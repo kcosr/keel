@@ -1,9 +1,9 @@
 # Writing & running a Keel workflow
 
 A **workflow** is an `async (ctx, input) => output` function. You call agents and
-do work through `ctx`; Keel runs it durably and survives crashes. For
-agent-driven work, put the workflow source inline inside a `keel execute`
-TypeScript heredoc, then launch, wait, inspect, and return one JSON result.
+do work through `ctx`; Keel runs it durably and survives crashes. For a single
+workflow, run inline TypeScript with `keel run --json <<'TS'` so no workflow file
+is needed.
 
 Assume the daemon is already running and the `keel` CLI is already configured to
 reach it. Do not start the daemon, restart systemd, or use admin credentials from
@@ -74,6 +74,13 @@ ctx.agent({
 Filter tolerated failures out with `.filter(Boolean)`. Do not use `onFailure:
 "null"` for required agents; let those failures fail the run so the run can be
 retried.
+
+`toolPolicy` is only `"none"`, `"read-only"`, `"workspace-write"`, or
+`"unrestricted"`. To let an agent run shell commands, use explicit capabilities:
+
+```ts
+capabilities: { fs: "none", network: "none", shell: true, secrets: [] }
+```
 
 ## 5. Schemas
 
@@ -156,69 +163,91 @@ export default async function adversarialReview(ctx: Ctx, input: { root: string 
 }
 ```
 
-## 7. Run it with `execute`
+## 7. Run It Inline
 
-For agent-driven work, prefer `keel execute`: it lets you write the orchestration
-around workflow commands in TypeScript, avoid repeated CLI round trips, and return
-one structured JSON value.
+For one workflow, prefer `keel run --json` with a TypeScript heredoc. Put runtime
+input in `--input`; stdin is the workflow source.
 
 ```bash
-keel execute <<'TS'
-const workflowSource = String.raw`
-import { type Ctx, passthrough } from "@kcosr/keel";
+keel run --json --input '{"root":"/abs/path/to/code"}' <<'TS'
+import { type Ctx, jsonSchema, passthrough } from "@kcosr/keel";
 
-const Out = passthrough<{ root: string; checked: boolean }>();
+const Hostname = jsonSchema<{ hostname: string }>({
+  type: "object",
+  additionalProperties: false,
+  required: ["hostname"],
+  properties: { hostname: { type: "string" } },
+});
+const Out = passthrough<unknown>();
 
 export default async function workflow(ctx: Ctx, input: { root: string }) {
-  return ctx.step("report", Out, { root: input.root }, ({ root }) => ({
-    root,
-    checked: true,
+  const report = await ctx.agent({
+    key: "report-hostname",
+    prompt: "Run hostname and return JSON with the hostname.",
+    schema: Hostname,
+    capabilities: { fs: "none", network: "none", shell: true, secrets: [] },
+    lenient: true,
+  });
+
+  const confirm = await ctx.agent({
+    key: "confirm-hostname",
+    prompt: "Independently run hostname and confirm this value: " + report.hostname,
+    schema: Hostname,
+    capabilities: { fs: "none", network: "none", shell: true, secrets: [] },
+    lenient: true,
+  });
+
+  return ctx.step("report", Out, { report, confirm, root: input.root }, (x) => ({
+    root: x.root,
+    reportedHostname: x.report.hostname,
+    confirmedHostname: x.confirm.hostname,
+    matches: x.report.hostname === x.confirm.hostname,
   }));
 }
-`;
-
-const run = await keel.launch({
-  workflow: { kind: "source", name: "adversarial-review", source: workflowSource },
-  input: { root: "/abs/path/to/code" },
-});
-const settled = await keel.wait(run.runId);
-return {
-  runId: run.runId,
-  capabilityRef: run.capabilityRef,
-  status: settled.status,
-  output: settled.output,
-};
 TS
 ```
 
-Inside `execute`, use the TypeScript control surface:
+## 8. Use `execute` For Orchestration
+
+Use `keel execute` when you need a TypeScript control script to drive multiple
+run operations. Avoid nesting a full workflow source string inside `execute`
+unless you really need orchestration; nested template literals are easy to break.
+
+Inside `execute`, use this TypeScript control surface:
+
+```bash
+keel execute -- "$RUN_ID" <<'TS'
+const runId = args[0];
+if (!runId) throw new Error("missing run id");
+const settled = await keel.wait(runId, { timeoutMs: 30_000 });
+const projection = await keel.get(runId);
+const output = settled.status === "finished" ? await keel.output(runId) : null;
+return { runId, status: settled.status, output, phase: projection?.phase ?? null };
+TS
+```
 
 ```ts
-const run = await keel.launch({
-  workflow: { kind: "source", name: "workflow", source: workflowSource },
-  input: {},
-});
-const settled = await keel.wait(run.runId);
-const projection = await keel.get(run.runId);
-const output = settled.status === "finished" ? await keel.output(run.runId) : null;
-await keel.retry(run.runId);
-await keel.resume(run.runId);
+await keel.wait(runId);
+await keel.get(runId);
+await keel.output(runId);
+await keel.retry(runId);
+await keel.resume(runId);
 ```
 
 `execute` is stateless. Return the small JSON result the caller needs: usually
 `runId`, `capabilityRef`, `status`, `output`, and any next-step context. Use
-`execute` when the next action is computable from the prior result: launch
+`execute` when the next action is computable from the prior result: start
 fan-out, wait, retry, inspect output, shape JSON, or decide a simple branch.
 Durable pauses, replayable workflow logic, and long-running state belong in the
 workflow itself, not in `execute`.
 
-## 8. Tips
+## 9. Tips
 
 - Use **absolute paths** for the code you're reviewing.
 - On optional review fan-out agents, set **`toolPolicy: "read-only"`**, **`lenient:
   true`**, and **`onFailure: "null"`** so one flaky branch doesn't sink the run.
   For required agents, omit `onFailure` so failures can be retried.
-- A run resumes from its immutable launch-time workflow snapshot. To change code,
-  launch or rerun with new inline source.
-- Use `execute` for mechanical follow-up; return concise JSON for the human or
-  calling agent to inspect.
+- A run resumes from its immutable start-time workflow snapshot. To change code,
+  run again or rerun with new inline source.
+- Use `run --json` for a single workflow; use `execute` only for mechanical
+  follow-up across one or more runs.

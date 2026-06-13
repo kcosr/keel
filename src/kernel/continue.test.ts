@@ -5,7 +5,9 @@ import { JournalStore } from "../journal/store.ts";
 import { captureWorkflowFile } from "../workflow-definitions/capture.ts";
 import { RealmKernel } from "./realm/realm-host.ts";
 
-const loopUrl = captureWorkflowFile(new URL("./realm/fixtures/loop.workflow.ts", import.meta.url).pathname);
+const loopUrl = captureWorkflowFile(
+  new URL("./realm/fixtures/loop.workflow.ts", import.meta.url).pathname,
+);
 
 describe("continueAsNew", () => {
   test("ends the run as 'continued' and chains a fresh run until it returns", async () => {

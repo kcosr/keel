@@ -6,8 +6,8 @@ import { describe, expect, test } from "bun:test";
 import { MockProvider } from "../agents/mock.ts";
 import { AgentProviderRegistry } from "../agents/types.ts";
 import { JournalStore } from "../journal/store.ts";
-import { captureWorkflowFile } from "../workflow-definitions/capture.ts";
 import { RealmKernel } from "../kernel/realm/realm-host.ts";
+import { captureWorkflowFile } from "../workflow-definitions/capture.ts";
 import { InProcessKeel } from "./in-process.ts";
 
 const FIX = new URL("../kernel/realm/fixtures/", import.meta.url);

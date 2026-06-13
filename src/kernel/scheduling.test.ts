@@ -7,8 +7,12 @@ import { snapshotWorkflowSource } from "../workflow-definitions/snapshot.ts";
 import { RealmKernel } from "./realm/realm-host.ts";
 import { Supervisor } from "./supervisor.ts";
 
-const napUrl = captureWorkflowFile(new URL("./realm/fixtures/nap.workflow.ts", import.meta.url).pathname);
-const chainUrl = captureWorkflowFile(new URL("./realm/fixtures/chain.workflow.ts", import.meta.url).pathname);
+const napUrl = captureWorkflowFile(
+  new URL("./realm/fixtures/nap.workflow.ts", import.meta.url).pathname,
+);
+const chainUrl = captureWorkflowFile(
+  new URL("./realm/fixtures/chain.workflow.ts", import.meta.url).pathname,
+);
 
 describe("durable ctx.sleep park/wake", () => {
   test("a run parks at sleep and a supervisor tick wakes it to finish", async () => {
@@ -71,9 +75,16 @@ describe("cron schedules", () => {
       nextFireMs: 500, // already due at t=1000
     });
 
-    const res = await new Supervisor({ store, kernel, clock: () => t }).tick();
+    const res = await new Supervisor({
+      store,
+      kernel,
+      clock: () => t,
+      claim: (runId) => store.claimRun(runId, "daemon-A", 0, t),
+    }).tick();
     expect(res.fired).toEqual(["hourly"]);
-    expect(store.listRuns().some((r) => r.workflowName === "hourly")).toBe(true);
+    const run = store.listRuns().find((r) => r.workflowName === "hourly");
+    expect(run?.runtimeOwnerId).toBe("daemon-A");
+    expect(run?.heartbeatAtMs).toBe(t);
     // advanced ~one interval forward, so not due again immediately
     const after = await new Supervisor({ store, kernel, clock: () => t }).tick();
     expect(after.fired).toEqual([]);

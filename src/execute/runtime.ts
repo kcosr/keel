@@ -177,10 +177,7 @@ export function createExecuteKeel(opts: ExecuteRuntimeOptions): ExecuteKeel {
   };
 }
 
-function normalizeLaunch(
-  req: ExecuteLaunchRequest,
-  cwd: string,
-): LaunchRequest {
+function normalizeLaunch(req: ExecuteLaunchRequest, cwd: string): LaunchRequest {
   if (typeof req === "string") {
     const path = resolve(cwd, req);
     return {

@@ -1159,8 +1159,9 @@ recommendation attached.
 ```sql
 CREATE TABLE runs (
   run_id             TEXT PRIMARY KEY,
-  workflow_name      TEXT NOT NULL,
+  workflow_name      TEXT,               -- optional display label; not a handle
   definition_version TEXT NOT NULL,      -- pinned archived definition
+  workflow_ref       TEXT,               -- display-only provenance / pinned hash
   status             TEXT NOT NULL,      -- running | waiting-human | waiting-signal
                                          -- | waiting-timer | waiting-approval
                                          -- | finished | failed | cancelled | continued

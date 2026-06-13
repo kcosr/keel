@@ -58,9 +58,9 @@ describe("#1 helper-closure versioning", () => {
       writeFileSync(helper, "export function transform(n) { return n * 2; }\n");
 
       const store = JournalStore.memory();
-      await expect(fixed(store).run<number>(captureWorkflowFile(workflow), { n: 5 })).rejects.toThrow(
-        /single self-contained file/,
-      );
+      await expect(
+        fixed(store).run<number>(captureWorkflowFile(workflow), { n: 5 }),
+      ).rejects.toThrow(/single self-contained file/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -115,7 +115,9 @@ describe("#2 resume uses immutable workflow snapshots", () => {
 
       rmSync(workflow);
 
-      const resumed = await fixed(store, { definitionCacheRoot: cacheRoot }).resume<number>("run_0");
+      const resumed = await fixed(store, { definitionCacheRoot: cacheRoot }).resume<number>(
+        "run_0",
+      );
       expect(resumed.status).toBe("finished");
       expect(resumed.output).toBe(14);
     } finally {
@@ -164,9 +166,9 @@ describe("#2 resume uses immutable workflow snapshots", () => {
       createdAtMs: 1,
     });
 
-    await expect(
-      fixed(store).resume("run_missing_snapshot"),
-    ).rejects.toThrow(/workflow definition wf_sha256_missing not found/);
+    await expect(fixed(store).resume("run_missing_snapshot")).rejects.toThrow(
+      /workflow definition wf_sha256_missing not found/,
+    );
   });
 
   test("external package imports are rejected by source capture", async () => {

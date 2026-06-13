@@ -147,7 +147,7 @@ export class RealmKernel {
     meta: { name?: string | null } = {},
   ): { runId: string; done: Promise<RunHandle<O>> } {
     const at = this.host.clock();
-    const name = meta.name !== undefined ? meta.name : workflow.name ?? null;
+    const name = meta.name !== undefined ? meta.name : (workflow.name ?? null);
     const { snapshot, entryPath } = snapshotWorkflowSource(this.store, workflow.source, {
       name,
       nowMs: at,
@@ -258,14 +258,24 @@ export class RealmKernel {
    */
   async rerun<O>(
     runId: string,
-    opts: { source?: string; input?: unknown; name?: string | null; provenance?: WorkflowProvenance } = {},
+    opts: {
+      source?: string;
+      input?: unknown;
+      name?: string | null;
+      provenance?: WorkflowProvenance;
+    } = {},
   ): Promise<RunHandle<O>> {
     return this.startRerun<O>(runId, opts).done;
   }
 
   startRerun<O>(
     runId: string,
-    opts: { source?: string; input?: unknown; name?: string | null; provenance?: WorkflowProvenance } = {},
+    opts: {
+      source?: string;
+      input?: unknown;
+      name?: string | null;
+      provenance?: WorkflowProvenance;
+    } = {},
   ): { runId: string; done: Promise<RunHandle<O>> } {
     const run = this.store.getRun(runId);
     if (!run) throw new Error(`run ${runId} not found`);
@@ -295,12 +305,7 @@ export class RealmKernel {
       ...(opts.name !== undefined ? { workflowName: name } : {}),
     });
     this.store.updateRunDefinition(runId, definitionHash, workflowRef);
-    this.store.appendEvent(
-      runId,
-      "run.rerun",
-      { definitionHash },
-      this.host.clock(),
-    );
+    this.store.appendEvent(runId, "run.rerun", { definitionHash }, this.host.clock());
     return { runId, done: this.execute<O>(runId, entryPath, effectiveInput) };
   }
 

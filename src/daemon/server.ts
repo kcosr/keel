@@ -375,7 +375,8 @@ export class KeelDaemon {
         const snapshot = snapshotWorkflowSource(this.store, p.source as string, {
           name: (p.workflowName as string | null | undefined) ?? (p.name as string),
           nowMs: this.clock(),
-          cacheRoot: this.opts.definitionCacheRoot ?? join(dirname(this.opts.dbPath), "definitions"),
+          cacheRoot:
+            this.opts.definitionCacheRoot ?? join(dirname(this.opts.dbPath), "definitions"),
         }).snapshot;
         this.store.putSchedule({
           name: p.name as string,
@@ -388,8 +389,7 @@ export class KeelDaemon {
       }
       case "gcDefinitions": {
         this.authorizeAdmin(conn);
-        const ttlMs =
-          typeof p.ttlMs === "number" ? p.ttlMs : definitionTtlMsFromEnv();
+        const ttlMs = typeof p.ttlMs === "number" ? p.ttlMs : definitionTtlMsFromEnv();
         const cacheMinAgeMs =
           typeof p.cacheMinAgeMs === "number"
             ? p.cacheMinAgeMs
@@ -399,7 +399,8 @@ export class KeelDaemon {
           ttlMs,
         });
         const definitionCacheEntriesRemoved = evictWorkflowDefinitionCache(this.store, {
-          cacheRoot: this.opts.definitionCacheRoot ?? join(dirname(this.opts.dbPath), "definitions"),
+          cacheRoot:
+            this.opts.definitionCacheRoot ?? join(dirname(this.opts.dbPath), "definitions"),
           nowMs: this.clock(),
           minAgeMs: cacheMinAgeMs,
         });
@@ -469,7 +470,7 @@ function definitionTtlMsFromEnv(): number {
   if (raw === undefined) return DEFAULT_WORKFLOW_DEFINITION_TTL_MS;
   const value = Number(raw);
   if (!Number.isFinite(value) || value < 0) {
-    throw new Error(`KEEL_DEFINITION_TTL_MS must be a non-negative number of milliseconds`);
+    throw new Error("KEEL_DEFINITION_TTL_MS must be a non-negative number of milliseconds");
   }
   return value;
 }

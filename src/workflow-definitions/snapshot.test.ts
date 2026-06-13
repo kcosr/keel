@@ -118,6 +118,62 @@ describe("workflow definition snapshots", () => {
     }
   });
 
+  test("materialization rebuilds a cache directory missing external links", () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-snapshot-link-"));
+    const store = JournalStore.memory();
+    try {
+      const cacheRoot = join(dir, "definitions");
+      const source =
+        'import { passthrough } from "@kcosr/keel";\nexport default async () => passthrough();\n';
+      const { snapshot } = snapshotWorkflowSource(store, source, {
+        name: "link",
+        nowMs: 1,
+        cacheRoot,
+      });
+      const link = join(cacheRoot, snapshot.hash, "node_modules", "@kcosr", "keel");
+      rmSync(link, { recursive: true, force: true });
+
+      materializeWorkflowDefinition(store, snapshot.hash, cacheRoot);
+      expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("cached materialization still validates external package integrity", () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-snapshot-integrity-"));
+    const store = JournalStore.memory();
+    try {
+      const cacheRoot = join(dir, "definitions");
+      const source =
+        'import { passthrough } from "@kcosr/keel";\nexport default async () => passthrough();\n';
+      const { snapshot } = snapshotWorkflowSource(store, source, {
+        name: "integrity",
+        nowMs: 1,
+        cacheRoot,
+      });
+      const row = store.getWorkflowDefinition(snapshot.hash);
+      if (!row?.manifestJson) throw new Error("missing workflow definition manifest");
+      const manifest = JSON.parse(row.manifestJson) as {
+        externalPackages: Array<{ integrity: string }>;
+      };
+      const pinned = manifest.externalPackages[0];
+      if (!pinned) throw new Error("missing external package pin");
+      pinned.integrity = "sha256-bad";
+      store.db
+        .query("UPDATE workflow_definitions SET manifest_json = ? WHERE hash = ?")
+        .run(JSON.stringify(manifest), snapshot.hash);
+
+      expect(() => materializeWorkflowDefinition(store, snapshot.hash, cacheRoot)).toThrow(
+        /changed since snapshot/,
+      );
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("cache eviction skips definitions used by active runs", () => {
     const dir = mkdtempSync(join(tmpdir(), "keel-snapshot-gc-"));
     const store = JournalStore.memory();

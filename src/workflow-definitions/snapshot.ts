@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   existsSync,
   lstatSync,
@@ -9,7 +10,6 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { randomUUID } from "node:crypto";
 import { builtinModules } from "node:module";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -105,7 +105,10 @@ export function materializeWorkflowDefinition(
   const manifest = parseManifest(row);
   const root = join(cacheRoot, hash);
   const entryPath = join(root, manifest.modules.length === 0 ? "entry.ts" : manifest.entry);
-  if (existsSync(entryPath)) return entryPath;
+  if (isMaterializationComplete(root, manifest)) {
+    validateExternalPackagePins(manifest.externalPackages);
+    return entryPath;
+  }
 
   mkdirSync(cacheRoot, { recursive: true });
   const tmp = join(cacheRoot, `.tmp-${hash}-${randomUUID()}`);
@@ -134,12 +137,36 @@ export function materializeWorkflowDefinition(
     const code = (err as NodeJS.ErrnoException).code;
     if (code !== "EEXIST" && code !== "ENOTEMPTY") throw err;
     rmSync(tmp, { recursive: true, force: true });
-    if (!existsSync(entryPath)) {
+    if (!isMaterializationComplete(root, manifest)) {
       rmSync(root, { recursive: true, force: true });
       materializeWorkflowDefinition(store, hash, cacheRoot);
+    } else {
+      validateExternalPackagePins(manifest.externalPackages);
     }
   }
   return entryPath;
+}
+
+function isMaterializationComplete(root: string, manifest: WorkflowDefinitionManifest): boolean {
+  const entryPath = join(root, manifest.modules.length === 0 ? "entry.ts" : manifest.entry);
+  if (!existsSync(entryPath)) return false;
+  for (const specifier of manifest.externalImports) {
+    const packageName = packageNameForImport(specifier);
+    if (!packageName) continue;
+    const linked =
+      packageName === "@kcosr/keel"
+        ? join(root, "node_modules", "@kcosr", "keel")
+        : join(root, "node_modules", ...packageName.split("/"));
+    if (!existsSync(linked)) return false;
+  }
+  return true;
+}
+
+function validateExternalPackagePins(packagePins: CapturedExternalPackage[]): void {
+  for (const pinned of packagePins) {
+    const root = pinned.name === "@kcosr/keel" ? KEEL_PACKAGE_ROOT : pinned.root;
+    validatePackageIntegrity(pinned.name, root, pinned);
+  }
 }
 
 export function evictWorkflowDefinitionCache(
@@ -192,7 +219,7 @@ function createWorkflowDefinitionSnapshot(
   for (const spec of imports) {
     if (spec.startsWith(".") || isAbsolute(spec)) {
       throw new Error(
-        `workflow must be a single self-contained file; import "${spec}" is not supported yet`,
+        `workflow must be a single self-contained file; import "${spec}" is not allowed`,
       );
     }
     if (spec !== "@kcosr/keel") {

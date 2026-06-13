@@ -18,8 +18,12 @@ import { KeelDaemon } from "./server.ts";
 const FIX = new URL("../kernel/realm/fixtures/", import.meta.url);
 const chainUrl = captureWorkflowFile(new URL("chain.workflow.ts", FIX).pathname);
 const TEST_DAEMON = new URL("./test-daemon.ts", import.meta.url).pathname;
-const onceUrl = captureWorkflowFile(new URL("./fixtures/once-pi.workflow.ts", import.meta.url).pathname);
-const napUrl = captureWorkflowFile(new URL("../kernel/realm/fixtures/nap.workflow.ts", import.meta.url).pathname);
+const onceUrl = captureWorkflowFile(
+  new URL("./fixtures/once-pi.workflow.ts", import.meta.url).pathname,
+);
+const napUrl = captureWorkflowFile(
+  new URL("../kernel/realm/fixtures/nap.workflow.ts", import.meta.url).pathname,
+);
 const ADMIN_TOKEN = "kc_admin_test";
 
 let dir: string;
@@ -335,12 +339,54 @@ describe("daemon supervisor tick over the socket", () => {
       daemon.stop();
     }
   }, 10000);
+
+  test("a due schedule launch is claimed by the daemon owner", async () => {
+    const socketPath = join(dir, "cron-owner.sock");
+    const dbPath = join(dir, "cron-owner.db");
+    const daemon = new KeelDaemon({
+      socketPath,
+      dbPath,
+      ownerId: "daemon-cron",
+      agents: new AgentProviderRegistry().register(new MockProvider()),
+      superviseMs: 100,
+      adminToken: ADMIN_TOKEN,
+    });
+    await daemon.start();
+    try {
+      const c = await DaemonClient.connect(socketPath);
+      await c.authenticate(ADMIN_TOKEN);
+      await c.putSchedule({
+        name: "hourly",
+        source: chainUrl.source,
+        workflowName: "hourly",
+        input: { n: 1 },
+        intervalMs: 60_000,
+        firstFireMs: Date.now() - 1000,
+      });
+      await until(async () => (await c.listRuns()).some((r) => r.workflowName === "hourly"), 4000);
+      const runId = (await c.listRuns()).find((r) => r.workflowName === "hourly")?.runId;
+      await until(async () => (await c.getRun(runId as string))?.status === "finished", 4000);
+      const probe = JournalStore.open(dbPath);
+      try {
+        const row = probe.getRun(runId as string);
+        expect(row?.runtimeOwnerId).toBe("daemon-cron");
+        expect(typeof row?.heartbeatAtMs).toBe("number");
+      } finally {
+        probe.close();
+      }
+      c.close();
+    } finally {
+      daemon.stop();
+    }
+  }, 10000);
 });
 
 describe("HITL over the socket", () => {
   test("a run parks on ctx.human and a decideApproval over the socket finishes it", async () => {
     const socketPath = join(dir, "h.sock");
-    const gateUrl = captureWorkflowFile(new URL("../kernel/realm/fixtures/gate.workflow.ts", import.meta.url).pathname);
+    const gateUrl = captureWorkflowFile(
+      new URL("../kernel/realm/fixtures/gate.workflow.ts", import.meta.url).pathname,
+    );
     const daemon = new KeelDaemon({
       socketPath,
       dbPath: join(dir, "h.db"),

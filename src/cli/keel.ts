@@ -176,7 +176,8 @@ async function main(argv: string[]): Promise<number> {
           : null;
       if (launched.capability) await client.authenticate(launched.capability);
       if (!launchOpts.detach) process.stdout.write(formatRunHeader(runId));
-      if (!launchOpts.detach && capabilityRef) process.stdout.write(`capability ${capabilityRef}\n`);
+      if (!launchOpts.detach && capabilityRef)
+        process.stdout.write(`capability ${capabilityRef}\n`);
       if (!launchOpts.detach && launchOpts.emitCapability && launched.capability) {
         process.stdout.write(`capability ${launched.capability}\n`);
       }
@@ -207,9 +208,7 @@ async function main(argv: string[]): Promise<number> {
       const outcome = await client.waitForRun(launched.runId);
       const blockage = isParked(outcome.status) ? await client.getBlockage(launched.runId) : null;
       if (runOpts.json) {
-        process.stdout.write(
-          `${JSON.stringify(runEnvelope(outcome, capabilityRef, blockage))}\n`,
-        );
+        process.stdout.write(`${JSON.stringify(runEnvelope(outcome, capabilityRef, blockage))}\n`);
       } else {
         process.stdout.write(`run ${launched.runId}\n`);
         if (outcome.status === "finished") {
@@ -457,7 +456,14 @@ export function parseExecuteArgs(args: string[]): ExecuteArgs {
 
 function parseSourceArgs(
   args: string[],
-  out: { file?: string; name?: string | null; input: unknown; detach?: boolean; emitCapability?: boolean; json?: boolean },
+  out: {
+    file?: string;
+    name?: string | null;
+    input: unknown;
+    detach?: boolean;
+    emitCapability?: boolean;
+    json?: boolean;
+  },
   flags: { detach: boolean; emitCapability: boolean; json: boolean },
 ): void {
   const positional: string[] = [];
@@ -489,7 +495,24 @@ function parseSourceArgs(
   if (positional.length > 1) {
     throw new Error(`unexpected argument ${positional[1]}; workflow input must use --input`);
   }
-  if (positional.length === 1) out.file = positional[0];
+  if (positional.length === 1) {
+    const file = positional[0] as string;
+    if (looksLikeWorkflowInput(file)) {
+      throw new Error(`unexpected argument ${file}; workflow input must use --input`);
+    }
+    out.file = file;
+  }
+}
+
+function looksLikeWorkflowInput(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return false;
+  try {
+    JSON.parse(trimmed);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function parseLaunchInput(inputJson: string | undefined): unknown {

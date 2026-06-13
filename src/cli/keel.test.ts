@@ -198,9 +198,8 @@ describe("keel CLI", () => {
       file: "wf.ts",
       input: {},
     });
-    expect(() => parseLaunchArgs(["wf.ts", '{"n":1}'])).toThrow(
-      "workflow input must use --input",
-    );
+    expect(() => parseLaunchArgs(["wf.ts", '{"n":1}'])).toThrow("workflow input must use --input");
+    expect(() => parseLaunchArgs(['{"n":1}'])).toThrow("workflow input must use --input");
   });
 
   test("run args parse json mode with optional source path", () => {
@@ -208,6 +207,7 @@ describe("keel CLI", () => {
       json: true,
       input: null,
     });
+    expect(() => parseRunArgs(['{"n":1}'])).toThrow("workflow input must use --input");
   });
 
   test("execute args parse source, state, cap file, entry, and script args", () => {
@@ -350,11 +350,7 @@ describe("keel CLI", () => {
     await daemon.start();
     try {
       const env = { KEEL_SOCKET: socketPath, KEEL_DB: dbPath, KEEL_DIR: dir };
-      const out = await runCli(
-        ["run", "--json", chainUrl, "--input", '{"n":2}'],
-        dir,
-        env,
-      );
+      const out = await runCli(["run", "--json", chainUrl, "--input", '{"n":2}'], dir, env);
       expect(out.code).toBe(0);
       const payload = JSON.parse(out.stdout) as {
         runId: string;

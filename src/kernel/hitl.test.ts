@@ -7,7 +7,9 @@ import { buildProjection, getBlockage } from "../rpc/projection.ts";
 import { captureWorkflowFile } from "../workflow-definitions/capture.ts";
 import { RealmKernel } from "./realm/realm-host.ts";
 
-const gateUrl = captureWorkflowFile(new URL("./realm/fixtures/gate.workflow.ts", import.meta.url).pathname);
+const gateUrl = captureWorkflowFile(
+  new URL("./realm/fixtures/gate.workflow.ts", import.meta.url).pathname,
+);
 const sigUrl = captureWorkflowFile(
   new URL("./realm/fixtures/await-signal.workflow.ts", import.meta.url).pathname,
 );

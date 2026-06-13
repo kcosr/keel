@@ -6,13 +6,15 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { JournalStore } from "../journal/store.ts";
-import { captureWorkflowFile } from "../workflow-definitions/capture.ts";
 import { RealmKernel } from "../kernel/realm/realm-host.ts";
+import { captureWorkflowFile } from "../workflow-definitions/capture.ts";
 import { PiProvider } from "./pi.ts";
 import type { AgentHooks, AgentInvocation, AgentProvider, AgentResult } from "./types.ts";
 import { AgentProviderRegistry } from "./types.ts";
 
-const onceUrl = captureWorkflowFile(new URL("../kernel/realm/fixtures/agent-once.workflow.ts", import.meta.url).pathname);
+const onceUrl = captureWorkflowFile(
+  new URL("../kernel/realm/fixtures/agent-once.workflow.ts", import.meta.url).pathname,
+);
 
 /** A fake vendor that records every invocation and emits a Pi-like session token. */
 class FakeVendor implements AgentProvider {
@@ -423,7 +425,9 @@ describe.if(LIVE)("LIVE pi smoke", () => {
     const { KeelDaemon } = await import("../daemon/server.ts");
     const { DaemonClient } = await import("../daemon/client.ts");
     const { PiProvider } = await import("./pi.ts");
-    const liveUrl = captureWorkflowFile(new URL("../kernel/realm/fixtures/agent-live.workflow.ts", import.meta.url).pathname);
+    const liveUrl = captureWorkflowFile(
+      new URL("../kernel/realm/fixtures/agent-live.workflow.ts", import.meta.url).pathname,
+    );
 
     const dir = mkdtempSync(join(tmpdir(), "keel-live-pi-daemon-"));
     const socketPath = join(dir, "keel.sock");

@@ -7,9 +7,7 @@
 
 import type { Blockage, RunProjection, RunSummary } from "./projection.ts";
 
-export type WorkflowProvenance =
-  | { kind: "stdin" }
-  | { kind: "clientPath"; path: string };
+export type WorkflowProvenance = { kind: "stdin" } | { kind: "clientPath"; path: string };
 
 export interface LaunchRequest {
   /** Workflow TypeScript captured by the client. The daemon never reads client paths. */
@@ -54,7 +52,12 @@ export interface KeelApi {
   /** Re-execute a run against its stored definition or a new client-captured source. */
   rerunRun(
     runId: string,
-    opts?: { source?: string; input?: unknown; name?: string | null; provenance?: WorkflowProvenance },
+    opts?: {
+      source?: string;
+      input?: unknown;
+      name?: string | null;
+      provenance?: WorkflowProvenance;
+    },
   ): Promise<RunStart>;
   /** Re-run a failed run from its failed step in the background. */
   retryRun(runId: string): Promise<RunStart>;
@@ -72,6 +75,11 @@ export interface KeelApi {
   waitForRun(runId: string): Promise<RunOutcome>;
   /** Return a run's terminal output without subscribing to events. */
   getRunOutput(runId: string): Promise<RunOutcome>;
+  /** Prune unreferenced workflow definition rows and cache entries. */
+  gcDefinitions(opts?: { ttlMs?: number; cacheMinAgeMs?: number }): Promise<{
+    workflowDefinitionsRemoved: number;
+    definitionCacheEntriesRemoved: number;
+  }>;
   /** Subscribe to a run's events after `afterSeq`; returns an unsubscribe fn. */
   subscribeEvents(
     runId: string,

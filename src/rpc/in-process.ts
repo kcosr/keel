@@ -5,6 +5,10 @@
 
 import type { JournalStore } from "../journal/store.ts";
 import type { RealmKernel, RunHandle } from "../kernel/realm/realm-host.ts";
+import {
+  DEFAULT_WORKFLOW_DEFINITION_TTL_MS,
+  evictWorkflowDefinitionCache,
+} from "../workflow-definitions/snapshot.ts";
 import type {
   EventEnvelope,
   KeelApi,
@@ -31,11 +35,14 @@ export class InProcessKeel implements KeelApi {
   ) {}
 
   async launchRun(req: LaunchRequest): Promise<{ runId: string }> {
-    const { runId, done } = this.kernel.launch({
-      source: req.source,
-      name: req.name ?? null,
-      provenance: req.provenance,
-    }, req.input);
+    const { runId, done } = this.kernel.launch(
+      {
+        source: req.source,
+        name: req.name ?? null,
+        provenance: req.provenance,
+      },
+      req.input,
+    );
     this.running.set(
       runId,
       done.catch((err) => ({ runId, status: "failed", output: undefined }) as RunHandle<unknown>),
@@ -113,6 +120,22 @@ export class InProcessKeel implements KeelApi {
       output: run.outputRef ? JSON.parse(run.outputRef) : undefined,
       error: run.errorJson ? JSON.parse(run.errorJson) : null,
     };
+  }
+
+  async gcDefinitions(opts: { ttlMs?: number; cacheMinAgeMs?: number } = {}): Promise<{
+    workflowDefinitionsRemoved: number;
+    definitionCacheEntriesRemoved: number;
+  }> {
+    const nowMs = Date.now();
+    const workflowDefinitionsRemoved = this.store.pruneWorkflowDefinitions({
+      nowMs,
+      ttlMs: opts.ttlMs ?? DEFAULT_WORKFLOW_DEFINITION_TTL_MS,
+    });
+    const definitionCacheEntriesRemoved = evictWorkflowDefinitionCache(this.store, {
+      nowMs,
+      minAgeMs: opts.cacheMinAgeMs ?? 0,
+    });
+    return { workflowDefinitionsRemoved, definitionCacheEntriesRemoved };
   }
 
   subscribeEvents(

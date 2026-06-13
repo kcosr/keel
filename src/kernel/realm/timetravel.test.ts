@@ -7,8 +7,12 @@ import { JournalStore } from "../../journal/store.ts";
 import { captureWorkflowFile } from "../../workflow-definitions/capture.ts";
 import { RealmKernel } from "./realm-host.ts";
 
-const tripleUrl = captureWorkflowFile(new URL("./fixtures/triple.workflow.ts", import.meta.url).pathname);
-const flakyUrl = captureWorkflowFile(new URL("./fixtures/flaky.workflow.ts", import.meta.url).pathname);
+const tripleUrl = captureWorkflowFile(
+  new URL("./fixtures/triple.workflow.ts", import.meta.url).pathname,
+);
+const flakyUrl = captureWorkflowFile(
+  new URL("./fixtures/flaky.workflow.ts", import.meta.url).pathname,
+);
 const napUrl = captureWorkflowFile(new URL("./fixtures/nap.workflow.ts", import.meta.url).pathname);
 
 describe("retry", () => {

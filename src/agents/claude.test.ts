@@ -4,14 +4,16 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { JournalStore } from "../journal/store.ts";
-import { captureWorkflowFile } from "../workflow-definitions/capture.ts";
 import { RealmKernel } from "../kernel/realm/realm-host.ts";
+import { captureWorkflowFile } from "../workflow-definitions/capture.ts";
 import { ClaudeProvider } from "./claude.ts";
 import type { AgentHooks, AgentInvocation, AgentProvider, AgentResult } from "./types.ts";
 import { AgentProviderRegistry } from "./types.ts";
 
 const RESUME_ID = "11111111-1111-4111-8111-111111111111";
-const onceUrl = captureWorkflowFile(new URL("../kernel/realm/fixtures/agent-once-claude.workflow.ts", import.meta.url).pathname);
+const onceUrl = captureWorkflowFile(
+  new URL("../kernel/realm/fixtures/agent-once-claude.workflow.ts", import.meta.url).pathname,
+);
 
 class FakeClaudeVendor implements AgentProvider {
   readonly name = "claude";
@@ -406,10 +408,9 @@ describe.if(LIVE)("LIVE claude smoke", () => {
     const { KeelDaemon } = await import("../daemon/server.ts");
     const { DaemonClient } = await import("../daemon/client.ts");
     const { AgentProviderRegistry } = await import("./types.ts");
-    const liveUrl = captureWorkflowFile(new URL(
-      "../kernel/realm/fixtures/agent-live-claude.workflow.ts",
-      import.meta.url,
-    ).pathname);
+    const liveUrl = captureWorkflowFile(
+      new URL("../kernel/realm/fixtures/agent-live-claude.workflow.ts", import.meta.url).pathname,
+    );
     const dir = mkdtempSync(join(tmpdir(), "keel-live-claude-daemon-"));
     const socketPath = join(dir, "keel.sock");
     const dbPath = join(dir, "keel.db");

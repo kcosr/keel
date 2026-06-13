@@ -57,9 +57,9 @@ describe("realm determinism lint gate", () => {
 
   test("lint disabled still does not bypass the source import allowlist", async () => {
     const store = JournalStore.memory();
-    await expect(fixed(store, { lint: false }).run(badImport, null, { name: "bad" })).rejects.toThrow(
-      /only @kcosr\/keel is supported/,
-    );
+    await expect(
+      fixed(store, { lint: false }).run(badImport, null, { name: "bad" }),
+    ).rejects.toThrow(/only @kcosr\/keel is supported/);
     expect(store.listRuns()).toHaveLength(0);
   });
 });

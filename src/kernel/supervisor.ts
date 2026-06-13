@@ -64,6 +64,7 @@ export class Supervisor {
           workflowRef: s.workflowRef,
         },
       );
+      if (!this.claim(runId)) continue;
       // advance to the next slot from the scheduled time (not drifting on now)
       const next = Math.max(s.nextFireMs + s.intervalMs, now + s.intervalMs);
       this.store.advanceSchedule(s.name, next, runId);

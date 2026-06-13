@@ -9,7 +9,9 @@ import { JournalStore } from "../../journal/store.ts";
 import { captureWorkflowFile } from "../../workflow-definitions/capture.ts";
 import { RealmKernel } from "./realm-host.ts";
 
-const url = captureWorkflowFile(new URL("./fixtures/tolerant.workflow.ts", import.meta.url).pathname);
+const url = captureWorkflowFile(
+  new URL("./fixtures/tolerant.workflow.ts", import.meta.url).pathname,
+);
 
 function kernel(store: JournalStore, mock: MockProvider, extra: Record<string, unknown> = {}) {
   return new RealmKernel(store, {

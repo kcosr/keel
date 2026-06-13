@@ -228,6 +228,8 @@ On launch, the daemon stores an immutable workflow definition snapshot by conten
 hash and runs from a daemon-owned materialized cache. Resume, retry, rewind,
 fork, and crash recovery use the stored definition, never a client path.
 `rerun` with a source override snapshots the supplied source as a new definition.
+Workflow source is persisted verbatim in the journal database; do not embed
+secrets in workflow TypeScript.
 
 Client-captured workflow v1 is single-file only. The only external import a
 workflow source may use is the exact SDK import `@kcosr/keel`; relative imports,
@@ -616,6 +618,10 @@ interface KeelApi {
   listRuns(): RunSummary[];
   waitForRun(runId: string): Promise<RunOutcome>;
   getRunOutput(runId: string): Promise<RunOutcome>;
+  gcDefinitions(opts?: { ttlMs?: number; cacheMinAgeMs?: number }): Promise<{
+    workflowDefinitionsRemoved: number;
+    definitionCacheEntriesRemoved: number;
+  }>;
   subscribeEvents(
     runId: string,
     afterSeq: number,
@@ -635,6 +641,7 @@ Use `waitForRun` to wait for terminal status or `subscribeEvents` to stream
 events. The daemon returns a raw run capability on launch/fork so clients can
 establish authority for follow-up operations. The CLI writes that capability to a
 local cap file by default and only prints raw tokens with `--emit-capability`.
+`gcDefinitions` is an admin operation.
 
 ### EventEnvelope
 

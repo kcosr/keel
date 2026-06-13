@@ -11,7 +11,15 @@
 //
 // Socket + db paths default under ~/.keel (override with KEEL_SOCKET / KEEL_DB).
 
-import { lstatSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
+import {
+  chmodSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { ClaudeProvider } from "../agents/claude.ts";
@@ -24,11 +32,13 @@ import type { EventEnvelope } from "../rpc/contract.ts";
 const KEEL_DIR = process.env.KEEL_DIR ?? join(homedir(), ".keel");
 const SOCKET = process.env.KEEL_SOCKET ?? join(KEEL_DIR, "keel.sock");
 const DB = process.env.KEEL_DB ?? join(KEEL_DIR, "keel.db");
+const CAP_DIR = process.env.KEEL_CAP_DIR ?? join(KEEL_DIR, "caps");
 
-/** Connect a client, authenticating with KEEL_TOKEN if the daemon requires it. */
+/** Connect a client, authenticating with the caller's presented capability. */
 async function openClient(): Promise<DaemonClient> {
   const c = await DaemonClient.connect(SOCKET);
-  if (process.env.KEEL_TOKEN) await c.authenticate(process.env.KEEL_TOKEN);
+  const credential = loadCredential();
+  if (credential) await c.authenticate(credential);
   return c;
 }
 
@@ -36,7 +46,11 @@ async function openClient(): Promise<DaemonClient> {
 const COMMANDS: [string, string, string][] = [
   ["daemon", "", "start the daemon (foreground; owns the journal + runs workflows)"],
   ["link", "[dir]", "make <dir> (default: cwd) able to import the @kcosr/keel SDK"],
-  ["launch", "[--detach] <workflow.ts> [json]", "start a run from a workflow file"],
+  [
+    "launch",
+    "[--detach] [--emit-capability] <workflow.ts> [json]",
+    "start a run from a workflow file",
+  ],
   ["watch", "[--json] <runId>", "stream a run's events until it finishes"],
   ["get", "<runId>", "print a run's projection as JSON"],
   ["list", "", "list runs"],
@@ -62,7 +76,7 @@ function topHelp(): string {
     "Commands:",
     ...rows,
     "",
-    "Environment: KEEL_SOCKET, KEEL_DB, KEEL_DIR, KEEL_TOKEN, KEEL_WORKSPACE_ROOT",
+    "Environment: KEEL_SOCKET, KEEL_DB, KEEL_DIR, KEEL_ADMIN_TOKEN, KEEL_RUN_CAP, KEEL_CAP_FILE, KEEL_CAP_DIR, KEEL_WORKSPACE_ROOT",
     "Run `keel help <command>` for one command.",
     "",
   ].join("\n");
@@ -90,22 +104,11 @@ async function main(argv: string[]): Promise<number> {
       const agents = new AgentProviderRegistry()
         .register(new PiProvider())
         .register(new ClaudeProvider());
-      // Scoped-token auth (§19): KEEL_TOKENS is a JSON map {token: "read"|"write"}.
-      // Absent → unauthenticated local-dev default; malformed → fail loudly.
-      let tokens: Record<string, "read" | "write"> | undefined;
-      if (process.env.KEEL_TOKENS) {
-        try {
-          tokens = JSON.parse(process.env.KEEL_TOKENS);
-        } catch (err) {
-          process.stderr.write(`keel: KEEL_TOKENS is not valid JSON: ${String(err)}\n`);
-          return 2;
-        }
-      }
       const daemon = new KeelDaemon({
         socketPath: SOCKET,
         dbPath: DB,
         agents,
-        ...(tokens ? { tokens } : {}),
+        ...(process.env.KEEL_ADMIN_TOKEN ? { adminToken: process.env.KEEL_ADMIN_TOKEN } : {}),
         ...(process.env.KEEL_WORKSPACE_ROOT
           ? { workspaceRoot: process.env.KEEL_WORKSPACE_ROOT }
           : {}),
@@ -146,20 +149,36 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     }
     case "launch": {
-      const parsed = parseLifecycleArgs(rest);
+      const launchOpts = parseLaunchArgs(rest);
+      const parsed = parseLifecycleArgs(launchOpts.args);
       const [workflow, inputJson] = parsed.args;
       if (!workflow) return usage("launch needs a workflow path");
       const input = parseLaunchInput(inputJson);
       const workflowUrl = resolveWorkflowPath(workflow);
       const client = await openClient();
-      const { runId } = await client.launchRun({
+      const launched = await client.launchRun({
         workflowUrl,
         input,
         name: workflowName(workflowUrl),
       });
+      const { runId } = launched;
+      const capabilityRef =
+        launched.capability && !launchOpts.emitCapability
+          ? writeCapabilityFile(runId, launched.capability)
+          : null;
+      if (launched.capability) await client.authenticate(launched.capability);
       if (!parsed.detach) process.stdout.write(formatRunHeader(runId));
+      if (!parsed.detach && capabilityRef) process.stdout.write(`capability ${capabilityRef}\n`);
+      if (!parsed.detach && launchOpts.emitCapability && launched.capability) {
+        process.stdout.write(`capability ${launched.capability}\n`);
+      }
       const terminal = parsed.detach ? null : await watchRun(client, runId, { json: false });
-      if (parsed.detach) process.stdout.write(`${runId}\n`);
+      if (parsed.detach) {
+        const payload = launchOpts.emitCapability
+          ? { runId, capability: launched.capability ?? null }
+          : { runId, capabilityRef };
+        process.stdout.write(`${JSON.stringify(payload)}\n`);
+      }
       client.close();
       return terminal === "failed" ? 1 : 0;
     }
@@ -255,7 +274,8 @@ async function main(argv: string[]): Promise<number> {
       if (!runId) return usage("fork needs <runId> [atStepKey]");
       const client = await openClient();
       const out = await client.forkRun(runId, atStableKey ? { atStableKey } : {});
-      process.stdout.write(`${out.runId}\n`);
+      const capabilityRef = out.capability ? writeCapabilityFile(out.runId, out.capability) : null;
+      process.stdout.write(`${JSON.stringify({ runId: out.runId, capabilityRef })}\n`);
       client.close();
       return 0;
     }
@@ -268,6 +288,13 @@ async function main(argv: string[]): Promise<number> {
 export function parseLifecycleArgs(args: string[]): { detach: boolean; args: string[] } {
   if (args[0] === "--detach") return { detach: true, args: args.slice(1) };
   return { detach: false, args };
+}
+
+export function parseLaunchArgs(args: string[]): { emitCapability: boolean; args: string[] } {
+  return {
+    emitCapability: args.includes("--emit-capability"),
+    args: args.filter((arg) => arg !== "--emit-capability"),
+  };
 }
 
 export function parseLaunchInput(inputJson: string | undefined): unknown {
@@ -405,6 +432,43 @@ function usage(message: string): number {
   if (cmdNames.has(name)) process.stderr.write(`${cmdHelp(name)}`);
   else process.stderr.write("Run `keel help` for usage.\n");
   return 2;
+}
+
+function loadCredential(): string | null {
+  if (process.env.KEEL_ADMIN_TOKEN) return process.env.KEEL_ADMIN_TOKEN;
+  if (process.env.KEEL_RUN_CAP) return process.env.KEEL_RUN_CAP;
+  if (process.env.KEEL_CAP_FILE) {
+    const parsed = JSON.parse(readFileSync(process.env.KEEL_CAP_FILE, "utf8")) as {
+      capability?: unknown;
+    };
+    if (typeof parsed.capability !== "string") {
+      throw new Error(`capability file ${process.env.KEEL_CAP_FILE} is missing capability`);
+    }
+    return parsed.capability;
+  }
+  return null;
+}
+
+function writeCapabilityFile(runId: string, capability: string): string {
+  mkdirSync(CAP_DIR, { recursive: true, mode: 0o700 });
+  chmodSync(CAP_DIR, 0o700);
+  const path = join(CAP_DIR, `${runId}.cap`);
+  writeFileSync(
+    path,
+    `${JSON.stringify(
+      {
+        kind: "keel-capability",
+        runId,
+        capability,
+        createdAtMs: Date.now(),
+      },
+      null,
+      2,
+    )}\n`,
+    { mode: 0o600 },
+  );
+  chmodSync(path, 0o600);
+  return path;
 }
 
 if (import.meta.main) {

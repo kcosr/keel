@@ -9,6 +9,13 @@ import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import type { Socket } from "bun";
 import type { AgentProviderRegistry } from "../agents/types.ts";
+import {
+  AuthorizationError,
+  type CapabilityAction,
+  authorize,
+  ensureAdminCapability,
+  issueRunCapability,
+} from "../auth/capabilities.ts";
 import { JournalStore } from "../journal/store.ts";
 import { RealmKernel } from "../kernel/realm/realm-host.ts";
 import { Supervisor } from "../kernel/supervisor.ts";
@@ -24,10 +31,8 @@ export interface DaemonOptions {
   heartbeatMs?: number;
   /** Supervisor tick interval (ms) for timer wake + cron (default 1000). */
   superviseMs?: number;
-  /** Scoped bearer tokens (§19). If set, clients must authenticate; a 'read'
-   * token may only call read methods, a 'write' token may call everything.
-   * If unset, the socket is unauthenticated (trusted local use). */
-  tokens?: Record<string, "read" | "write">;
+  /** Optional bootstrap admin bearer token. Stored only as a daemon-side hash. */
+  adminToken?: string;
   /** Git repo root for agents that explicitly request workspaceIsolation (§11.3). */
   workspaceRoot?: string;
   /** Named agent profiles, resolved into each ctx.agent before versioning. */
@@ -36,21 +41,11 @@ export interface DaemonOptions {
   clock?: () => number;
 }
 
-/** Methods that only read state — allowed for a 'read' scope. */
-const READ_METHODS = new Set([
-  "getRun",
-  "getBlockage",
-  "listRuns",
-  "waitForRun",
-  "subscribeEvents",
-  "ping",
-]);
-
 interface Conn {
   socket: Socket<undefined>;
   buf: string;
   subs: Map<string, () => void>; // subId → unsubscribe
-  scope: "read" | "write" | null; // null until authenticated (if tokens are set)
+  credential: string | null;
 }
 
 const DEFAULT_HEARTBEAT_MS = 10_000;
@@ -77,6 +72,9 @@ export class KeelDaemon {
     this.heartbeatMs = opts.heartbeatMs ?? DEFAULT_HEARTBEAT_MS;
     this.superviseMs = opts.superviseMs ?? DEFAULT_SUPERVISE_MS;
     this.store = JournalStore.open(opts.dbPath);
+    if (opts.adminToken) {
+      ensureAdminCapability(this.store, opts.adminToken, this.clock());
+    }
     this.kernel = new RealmKernel(this.store, {
       ...(opts.agents ? { agents: opts.agents } : {}),
       ...(opts.workspaceRoot ? { workspaceRoot: opts.workspaceRoot } : {}),
@@ -126,8 +124,7 @@ export class KeelDaemon {
             socket,
             buf: "",
             subs: new Map(),
-            // No tokens configured → every connection is authorized for writes.
-            scope: this.opts.tokens ? null : "write",
+            credential: null,
           };
         },
         data: (socket, data) => this.onData(socket as Socket<undefined> & { conn?: Conn }, data),
@@ -211,25 +208,24 @@ export class KeelDaemon {
     } catch (err) {
       this.send(conn, {
         id: req.id,
-        error: { message: err instanceof Error ? err.message : String(err) },
+        error:
+          err instanceof AuthorizationError
+            ? {
+                code: err.code,
+                message: err.message,
+                action: err.request.action,
+                resource: err.request.resource,
+              }
+            : { message: err instanceof Error ? err.message : String(err) },
       });
     }
   }
 
   private async handle(conn: Conn, method: string, params: unknown): Promise<unknown> {
     const p = (params ?? {}) as Record<string, unknown>;
-    // §19 scoped-token auth: authenticate first; read tokens may only read.
-    if (this.opts.tokens) {
-      if (method === "authenticate") {
-        const scope = this.opts.tokens[p.token as string];
-        if (!scope) throw new Error("invalid token");
-        conn.scope = scope;
-        return { scope };
-      }
-      if (conn.scope === null) throw new Error("not authenticated");
-      if (conn.scope === "read" && !READ_METHODS.has(method)) {
-        throw new Error(`method ${method} requires a write-scoped token`);
-      }
+    if (method === "authenticate") {
+      conn.credential = p.token as string;
+      return { ok: true };
     }
     switch (method) {
       case "launchRun": {
@@ -240,13 +236,16 @@ export class KeelDaemon {
         });
         this.store.claimRun(res.runId, this.ownerId, this.clock(), this.clock());
         this.owned.add(res.runId);
-        return res;
+        const cap = issueRunCapability(this.store, res.runId, this.clock());
+        return { ...res, capability: cap.token, capabilityId: cap.capabilityId };
       }
       case "resumeRun": {
+        this.authorizeRun(conn, p.runId as string, "run:resume");
         this.claimOrReject(p.runId as string);
         return this.api.resumeRun(p.runId as string);
       }
       case "rerunRun": {
+        this.authorizeRun(conn, p.runId as string, "run:retry");
         this.claimOrReject(p.runId as string);
         return this.api.rerunRun(
           p.runId as string,
@@ -254,34 +253,66 @@ export class KeelDaemon {
         );
       }
       case "getRun":
+        this.authorizeRun(conn, p.runId as string, "run:read");
         return this.api.getRun(p.runId as string);
       case "getBlockage":
+        this.authorizeRun(conn, p.runId as string, "run:read");
         return this.api.getBlockage(p.runId as string);
       case "listRuns":
+        this.authorizeAdmin(conn);
         return this.api.listRuns();
       case "waitForRun":
-        return this.api.waitForRun(p.runId as string);
+        this.authorizeRun(conn, p.runId as string, "run:watch");
+        return this.api.waitForRun(p.runId as string).finally(() => {
+          this.authorizeRun(conn, p.runId as string, "run:watch");
+        });
       case "subscribeEvents": {
+        this.authorizeRun(conn, p.runId as string, "run:events");
         const subId = randomUUID();
-        const unsub = this.api.subscribeEvents(
+        let unsub = () => {};
+        unsub = this.api.subscribeEvents(
           p.runId as string,
           (p.afterSeq as number) ?? 0,
-          (event: EventEnvelope) => this.send(conn, { event: { subId, ...event } }),
+          (event: EventEnvelope) => {
+            try {
+              this.authorizeRun(conn, p.runId as string, "run:events");
+              this.send(conn, { event: { subId, ...event } });
+            } catch (err) {
+              this.send(conn, {
+                event: {
+                  subId,
+                  seq: event.seq,
+                  type: "authorization.failed",
+                  payload: { message: err instanceof Error ? err.message : String(err) },
+                  atMs: this.clock(),
+                },
+              });
+              unsub();
+              conn.subs.delete(subId);
+            }
+          },
         );
         conn.subs.set(subId, unsub);
         return { subId };
       }
       case "retryRun": {
+        this.authorizeRun(conn, p.runId as string, "run:retry");
         this.claimOrReject(p.runId as string);
         return this.api.retryRun(p.runId as string);
       }
       case "rewindRun": {
+        this.authorizeRun(conn, p.runId as string, "run:rewind");
         this.claimOrReject(p.runId as string);
         return this.api.rewindRun(p.runId as string, p.toStableKey as string);
       }
-      case "forkRun":
-        return this.api.forkRun(p.runId as string, (p.opts as Record<string, unknown>) ?? {});
+      case "forkRun": {
+        this.authorizeRun(conn, p.runId as string, "run:fork");
+        const fork = this.api.forkRun(p.runId as string, (p.opts as Record<string, unknown>) ?? {});
+        const cap = issueRunCapability(this.store, fork.runId, this.clock());
+        return { ...fork, capability: cap.token, capabilityId: cap.capabilityId };
+      }
       case "decideApproval": {
+        this.authorizeAdmin(conn);
         const runId = p.runId as string;
         this.store.decideApproval(
           runId,
@@ -293,10 +324,12 @@ export class KeelDaemon {
       }
       case "sendSignal": {
         const runId = p.runId as string;
+        this.authorizeRun(conn, runId, "run:signal");
         this.store.putSignal(runId, p.name as string, p.payload, this.clock());
         return this.wakeParked(runId);
       }
       case "putSchedule": {
+        this.authorizeAdmin(conn);
         this.store.putSchedule({
           name: p.name as string,
           workflowRef: p.workflowUrl as string,
@@ -311,5 +344,23 @@ export class KeelDaemon {
       default:
         throw new Error(`unknown method ${method}`);
     }
+  }
+
+  private authorizeRun(conn: Conn, runId: string, action: CapabilityAction): void {
+    authorize(
+      this.store,
+      conn.credential,
+      { action, resource: { kind: "run", runId } },
+      this.clock(),
+    );
+  }
+
+  private authorizeAdmin(conn: Conn): void {
+    authorize(
+      this.store,
+      conn.credential,
+      { action: "admin", resource: { kind: "daemon" } },
+      this.clock(),
+    );
   }
 }

@@ -2,9 +2,13 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { MockProvider } from "../agents/mock.ts";
+import { AgentProviderRegistry } from "../agents/types.ts";
+import { KeelDaemon } from "../daemon/server.ts";
 import {
   formatRunHeader,
   formatWatchEvent,
+  parseLaunchArgs,
   parseLaunchInput,
   parseLifecycleArgs,
   parseWatchArgs,
@@ -13,6 +17,8 @@ import {
 } from "./keel.ts";
 
 const CLI = new URL("./keel.ts", import.meta.url).pathname;
+const FIX = new URL("../kernel/realm/fixtures/", import.meta.url);
+const chainUrl = new URL("chain.workflow.ts", FIX).pathname;
 
 async function runCli(
   args: string[],
@@ -144,6 +150,17 @@ describe("keel CLI", () => {
     });
   });
 
+  test("launch args require explicit raw capability opt-in", () => {
+    expect(parseLaunchArgs(["--emit-capability", "--detach", "wf.ts"])).toEqual({
+      emitCapability: true,
+      args: ["--detach", "wf.ts"],
+    });
+    expect(parseLaunchArgs(["--detach", "wf.ts"])).toEqual({
+      emitCapability: false,
+      args: ["--detach", "wf.ts"],
+    });
+  });
+
   test("attached lifecycle commands print the run id before streaming events", () => {
     expect(formatRunHeader("run_123")).toBe("run run_123\n");
   });
@@ -181,4 +198,59 @@ describe("keel CLI", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  test("detached launch writes a capability file that authorizes follow-up get", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-launch-cap-"));
+    const socketPath = join(dir, "keel.sock");
+    const dbPath = join(dir, "keel.db");
+    const capDir = join(dir, "caps");
+    const daemon = new KeelDaemon({
+      socketPath,
+      dbPath,
+      agents: new AgentProviderRegistry().register(new MockProvider()),
+    });
+    await daemon.start();
+    try {
+      const env = {
+        KEEL_SOCKET: socketPath,
+        KEEL_DB: dbPath,
+        KEEL_DIR: dir,
+        KEEL_CAP_DIR: capDir,
+      };
+      const launched = await runCli(["launch", "--detach", chainUrl, '{"n":1}'], dir, env);
+      expect(launched.code).toBe(0);
+      const payload = JSON.parse(launched.stdout) as { runId: string; capabilityRef: string };
+      expect(payload.capabilityRef).toBe(join(capDir, `${payload.runId}.cap`));
+      const capFile = JSON.parse(readFileSync(payload.capabilityRef, "utf8")) as {
+        capability: string;
+      };
+      expect(capFile.capability.startsWith("kc_run_")).toBe(true);
+
+      const got = await runCli(["get", payload.runId], dir, {
+        ...env,
+        KEEL_CAP_FILE: payload.capabilityRef,
+      });
+      expect(got.code).toBe(0);
+      expect(JSON.parse(got.stdout).runId).toBe(payload.runId);
+      await waitForCliStatus(payload.runId, dir, { ...env, KEEL_CAP_FILE: payload.capabilityRef });
+    } finally {
+      daemon.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
+
+async function waitForCliStatus(
+  runId: string,
+  cwd: string,
+  env: Record<string, string>,
+  status = "finished",
+): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < 4000) {
+    const out = await runCli(["get", runId], cwd, env);
+    if (out.code === 0 && JSON.parse(out.stdout).status === status) return;
+    await Bun.sleep(50);
+  }
+  throw new Error(`run ${runId} did not reach ${status}`);
+}

@@ -8,7 +8,7 @@
 //
 // History: v1 base → v2 runs.workflow_ref → v3 schedules table → v4
 // signals.consumed_key → v5 journal.seq → v6 approvals.prompt/requested_caps_json
-// → v7 workflow_definitions.
+// → v7 workflow_definitions → v8 capabilities.
 
 import type { Database } from "bun:sqlite";
 
@@ -49,6 +49,8 @@ export function applyMigration(db: Database, fromVersion: number): void {
       addColumn(db, "approvals", "requested_caps_json", "TEXT");
       break;
     case 6: // → v7: workflow_definitions is a new TABLE, created by base DDL.
+      break;
+    case 7: // → v8: capabilities is a new TABLE, created by base DDL.
       break;
     default:
       throw new Error(`no migration defined from schema version ${fromVersion}`);

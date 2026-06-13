@@ -42,7 +42,7 @@ function makeV4Db(path: string): void {
 }
 
 describe("schema migrations", () => {
-  test("a v4 DB migrates forward to v7 in place, additively and idempotently", () => {
+  test("a v4 DB migrates forward to v8 in place, additively and idempotently", () => {
     const dir = mkdtempSync(join(tmpdir(), "keel-mig-"));
     try {
       const path = join(dir, "old.db");
@@ -55,7 +55,7 @@ describe("schema migrations", () => {
       const ver = store.db
         .query<{ value: string }, []>("SELECT value FROM schema_meta WHERE key='schema_version'")
         .get();
-      expect(ver?.value).toBe("7");
+      expect(ver?.value).toBe("8");
 
       // new columns exist
       const jcols = store.db.query<{ name: string }, []>("PRAGMA table_info(journal)").all();
@@ -68,6 +68,9 @@ describe("schema migrations", () => {
         .all();
       expect(wdefs.some((c) => c.name === "hash")).toBe(true);
       expect(wdefs.some((c) => c.name === "manifest_json")).toBe(true);
+      const caps = store.db.query<{ name: string }, []>("PRAGMA table_info(capabilities)").all();
+      expect(caps.some((c) => c.name === "secret_hash")).toBe(true);
+      expect(caps.some((c) => c.name === "resource_json")).toBe(true);
 
       // existing rows preserved (additive) and seq backfilled per-run monotonic
       const rows = store.listJournalRows("r");
@@ -93,7 +96,7 @@ describe("schema migrations", () => {
     const ver = store.db
       .query<{ value: string }, []>("SELECT value FROM schema_meta WHERE key='schema_version'")
       .get();
-    expect(ver?.value).toBe("7");
+    expect(ver?.value).toBe("8");
     store.close();
   });
 });

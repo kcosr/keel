@@ -147,6 +147,24 @@ describe("JournalStore (in-memory)", () => {
     expect(got?.manifestJson).toContain("keel.workflow-definition.v1");
   });
 
+  test("capabilities round-trip by secret hash without storing raw tokens", () => {
+    store.putCapability({
+      id: "cap_1",
+      secretHash: "hash-only",
+      resourceJson: '{"kind":"run","runId":"r1"}',
+      actionsJson: '["run:read"]',
+      createdAtMs: 1000,
+      expiresAtMs: null,
+      revokedAtMs: null,
+      note: "test",
+    });
+
+    const got = store.getCapabilityByHash("hash-only");
+    expect(got?.id).toBe("cap_1");
+    expect(got?.resourceJson).toContain("r1");
+    expect(got?.secretHash).toBe("hash-only");
+  });
+
   test("transaction rolls back fully on throw (zero partial rows)", () => {
     store.insertRun(newRun("r1"));
     expect(() =>

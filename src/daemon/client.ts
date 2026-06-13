@@ -2,7 +2,13 @@
 // socket. The CLI, and later web/MCP, are clients exactly like this.
 
 import { type Socket, connect } from "bun";
-import type { EventEnvelope, LaunchRequest, RunOutcome, RunStart } from "../rpc/contract.ts";
+import type {
+  EventEnvelope,
+  LaunchRequest,
+  RunLaunchResult,
+  RunOutcome,
+  RunStart,
+} from "../rpc/contract.ts";
 import type { RunProjection, RunSummary } from "../rpc/projection.ts";
 
 /** Async-shaped client over the socket (the in-process KeelApi is sync; the wire
@@ -48,7 +54,7 @@ export class DaemonClient {
     const msg = JSON.parse(line) as {
       id?: number;
       result?: unknown;
-      error?: { message: string };
+      error?: { message: string; code?: string; action?: string; resource?: unknown };
       event?: EventEnvelope & { subId: string };
     };
     if (msg.event) {
@@ -77,7 +83,7 @@ export class DaemonClient {
     });
   }
 
-  launchRun(req: LaunchRequest): Promise<{ runId: string }> {
+  launchRun(req: LaunchRequest): Promise<RunLaunchResult> {
     return this.rpc("launchRun", req);
   }
   resumeRun(runId: string): Promise<RunStart> {
@@ -98,7 +104,7 @@ export class DaemonClient {
   forkRun(
     runId: string,
     opts: { atStableKey?: string; newRunId?: string } = {},
-  ): Promise<{ runId: string }> {
+  ): Promise<RunLaunchResult> {
     return this.rpc("forkRun", { runId, opts });
   }
   getBlockage(runId: string): Promise<import("../rpc/projection.ts").Blockage> {
@@ -129,7 +135,7 @@ export class DaemonClient {
   ping(): Promise<{ ok: boolean; ownerId: string }> {
     return this.rpc("ping", {});
   }
-  authenticate(token: string): Promise<{ scope: "read" | "write" }> {
+  authenticate(token: string): Promise<{ ok: boolean }> {
     return this.rpc("authenticate", { token });
   }
   waitForRun(runId: string): Promise<RunOutcome> {

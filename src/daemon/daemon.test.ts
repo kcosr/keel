@@ -17,6 +17,7 @@ const FIX = new URL("../kernel/realm/fixtures/", import.meta.url);
 const chainUrl = new URL("chain.workflow.ts", FIX).pathname;
 const TEST_DAEMON = new URL("./test-daemon.ts", import.meta.url).pathname;
 const onceUrl = new URL("./fixtures/once-pi.workflow.ts", import.meta.url).pathname;
+const ADMIN_TOKEN = "kc_admin_test";
 
 let dir: string;
 beforeEach(() => {
@@ -31,23 +32,28 @@ describe("daemon multi-client over the socket", () => {
       socketPath,
       dbPath: join(dir, "k.db"),
       agents: new AgentProviderRegistry().register(new MockProvider()),
+      adminToken: ADMIN_TOKEN,
     });
     await daemon.start();
     try {
       const a = await DaemonClient.connect(socketPath);
       const b = await DaemonClient.connect(socketPath);
 
-      const { runId } = await a.launchRun({
+      const { runId, capability } = await a.launchRun({
         workflowUrl: chainUrl,
         input: { n: 3 },
         name: "chain",
       });
+      expect(capability?.startsWith("kc_run_")).toBe(true);
+      await expect(b.waitForRun(runId)).rejects.toThrow(/no capability presented/);
+      await b.authenticate(capability as string);
       const out = await b.waitForRun(runId); // a different connection awaits it
       expect(out.status).toBe("finished");
       expect(out.output).toBe(3);
 
       const projection = await b.getRun(runId);
       expect(projection?.stats).toEqual({ steps: 3, agents: 0, artifacts: 0 });
+      await a.authenticate(ADMIN_TOKEN);
       expect((await a.listRuns()).length).toBe(1);
       a.close();
       b.close();
@@ -57,46 +63,54 @@ describe("daemon multi-client over the socket", () => {
   });
 });
 
-describe("scoped-token auth", () => {
-  test("a read token may read but not launch; a write token may do both", async () => {
+describe("capability auth", () => {
+  test("a run capability scopes access to one run; admin is required for daemon-wide list", async () => {
     const socketPath = join(dir, "auth.sock");
     const daemon = new KeelDaemon({
       socketPath,
       dbPath: join(dir, "auth.db"),
       agents: new AgentProviderRegistry().register(new MockProvider()),
-      tokens: { reader: "read", writer: "write" },
+      adminToken: ADMIN_TOKEN,
     });
     await daemon.start();
     try {
       // unauthenticated → rejected
       const anon = await DaemonClient.connect(socketPath);
-      await expect(anon.listRuns()).rejects.toThrow(/not authenticated/);
+      await expect(anon.listRuns()).rejects.toThrow(/no capability presented/);
       anon.close();
 
-      // a writer seeds a run
-      const w = await DaemonClient.connect(socketPath);
-      expect((await w.authenticate("writer")).scope).toBe("write");
-      const { runId } = await w.launchRun({
+      const launcher = await DaemonClient.connect(socketPath);
+      const first = await launcher.launchRun({
         workflowUrl: chainUrl,
         input: { n: 1 },
         name: "chain",
       });
-      await w.waitForRun(runId);
+      expect(first.capability?.startsWith("kc_run_")).toBe(true);
+      await launcher.authenticate(first.capability as string);
+      await launcher.waitForRun(first.runId);
 
-      // a reader can read but not launch
-      const r = await DaemonClient.connect(socketPath);
-      expect((await r.authenticate("reader")).scope).toBe("read");
-      expect((await r.getRun(runId))?.status).toBe("finished");
-      await expect(
-        r.launchRun({ workflowUrl: chainUrl, input: { n: 1 }, name: "chain" }),
-      ).rejects.toThrow(/write-scoped/);
+      const second = await launcher.launchRun({
+        workflowUrl: chainUrl,
+        input: { n: 2 },
+        name: "chain",
+      });
+      await launcher.authenticate(second.capability as string);
+      await launcher.waitForRun(second.runId);
 
-      // a bad token is rejected
-      const bad = await DaemonClient.connect(socketPath);
-      await expect(bad.authenticate("nope")).rejects.toThrow(/invalid token/);
-      w.close();
-      r.close();
-      bad.close();
+      const scoped = await DaemonClient.connect(socketPath);
+      await scoped.authenticate(first.capability as string);
+      expect((await scoped.getRun(first.runId))?.status).toBe("finished");
+      await expect(scoped.getRun(second.runId)).rejects.toThrow(/different resource/);
+      await expect(scoped.listRuns()).rejects.toThrow(/admin/);
+
+      const admin = await DaemonClient.connect(socketPath);
+      await admin.authenticate(ADMIN_TOKEN);
+      expect((await admin.listRuns()).map((r) => r.runId).sort()).toEqual(
+        [first.runId, second.runId].sort(),
+      );
+      launcher.close();
+      scoped.close();
+      admin.close();
     } finally {
       daemon.stop();
     }
@@ -110,10 +124,12 @@ describe("CAS ownership fence", () => {
       socketPath,
       dbPath: join(dir, "missing.db"),
       agents: new AgentProviderRegistry().register(new MockProvider()),
+      adminToken: ADMIN_TOKEN,
     });
     await daemon.start();
     try {
       const c = await DaemonClient.connect(socketPath);
+      await c.authenticate(ADMIN_TOKEN);
       await expect(c.retryRun("missing")).rejects.toThrow(/run missing not found/);
       c.close();
     } finally {
@@ -164,7 +180,12 @@ describe("CAS ownership fence", () => {
     });
     await a.start();
     const ca = await DaemonClient.connect(join(dir, "a.sock"));
-    const { runId } = await ca.launchRun({ workflowUrl: onceUrl2, input: null, name: "once" });
+    const { runId, capability } = await ca.launchRun({
+      workflowUrl: onceUrl2,
+      input: null,
+      name: "once",
+    });
+    await ca.authenticate(capability as string);
     await ca.waitForRun(runId); // finishes; A owns it with a fresh heartbeat
 
     // mark it running again (simulate a non-terminal owned run) for the fence test
@@ -182,6 +203,7 @@ describe("CAS ownership fence", () => {
     });
     await b.start();
     const cb = await DaemonClient.connect(join(dir, "b.sock"));
+    await cb.authenticate(capability as string);
     await expect(cb.resumeRun(runId)).rejects.toThrow(/ownership fence/);
 
     ca.close();
@@ -204,7 +226,12 @@ describe("daemon supervisor tick over the socket", () => {
     await daemon.start();
     try {
       const c = await DaemonClient.connect(socketPath);
-      const { runId } = await c.launchRun({ workflowUrl: napUrl, input: null, name: "nap" });
+      const { runId, capability } = await c.launchRun({
+        workflowUrl: napUrl,
+        input: null,
+        name: "nap",
+      });
+      await c.authenticate(capability as string);
       await c.waitForRun(runId);
       expect((await c.getRun(runId))?.status).toBe("waiting-timer");
       // the nap sleeps 1000ms real-time; the supervisor wakes it once due
@@ -226,15 +253,25 @@ describe("HITL over the socket", () => {
       dbPath: join(dir, "h.db"),
       agents: new AgentProviderRegistry().register(new MockProvider()),
       superviseMs: 100_000, // don't auto-tick; drive the decision explicitly
+      adminToken: ADMIN_TOKEN,
     });
     await daemon.start();
     try {
       const c = await DaemonClient.connect(socketPath);
-      const { runId } = await c.launchRun({ workflowUrl: gateUrl, input: null, name: "gate" });
+      const { runId, capability } = await c.launchRun({
+        workflowUrl: gateUrl,
+        input: null,
+        name: "gate",
+      });
+      await c.authenticate(capability as string);
       await c.waitForRun(runId);
       expect((await c.getRun(runId))?.status).toBe("waiting-human");
       expect((await c.getBlockage(runId)).reason).toBe("waiting_human");
 
+      await expect(
+        c.decideApproval(runId, "approve-deploy", { status: "approved" }),
+      ).rejects.toThrow(/admin/);
+      await c.authenticate(ADMIN_TOKEN);
       const out = await c.decideApproval(runId, "approve-deploy", { status: "approved" });
       expect(out.status).toBe("finished");
       expect((await c.getRun(runId))?.status).toBe("finished");
@@ -264,7 +301,12 @@ describe("kill -9 daemon recovery", () => {
     });
     await waitForLine(d1.stdout, "READY");
     const c1 = await DaemonClient.connect(socketPath);
-    const { runId } = await c1.launchRun({ workflowUrl: onceUrl, input: null, name: "once" });
+    const { runId, capability } = await c1.launchRun({
+      workflowUrl: onceUrl,
+      input: null,
+      name: "once",
+    });
+    await c1.authenticate(capability as string);
     // poll until the agent row is pending (mid-flight)
     await until(
       async () => (await c1.getRun(runId))?.nodes.some((n) => n.status === "pending"),
@@ -292,6 +334,7 @@ describe("kill -9 daemon recovery", () => {
     });
     await waitForLine(d2.stdout, "READY");
     const c2 = await DaemonClient.connect(socketPath);
+    await c2.authenticate(capability as string);
     try {
       await until(async () => (await c2.getRun(runId))?.status === "finished", 8000);
       const final = await c2.getRun(runId);

@@ -10,9 +10,11 @@ import { applyMigration } from "./migrations.ts";
 import { DDL, SCHEMA_VERSION } from "./schema.ts";
 import type {
   ArtifactRow,
+  CapabilityRow,
   EventRow,
   InputDep,
   JournalRow,
+  NewCapabilityRow,
   NewJournalRow,
   NewRunRow,
   NewWorkflowDefinitionRow,
@@ -389,6 +391,47 @@ export class JournalStore {
       )
       .get(hash);
     return r ? mapWorkflowDefinition(r) : null;
+  }
+
+  // ---- capabilities ------------------------------------------------------
+
+  putCapability(row: NewCapabilityRow): void {
+    this.db
+      .query(
+        `INSERT INTO capabilities (
+           id, secret_hash, resource_json, actions_json, created_at_ms,
+           expires_at_ms, revoked_at_ms, note
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(secret_hash) DO UPDATE SET
+           resource_json = excluded.resource_json,
+           actions_json = excluded.actions_json,
+           expires_at_ms = excluded.expires_at_ms,
+           revoked_at_ms = excluded.revoked_at_ms,
+           note = excluded.note`,
+      )
+      .run(
+        row.id,
+        row.secretHash,
+        row.resourceJson,
+        row.actionsJson,
+        row.createdAtMs,
+        row.expiresAtMs,
+        row.revokedAtMs,
+        row.note,
+      );
+  }
+
+  getCapabilityByHash(secretHash: string): CapabilityRow | null {
+    const r = this.db
+      .query<RawCapabilityRow, [string]>("SELECT * FROM capabilities WHERE secret_hash = ?")
+      .get(secretHash);
+    return r ? mapCapability(r) : null;
+  }
+
+  revokeCapability(id: string, atMs: number): void {
+    this.db
+      .query("UPDATE capabilities SET revoked_at_ms = ? WHERE id = ? AND revoked_at_ms IS NULL")
+      .run(atMs, id);
   }
 
   // ---- timers (durable ctx.sleep, §16) -----------------------------------
@@ -853,6 +896,17 @@ interface RawWorkflowDefinitionRow {
   created_at_ms: number;
 }
 
+interface RawCapabilityRow {
+  id: string;
+  secret_hash: string;
+  resource_json: string;
+  actions_json: string;
+  created_at_ms: number;
+  expires_at_ms: number | null;
+  revoked_at_ms: number | null;
+  note: string | null;
+}
+
 function mapRun(r: RawRunRow): RunRow {
   return {
     runId: r.run_id,
@@ -921,5 +975,18 @@ function mapWorkflowDefinition(r: RawWorkflowDefinitionRow): WorkflowDefinitionR
     sourceMap: r.source_map,
     manifestJson: r.manifest_json,
     createdAtMs: r.created_at_ms,
+  };
+}
+
+function mapCapability(r: RawCapabilityRow): CapabilityRow {
+  return {
+    id: r.id,
+    secretHash: r.secret_hash,
+    resourceJson: r.resource_json,
+    actionsJson: r.actions_json,
+    createdAtMs: r.created_at_ms,
+    expiresAtMs: r.expires_at_ms,
+    revokedAtMs: r.revoked_at_ms,
+    note: r.note,
   };
 }

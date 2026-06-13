@@ -26,6 +26,12 @@ export interface RunStart {
   status: RunProjection["status"];
 }
 
+export interface RunLaunchResult {
+  runId: string;
+  capability?: string;
+  capabilityId?: string;
+}
+
 export interface EventEnvelope {
   seq: number;
   type: string;
@@ -35,7 +41,7 @@ export interface EventEnvelope {
 
 export interface KeelApi {
   /** Start a run; returns its id immediately (the run executes in the background). */
-  launchRun(req: LaunchRequest): Promise<{ runId: string }>;
+  launchRun(req: LaunchRequest): Promise<RunLaunchResult>;
   /** Resume a non-terminal run in the background. */
   resumeRun(runId: string): Promise<RunStart>;
   /** Re-execute a run against (possibly edited) code in the background. */
@@ -45,7 +51,7 @@ export interface KeelApi {
   /** Discard everything after a step and re-run in the background. */
   rewindRun(runId: string, toStableKey: string): Promise<RunStart>;
   /** Copy a terminal run into a new independent run. */
-  forkRun(runId: string, opts?: { atStableKey?: string; newRunId?: string }): { runId: string };
+  forkRun(runId: string, opts?: { atStableKey?: string; newRunId?: string }): RunLaunchResult;
   /** The canonical projection for one run. */
   getRun(runId: string): RunProjection | null;
   /** Why is this run stuck? (§12.2). */

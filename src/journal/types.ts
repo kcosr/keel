@@ -121,3 +121,16 @@ export interface WorkflowDefinitionRow {
 }
 
 export type NewWorkflowDefinitionRow = WorkflowDefinitionRow;
+
+export interface CapabilityRow {
+  id: string;
+  secretHash: string;
+  resourceJson: string;
+  actionsJson: string;
+  createdAtMs: number;
+  expiresAtMs: number | null;
+  revokedAtMs: number | null;
+  note: string | null;
+}
+
+export type NewCapabilityRow = CapabilityRow;

@@ -5,6 +5,10 @@ do work through `ctx`; Keel runs it durably and survives crashes. Write a `.ts`
 workflow file, then use `keel execute` for agent-friendly control scripts that
 launch, wait, inspect, and return one JSON result.
 
+Assume the daemon is already running and the `keel` CLI is already configured to
+reach it. Do not start the daemon, restart systemd, or use admin credentials from
+this skill.
+
 ---
 
 ## 1. The shape

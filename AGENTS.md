@@ -1,8 +1,9 @@
 # Keel Agent Notes
 
-Keel is run locally as a user-level systemd service. The daemon should be
-started from this workspace with `KEEL_ADMIN_TOKEN=kc_admin_local` and
-`KEEL_WORKSPACE_ROOT=/home/kevin/worktrees/keel`.
+For normal agent use, assume the Keel daemon is already running and the `keel`
+CLI is configured to reach it through the environment (`KEEL_SOCKET` or
+`KEEL_DIR`). Do not start, restart, or inspect the systemd service unless the
+user explicitly asks for daemon operations.
 
 ## Project Rules
 
@@ -144,6 +145,10 @@ not the primary regression suite.
   environment defaults into production provider code.
 
 ## Systemd
+
+These commands are for explicit human-requested daemon operations only. Agents
+running workflows should use the configured `keel` CLI and should not touch
+systemd by default.
 
 Check the daemon status:
 

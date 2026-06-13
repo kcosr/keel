@@ -31,8 +31,9 @@ RunProjection; the out-of-process daemon + thin CLI with CAS-fenced crash
 recovery; liveness (stall-retry, timeouts, blockage); agent capabilities,
 explicit git-worktree isolation, diff gate, and secrets side-channel; durable
 `ctx.sleep` with the supervisor and cron; full HITL (`ctx.human`/`ctx.signal`);
-time travel (retry/rewind/fork); and ops (artifact GC, `continueAsNew`,
-scoped-token auth, Postgres-dialect discipline).
+time travel (retry/rewind/fork); immutable workflow definition snapshots;
+daemon-enforced bearer capabilities; stateless `keel execute`; and ops
+(artifact GC, `continueAsNew`, Postgres-dialect discipline).
 
 **Deltas from the original design text, all intentional and noted in place:**
 
@@ -62,9 +63,19 @@ scoped-token auth, Postgres-dialect discipline).
   is an atomic transactional handoff with lineage, and fork is fenced to terminal
   runs. The OS-sandbox capability backstop remains the one unimplemented
   hardening.
+- **Run authorization is object-capability based.** Launch is open to local
+  callers and mints a run capability. Existing-run read/control operations
+  require a run capability or an admin capability; the daemon stores only token
+  hashes. The CLI writes cap files by default and raw tokens require explicit
+  opt-in.
+- **Workflow definitions are immutable snapshots.** `runs.definition_version`
+  is the content-addressed definition hash; `runs.workflow_ref` is provenance.
+  Resume/retry/rewind/fork use the stored definition, while rerun/adopt-latest
+  snapshots the current source intentionally.
 - **Two surfaces are programmatic-only on the bundled daemon:** secret injection
   (`SecretStore`) and agent profiles (`agentProfiles`) require constructing the
-  daemon/kernel in code; the CLI wires auth (`KEEL_TOKENS`/`KEEL_TOKEN`) and
+  daemon/kernel in code; the CLI wires capability credentials
+  (`KEEL_ADMIN_TOKEN`, `KEEL_RUN_CAP`, `KEEL_CAP_FILE`) and
   `KEEL_WORKSPACE_ROOT`.
 
 ---
@@ -460,9 +471,36 @@ collecting artifacts referenced by non-terminal runs) is deferred to Phase 19.
 The SQLite journal at a stable path survives terminal exits and reboots; any
 client reaches it through the daemon. Team-internal: one shared daemon host —
 a run authored from machine A is observable and resumable from machine B by
-pointing a client at the same daemon (scoped-token auth lands when the daemon
-serves non-local clients, Phase 19). The session-scoped JSON of the Claude
-runtime becomes an *export view*, not storage.
+pointing a client at the same daemon with the run capability or an admin
+capability. The session-scoped JSON of the Claude runtime becomes an *export
+view*, not storage.
+
+### 8.4 Workflow definition snapshots
+
+Launch stores an immutable workflow definition snapshot in
+`workflow_definitions`, keyed by a `wf_sha256_...` content hash. The run row uses
+`runs.definition_version` for that hash and keeps `runs.workflow_ref` only as
+provenance. The daemon materializes definitions from the DB into a cache for Bun
+import; the cache is not the source of truth.
+
+Relative authored imports under the workflow root are captured into the
+definition. Absolute imports, dynamic imports, imports that escape the workflow
+root, and capability/nondeterministic imports are rejected by the snapshot/lint
+boundary. Resume/retry/rewind/fork use the stored definition. Rerun/adopt-latest
+creates a new snapshot intentionally.
+
+### 8.5 Run capabilities
+
+Run id is an identifier, not authority. Launch mints a broad run capability for
+that run; daemon methods authorize against bearer capabilities stored only as
+hashes in the `capabilities` table. The default run capability covers normal
+run lifecycle operations: read, watch/events, output, resume, retry, rewind,
+fork, and ordinary signal. `ctx.human` approve/deny and daemon-wide list require
+an admin capability (`{ kind: "daemon" }`, action `admin`).
+
+The CLI writes run capabilities into private cap files by default and returns
+capability references. Raw capabilities are emitted only through explicit
+opt-in such as `--emit-capability`.
 
 ## 9. The authoring surface
 
@@ -473,6 +511,19 @@ requirements rather than niceties: the `ctx` surface stays small and
 JSON-native (reliably generatable by a model), schemas are accepted as raw JSON
 Schema (§9.3), and every realm violation returns actionable guidance an agent
 can self-correct from (§6).
+
+### 9.0 Operator control surface
+
+`keel execute` is a stateless TypeScript control surface over the daemon API.
+It runs outside the deterministic workflow realm, receives injected `keel`,
+`args`, `state`, and `env`, and writes only its returned JSON value to stdout.
+It is useful for short launch/resume/wait/inspect loops and output shaping.
+
+`execute` is not a durable workflow engine: it does not pause and resume its own
+stack, and its `--state` input is only an ephemeral convenience for non-secret
+handles. Durable pauses remain workflow features (`ctx.sleep`, `ctx.signal`,
+`ctx.human`). Saved workflows/tasks and durable child-workflow orchestration are
+deferred until the registry/`ctx.spawn` design is implemented.
 
 ### 9.1 The `ctx` API (fixed, typed, non-overloaded)
 

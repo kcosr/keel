@@ -71,9 +71,11 @@ run run_...
 Use `--detach` when a script needs the run id without streaming:
 
 ```bash
-RUN=$(keel launch --detach ./path/to/workflow.ts '{"n":3}')
-keel watch "$RUN"
-keel get "$RUN"
+LAUNCH=$(keel launch --detach ./path/to/workflow.ts '{"n":3}')
+RUN=$(printf '%s' "$LAUNCH" | jq -r .runId)
+CAP=$(printf '%s' "$LAUNCH" | jq -r .capabilityRef)
+KEEL_CAP_FILE="$CAP" keel watch "$RUN"
+KEEL_CAP_FILE="$CAP" keel get "$RUN"
 ```
 
 Omit the input argument for `{}`:
@@ -118,7 +120,7 @@ bun src/cli/keel.ts <command> [args]
 |---|---|
 | `daemon` | Start the daemon in the foreground. |
 | `link [dir]` | Symlink this repo's SDK into `<dir>/node_modules`; defaults to the current directory. |
-| `launch [--detach] <workflow.ts> [json]` | Start a run from a workflow file. Watches by default. |
+| `launch [--detach] [--emit-capability] <workflow.ts> [json]` | Start a run from a workflow file. Watches by default. |
 | `watch [--json] <runId>` | Stream run events until terminal. |
 | `get <runId>` | Print the canonical run projection as JSON. |
 | `list` | List run id, status, and workflow name. |
@@ -126,6 +128,7 @@ bun src/cli/keel.ts <command> [args]
 | `retry [--detach] <runId>` | Re-run a failed run from its failed step. Watches by default. |
 | `rewind [--detach] <runId> <stepKey>` | Discard everything after a step and re-run. Watches by default. |
 | `fork <runId> [atStepKey]` | Copy a terminal run into a new independent run. |
+| `execute [--stdin\|file] [--entry name] [--state file] [--cap-file file] [--emit-capability] [-- args...]` | Run a stateless TypeScript control script over the daemon API. |
 | `approve <runId> <key> [note]` | Approve a `ctx.human` gate. |
 | `deny <runId> <key> [note]` | Deny a `ctx.human` gate. |
 | `signal <runId> <name> [json]` | Deliver a payload to `ctx.signal(name)`. |
@@ -149,8 +152,10 @@ keel retry --detach run_...
 keel rewind --detach run_... step-key
 ```
 
-Detached `launch` prints only the run id. Detached `resume`, `retry`, and
-`rewind` print the run id and status separated by a tab.
+Detached `launch` prints JSON with `runId` and `capabilityRef` by default. The
+capability file contains the bearer token needed for follow-up control of that
+run. Detached `resume`, `retry`, and `rewind` print the run id and status
+separated by a tab.
 
 ### Watch Output
 
@@ -200,8 +205,11 @@ socket and do not open the database directly.
 using the CLI process cwd before sending the request to the daemon. `file:` URLs
 are passed through as-is.
 
-The daemon loads the workflow module from the resolved path. The workflow file
-must therefore be visible to the daemon host at that path.
+On launch, the daemon stores an immutable workflow definition snapshot by
+content hash and runs from a daemon-owned materialized cache. Resume, retry,
+rewind, fork, and crash recovery use the stored definition, not the mutable
+source path. `rerun`/adopt-latest intentionally snapshots the current source as
+a new definition.
 
 ### Workspace Root
 
@@ -220,21 +228,78 @@ When enabled, the agent works in an isolated git worktree at the run's base
 commit. Its changes are captured as an `agent.diff` event and are not merged
 into the real tree automatically.
 
-### Auth
+### Authorization
 
-Set `KEEL_TOKENS` when starting the daemon to require scoped bearer tokens:
+Keel uses daemon-enforced bearer capabilities. Launch is open to local callers,
+but controlling an existing run requires a run capability or an admin
+capability. The daemon stores only token hashes.
+
+By default, commands that create a protected run write a capability file under
+`$KEEL_CAP_DIR` or `$KEEL_DIR/caps` and return a `capabilityRef`:
 
 ```bash
-KEEL_TOKENS='{"reader":"read","writer":"write"}' keel daemon
+keel launch --detach ./workflow.ts '{"n":3}'
 ```
 
-CLI clients authenticate with:
+```json
+{"runId":"run_...","capabilityRef":"/home/me/.keel/caps/run_....cap"}
+```
+
+Use the cap file for follow-up commands:
 
 ```bash
-KEEL_TOKEN=writer keel list
+KEEL_CAP_FILE=/home/me/.keel/caps/run_....cap keel get run_...
+KEEL_CAP_FILE=/home/me/.keel/caps/run_....cap keel resume run_...
 ```
 
-Read tokens may only call read methods.
+Credential channels:
+
+| Setting | Meaning |
+|---|---|
+| `KEEL_RUN_CAP` | Raw run bearer capability for one run. |
+| `KEEL_CAP_FILE` | JSON cap file containing a `capability` field. |
+| `KEEL_ADMIN_TOKEN` | Admin capability bootstrap/use channel. |
+| `KEEL_CAP_DIR` | Directory where new cap files are written; files are mode `0600`, directory mode `0700`. |
+
+Start the daemon with `KEEL_ADMIN_TOKEN=kc_admin_...` to bootstrap that token as
+an admin capability. Admin is required for daemon-wide `list` and
+`approve`/`deny` of `ctx.human` gates. Raw run capabilities are printed only
+with explicit `--emit-capability`; avoid this in transcripts unless you intend
+to handle the token as a secret.
+
+### Execute
+
+`keel execute` runs a stateless TypeScript control script outside the workflow
+realm. The script receives injected `keel`, `args`, `state`, and `env` variables
+and must return a JSON-serializable value. Stdout is always that returned JSON;
+runtime/authorization errors are structured JSON on stderr with a nonzero exit.
+
+```bash
+keel execute ./control.ts -- root security
+keel execute --stdin < control.ts
+keel execute ./control.ts --entry resume --state state.json --cap-file run.cap
+```
+
+Example control script:
+
+```ts
+const run = await keel.launch({
+  workflow: "./review.workflow.ts",
+  input: { root: args[0] },
+});
+
+const settled = await keel.wait(run.runId, { timeoutMs: 30_000 });
+return {
+  runId: run.runId,
+  capabilityRef: run.capabilityRef,
+  status: settled.status,
+};
+```
+
+`execute` is not durable orchestration. It can be re-invoked with non-secret
+state handles, but durable pauses belong in workflow code via `ctx.human`,
+`ctx.signal`, and `ctx.sleep`. Saved workflows/tasks and `ctx.spawn` are
+deferred.
 
 ### Diagnostics
 
@@ -270,7 +335,9 @@ code:
 
 - Do not use ambient non-determinism in the workflow body: `Date.now()`,
   `new Date()`, `Math.random()`, `crypto`, `fetch`, `eval`, `new Function`,
-  `require`, or direct `fs`/`child_process`/`http` imports.
+  `require`, `Bun.*`, or direct `fs`/`child_process`/`http` imports.
+- Workflow code may import the authoring SDK `@kcosr/keel`, but must not import
+  operator/control APIs such as `@kcosr/keel/execute`.
 - Use `ctx.now()` and `ctx.random()` for journaled time and entropy.
 - A `ctx.step` callback must be a pure function of its explicit `inputs`. Do not
   close over enclosing-scope data inside the callback; pass values through
@@ -576,6 +643,11 @@ runs.
   re-park or wait for a new signal.
 - Partial `fork` does not copy durable waits. Treat divergent forks of
   wait-heavy workflows with care.
+- Saved workflows, saved tasks, durable task pause/re-entry, and durable child
+  workflow spawning (`ctx.spawn`) are not implemented in this v1 execute/auth
+  pass.
+- Workflow definition manifests include runtime/import metadata, but they do not
+  yet include full package lockfile or external package integrity proofs.
 - SQLite is the only implemented store. Postgres compatibility is a discipline
   enforced by tests, not a working backend.
 - Secrets and profiles are programmatic-only on the bundled daemon.
@@ -584,3 +656,6 @@ runs.
   runs.
 - OS-level sandbox enforcement is not implemented beneath provider tool flags
   and workspace isolation.
+- Capability files protect against accidental cross-agent access through Keel,
+  but they do not prevent token theft between unrestricted processes running as
+  the same Unix user.

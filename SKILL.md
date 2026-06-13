@@ -25,8 +25,12 @@ export default async function myWorkflow(ctx: Ctx, input: { /* your input */ }) 
 
 The body runs in a sandbox. Stay inside it or the run is rejected:
 
-- **No `Date.now()`, `new Date()`, `Math.random()`, `fetch`, or file/network access**
-  in the body. Use `ctx.now()` / `ctx.random()`; do real work via `ctx.agent`.
+- **No `Date.now()`, `new Date()`, `Math.random()`, `fetch`, `Bun.*`, or
+  file/network access** in the body. Use `ctx.now()` / `ctx.random()`; do real
+  work via `ctx.agent`.
+- **Workflow code imports only the authoring SDK** (`@kcosr/keel`) and local
+  helper modules. Do not import operator/control APIs such as
+  `@kcosr/keel/execute`.
 - **A `ctx.step` callback must use only its `inputs`** — don't read outer variables
   inside a `step` function; pass them in through `inputs`. (Agent prompts can use
   any variable freely.)
@@ -153,12 +157,15 @@ keel launch ./adversarial-review.workflow.ts '{"root":"/abs/path/to/code"}'
 ```
 
 `keel launch` watches by default. Use `keel launch --detach ...` when you need a
-run id for scripting:
+run id for scripting; detached launch returns JSON with `runId` and
+`capabilityRef`, and follow-up commands need that cap file:
 
 ```bash
-RUN=$(keel launch --detach ./adversarial-review.workflow.ts '{"root":"/abs/path/to/code"}')
-keel watch "$RUN"
-keel get "$RUN"       # final result (JSON)
+LAUNCH=$(keel launch --detach ./adversarial-review.workflow.ts '{"root":"/abs/path/to/code"}')
+RUN=$(printf '%s' "$LAUNCH" | jq -r .runId)
+CAP=$(printf '%s' "$LAUNCH" | jq -r .capabilityRef)
+KEEL_CAP_FILE="$CAP" keel watch "$RUN"
+KEEL_CAP_FILE="$CAP" keel get "$RUN"       # final result (JSON)
 ```
 
 Omit the input argument for `{}`. Pass valid JSON for any other input.
@@ -169,4 +176,8 @@ Omit the input argument for `{}`. Pass valid JSON for any other input.
 - On optional review fan-out agents, set **`toolPolicy: "read-only"`**, **`lenient:
   true`**, and **`onFailure: "null"`** so one flaky branch doesn't sink the run.
   For required agents, omit `onFailure` so failures can be retried.
-- Don't edit the workflow file while a run is still going.
+- A run resumes from its immutable launch-time workflow snapshot. Edit the source
+  file only when you intend a later rerun/adopt-latest path to snapshot new code.
+- Use `keel execute` for short stateless control scripts that launch/resume/wait
+  and shape JSON output. Do not put durable orchestration state in `execute`;
+  durable pauses belong in workflow code.

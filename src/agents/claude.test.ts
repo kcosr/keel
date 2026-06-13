@@ -104,9 +104,9 @@ describe("ClaudeProvider", () => {
     const dir = mkdtempSync(join(tmpdir(), "keel-claude-env-bin-"));
     const previous = process.env.KEEL_CLAUDE_BIN;
     try {
-      const bin = join(dir, "fake-claude-pty-wrapper");
+      const bin = join(dir, "fake-claude");
       const argsPath = join(dir, "args.json");
-      await writeFakeWrapper(bin, argsPath);
+      await writeFakeClaude(bin, argsPath);
       process.env.KEEL_CLAUDE_BIN = bin;
 
       const provider = new ClaudeProvider({ timeoutMs: 5_000 });
@@ -123,12 +123,12 @@ describe("ClaudeProvider", () => {
     }
   });
 
-  test("spawns claude-pty-wrapper in stream-json mode and maps events", async () => {
+  test("spawns claude in stream-json mode and maps events", async () => {
     const dir = mkdtempSync(join(tmpdir(), "keel-claude-provider-"));
     try {
-      const bin = join(dir, "fake-claude-pty-wrapper");
+      const bin = join(dir, "fake-claude");
       const argsPath = join(dir, "args.json");
-      await writeFakeWrapper(bin, argsPath);
+      await writeFakeClaude(bin, argsPath);
 
       const events: unknown[] = [];
       const tokens: string[] = [];
@@ -194,9 +194,9 @@ describe("ClaudeProvider", () => {
   test("resumes with the carried Claude session token", async () => {
     const dir = mkdtempSync(join(tmpdir(), "keel-claude-resume-"));
     try {
-      const bin = join(dir, "fake-claude-pty-wrapper");
+      const bin = join(dir, "fake-claude");
       const argsPath = join(dir, "args.json");
-      await writeFakeWrapper(bin, argsPath);
+      await writeFakeClaude(bin, argsPath);
 
       const tokens: string[] = [];
       const provider = new ClaudeProvider({ bin, timeoutMs: 5_000 });
@@ -227,9 +227,9 @@ describe("ClaudeProvider", () => {
   test("uses resolved invocation capabilities instead of the derived policy label", async () => {
     const dir = mkdtempSync(join(tmpdir(), "keel-claude-resolved-caps-"));
     try {
-      const bin = join(dir, "fake-claude-pty-wrapper");
+      const bin = join(dir, "fake-claude");
       const argsPath = join(dir, "args.json");
-      await writeFakeWrapper(bin, argsPath);
+      await writeFakeClaude(bin, argsPath);
 
       const provider = new ClaudeProvider({ bin, timeoutMs: 5_000 });
       await provider.generate(
@@ -263,13 +263,13 @@ describe("ClaudeProvider", () => {
     }
   });
 
-  test("waits for wrapper cleanup after the terminal result event", async () => {
+  test("waits for Claude process cleanup after the terminal result event", async () => {
     const dir = mkdtempSync(join(tmpdir(), "keel-claude-cleanup-"));
     try {
-      const bin = join(dir, "fake-claude-pty-wrapper");
+      const bin = join(dir, "fake-claude");
       const argsPath = join(dir, "args.json");
       const cleanupPath = join(dir, "cleanup");
-      await writeFakeWrapper(bin, argsPath, cleanupPath);
+      await writeFakeClaude(bin, argsPath, cleanupPath);
 
       const provider = new ClaudeProvider({ bin, timeoutMs: 5_000 });
       const result = await provider.generate(
@@ -289,10 +289,10 @@ describe("ClaudeProvider", () => {
     }
   });
 
-  test("does not hang if a wrapper descendant keeps stderr open after success", async () => {
+  test("does not hang if a Claude descendant keeps stderr open after success", async () => {
     const dir = mkdtempSync(join(tmpdir(), "keel-claude-stderr-open-"));
     try {
-      const bin = join(dir, "fake-claude-pty-wrapper");
+      const bin = join(dir, "fake-claude");
       const argsPath = join(dir, "args.json");
       await Bun.write(
         bin,
@@ -332,7 +332,7 @@ process.exit(0);
   });
 });
 
-async function writeFakeWrapper(
+async function writeFakeClaude(
   bin: string,
   argsPath: string,
   cleanupPath?: string,

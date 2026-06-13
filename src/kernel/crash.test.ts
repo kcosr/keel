@@ -19,7 +19,7 @@ interface SpawnResult {
 }
 
 async function runHarness(env: Record<string, string>): Promise<SpawnResult> {
-  const proc = Bun.spawn(["bun", HARNESS], {
+  const proc = Bun.spawn([process.execPath, HARNESS], {
     cwd: join(import.meta.dir, "..", ".."),
     env: { ...process.env, ...env },
     stdout: "pipe",

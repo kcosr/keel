@@ -130,6 +130,23 @@ describe("JournalStore (in-memory)", () => {
     expect(store.listEvents("r1", 1).map((e) => e.type)).toEqual(["step"]);
   });
 
+  test("workflow definitions round-trip by hash", () => {
+    store.putWorkflowDefinition({
+      hash: "wf_sha256_abc",
+      name: "demo",
+      kind: "path",
+      code: "export default async () => 1;",
+      sourceMap: null,
+      manifestJson: '{"format":"keel.workflow-definition.v1"}',
+      createdAtMs: 1000,
+    });
+
+    const got = store.getWorkflowDefinition("wf_sha256_abc");
+    expect(got?.name).toBe("demo");
+    expect(got?.code).toContain("export default");
+    expect(got?.manifestJson).toContain("keel.workflow-definition.v1");
+  });
+
   test("transaction rolls back fully on throw (zero partial rows)", () => {
     store.insertRun(newRun("r1"));
     expect(() =>

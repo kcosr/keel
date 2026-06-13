@@ -257,7 +257,11 @@ describe("kill -9 daemon recovery", () => {
     };
 
     // 1) start daemon, launch a run, wait until the agent is pending, then SIGKILL.
-    const d1 = Bun.spawn(["bun", TEST_DAEMON], { env, stdout: "pipe", stderr: "pipe" });
+    const d1 = Bun.spawn([process.execPath, TEST_DAEMON], {
+      env,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
     await waitForLine(d1.stdout, "READY");
     const c1 = await DaemonClient.connect(socketPath);
     const { runId } = await c1.launchRun({ workflowUrl: onceUrl, input: null, name: "once" });
@@ -281,7 +285,7 @@ describe("kill -9 daemon recovery", () => {
     await Bun.sleep(800);
 
     // 2) restart a fresh daemon with NO delay → recovery resumes to completion.
-    const d2 = Bun.spawn(["bun", TEST_DAEMON], {
+    const d2 = Bun.spawn([process.execPath, TEST_DAEMON], {
       env: { ...env, KEEL_DELAY: "0" },
       stdout: "pipe",
       stderr: "pipe",

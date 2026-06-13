@@ -1,7 +1,11 @@
 // Regression tests for review findings: helper-closure versioning (#1), resume
-// lints (#2), rerun persists override input + clears stale result (#3).
+// uses immutable snapshots (#2), rerun persists override input + clears stale
+// result (#3).
 
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { JournalStore } from "../../journal/store.ts";
 import { RealmKernel } from "./realm-host.ts";
 
@@ -36,8 +40,8 @@ describe("#1 helper-closure versioning", () => {
   });
 });
 
-describe("#2 resume runs the determinism lint", () => {
-  test("resuming a non-terminal run with a forbidden-import workflow is rejected", async () => {
+describe("#2 resume uses immutable workflow snapshots", () => {
+  test("resuming a non-terminal run ignores a caller-supplied mutable workflow path", async () => {
     const store = JournalStore.memory();
     // start a run and abort it (leave non-terminal) using the clean fixture
     const k1 = fixed(store, {
@@ -48,10 +52,50 @@ describe("#2 resume runs the determinism lint", () => {
     await k1.run(url("helper-v1.workflow.ts"), { n: 1 }, { name: "h" }).catch(() => null);
     expect(store.getRun("run_0")?.status).toBe("running");
 
-    // resume against a workflow with a forbidden import → lint must reject
-    await expect(fixed(store).resume("run_0", url("forbidden-import.workflow.ts"))).rejects.toThrow(
-      /determinism lint/,
-    );
+    // The supplied path is ignored for snapshotted runs; resume uses the stored
+    // immutable definition hash from launch.
+    const resumed = await fixed(store).resume<number>("run_0", url("forbidden-import.workflow.ts"));
+    expect(resumed.status).toBe("finished");
+    expect(resumed.output).toBe(2);
+  });
+
+  test("resume succeeds after the original workflow file is deleted", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-snapshot-"));
+    try {
+      const workflow = join(dir, "snapshot.workflow.ts");
+      const cacheRoot = join(dir, "definitions");
+      writeFileSync(
+        workflow,
+        `
+          export default async function wf(ctx, input) {
+            const Schema = { parse: (v) => v };
+            return ctx.step("compute", Schema, { n: input.n }, ({ n }) => n * 2);
+          }
+        `,
+      );
+
+      const store = JournalStore.memory();
+      const k1 = fixed(store, {
+        definitionCacheRoot: cacheRoot,
+        fault: (p: string, key: string) => {
+          if (p === "after-pending" && key === "compute") throw new Error("CRASH");
+        },
+      });
+      await k1.run(workflow, { n: 7 }, { name: "snapshot" }).catch(() => null);
+      expect(store.getRun("run_0")?.status).toBe("running");
+      expect(store.getRun("run_0")?.definitionVersion.startsWith("wf_sha256_")).toBe(true);
+
+      rmSync(workflow);
+
+      const resumed = await fixed(store, { definitionCacheRoot: cacheRoot }).resume<number>(
+        "run_0",
+        workflow,
+      );
+      expect(resumed.status).toBe("finished");
+      expect(resumed.output).toBe(14);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

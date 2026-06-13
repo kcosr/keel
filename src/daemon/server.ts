@@ -6,6 +6,7 @@
 // compare-and-set ownership fence and resumes them.
 
 import { randomUUID } from "node:crypto";
+import { dirname, join } from "node:path";
 import type { Socket } from "bun";
 import type { AgentProviderRegistry } from "../agents/types.ts";
 import { JournalStore } from "../journal/store.ts";
@@ -31,6 +32,7 @@ export interface DaemonOptions {
   workspaceRoot?: string;
   /** Named agent profiles, resolved into each ctx.agent before versioning. */
   agentProfiles?: Record<string, unknown>;
+  definitionCacheRoot?: string;
   clock?: () => number;
 }
 
@@ -79,6 +81,7 @@ export class KeelDaemon {
       ...(opts.agents ? { agents: opts.agents } : {}),
       ...(opts.workspaceRoot ? { workspaceRoot: opts.workspaceRoot } : {}),
       ...(opts.agentProfiles ? { agentProfiles: opts.agentProfiles } : {}),
+      definitionCacheRoot: opts.definitionCacheRoot ?? join(dirname(opts.dbPath), "definitions"),
       clock: this.clock,
     });
     this.api = new InProcessKeel(this.kernel, this.store);

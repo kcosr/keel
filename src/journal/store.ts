@@ -15,7 +15,9 @@ import type {
   JournalRow,
   NewJournalRow,
   NewRunRow,
+  NewWorkflowDefinitionRow,
   RunRow,
+  WorkflowDefinitionRow,
 } from "./types.ts";
 
 export class JournalStore {
@@ -177,6 +179,12 @@ export class JournalStore {
       .query<RawRunRow, [string]>("SELECT * FROM runs WHERE status = ? ORDER BY created_at_ms ASC")
       .all(status)
       .map(mapRun);
+  }
+
+  updateRunDefinition(runId: string, definitionVersion: string, workflowRef: string | null): void {
+    this.db
+      .query("UPDATE runs SET definition_version = ?, workflow_ref = ? WHERE run_id = ?")
+      .run(definitionVersion, workflowRef, runId);
   }
 
   /**
@@ -351,6 +359,36 @@ export class JournalStore {
       .query<{ data: Uint8Array | null }, [string]>("SELECT data FROM artifacts WHERE hash = ?")
       .get(hash);
     return r?.data ?? null;
+  }
+
+  // ---- workflow definitions ---------------------------------------------
+
+  putWorkflowDefinition(row: NewWorkflowDefinitionRow): void {
+    this.db
+      .query(
+        `INSERT INTO workflow_definitions (
+           hash, name, kind, code, source_map, manifest_json, created_at_ms
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(hash) DO NOTHING`,
+      )
+      .run(
+        row.hash,
+        row.name,
+        row.kind,
+        row.code,
+        row.sourceMap,
+        row.manifestJson,
+        row.createdAtMs,
+      );
+  }
+
+  getWorkflowDefinition(hash: string): WorkflowDefinitionRow | null {
+    const r = this.db
+      .query<RawWorkflowDefinitionRow, [string]>(
+        "SELECT * FROM workflow_definitions WHERE hash = ?",
+      )
+      .get(hash);
+    return r ? mapWorkflowDefinition(r) : null;
   }
 
   // ---- timers (durable ctx.sleep, §16) -----------------------------------
@@ -805,6 +843,16 @@ interface RawArtifactRow {
   data: Uint8Array | null;
 }
 
+interface RawWorkflowDefinitionRow {
+  hash: string;
+  name: string;
+  kind: string;
+  code: string;
+  source_map: string | null;
+  manifest_json: string | null;
+  created_at_ms: number;
+}
+
 function mapRun(r: RawRunRow): RunRow {
   return {
     runId: r.run_id,
@@ -861,5 +909,17 @@ function mapArtifact(r: RawArtifactRow): ArtifactRow {
     refCount: r.ref_count,
     createdAtMs: r.created_at_ms,
     data: r.data,
+  };
+}
+
+function mapWorkflowDefinition(r: RawWorkflowDefinitionRow): WorkflowDefinitionRow {
+  return {
+    hash: r.hash,
+    name: r.name,
+    kind: r.kind,
+    code: r.code,
+    sourceMap: r.source_map,
+    manifestJson: r.manifest_json,
+    createdAtMs: r.created_at_ms,
   };
 }

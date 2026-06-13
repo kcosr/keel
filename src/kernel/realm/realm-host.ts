@@ -13,8 +13,14 @@ import { type SecretStore, redact } from "../../agents/secrets.ts";
 import type { AgentProviderRegistry } from "../../agents/types.ts";
 import { type Json, hashJson } from "../../hash.ts";
 import type { JournalStore } from "../../journal/store.ts";
-import type { RunStatus } from "../../journal/types.ts";
+import type { RunRow, RunStatus } from "../../journal/types.ts";
 import { formatViolations, lintWorkflowSource } from "../../lint/determinism.ts";
+import {
+  defaultDefinitionCacheRoot,
+  isWorkflowDefinitionHash,
+  materializeWorkflowDefinition,
+  snapshotWorkflowPath,
+} from "../../workflow-definitions/snapshot.ts";
 import { createWorktree } from "../../workspace/worktree.ts";
 import type { CtxHost, FaultPoint } from "../ctx.ts";
 import { extractModuleHelpers } from "../module-helpers.ts";
@@ -50,6 +56,8 @@ export interface RealmKernelOptions {
   workspaceRoot?: string;
   /** Named agent profiles resolved before version computation (§10.2). */
   agentProfiles?: Record<string, unknown>;
+  /** Daemon-owned workflow definition materialization cache. */
+  definitionCacheRoot?: string;
 }
 
 const TERMINAL: ReadonlySet<RunStatus> = new Set<RunStatus>([
@@ -83,6 +91,7 @@ export class RealmKernel {
   private readonly onStepExecute?: (key: string) => void;
   private readonly lintEnabled: boolean;
   private readonly registry?: AgentProviderRegistry;
+  private readonly definitionCacheRoot: string;
 
   constructor(store: JournalStore, opts: RealmKernelOptions = {}) {
     this.store = store;
@@ -94,6 +103,7 @@ export class RealmKernel {
     this.idgen = opts.idgen ?? (() => `run_${randomUUID()}`);
     if (opts.onStepExecute) this.onStepExecute = opts.onStepExecute;
     this.lintEnabled = opts.lint ?? true;
+    this.definitionCacheRoot = opts.definitionCacheRoot ?? defaultDefinitionCacheRoot();
     if (opts.agents) this.registry = opts.agents;
     if (opts.secrets) this.secrets = opts.secrets;
     if (opts.workspaceRoot) this.workspaceRoot = opts.workspaceRoot;
@@ -123,13 +133,19 @@ export class RealmKernel {
     input: unknown,
     meta: { name: string },
   ): { runId: string; done: Promise<RunHandle<O>> } {
-    this.runLint(workflowUrl);
+    const at = this.host.clock();
+    const { snapshot, entryPath } = snapshotWorkflowPath(this.store, workflowUrl, {
+      name: meta.name,
+      nowMs: at,
+      lint: this.lintEnabled,
+      cacheRoot: this.definitionCacheRoot,
+    });
     const runId = this.idgen();
     this.store.insertRun({
       runId,
       workflowName: meta.name,
-      definitionVersion: "v0",
-      workflowRef: workflowUrl,
+      definitionVersion: snapshot.hash,
+      workflowRef: snapshot.provenance,
       status: "running",
       parentRunId: null,
       tenantId: null,
@@ -138,10 +154,15 @@ export class RealmKernel {
       errorJson: null,
       heartbeatAtMs: null,
       runtimeOwnerId: null,
-      createdAtMs: this.host.clock(),
+      createdAtMs: at,
     });
-    this.store.appendEvent(runId, "run.started", { name: meta.name }, this.host.clock());
-    return { runId, done: this.execute<O>(runId, workflowUrl, input) };
+    this.store.appendEvent(
+      runId,
+      "run.started",
+      { name: meta.name, definitionHash: snapshot.hash },
+      this.host.clock(),
+    );
+    return { runId, done: this.execute<O>(runId, entryPath, input) };
   }
 
   async run<O>(workflowUrl: string, input: unknown, meta: { name: string }): Promise<RunHandle<O>> {
@@ -168,12 +189,10 @@ export class RealmKernel {
         }),
       };
     }
-    // Until archived definitions exist (Phase 12), workflowUrl is mutable, so the
-    // determinism gate must run on resume too.
-    this.runLint(workflowUrl);
+    const executionPath = this.executionPathForRun(run);
     const input = run.inputRef ? JSON.parse(run.inputRef) : undefined;
     this.store.appendEvent(runId, "run.resumed", {}, this.host.clock());
-    return { runId, done: this.execute<O>(runId, workflowUrl, input) };
+    return { runId, done: this.execute<O>(runId, executionPath, input) };
   }
 
   /**
@@ -196,7 +215,13 @@ export class RealmKernel {
   ): { runId: string; done: Promise<RunHandle<O>> } {
     const run = this.store.getRun(runId);
     if (!run) throw new Error(`run ${runId} not found`);
-    this.runLint(workflowUrl);
+    const at = this.host.clock();
+    const { snapshot, entryPath } = snapshotWorkflowPath(this.store, workflowUrl, {
+      name: run.workflowName,
+      nowMs: at,
+      lint: this.lintEnabled,
+      cacheRoot: this.definitionCacheRoot,
+    });
     const overriding = input !== undefined;
     const effectiveInput = overriding ? input : run.inputRef ? JSON.parse(run.inputRef) : undefined;
     // Reset the run to running and clear the previous terminal result; persist an
@@ -208,8 +233,14 @@ export class RealmKernel {
       errorJson: null,
       ...(overriding ? { inputRef: JSON.stringify(input ?? null) } : {}),
     });
-    this.store.appendEvent(runId, "run.rerun", {}, this.host.clock());
-    return { runId, done: this.execute<O>(runId, workflowUrl, effectiveInput) };
+    this.store.updateRunDefinition(runId, snapshot.hash, snapshot.provenance);
+    this.store.appendEvent(
+      runId,
+      "run.rerun",
+      { definitionHash: snapshot.hash },
+      this.host.clock(),
+    );
+    return { runId, done: this.execute<O>(runId, entryPath, effectiveInput) };
   }
 
   /** Retry a FAILED run from its failed step (§18) — the failed rows are dropped
@@ -225,12 +256,12 @@ export class RealmKernel {
     const run = this.store.getRun(runId);
     if (!run) throw new Error(`run ${runId} not found`);
     if (run.status !== "failed") throw new Error(`retry needs a failed run (is ${run.status})`);
-    this.runLint(workflowUrl);
+    const executionPath = this.executionPathForRun(run);
     this.store.deleteFailedRows(runId);
     this.store.updateRun(runId, { status: "running", errorJson: null, finishedAtMs: null });
     this.store.appendEvent(runId, "run.retry", {}, this.host.clock());
     const input = run.inputRef ? JSON.parse(run.inputRef) : undefined;
-    return { runId, done: this.execute<O>(runId, workflowUrl, input) };
+    return { runId, done: this.execute<O>(runId, executionPath, input) };
   }
 
   /** Rewind a run to a chosen step (§18): discard everything journaled after it,
@@ -249,7 +280,7 @@ export class RealmKernel {
     if (!this.store.getLatestAttempt(runId, toStableKey)) {
       throw new Error(`cannot rewind to unknown step "${toStableKey}"`);
     }
-    this.runLint(workflowUrl);
+    const executionPath = this.executionPathForRun(run);
     // Trim journal + decrement refcounts + clear unresolved waits as one snapshot.
     this.store.deleteRunStateAfter(runId, toStableKey);
     this.store.updateRun(runId, {
@@ -260,7 +291,7 @@ export class RealmKernel {
     });
     this.store.appendEvent(runId, "run.rewind", { to: toStableKey }, this.host.clock());
     const input = run.inputRef ? JSON.parse(run.inputRef) : undefined;
-    return { runId, done: this.execute<O>(runId, workflowUrl, input) };
+    return { runId, done: this.execute<O>(runId, executionPath, input) };
   }
 
   /** Fork a TERMINAL run into a new independent run sharing the journal prefix
@@ -280,6 +311,19 @@ export class RealmKernel {
     this.store.forkRun(runId, newId, opts.atStableKey ?? null, this.host.clock());
     this.store.appendEvent(newId, "run.forked", { from: runId }, this.host.clock());
     return newId;
+  }
+
+  private executionPathForRun(run: RunRow): string {
+    if (isWorkflowDefinitionHash(run.definitionVersion)) {
+      return materializeWorkflowDefinition(
+        this.store,
+        run.definitionVersion,
+        this.definitionCacheRoot,
+      );
+    }
+    throw new Error(
+      `run ${run.runId} cannot be resumed because it has no immutable workflow definition snapshot (${run.definitionVersion})`,
+    );
   }
 
   private execute<O>(runId: string, workflowUrl: string, input: unknown): Promise<RunHandle<O>> {
@@ -701,7 +745,10 @@ export class RealmKernel {
               // §19: end this run (status 'continued') and chain a fresh run of
               // the same workflow with the new input — bounded journal growth.
               const run = this.store.getRun(runId);
-              const name = run?.workflowName ?? "workflow";
+              if (!run) throw new Error(`run ${runId} not found during continueAsNew`);
+              const name = run.workflowName;
+              const definitionVersion = run.definitionVersion;
+              const workflowRef = run.workflowRef;
               const nextId = this.idgen();
               const at = this.host.clock();
               // ATOMIC handoff: create the successor AND mark this run 'continued'
@@ -712,8 +759,8 @@ export class RealmKernel {
                 this.store.insertRun({
                   runId: nextId,
                   workflowName: name,
-                  definitionVersion: "v0",
-                  workflowRef: workflowUrl,
+                  definitionVersion,
+                  workflowRef,
                   status: "running",
                   parentRunId: runId, // lineage
                   tenantId: null,

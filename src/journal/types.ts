@@ -109,3 +109,15 @@ export interface ArtifactRow {
   createdAtMs: number;
   data: Uint8Array | null;
 }
+
+export interface WorkflowDefinitionRow {
+  hash: string;
+  name: string;
+  kind: string;
+  code: string;
+  sourceMap: string | null;
+  manifestJson: string | null;
+  createdAtMs: number;
+}
+
+export type NewWorkflowDefinitionRow = WorkflowDefinitionRow;

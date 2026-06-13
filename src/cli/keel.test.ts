@@ -19,7 +19,7 @@ async function runCli(
   cwd: string,
   env?: Record<string, string>,
 ): Promise<{ code: number; stdout: string; stderr: string }> {
-  const proc = Bun.spawn(["bun", CLI, ...args], {
+  const proc = Bun.spawn([process.execPath, CLI, ...args], {
     cwd,
     env: { ...process.env, ...env },
     stdout: "pipe",

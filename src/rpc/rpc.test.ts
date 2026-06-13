@@ -78,11 +78,13 @@ describe("projection is golden-locked", () => {
     await api.launchRun({ workflowUrl: chainUrl, input: { n: 3 }, name: "chain" });
     await api.waitForRun("run_0");
     const p = api.getRun("run_0");
+    const definitionVersion = p?.definitionVersion ?? "";
+    expect(definitionVersion.startsWith("wf_sha256_")).toBe(true);
     expect(p).toEqual({
       runId: "run_0",
       workflowName: "chain",
       status: "finished",
-      definitionVersion: "v0",
+      definitionVersion,
       parentRunId: null,
       phase: null,
       error: null,

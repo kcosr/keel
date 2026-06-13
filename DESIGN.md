@@ -70,8 +70,8 @@ daemon-enforced bearer capabilities; stateless `keel execute`; and ops
   opt-in.
 - **Workflow definitions are immutable snapshots.** `runs.definition_version`
   is the content-addressed definition hash; `runs.workflow_ref` is provenance.
-  Resume/retry/rewind/fork use the stored definition, while rerun/adopt-latest
-  snapshots the current source intentionally.
+  Resume/retry/rewind/fork use the stored definition, while rerun with a source
+  override snapshots new source intentionally.
 - **Two surfaces are programmatic-only on the bundled daemon:** secret injection
   (`SecretStore`) and agent profiles (`agentProfiles`) require constructing the
   daemon/kernel in code; the CLI wires capability credentials
@@ -258,7 +258,7 @@ destroy the tracking wrapper exactly where workflows do real work. v2 drops it
 entirely. **Correctness comes from value hashing plus the resume re-run
 itself:**
 
-- On resume (or `--adopt-latest`), the body re-runs; plain code recomputes from
+- On resume (or source override), the body re-runs; plain code recomputes from
   replayed results. When execution reaches a step, the kernel recomputes its
   `inputHash` from the *current* input values (§5.3) and compares it to the
   journal: match → replay; mismatch → re-execute as a new attempt. **The body
@@ -424,19 +424,17 @@ stale one cannot both drive one run.
 
 A run pins the **archived definition** it started with; a run paused for days
 resumes against it even if the source changed — a paused approval can never
-resume into code the human didn't approve. Saving changed source creates a new
-`definitionVersion` for new runs.
+resume into code the human didn't approve. Re-running against changed source is
+an explicit `rerun` source override, which snapshots the supplied source as a
+new `definitionVersion` and lets structural versioning (§5.2) compute which
+steps are invalidated.
 
-The "edit a prompt mid-pipeline, resume re-runs one step" flow is **explicit
-opt-in**: `keel resume --adopt-latest` re-versions the run against current
-source; structural versioning (§5.2) computes exactly which steps' `version`
-changed, and invalidation cascades from there. Default `resume` stays pinned.
-
-**Definitions register at launch.** `launchRun` accepts the workflow source
-inline; the daemon archives it content-addressed as the run's pinned
-`definitionVersion` — there is no separate deploy step. Load-bearing for L22:
-the common author is an agent submitting a just-written workflow in one call,
-exactly the Claude Workflow tool's submit-script-and-run shape.
+**Definitions register at launch.** `launchRun` accepts client-captured workflow
+source; the daemon archives those bytes content-addressed as the run's pinned
+`definitionVersion` — there is no separate deploy step. The daemon never opens a
+client workflow path. Load-bearing for L22: the common author is an agent
+submitting a just-written workflow in one call, exactly the Claude Workflow
+tool's submit-script-and-run shape.
 
 ## 8. Persistence
 
@@ -483,16 +481,19 @@ Launch stores an immutable workflow definition snapshot in
 provenance. The daemon materializes definitions from the DB into a cache for Bun
 import; the cache is not the source of truth.
 
-Relative authored imports under the workflow root are captured into the
-definition. Absolute imports, dynamic imports, imports that escape the workflow
-root, and capability/nondeterministic imports are rejected by the snapshot/lint
-boundary. Resume/retry/rewind/fork use the stored definition. Rerun/adopt-latest
+Client-captured workflow v1 is intentionally single-file. The only external
+import allowed in workflow source is the exact SDK specifier `@kcosr/keel`,
+linked from the daemon's installed package during materialization. Relative
+imports, SDK subpaths, arbitrary packages, dynamic imports, and
+capability/nondeterministic imports are rejected by the snapshot/lint boundary.
+Resume/retry/rewind/fork use the stored definition. Rerun with a source override
 creates a new snapshot intentionally.
 
-External package imports are recorded with package-tree integrity metadata. Keel
-does not vendor external packages into the journal in v1; instead,
-materialization validates the current package tree against the snapshot and
-fails closed if it drifted.
+The materialized `definitions/<hash>/` tree is a rebuildable cache, not durable
+state. It is written through a temp directory and atomic rename so a concurrent
+resume never imports a half-written tree. Definition-row GC prunes only old rows
+unreferenced by any run and by any enabled schedule; cache eviction skips hashes
+used by running or parked runs.
 
 ### 8.5 Run capabilities
 
@@ -586,7 +587,7 @@ interface AgentSpec<T> {
   workspaceIsolation?: boolean;     // explicit worktree + diff capture opt-in
   capabilities?: Capabilities;      // §11.1; used when toolPolicy is omitted
   // note: no memo mode — agents are always memoized (L18); re-think is
-  // expressed via retry(stableKey), resume --adopt-latest, or iteration loops
+  // expressed via retry(stableKey), rerun with a source override, or iteration loops
   // provider-specific session opts (e.g. Pi sessionDir) live in the adapter config
 }
 ```
@@ -617,7 +618,7 @@ agent or an input, not a pure step.
 > sharper mechanism: data interpolated into the prompt re-triggers via
 > `inputHash` automatically; world-drift the prompt can't see (an agent reading
 > files via tools) is an operator judgment expressed once via
-> `retry(stableKey)` or `resume --adopt-latest`; genuine re-polling is a loop
+> `retry(stableKey)` or `rerun with a source override`; genuine re-polling is a loop
 > with iteration-distinct `stepKey`s. A standing re-think mode would fire on
 > every crash-recovery resume — exactly when it must not — and cascade-
 > invalidate the step's downstream cone through the value hashes.
@@ -683,7 +684,7 @@ export default async function review(ctx, { root }) {
 
 Crash at verifier 90 and resume: the body re-runs, 20 finders + 89 verifiers
 replay from the journal in milliseconds, execution continues at verifier 90.
-Edit `synthPrompt` and `resume --adopt-latest`: only `synthesize`'s `version`
+Edit `synthPrompt` and `rerun with a source override`: only `synthesize`'s `version`
 changes; 110 agents replay, one re-runs.
 
 ### 9.3 Schemas
@@ -953,7 +954,7 @@ daemon's single write path, in Phase 18:
 |---|---|
 | Kernel & journal | durable-function execution model · effect taxonomy · step identity + structural versioning · content-addressed invalidation + keySetHash drift · write-ahead crash protocol · journal store (SQLite-WAL, PG-compatible) · two-tier artifact store |
 | Realm | three-layer determinism enforcement · error-first DX / Realm Reference |
-| Authoring | the `ctx` API · Zod + JSON-Schema + structural hashing · definition pinning + `--adopt-latest` |
+| Authoring | the `ctx` API · Zod + JSON-Schema + structural hashing · definition pinning + a source override |
 | Daemon & clients | single-writer daemon · embedded mode · frozen RPC contract (Phase 11) · thin CLI · crash recovery + CAS fence · daemon-owned agent subprocesses |
 | Adapters | `AgentLike` contract · **Pi adapter** · structured-output enforcement · session capture & mid-call resume · stream/transcript capture |
 | Capability | declaration enum (in `version` + input hash) AND enforcement — fail-closed write-isolation, diff gate, secret redaction (Phase 15). OS-sandbox backstop still deferred. |
@@ -1104,7 +1105,7 @@ Phase 17.
 
 - **L18 Agents are always memoized** *(D4 resolved 2026-06-11)*: no
   `memo:'never'` mode. Re-thinking is expressed via `retry(stableKey)`,
-  `resume --adopt-latest`, or iteration-keyed loops — never as a standing
+  `rerun with a source override`, or iteration-keyed loops — never as a standing
   replay-policy override (§9.1).
 
 - **L19 Pi and Claude are provider adapters** *(D5 resolved 2026-06-11, later

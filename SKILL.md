@@ -29,9 +29,9 @@ The body runs in a sandbox. Stay inside it or the run is rejected:
 - **No `Date.now()`, `new Date()`, `Math.random()`, `fetch`, `Bun.*`, or
   file/network access** in the body. Use `ctx.now()` / `ctx.random()`; do real
   work via `ctx.agent`.
-- **Workflow code imports only the authoring SDK** (`@kcosr/keel`) and local
-  helper modules. Do not import operator/control APIs such as
-  `@kcosr/keel/execute`.
+- **Workflow code is single-file in v1** and imports only the exact authoring SDK
+  specifier `@kcosr/keel`. Do not import local helper modules, other packages,
+  SDK subpaths, or operator/control APIs such as `@kcosr/keel/execute`.
 - **A `ctx.step` callback must use only its `inputs`** — don't read outer variables
   inside a `step` function; pass them in through `inputs`. (Agent prompts can use
   any variable freely.)
@@ -193,18 +193,19 @@ Use individual CLI verbs for quick one-shot commands or when you need to inspect
 the result and decide the next action manually:
 
 ```bash
-keel launch ./adversarial-review.workflow.ts '{"root":"/abs/path/to/code"}'
+keel launch ./adversarial-review.workflow.ts --input '{"root":"/abs/path/to/code"}'
 ```
 
 `keel launch` watches by default. Detached launch returns JSON with `runId` and
 `capabilityRef`; follow-up commands need that cap file:
 
 ```bash
-LAUNCH=$(keel launch --detach ./adversarial-review.workflow.ts '{"root":"/abs/path/to/code"}')
+LAUNCH=$(keel launch --detach ./adversarial-review.workflow.ts --input '{"root":"/abs/path/to/code"}')
 RUN=$(printf '%s' "$LAUNCH" | jq -r .runId)
 CAP=$(printf '%s' "$LAUNCH" | jq -r .capabilityRef)
 KEEL_CAP_FILE="$CAP" keel watch "$RUN"
-KEEL_CAP_FILE="$CAP" keel get "$RUN"       # final result (JSON)
+KEEL_CAP_FILE="$CAP" keel get "$RUN"       # run projection (JSON)
+KEEL_CAP_FILE="$CAP" keel output "$RUN"    # terminal output (JSON)
 ```
 
 Other useful verbs:
@@ -216,7 +217,7 @@ KEEL_CAP_FILE="$CAP" keel rewind "$RUN" <stepKey>
 KEEL_CAP_FILE="$CAP" keel fork "$RUN" [atStepKey]
 ```
 
-Omit the input argument for `{}`. Pass valid JSON for any other input.
+Omit `--input` for `{}`. Pass valid JSON through `--input` for any other input.
 
 ## 9. Tips
 
@@ -225,6 +226,7 @@ Omit the input argument for `{}`. Pass valid JSON for any other input.
   true`**, and **`onFailure: "null"`** so one flaky branch doesn't sink the run.
   For required agents, omit `onFailure` so failures can be retried.
 - A run resumes from its immutable launch-time workflow snapshot. Edit the source
-  file only when you intend a later rerun/adopt-latest path to snapshot new code.
+  file only when you intend a later rerun with a source override to snapshot new
+  code.
 - Use individual CLI verbs when judgment is needed between steps; use `execute`
   when the next step is mechanical.

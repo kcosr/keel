@@ -448,6 +448,41 @@ describe("keel CLI", () => {
   );
 
   test(
+    "run closes the client and exits when the daemon rejects the launch",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "keel-run-reject-"));
+      const socketPath = join(dir, "keel.sock");
+      const dbPath = join(dir, "keel.db");
+      const daemon = new KeelDaemon({
+        socketPath,
+        dbPath,
+        agents: new AgentProviderRegistry().register(new MockProvider()),
+      });
+      await daemon.start();
+      try {
+        const env = { KEEL_SOCKET: socketPath, KEEL_DB: dbPath, KEEL_DIR: dir };
+        // A forbidden import makes the daemon reject launchRun mid-command. The CLI
+        // must close the socket and exit rather than hang on the dangling handle —
+        // the bounded timeout trips `timedOut` if the leak regresses.
+        const rejected = await runCli(
+          ["run", "--output", "json"],
+          dir,
+          env,
+          'import fs from "node:fs";\nexport default async () => fs;\n',
+          5_000,
+        );
+        expect(rejected.timedOut).toBe(false);
+        expect(rejected.code).toBe(1);
+        expect(rejected.stderr).toContain("no-forbidden-import");
+      } finally {
+        daemon.stop();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    DAEMON_TEST_TIMEOUT_MS,
+  );
+
+  test(
     "report prints a per-node result digest",
     async () => {
       const dir = mkdtempSync(join(tmpdir(), "keel-report-"));

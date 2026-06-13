@@ -54,8 +54,10 @@
   standalone binary and triggered a recursive scan from `/` (surfacing as
   `EACCES … /etc/.pwd.lock`). The root is resolved lazily and the daemon asserts
   it at startup, failing fast with an actionable message if it cannot be found.
-- CLI commands that fail authorization while using a daemon client now close the
-  socket before exiting instead of printing the error and hanging.
+- CLI commands no longer hang after a daemon-side error. Every daemon client
+  opened during a command is closed by the dispatcher, so a rejected RPC (auth,
+  lint, not-found, precondition) prints the error and exits instead of leaking the
+  socket and stalling on the open handle.
 - CLI exit handling no longer uses `process.exit(code)` after writes, avoiding
   truncated piped JSON output.
 - `run.finished` events include small terminal outputs and omit large outputs

@@ -42,23 +42,24 @@ const CAP_DIR = process.env.KEEL_CAP_DIR ?? join(KEEL_DIR, "caps");
 export const OUTPUT_FORMATS = ["json", "text", "ndjson"] as const;
 export type OutputFormat = (typeof OUTPUT_FORMATS)[number];
 
+// Every client opened during a command is tracked here and closed by `main`'s
+// dispatch `finally`. A leaked socket keeps the event loop alive and hangs the
+// CLI, so cleanup must be a structural guarantee — not per-command discipline
+// that the throw path skips. Commands therefore never close their own client.
+const trackedClients = new Set<DaemonClient>();
+
 /** Connect a client, authenticating with the caller's presented capability. */
 async function openClient(credential = loadCredential()): Promise<DaemonClient> {
   const c = await DaemonClient.connect(SOCKET);
+  // Track before authenticate so a failed authentication is still cleaned up.
+  trackedClients.add(c);
   if (credential) await c.authenticate(credential);
   return c;
 }
 
-async function withClient<T>(
-  fn: (client: DaemonClient) => Promise<T>,
-  credential = loadCredential(),
-): Promise<T> {
-  const client = await openClient(credential);
-  try {
-    return await fn(client);
-  } finally {
-    client.close();
-  }
+function closeTrackedClients(): void {
+  for (const c of trackedClients) c.close();
+  trackedClients.clear();
 }
 
 /** [name, args, summary] — single source for help + dispatch. */
@@ -120,6 +121,14 @@ function cmdHelp(name: string): string {
 }
 
 async function main(argv: string[]): Promise<number> {
+  try {
+    return await dispatch(argv);
+  } finally {
+    closeTrackedClients();
+  }
+}
+
+async function dispatch(argv: string[]): Promise<number> {
   const [cmd, ...rest] = argv;
   // help: `keel`, `keel help [cmd]`, `keel --help`, `keel <cmd> --help`
   if (!cmd || cmd === "help" || cmd === "--help" || cmd === "-h") {
@@ -210,7 +219,6 @@ async function main(argv: string[]): Promise<number> {
         process.stdout.write(
           output === "json" ? `${JSON.stringify(payload)}\n` : formatLaunchText(payload),
         );
-        client.close();
         return 0;
       }
       if (output === "text") {
@@ -232,7 +240,6 @@ async function main(argv: string[]): Promise<number> {
         );
       }
       const terminal = await watchRun(client, runId, { output });
-      client.close();
       return statusExitCode(terminal);
     }
     case "run": {
@@ -254,14 +261,12 @@ async function main(argv: string[]): Promise<number> {
         const outcome = await client.waitForRun(launched.runId);
         const blockage = isParked(outcome.status) ? await client.getBlockage(launched.runId) : null;
         process.stdout.write(`${JSON.stringify(runEnvelope(outcome, capabilityRef, blockage))}\n`);
-        client.close();
         return statusExitCode(outcome.status);
       }
       if (output === "text") {
         process.stdout.write(`run ${launched.runId}\n`);
       }
       const terminal = await watchRun(client, launched.runId, { output });
-      client.close();
       return statusExitCode(terminal);
     }
     case "watch": {
@@ -273,50 +278,46 @@ async function main(argv: string[]): Promise<number> {
       if (!runId) return usage("watch needs a runId");
       const client = await openClient();
       const terminal = await watchRun(client, runId, { output: parsed.output ?? "ndjson" });
-      client.close();
       return statusExitCode(terminal);
     }
     case "get": {
       const [runId] = rest;
       if (!runId) return usage("get needs a runId");
-      return withClient(async (client) => {
-        process.stdout.write(`${JSON.stringify(await client.getRun(runId), null, 2)}\n`);
-        return 0;
-      });
+      const client = await openClient();
+      process.stdout.write(`${JSON.stringify(await client.getRun(runId), null, 2)}\n`);
+      return 0;
     }
     case "output": {
       const parsed = parseRunIdOutputArgs(rest, "output", "json", ["json", "text"]);
       const { runId } = parsed;
       if (!runId) return usage("output needs a runId");
-      return withClient(async (client) => {
-        const out = await client.getRunOutput(runId);
-        if (out.status !== "finished") {
-          process.stderr.write(`run ${runId} is ${out.status}; no terminal output available\n`);
-          return out.status === "failed" ? 1 : 3;
-        }
-        process.stdout.write(
-          parsed.output === "json"
-            ? `${JSON.stringify(out.output ?? null)}\n`
-            : formatHumanOutput(out.output),
-        );
-        return 0;
-      });
+      const client = await openClient();
+      const out = await client.getRunOutput(runId);
+      if (out.status !== "finished") {
+        process.stderr.write(`run ${runId} is ${out.status}; no terminal output available\n`);
+        return out.status === "failed" ? 1 : 3;
+      }
+      process.stdout.write(
+        parsed.output === "json"
+          ? `${JSON.stringify(out.output ?? null)}\n`
+          : formatHumanOutput(out.output),
+      );
+      return 0;
     }
     case "report": {
       const parsed = parseRunIdOutputArgs(rest, "report", "json", ["json", "text"]);
       const { runId } = parsed;
       if (!runId) return usage("report needs a runId");
-      return withClient(async (client) => {
-        const report = await client.getRunReport(runId);
-        if (!report) {
-          process.stderr.write(`run ${runId} not found\n`);
-          return 1;
-        }
-        process.stdout.write(
-          parsed.output === "json" ? `${JSON.stringify(report)}\n` : formatRunReportText(report),
-        );
-        return statusExitCode(report.status);
-      });
+      const client = await openClient();
+      const report = await client.getRunReport(runId);
+      if (!report) {
+        process.stderr.write(`run ${runId} not found\n`);
+        return 1;
+      }
+      process.stdout.write(
+        parsed.output === "json" ? `${JSON.stringify(report)}\n` : formatRunReportText(report),
+      );
+      return statusExitCode(report.status);
     }
     case "resume": {
       const parsed = parseLifecycleArgs(rest);
@@ -327,22 +328,19 @@ async function main(argv: string[]): Promise<number> {
       if (!parsed.detach) process.stdout.write(formatRunHeader(out.runId));
       const terminal = parsed.detach ? null : await watchRun(client, out.runId, { output: "text" });
       if (parsed.detach) process.stdout.write(`${out.runId}\t${out.status}\n`);
-      client.close();
       return parsed.detach ? 0 : statusExitCode(terminal ?? out.status);
     }
     case "list": {
-      return withClient(async (client) => {
-        for (const r of await client.listRuns()) {
-          process.stdout.write(`${r.runId}\t${r.status}\t${displayName(r.workflowName)}\n`);
-        }
-        return 0;
-      });
+      const client = await openClient();
+      for (const r of await client.listRuns()) {
+        process.stdout.write(`${r.runId}\t${r.status}\t${displayName(r.workflowName)}\n`);
+      }
+      return 0;
     }
     case "gc": {
       const client = await openClient();
       const out = await client.gcDefinitions();
       process.stdout.write(`${JSON.stringify(out)}\n`);
-      client.close();
       return 0;
     }
     case "approve":
@@ -355,7 +353,6 @@ async function main(argv: string[]): Promise<number> {
         ...(note ? { note } : {}),
       });
       process.stdout.write(`${out.status}\n`);
-      client.close();
       return 0;
     }
     case "signal": {
@@ -368,7 +365,6 @@ async function main(argv: string[]): Promise<number> {
         payloadJson ? JSON.parse(payloadJson) : null,
       );
       process.stdout.write(`${out.status}\n`);
-      client.close();
       return 0;
     }
     case "retry": {
@@ -380,7 +376,6 @@ async function main(argv: string[]): Promise<number> {
       if (!parsed.detach) process.stdout.write(formatRunHeader(out.runId));
       const terminal = parsed.detach ? null : await watchRun(client, out.runId, { output: "text" });
       if (parsed.detach) process.stdout.write(`${out.runId}\t${out.status}\n`);
-      client.close();
       return parsed.detach ? 0 : statusExitCode(terminal ?? out.status);
     }
     case "rewind": {
@@ -392,7 +387,6 @@ async function main(argv: string[]): Promise<number> {
       if (!parsed.detach) process.stdout.write(formatRunHeader(out.runId));
       const terminal = parsed.detach ? null : await watchRun(client, out.runId, { output: "text" });
       if (parsed.detach) process.stdout.write(`${out.runId}\t${out.status}\n`);
-      client.close();
       return parsed.detach ? 0 : statusExitCode(terminal ?? out.status);
     }
     case "fork": {
@@ -402,7 +396,6 @@ async function main(argv: string[]): Promise<number> {
       const out = await client.forkRun(runId, atStableKey ? { atStableKey } : {});
       const capabilityRef = out.capability ? writeCapabilityFile(out.runId, out.capability) : null;
       process.stdout.write(`${JSON.stringify({ runId: out.runId, capabilityRef })}\n`);
-      client.close();
       return 0;
     }
     case "execute": {
@@ -435,8 +428,6 @@ async function main(argv: string[]): Promise<number> {
       } catch (err) {
         process.stderr.write(`${JSON.stringify({ error: structuredError(err) })}\n`);
         return 1;
-      } finally {
-        client?.close();
       }
     }
     default:

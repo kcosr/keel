@@ -24,6 +24,7 @@ import {
 import { createWorktree } from "../../workspace/worktree.ts";
 import type { CtxHost, FaultPoint } from "../ctx.ts";
 import { extractModuleHelpers } from "../module-helpers.ts";
+import { RUN_FINISHED_INLINE_OUTPUT_BYTES } from "../output.ts";
 import { StepEngine } from "../step-engine.ts";
 import {
   CONTROL_WORDS,
@@ -68,7 +69,6 @@ const TERMINAL: ReadonlySet<RunStatus> = new Set<RunStatus>([
 ]);
 
 const WORKER_URL = new URL("./worker-entry.ts", import.meta.url);
-const RUN_FINISHED_INLINE_OUTPUT_BYTES = 8 * 1024;
 
 function canWriteOrRunShell(caps: Capabilities): boolean {
   return caps.fs === "workspace-write" || caps.shell;

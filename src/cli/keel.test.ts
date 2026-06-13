@@ -20,6 +20,7 @@ import {
   parseLaunchArgs,
   parseLaunchInput,
   parseLifecycleArgs,
+  parseOutputFormat,
   parseRunArgs,
   parseWatchArgs,
   resolveWorkflowPath,
@@ -30,6 +31,7 @@ const CLI = new URL("./keel.ts", import.meta.url).pathname;
 const FIX = new URL("../kernel/realm/fixtures/", import.meta.url);
 const chainUrl = new URL("chain.workflow.ts", FIX).pathname;
 const gateUrl = new URL("gate.workflow.ts", FIX).pathname;
+const DAEMON_TEST_TIMEOUT_MS = 20_000;
 
 async function runCli(
   args: string[],
@@ -37,9 +39,12 @@ async function runCli(
   env?: Record<string, string>,
   stdin?: string,
 ): Promise<{ code: number; stdout: string; stderr: string }> {
+  const baseEnv = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => !key.startsWith("KEEL_")),
+  ) as Record<string, string>;
   const proc = Bun.spawn([process.execPath, CLI, ...args], {
     cwd,
-    env: { ...process.env, ...env },
+    env: { ...baseEnv, ...env },
     stdin: stdin === undefined ? "ignore" : new Blob([stdin]),
     stdout: "pipe",
     stderr: "pipe",
@@ -115,14 +120,14 @@ describe("keel CLI", () => {
     ).toBe("[234] agent run-date text: RESULT 50\\n\n");
   });
 
-  test("watch formatter supports raw JSON lines", () => {
+  test("watch formatter supports NDJSON event lines", () => {
     const event = {
       seq: 235,
       type: "agent.event",
       payload: { key: "run-date", event: { type: "tool_call", data: { command: "date" } } },
       atMs: 456,
     };
-    expect(formatWatchEvent(event, { json: true })).toBe(`${JSON.stringify(event)}\n`);
+    expect(formatWatchEvent(event, { output: "ndjson" })).toBe(`${JSON.stringify(event)}\n`);
   });
 
   test("watch formatter keeps unexpected agent event payloads visible", () => {
@@ -144,7 +149,7 @@ describe("keel CLI", () => {
       atMs: 891,
     };
     expect(formatWatchEvent(event)).toContain("«redacted-capability»");
-    expect(formatWatchEvent(event, { json: true })).not.toContain("kc_run_secretValue");
+    expect(formatWatchEvent(event, { output: "ndjson" })).not.toContain("kc_run_secretValue");
   });
 
   test("watch formatter tolerates missing agent event payloads", () => {
@@ -158,9 +163,14 @@ describe("keel CLI", () => {
     ).toBe("[237] agent: undefined\n");
   });
 
-  test("watch args parse raw JSON mode before the run id", () => {
-    expect(parseWatchArgs(["run_123"])).toEqual({ runId: "run_123", json: false });
-    expect(parseWatchArgs(["--json", "run_123"])).toEqual({ runId: "run_123", json: true });
+  test("watch args default to ndjson and parse --output", () => {
+    expect(parseWatchArgs(["run_123"])).toEqual({ runId: "run_123", output: "ndjson" });
+    expect(parseWatchArgs(["run_123", "--output", "text"])).toEqual({
+      runId: "run_123",
+      output: "text",
+    });
+    expect(parseOutputFormat("json")).toBe("json");
+    expect(() => parseOutputFormat("events")).toThrow("expected json, text, or ndjson");
   });
 
   test("lifecycle args default to attached mode and support --detach", () => {
@@ -192,6 +202,13 @@ describe("keel CLI", () => {
       name: "review",
       input: { n: 1 },
     });
+    expect(parseLaunchArgs(["--detach", "--output", "text", "wf.ts"])).toEqual({
+      detach: true,
+      emitCapability: false,
+      output: "text",
+      file: "wf.ts",
+      input: {},
+    });
     expect(parseLaunchArgs(["--detach", "wf.ts"])).toEqual({
       detach: true,
       emitCapability: false,
@@ -202,11 +219,12 @@ describe("keel CLI", () => {
     expect(() => parseLaunchArgs(['{"n":1}'])).toThrow("workflow input must use --input");
   });
 
-  test("run args parse json mode with optional source path", () => {
-    expect(parseRunArgs(["--json", "--input", "null"])).toEqual({
-      json: true,
+  test("run args parse output mode with optional source path", () => {
+    expect(parseRunArgs(["--output", "ndjson", "--input", "null"])).toEqual({
+      output: "ndjson",
       input: null,
     });
+    expect(() => parseRunArgs(["--json"])).toThrow("unknown flag --json");
     expect(() => parseRunArgs(['{"n":1}'])).toThrow("workflow input must use --input");
   });
 
@@ -230,9 +248,15 @@ describe("keel CLI", () => {
       entry: "resume",
       stateFile: "state.json",
       capFile: "run.cap",
+      output: "json",
       emitCapability: true,
       args: ["a", "b"],
     });
+    expect(parseExecuteArgs(["--output", "json", "control.ts"])).toMatchObject({
+      file: "control.ts",
+      output: "json",
+    });
+    expect(parseExecuteArgs(["--output", "text", "control.ts"]).output).toBe("text");
   });
 
   test("attached lifecycle commands print the run id before streaming events", () => {
@@ -273,278 +297,454 @@ describe("keel CLI", () => {
     }
   });
 
-  test("detached launch writes a capability file that authorizes follow-up get", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "keel-launch-cap-"));
-    const socketPath = join(dir, "keel.sock");
-    const dbPath = join(dir, "keel.db");
-    const capDir = join(dir, "caps");
-    const daemon = new KeelDaemon({
-      socketPath,
-      dbPath,
-      agents: new AgentProviderRegistry().register(new MockProvider()),
-    });
-    await daemon.start();
-    try {
-      const env = {
-        KEEL_SOCKET: socketPath,
-        KEEL_DB: dbPath,
-        KEEL_DIR: dir,
-        KEEL_CAP_DIR: capDir,
-      };
-      const launched = await runCli(
-        ["launch", "--detach", chainUrl, "--input", '{"n":1}'],
-        dir,
-        env,
-      );
-      expect(launched.code).toBe(0);
-      expect(launched.stdout).not.toContain("kc_run_");
-      const payload = JSON.parse(launched.stdout) as { runId: string; capabilityRef: string };
-      expect(payload.capabilityRef).toBe(join(capDir, `${payload.runId}.cap`));
-      const capFile = JSON.parse(readFileSync(payload.capabilityRef, "utf8")) as {
-        capability: string;
-      };
-      expect(capFile.capability.startsWith("kc_run_")).toBe(true);
-
-      const got = await runCli(["get", payload.runId], dir, {
-        ...env,
-        KEEL_CAP_FILE: payload.capabilityRef,
+  test(
+    "detached launch writes a capability file that authorizes follow-up get",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "keel-launch-cap-"));
+      const socketPath = join(dir, "keel.sock");
+      const dbPath = join(dir, "keel.db");
+      const capDir = join(dir, "caps");
+      const daemon = new KeelDaemon({
+        socketPath,
+        dbPath,
+        agents: new AgentProviderRegistry().register(new MockProvider()),
       });
-      expect(got.code).toBe(0);
-      expect(JSON.parse(got.stdout).runId).toBe(payload.runId);
-      await waitForCliStatus(payload.runId, dir, { ...env, KEEL_CAP_FILE: payload.capabilityRef });
-      const output = await runCli(["output", payload.runId], dir, {
-        ...env,
-        KEEL_CAP_FILE: payload.capabilityRef,
+      await daemon.start();
+      try {
+        const env = {
+          KEEL_SOCKET: socketPath,
+          KEEL_DB: dbPath,
+          KEEL_DIR: dir,
+          KEEL_CAP_DIR: capDir,
+        };
+        const launched = await runCli(
+          ["launch", "--detach", chainUrl, "--input", '{"n":1}'],
+          dir,
+          env,
+        );
+        expect(launched.code).toBe(0);
+        expect(launched.stdout).not.toContain("kc_run_");
+        const payload = JSON.parse(launched.stdout) as { runId: string; capabilityRef: string };
+        expect(payload.capabilityRef).toBe(join(capDir, `${payload.runId}.cap`));
+        const capFile = JSON.parse(readFileSync(payload.capabilityRef, "utf8")) as {
+          capability: string;
+        };
+        expect(capFile.capability.startsWith("kc_run_")).toBe(true);
+
+        const got = await runCli(["get", payload.runId], dir, {
+          ...env,
+          KEEL_CAP_FILE: payload.capabilityRef,
+        });
+        expect(got.code).toBe(0);
+        expect(JSON.parse(got.stdout).runId).toBe(payload.runId);
+        const unauthorizedWatch = await runCli(["watch", payload.runId], dir, env);
+        expect(unauthorizedWatch.code).toBe(1);
+        expect(unauthorizedWatch.stderr).toContain("not authorized");
+        await waitForCliStatus(payload.runId, dir, {
+          ...env,
+          KEEL_CAP_FILE: payload.capabilityRef,
+        });
+        const output = await runCli(["output", payload.runId], dir, {
+          ...env,
+          KEEL_CAP_FILE: payload.capabilityRef,
+        });
+        expect(output.code).toBe(0);
+        expect(output.stdout).toBe("1\n");
+
+        const raw = await runCli(
+          ["launch", "--detach", "--emit-capability", chainUrl, "--input", '{"n":3}'],
+          dir,
+          env,
+        );
+        expect(raw.code).toBe(0);
+        const rawPayload = JSON.parse(raw.stdout) as { runId: string; capability: string };
+        expect(rawPayload.capability.startsWith("kc_run_")).toBe(true);
+        expect(raw.stdout).not.toContain("capabilityRef");
+        await waitForCliStatus(rawPayload.runId, dir, {
+          ...env,
+          KEEL_RUN_CAP: rawPayload.capability,
+        });
+
+        const attached = await runCli(["launch", chainUrl, "--input", '{"n":2}'], dir, env);
+        expect(attached.code).toBe(0);
+        expect(attached.stdout.startsWith("run ")).toBe(false);
+        const attachedEvents = attached.stdout
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line) as { type: string; payload: Record<string, unknown> });
+        expect(attachedEvents[0]).toMatchObject({
+          type: "launch.started",
+          payload: { capabilityRef: join(capDir, `${attachedEvents[0]?.payload.runId}.cap`) },
+        });
+        expect(attachedEvents.find((e) => e.type === "run.finished")?.payload).toEqual({
+          output: 2,
+        });
+      } finally {
+        daemon.stop();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    DAEMON_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "run launches a workflow file and prints a JSON envelope by default",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "keel-run-json-"));
+      const socketPath = join(dir, "keel.sock");
+      const dbPath = join(dir, "keel.db");
+      const daemon = new KeelDaemon({
+        socketPath,
+        dbPath,
+        agents: new AgentProviderRegistry().register(new MockProvider()),
       });
-      expect(output.code).toBe(0);
-      expect(output.stdout).toBe("1\n");
+      await daemon.start();
+      try {
+        const env = { KEEL_SOCKET: socketPath, KEEL_DB: dbPath, KEEL_DIR: dir };
+        const out = await runCli(["run", chainUrl, "--input", '{"n":2}'], dir, env);
+        expect(out.code).toBe(0);
+        const payload = JSON.parse(out.stdout) as {
+          runId: string;
+          capabilityRef: string;
+          status: string;
+          output: number;
+        };
+        expect(payload.status).toBe("finished");
+        expect(payload.output).toBe(2);
+        expect(payload.capabilityRef).toBe(join(dir, "caps", `${payload.runId}.cap`));
 
-      const raw = await runCli(
-        ["launch", "--detach", "--emit-capability", chainUrl, "--input", '{"n":3}'],
-        dir,
-        env,
-      );
-      expect(raw.code).toBe(0);
-      const rawPayload = JSON.parse(raw.stdout) as { runId: string; capability: string };
-      expect(rawPayload.capability.startsWith("kc_run_")).toBe(true);
-      expect(raw.stdout).not.toContain("capabilityRef");
-      await waitForCliStatus(rawPayload.runId, dir, {
-        ...env,
-        KEEL_RUN_CAP: rawPayload.capability,
+        const streamed = await runCli(
+          ["run", "--output", "ndjson", chainUrl, "--input", '{"n":2}'],
+          dir,
+          env,
+        );
+        expect(streamed.code).toBe(0);
+        const events = streamed.stdout
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line) as { type: string; subId?: string; payload: unknown });
+        expect(events.find((e) => e.type === "run.finished")?.payload).toEqual({ output: 2 });
+        expect(events.length).toBeGreaterThan(0);
+        expect(events.every((e) => e.subId === undefined)).toBe(true);
+      } finally {
+        daemon.stop();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    DAEMON_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "report prints a per-node result digest",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "keel-report-"));
+      const socketPath = join(dir, "keel.sock");
+      const dbPath = join(dir, "keel.db");
+      const daemon = new KeelDaemon({
+        socketPath,
+        dbPath,
+        agents: new AgentProviderRegistry().register(new MockProvider()),
       });
-    } finally {
-      daemon.stop();
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
+      await daemon.start();
+      try {
+        const env = { KEEL_SOCKET: socketPath, KEEL_DB: dbPath, KEEL_DIR: dir };
+        const run = await runCli(["run", chainUrl, "--input", '{"n":2}'], dir, env);
+        const { runId, capabilityRef } = JSON.parse(run.stdout) as {
+          runId: string;
+          capabilityRef: string;
+        };
 
-  test("run launches a workflow file and prints a JSON envelope", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "keel-run-json-"));
-    const socketPath = join(dir, "keel.sock");
-    const dbPath = join(dir, "keel.db");
-    const daemon = new KeelDaemon({
-      socketPath,
-      dbPath,
-      agents: new AgentProviderRegistry().register(new MockProvider()),
-    });
-    await daemon.start();
-    try {
-      const env = { KEEL_SOCKET: socketPath, KEEL_DB: dbPath, KEEL_DIR: dir };
-      const out = await runCli(["run", "--json", chainUrl, "--input", '{"n":2}'], dir, env);
-      expect(out.code).toBe(0);
-      const payload = JSON.parse(out.stdout) as {
-        runId: string;
-        capabilityRef: string;
-        status: string;
-        output: number;
-      };
-      expect(payload.status).toBe("finished");
-      expect(payload.output).toBe(2);
-      expect(payload.capabilityRef).toBe(join(dir, "caps", `${payload.runId}.cap`));
-    } finally {
-      daemon.stop();
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
+        const report = await runCli(["report", runId], dir, {
+          ...env,
+          KEEL_CAP_FILE: capabilityRef,
+        });
+        expect(report.code).toBe(0);
+        const payload = JSON.parse(report.stdout) as {
+          runId: string;
+          output: number;
+          stats: { steps: number; agents: number; artifacts: number };
+          nodes: Array<{ stableKey: string; result: number; artifactBacked: boolean }>;
+        };
+        expect(payload.runId).toBe(runId);
+        expect(payload.output).toBe(2);
+        expect(payload.stats).toEqual({ steps: 2, agents: 0, artifacts: 0 });
+        expect(payload.nodes.map((n) => [n.stableKey, n.result])).toEqual([
+          ["s0", 1],
+          ["s1", 2],
+        ]);
 
-  test("launch reads workflow source from stdin when no file is passed", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "keel-launch-stdin-"));
-    const socketPath = join(dir, "keel.sock");
-    const dbPath = join(dir, "keel.db");
-    const daemon = new KeelDaemon({
-      socketPath,
-      dbPath,
-      agents: new AgentProviderRegistry().register(new MockProvider()),
-      adminToken: "kc_admin_cli_test",
-    });
-    await daemon.start();
-    try {
-      const env = {
-        KEEL_SOCKET: socketPath,
-        KEEL_DB: dbPath,
-        KEEL_DIR: dir,
-        KEEL_ADMIN_TOKEN: "kc_admin_cli_test",
-      };
-      const launched = await runCli(
-        ["launch", "--detach", "--input", '{"n":2}'],
-        dir,
-        env,
-        readFileSync(chainUrl, "utf8"),
-      );
-      expect(launched.code).toBe(0);
-      const payload = JSON.parse(launched.stdout) as { runId: string; capabilityRef: string };
-      await waitForCliStatus(payload.runId, dir, { ...env, KEEL_CAP_FILE: payload.capabilityRef });
+        const text = await runCli(["report", runId, "--output", "text"], dir, {
+          ...env,
+          KEEL_CAP_FILE: capabilityRef,
+        });
+        expect(text.code).toBe(0);
+        expect(text.stdout).toContain(`run ${runId}`);
+        expect(text.stdout).toContain("s0 completed pure attempt=1 result 1");
 
-      const listed = await runCli(["list"], dir, env);
-      expect(listed.code).toBe(0);
-      expect(listed.stdout).toContain("(unnamed)");
-    } finally {
-      daemon.stop();
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
+        const invalid = await runCli(["report", runId, "--output", "ndjson"], dir, {
+          ...env,
+          KEEL_CAP_FILE: capabilityRef,
+        });
+        expect(invalid.code).toBe(1);
+        expect(invalid.stderr).toContain("--output ndjson is not available for report");
+      } finally {
+        daemon.stop();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    DAEMON_TEST_TIMEOUT_MS,
+  );
 
-  test("gc runs as an admin daemon operation", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "keel-gc-"));
-    const socketPath = join(dir, "keel.sock");
-    const dbPath = join(dir, "keel.db");
-    const daemon = new KeelDaemon({
-      socketPath,
-      dbPath,
-      agents: new AgentProviderRegistry().register(new MockProvider()),
-      adminToken: "kc_admin_gc_test",
-    });
-    await daemon.start();
-    try {
-      const out = await runCli(["gc"], dir, {
-        KEEL_SOCKET: socketPath,
-        KEEL_DB: dbPath,
-        KEEL_DIR: dir,
-        KEEL_ADMIN_TOKEN: "kc_admin_gc_test",
+  test(
+    "launch reads workflow source from stdin when no file is passed",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "keel-launch-stdin-"));
+      const socketPath = join(dir, "keel.sock");
+      const dbPath = join(dir, "keel.db");
+      const daemon = new KeelDaemon({
+        socketPath,
+        dbPath,
+        agents: new AgentProviderRegistry().register(new MockProvider()),
+        adminToken: "kc_admin_cli_test",
       });
-      expect(out.code).toBe(0);
-      expect(JSON.parse(out.stdout)).toEqual({
-        workflowDefinitionsRemoved: 0,
-        definitionCacheEntriesRemoved: 0,
+      await daemon.start();
+      try {
+        const env = {
+          KEEL_SOCKET: socketPath,
+          KEEL_DB: dbPath,
+          KEEL_DIR: dir,
+          KEEL_ADMIN_TOKEN: "kc_admin_cli_test",
+        };
+        const launched = await runCli(
+          ["launch", "--detach", "--input", '{"n":2}'],
+          dir,
+          env,
+          readFileSync(chainUrl, "utf8"),
+        );
+        expect(launched.code).toBe(0);
+        const payload = JSON.parse(launched.stdout) as { runId: string; capabilityRef: string };
+        await waitForCliStatus(payload.runId, dir, {
+          ...env,
+          KEEL_CAP_FILE: payload.capabilityRef,
+        });
+
+        const listed = await runCli(["list"], dir, env);
+        expect(listed.code).toBe(0);
+        expect(listed.stdout).toContain("(unnamed)");
+      } finally {
+        daemon.stop();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    DAEMON_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "gc runs as an admin daemon operation",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "keel-gc-"));
+      const socketPath = join(dir, "keel.sock");
+      const dbPath = join(dir, "keel.db");
+      const daemon = new KeelDaemon({
+        socketPath,
+        dbPath,
+        agents: new AgentProviderRegistry().register(new MockProvider()),
+        adminToken: "kc_admin_gc_test",
       });
-    } finally {
-      daemon.stop();
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
+      await daemon.start();
+      try {
+        const out = await runCli(["gc"], dir, {
+          KEEL_SOCKET: socketPath,
+          KEEL_DB: dbPath,
+          KEEL_DIR: dir,
+          KEEL_ADMIN_TOKEN: "kc_admin_gc_test",
+        });
+        expect(out.code).toBe(0);
+        expect(JSON.parse(out.stdout)).toEqual({
+          workflowDefinitionsRemoved: 0,
+          definitionCacheEntriesRemoved: 0,
+        });
+      } finally {
+        daemon.stop();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    DAEMON_TEST_TIMEOUT_MS,
+  );
 
-  test("execute runs a stateless TypeScript control script over the daemon", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "keel-execute-"));
-    const socketPath = join(dir, "keel.sock");
-    const dbPath = join(dir, "keel.db");
-    const capDir = join(dir, "caps");
-    const script = join(dir, "control.ts");
-    writeControlScript(script, chainUrl);
-    const daemon = new KeelDaemon({
-      socketPath,
-      dbPath,
-      agents: new AgentProviderRegistry().register(new MockProvider()),
-    });
-    await daemon.start();
-    try {
-      const env = {
-        KEEL_SOCKET: socketPath,
-        KEEL_DB: dbPath,
-        KEEL_DIR: dir,
-        KEEL_CAP_DIR: capDir,
-      };
-      const out = await runCli(["execute", script], dir, env);
-      expect(out.code).toBe(0);
-      const result = JSON.parse(out.stdout) as {
-        runId: string;
-        status: string;
-        output: number;
-        capabilityRef: string;
-      };
-      expect(result.status).toBe("finished");
-      expect(result.output).toBe(2);
-      expect(result.capabilityRef).toBe(join(capDir, `${result.runId}.cap`));
-      expect(readFileSync(result.capabilityRef, "utf8")).toContain("kc_run_");
+  test(
+    "execute runs a stateless TypeScript control script over the daemon",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "keel-execute-"));
+      const socketPath = join(dir, "keel.sock");
+      const dbPath = join(dir, "keel.db");
+      const capDir = join(dir, "caps");
+      const script = join(dir, "control.ts");
+      writeControlScript(script, chainUrl);
+      const daemon = new KeelDaemon({
+        socketPath,
+        dbPath,
+        agents: new AgentProviderRegistry().register(new MockProvider()),
+      });
+      await daemon.start();
+      try {
+        const env = {
+          KEEL_SOCKET: socketPath,
+          KEEL_DB: dbPath,
+          KEEL_DIR: dir,
+          KEEL_CAP_DIR: capDir,
+        };
+        const out = await runCli(["execute", script], dir, env);
+        expect(out.code).toBe(0);
+        const result = JSON.parse(out.stdout) as {
+          runId: string;
+          status: string;
+          output: number;
+          capabilityRef: string;
+          reportNodeCount: number;
+        };
+        expect(result.status).toBe("finished");
+        expect(result.output).toBe(2);
+        expect(result.reportNodeCount).toBe(2);
+        expect(result.capabilityRef).toBe(join(capDir, `${result.runId}.cap`));
+        expect(readFileSync(result.capabilityRef, "utf8")).toContain("kc_run_");
 
-      const raw = await runCli(["execute", "--emit-capability", script], dir, env);
-      expect(raw.code).toBe(0);
-      const rawResult = JSON.parse(raw.stdout) as { capability: string; capabilityRef?: string };
-      expect(rawResult.capability.startsWith("kc_run_")).toBe(true);
-      expect(rawResult.capabilityRef).toBeUndefined();
-    } finally {
-      daemon.stop();
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
+        const raw = await runCli(["execute", "--emit-capability", script], dir, env);
+        expect(raw.code).toBe(0);
+        const rawResult = JSON.parse(raw.stdout) as { capability: string; capabilityRef?: string };
+        expect(rawResult.capability.startsWith("kc_run_")).toBe(true);
+        expect(rawResult.capabilityRef).toBeUndefined();
+      } finally {
+        daemon.stop();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    DAEMON_TEST_TIMEOUT_MS,
+  );
 
-  test("execute approve reuses the original admin credential after launching a child run", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "keel-execute-approve-"));
-    const socketPath = join(dir, "keel.sock");
-    const dbPath = join(dir, "keel.db");
-    const script = join(dir, "approve.ts");
-    writeFileSync(
-      script,
-      `
+  test(
+    "execute approve reuses the original admin credential after launching a child run",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "keel-execute-approve-"));
+      const socketPath = join(dir, "keel.sock");
+      const dbPath = join(dir, "keel.db");
+      const script = join(dir, "approve.ts");
+      writeFileSync(
+        script,
+        `
         const run = await keel.launch({ workflow: ${JSON.stringify(gateUrl)}, input: null });
         await keel.wait(run.runId, { timeoutMs: 2000 });
         const decision = await keel.approve(run.runId, "approve-deploy");
         const done = await keel.wait(run.runId);
         return { decision: decision.status, output: done.output };
       `,
-    );
-    const daemon = new KeelDaemon({
-      socketPath,
-      dbPath,
-      agents: new AgentProviderRegistry().register(new MockProvider()),
-      adminToken: "kc_admin_execute_test",
-    });
-    await daemon.start();
-    try {
-      const out = await runCli(["execute", script], dir, {
-        KEEL_SOCKET: socketPath,
-        KEEL_DB: dbPath,
-        KEEL_DIR: dir,
-        KEEL_ADMIN_TOKEN: "kc_admin_execute_test",
+      );
+      const daemon = new KeelDaemon({
+        socketPath,
+        dbPath,
+        agents: new AgentProviderRegistry().register(new MockProvider()),
+        adminToken: "kc_admin_execute_test",
       });
-      expect(out.code).toBe(0);
-      expect(JSON.parse(out.stdout)).toEqual({
-        decision: "finished",
-        output: "deploy:approved",
-      });
-    } finally {
-      daemon.stop();
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
+      await daemon.start();
+      try {
+        const out = await runCli(["execute", script], dir, {
+          KEEL_SOCKET: socketPath,
+          KEEL_DB: dbPath,
+          KEEL_DIR: dir,
+          KEEL_ADMIN_TOKEN: "kc_admin_execute_test",
+        });
+        expect(out.code).toBe(0);
+        expect(JSON.parse(out.stdout)).toEqual({
+          decision: "finished",
+          output: "deploy:approved",
+        });
+      } finally {
+        daemon.stop();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    DAEMON_TEST_TIMEOUT_MS,
+  );
 
-  test("execute writes structured errors to stderr", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "keel-execute-error-"));
-    const socketPath = join(dir, "keel.sock");
-    const dbPath = join(dir, "keel.db");
-    const script = join(dir, "bad.ts");
-    writeFileSync(script, 'throw new Error("bad control script kc_run_secretValue");\n');
-    const daemon = new KeelDaemon({
-      socketPath,
-      dbPath,
-      agents: new AgentProviderRegistry().register(new MockProvider()),
-    });
-    await daemon.start();
-    try {
-      const out = await runCli(["execute", script], dir, {
-        KEEL_SOCKET: socketPath,
-        KEEL_DB: dbPath,
-        KEEL_DIR: dir,
+  test(
+    "execute report restores the original credential for externally supplied runs",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "keel-execute-report-"));
+      const socketPath = join(dir, "keel.sock");
+      const dbPath = join(dir, "keel.db");
+      const script = join(dir, "report-parent.ts");
+      writeFileSync(
+        script,
+        `
+        const parentRunId = args[0];
+        if (!parentRunId) throw new Error("missing parent run id");
+        const child = await keel.launch({ workflow: ${JSON.stringify(chainUrl)}, input: { n: 1 } });
+        await keel.wait(child.runId);
+        const report = await keel.report(parentRunId);
+        return { parentRunId, nodeCount: report.nodes.length };
+      `,
+      );
+      const daemon = new KeelDaemon({
+        socketPath,
+        dbPath,
+        agents: new AgentProviderRegistry().register(new MockProvider()),
+        adminToken: "kc_admin_report_test",
       });
-      expect(out.code).toBe(1);
-      expect(JSON.parse(out.stderr).error).toMatchObject({
-        code: "execute_failed",
-        message: "bad control script «redacted-capability»",
+      await daemon.start();
+      try {
+        const env = {
+          KEEL_SOCKET: socketPath,
+          KEEL_DB: dbPath,
+          KEEL_DIR: dir,
+          KEEL_ADMIN_TOKEN: "kc_admin_report_test",
+        };
+        const parent = await runCli(["run", chainUrl, "--input", '{"n":2}'], dir, env);
+        expect(parent.code).toBe(0);
+        const parentRunId = (JSON.parse(parent.stdout) as { runId: string }).runId;
+
+        const out = await runCli(["execute", script, "--", parentRunId], dir, env);
+        expect(out.code).toBe(0);
+        expect(JSON.parse(out.stdout)).toEqual({ parentRunId, nodeCount: 2 });
+      } finally {
+        daemon.stop();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    DAEMON_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "execute writes structured errors to stderr",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "keel-execute-error-"));
+      const socketPath = join(dir, "keel.sock");
+      const dbPath = join(dir, "keel.db");
+      const script = join(dir, "bad.ts");
+      writeFileSync(script, 'throw new Error("bad control script kc_run_secretValue");\n');
+      const daemon = new KeelDaemon({
+        socketPath,
+        dbPath,
+        agents: new AgentProviderRegistry().register(new MockProvider()),
       });
-    } finally {
-      daemon.stop();
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
+      await daemon.start();
+      try {
+        const out = await runCli(["execute", script], dir, {
+          KEEL_SOCKET: socketPath,
+          KEEL_DB: dbPath,
+          KEEL_DIR: dir,
+        });
+        expect(out.code).toBe(1);
+        expect(JSON.parse(out.stderr).error).toMatchObject({
+          code: "execute_failed",
+          message: "bad control script «redacted-capability»",
+        });
+      } finally {
+        daemon.stop();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    DAEMON_TEST_TIMEOUT_MS,
+  );
 
   test("execute writes structured errors for argument/setup failures", async () => {
     const dir = mkdtempSync(join(tmpdir(), "keel-execute-arg-error-"));
@@ -558,6 +758,38 @@ describe("keel CLI", () => {
         message: "unknown execute flag --unknown",
       });
       expect(out.stderr).not.toContain("keel:");
+
+      const output = await runCli(["execute", "--output", "text"], dir, {
+        KEEL_SOCKET: join(dir, "missing.sock"),
+      });
+      expect(output.code).toBe(1);
+      expect(JSON.parse(output.stderr).error.message).toContain(
+        "--output text is not available for execute",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("unsupported output combinations fail before daemon connection", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-output-combos-"));
+    try {
+      const env = { KEEL_SOCKET: join(dir, "missing.sock") };
+      const watch = await runCli(["watch", "run_123", "--output", "json"], dir, env);
+      expect(watch.code).toBe(1);
+      expect(watch.stderr).toContain("--output json is not available for watch");
+
+      const attached = await runCli(["launch", "--output", "json", "wf.ts"], dir, env);
+      expect(attached.code).toBe(1);
+      expect(attached.stderr).toContain("--output json is not available for attached launch");
+
+      const detached = await runCli(
+        ["launch", "--detach", "--output", "ndjson", "wf.ts"],
+        dir,
+        env,
+      );
+      expect(detached.code).toBe(1);
+      expect(detached.stderr).toContain("--output ndjson is not available for launch --detach");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -573,12 +805,14 @@ function writeControlScript(path: string, workflowUrl: string): void {
         input: { n: 2 },
       });
       const settled = await keel.wait(run.runId);
+      const report = await keel.report(run.runId);
         return {
           runId: run.runId,
           capabilityRef: run.capabilityRef,
           capability: run.capability,
           status: settled.status,
           output: settled.output,
+          reportNodeCount: report.nodes.length,
         };
     `,
   );

@@ -6,6 +6,7 @@
 
 import type { JournalStore } from "../journal/store.ts";
 import type { EffectType, JournalStatus, RunStatus } from "../journal/types.ts";
+import { RUN_FINISHED_INLINE_OUTPUT_BYTES } from "../kernel/output.ts";
 
 export interface NodeView {
   stableKey: string;
@@ -34,6 +35,25 @@ export interface RunProjection {
   /** The current phase (last ctx.phase narration), if any. */
   phase: string | null;
   error: { name: string; message: string } | null;
+  stats: RunStats;
+}
+
+export interface ReportNodeView extends NodeView {
+  result?: unknown;
+  resultOmitted?: true;
+  resultByteLength?: number;
+}
+
+export interface RunReport {
+  runId: string;
+  workflowName: string | null;
+  status: RunStatus;
+  output?: unknown;
+  outputOmitted?: true;
+  outputByteLength?: number;
+  error: { name: string; message: string } | null;
+  blockage?: Blockage;
+  nodes: ReportNodeView[];
   stats: RunStats;
 }
 
@@ -90,6 +110,88 @@ export function buildProjection(store: JournalStore, runId: string): RunProjecti
     error: run.errorJson ? (JSON.parse(run.errorJson) as { name: string; message: string }) : null,
     stats,
   };
+}
+
+/** Build a post-run digest from journaled node results, not raw event transcripts. */
+export function buildRunReport(store: JournalStore, runId: string): RunReport | null {
+  const run = store.getRun(runId);
+  if (!run) return null;
+
+  const rows = store.listJournalRows(runId);
+  const latest = new Map<string, (typeof rows)[number]>();
+  for (const r of rows) {
+    if (r.stableKey.startsWith("__")) continue;
+    const prev = latest.get(r.stableKey);
+    if (!prev || r.attempt > prev.attempt) latest.set(r.stableKey, r);
+  }
+
+  const nodes: ReportNodeView[] = [...latest.values()]
+    .sort((a, b) => a.stableKey.localeCompare(b.stableKey))
+    .map((r) => {
+      const node: ReportNodeView = {
+        stableKey: r.stableKey,
+        effectType: r.effectType,
+        status: r.status,
+        attempt: r.attempt,
+        dependsOn: (r.inputDeps ?? []).map((d) => d.stepKey).sort(),
+        artifactBacked: r.resultArtifact !== null,
+      };
+      const result = resultJsonForReport(store, r.resultInline, r.resultArtifact);
+      if (result.kind === "inline") node.result = JSON.parse(result.json);
+      if (result.kind === "omitted") {
+        node.resultOmitted = true;
+        node.resultByteLength = result.byteLength;
+      }
+      return node;
+    });
+
+  const output = outputJsonForReport(run.outputRef);
+  const blockage = getBlockage(store, runId, Date.now());
+  return {
+    runId: run.runId,
+    workflowName: run.workflowName,
+    status: run.status,
+    ...(output.kind === "inline" ? { output: JSON.parse(output.json) } : {}),
+    ...(output.kind === "omitted"
+      ? { outputOmitted: true as const, outputByteLength: output.byteLength }
+      : {}),
+    error: run.errorJson ? (JSON.parse(run.errorJson) as { name: string; message: string }) : null,
+    ...(blockage.reason !== "none" ? { blockage } : {}),
+    nodes,
+    stats: {
+      steps: nodes.filter((n) => n.effectType === "pure").length,
+      agents: nodes.filter((n) => n.effectType === "effectful").length,
+      artifacts: nodes.filter((n) => n.artifactBacked).length,
+    },
+  };
+}
+
+function outputJsonForReport(
+  json: string | null,
+): { kind: "none" } | { kind: "inline"; json: string } | { kind: "omitted"; byteLength: number } {
+  if (json === null) return { kind: "none" };
+  const byteLength = Buffer.byteLength(json, "utf8");
+  if (byteLength > RUN_FINISHED_INLINE_OUTPUT_BYTES) {
+    return { kind: "omitted", byteLength };
+  }
+  return { kind: "inline", json };
+}
+
+function resultJsonForReport(
+  store: JournalStore,
+  inline: string | null,
+  artifact: string | null,
+): { kind: "none" } | { kind: "inline"; json: string } | { kind: "omitted"; byteLength: number } {
+  if (inline !== null) return { kind: "inline", json: inline };
+  if (artifact === null) return { kind: "none" };
+  const row = store.getArtifact(artifact);
+  if (!row) throw new Error(`journal result artifact ${artifact} is missing`);
+  if (row.byteLen > RUN_FINISHED_INLINE_OUTPUT_BYTES) {
+    return { kind: "omitted", byteLength: row.byteLen };
+  }
+  const data = store.getArtifactData(artifact);
+  if (!data) throw new Error(`journal result artifact ${artifact} has no data`);
+  return { kind: "inline", json: Buffer.from(data).toString("utf8") };
 }
 
 export type BlockageReason =

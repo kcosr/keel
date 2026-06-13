@@ -2,8 +2,8 @@
 
 A **workflow** is an `async (ctx, input) => output` function. You call agents and
 do work through `ctx`; Keel runs it durably and survives crashes. For a single
-workflow, run inline TypeScript with `keel run --json <<'TS'` so no workflow file
-is needed.
+workflow, run inline TypeScript with `keel run <<'TS'` so no workflow file is
+needed. `keel run` prints a structured JSON envelope by default.
 
 Assume the daemon is already running and the `keel` CLI is already configured to
 reach it. Do not start the daemon, restart systemd, or use admin credentials from
@@ -165,11 +165,11 @@ export default async function adversarialReview(ctx: Ctx, input: { root: string 
 
 ## 7. Run It Inline
 
-For one workflow, prefer `keel run --json` with a TypeScript heredoc. Put runtime
+For one workflow, prefer `keel run` with a TypeScript heredoc. Put runtime
 input in `--input`; stdin is the workflow source.
 
 ```bash
-keel run --json --input '{"root":"/abs/path/to/code"}' <<'TS'
+keel run --input '{"root":"/abs/path/to/code"}' <<'TS'
 import { type Ctx, jsonSchema, passthrough } from "@kcosr/keel";
 
 const Hostname = jsonSchema<{ hostname: string }>({
@@ -229,6 +229,7 @@ TS
 ```ts
 await keel.wait(runId);
 await keel.get(runId);
+await keel.report(runId);
 await keel.output(runId);
 await keel.retry(runId);
 await keel.resume(runId);
@@ -249,5 +250,5 @@ workflow itself, not in `execute`.
   For required agents, omit `onFailure` so failures can be retried.
 - A run resumes from its immutable start-time workflow snapshot. To change code,
   run again or rerun with new inline source.
-- Use `run --json` for a single workflow; use `execute` only for mechanical
+- Use `run` for a single workflow; use `execute` only for mechanical
   follow-up across one or more runs.

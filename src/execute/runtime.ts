@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { DaemonClient } from "../daemon/client.ts";
 import type { EventEnvelope, LaunchRequest, RunOutcome, RunStart } from "../rpc/contract.ts";
-import type { Blockage, RunProjection } from "../rpc/projection.ts";
+import type { Blockage, RunProjection, RunReport } from "../rpc/projection.ts";
 
 export interface ExecuteKeel {
   launch(req: ExecuteLaunchRequest): Promise<ExecuteRunHandle>;
@@ -14,6 +14,7 @@ export interface ExecuteKeel {
     opts?: { atStableKey?: string; newRunId?: string },
   ): Promise<ExecuteRunHandle>;
   get(runId: string): Promise<RunProjection | null>;
+  report(runId: string): Promise<RunReport | null>;
   blockage(runId: string): Promise<Blockage>;
   wait(runId: string, opts?: { timeoutMs?: number }): Promise<RunOutcome | ExecuteRunning>;
   output(runId: string): Promise<unknown>;
@@ -93,7 +94,11 @@ export function createExecuteKeel(opts: ExecuteRuntimeOptions): ExecuteKeel {
   };
   const authenticateKnownRun = async (runId: string) => {
     const cap = runCaps.get(runId);
-    if (cap) await opts.client.authenticate(cap);
+    if (cap) {
+      await opts.client.authenticate(cap);
+      return;
+    }
+    await authenticateControlCredential();
   };
   const authenticateControlCredential = async () => {
     if (opts.credential) await opts.client.authenticate(opts.credential);
@@ -134,6 +139,10 @@ export function createExecuteKeel(opts: ExecuteRuntimeOptions): ExecuteKeel {
     async get(runId) {
       await authenticateKnownRun(runId);
       return opts.client.getRun(runId);
+    },
+    async report(runId) {
+      await authenticateKnownRun(runId);
+      return opts.client.getRunReport(runId);
     },
     async blockage(runId) {
       await authenticateKnownRun(runId);

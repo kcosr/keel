@@ -5,7 +5,7 @@
 // a Unix socket, so the extraction is a transport swap, not a redesign. Adding
 // methods is allowed; changing an existing method's shape is a breaking change.
 
-import type { Blockage, RunProjection, RunSummary } from "./projection.ts";
+import type { Blockage, RunProjection, RunReport, RunSummary } from "./projection.ts";
 
 export type WorkflowProvenance = { kind: "stdin" } | { kind: "clientPath"; path: string };
 
@@ -67,6 +67,8 @@ export interface KeelApi {
   forkRun(runId: string, opts?: { atStableKey?: string; newRunId?: string }): RunLaunchResult;
   /** The canonical projection for one run. */
   getRun(runId: string): RunProjection | null;
+  /** Post-run result digest from journaled node results. */
+  getRunReport(runId: string): RunReport | null;
   /** Why is this run stuck? (§12.2). */
   getBlockage(runId: string): Blockage;
   /** Summaries of all runs. */

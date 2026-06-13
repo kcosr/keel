@@ -272,6 +272,9 @@ export class KeelDaemon {
       case "getRun":
         this.authorizeRun(conn, p.runId as string, "run:read");
         return this.api.getRun(p.runId as string);
+      case "getRunReport":
+        this.authorizeRun(conn, p.runId as string, "run:read");
+        return this.api.getRunReport(p.runId as string);
       case "getBlockage":
         this.authorizeRun(conn, p.runId as string, "run:read");
         return this.api.getBlockage(p.runId as string);

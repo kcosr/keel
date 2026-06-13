@@ -64,17 +64,18 @@ daemon. The daemon never opens the client path. Omit the file to read workflow
 source from stdin:
 
 ```bash
-cat ./path/to/workflow.ts | keel run --input '{"n":3}' --json
+cat ./path/to/workflow.ts | keel run --input '{"n":3}'
 ```
 
-Lifecycle commands watch by default. `launch` prints the run id first, then
-streams events until the run reaches a terminal state:
+Lifecycle commands watch by default. Attached `launch` streams newline-delimited
+JSON events by default until the run reaches a terminal state:
 
-```text
-run run_...
-[1] run.started {"name":"workflow.ts"}
+```json
+{"seq":1,"type":"run.started","payload":{"name":"workflow.ts"},"atMs":...}
 ...
 ```
+
+Use `--output text` when you want the compact human transcript.
 
 Use `--detach` when a script needs the run id without streaming:
 
@@ -85,6 +86,7 @@ CAP=$(printf '%s' "$LAUNCH" | jq -r .capabilityRef)
 KEEL_CAP_FILE="$CAP" keel watch "$RUN"
 KEEL_CAP_FILE="$CAP" keel get "$RUN"
 KEEL_CAP_FILE="$CAP" keel output "$RUN"
+KEEL_CAP_FILE="$CAP" keel report "$RUN"
 ```
 
 Omit `--input` for `{}`:
@@ -129,18 +131,19 @@ bun src/cli/keel.ts <command> [args]
 |---|---|
 | `daemon` | Start the daemon in the foreground. |
 | `link [dir]` | Symlink this repo's SDK into `<dir>/node_modules`; defaults to the current directory. |
-| `launch [workflow.ts] [--name n] [--input json] [--detach] [--emit-capability]` | Start a run from client-captured workflow source. Watches by default. |
-| `run [workflow.ts] [--name n] [--input json] [--json]` | Launch a run and print its terminal output or JSON envelope. |
-| `watch [--json] <runId>` | Stream run events until terminal. |
+| `launch [workflow.ts] [--name n] [--input json] [--output json\|text\|ndjson] [--detach] [--emit-capability]` | Start a run from client-captured workflow source. Attached launch streams NDJSON by default; detached launch prints JSON. |
+| `run [workflow.ts] [--name n] [--input json] [--output json\|text\|ndjson]` | Launch a run and print a JSON envelope, text transcript, or NDJSON events. |
+| `watch <runId> [--output ndjson\|text]` | Stream run events until terminal. |
 | `get <runId>` | Print the canonical run projection as JSON. |
-| `output <runId>` | Print the terminal workflow output as JSON. |
+| `output <runId> [--output json\|text]` | Print the terminal workflow output. |
+| `report <runId> [--output json\|text]` | Print a journaled per-node result digest. |
 | `list` | List run id, status, and workflow name. |
 | `gc` | Prune unreferenced workflow definition rows and cache entries. Requires admin. |
 | `resume [--detach] <runId>` | Resume a parked or incomplete run. Watches by default. |
 | `retry [--detach] <runId>` | Re-run a failed run from its failed step. Watches by default. |
 | `rewind [--detach] <runId> <stepKey>` | Discard everything after a step and re-run. Watches by default. |
 | `fork <runId> [atStepKey]` | Copy a terminal run into a new independent run. |
-| `execute [file] [--entry name] [--state file] [--cap-file file] [--emit-capability] [-- args...]` | Run a stateless TypeScript control script over the daemon API. Omit `file` to read stdin. |
+| `execute [file] [--entry name] [--state file] [--cap-file file] [--output json] [--emit-capability] [-- args...]` | Run a stateless TypeScript control script over the daemon API. Omit `file` to read stdin. |
 | `approve <runId> <key> [note]` | Approve a `ctx.human` gate. |
 | `deny <runId> <key> [note]` | Deny a `ctx.human` gate. |
 | `signal <runId> <name> [json]` | Deliver a payload to `ctx.signal(name)`. |
@@ -153,7 +156,9 @@ bun src/cli/keel.ts <command> [args]
 keel retry run_...
 ```
 
-They print `run <runId>` first and then behave like `keel watch <runId>`.
+Attached `launch` defaults to NDJSON and does not print a text header. Attached
+`resume`, `retry`, and `rewind` print `run <runId>` first and then behave like
+`keel watch <runId> --output text`.
 
 Use `--detach` for background operation:
 
@@ -164,14 +169,30 @@ keel retry --detach run_...
 keel rewind --detach run_... step-key
 ```
 
-Detached `launch` prints JSON with `runId` and `capabilityRef` by default. The
-capability file contains the bearer token needed for follow-up control of that
-run. Detached `resume`, `retry`, and `rewind` print the run id and status
-separated by a tab.
+Attached `launch` defaults to `--output ndjson`; use `--output text` for a human
+transcript. Detached `launch` defaults to `--output json` and prints `runId` plus
+`capabilityRef`. The capability file contains the bearer token needed for
+follow-up control of that run. Detached `resume`, `retry`, and `rewind` print the
+run id and status separated by a tab.
+
+`launch --output json` is only valid with `--detach`; attached launch streams
+events, so `--output json` is rejected there. `launch --detach --output ndjson`
+is also rejected because detached launch returns a snapshot handle, not a stream.
 
 ### Watch Output
 
-Default watch output is human-oriented and compact:
+Default watch output is newline-delimited JSON event envelopes:
+
+```bash
+keel watch run_...
+```
+
+```json
+{"seq":1,"type":"run.started","payload":{"name":"review.workflow.ts"},"atMs":...}
+{"seq":2,"type":"phase","payload":{"title":"Find"},"atMs":...}
+```
+
+Use `--output text` for human-oriented compact output:
 
 ```text
 [1] run.started {"name":"review.workflow.ts"}
@@ -181,13 +202,32 @@ Default watch output is human-oriented and compact:
 [5] run.finished
 ```
 
-Use `--json` to print raw event envelopes, one JSON object per line:
+Raw events include `seq`, `type`, `payload`, and `atMs`.
+
+### Run, Output, And Report Formats
+
+`keel run` defaults to `--output json`, a single envelope containing `runId`,
+`capabilityRef`, `status`, and terminal `output`/`error`/`blockage` fields when
+present.
+
+Use `keel run --output ndjson` to render the same attached execution as event
+envelopes while it runs, or `keel run --output text` for the compact transcript.
+`--output` changes rendering only; it does not change whether `run` starts and
+attaches to the workflow.
 
 ```bash
-keel watch --json run_...
+keel run --output text ./workflow.ts --input '{"n":3}'
+keel run --output ndjson ./workflow.ts --input '{"n":3}'
 ```
 
-Raw events include `seq`, `type`, `payload`, and `atMs`.
+`keel output <runId>` defaults to JSON and prints only the terminal workflow
+output. `keel output <runId> --output text` prints string outputs directly and
+other JSON values compactly.
+
+`keel report <runId>` defaults to JSON and prints a post-run digest derived from
+journaled node results, not raw event transcripts. `--output text` prints a
+compact per-node status/result summary. `--output ndjson` is invalid for
+`report`.
 
 ### Exit Codes
 
@@ -654,7 +694,7 @@ interface EventEnvelope {
 }
 ```
 
-`seq` is monotonically increasing per run. CLI `watch --json` prints these
+`seq` is monotonically increasing per run. CLI `watch` default output prints these
 envelopes exactly.
 
 ## Development And Operations

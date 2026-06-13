@@ -1,0 +1,1 @@
+export const RUN_FINISHED_INLINE_OUTPUT_BYTES = 8 * 1024;

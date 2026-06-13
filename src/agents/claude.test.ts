@@ -332,11 +332,7 @@ process.exit(0);
   });
 });
 
-async function writeFakeClaude(
-  bin: string,
-  argsPath: string,
-  cleanupPath?: string,
-): Promise<void> {
+async function writeFakeClaude(bin: string, argsPath: string, cleanupPath?: string): Promise<void> {
   await Bun.write(
     bin,
     `#!${process.execPath}

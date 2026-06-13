@@ -6,9 +6,12 @@
 - `keel execute` runs stateless TypeScript control scripts outside the workflow
   realm with injected `keel`, `args`, `state`, and `env`; stdout is always the
   returned JSON value and runtime failures are structured JSON on stderr.
-- `keel run [workflow.ts] [--input json] [--json]` launches a workflow and prints
-  its terminal output or a JSON envelope containing the run id and cap file.
+- `keel run [workflow.ts] [--input json] [--output json|text|ndjson]` launches a
+  workflow and prints a JSON envelope by default, or a text transcript / NDJSON
+  event stream when requested.
 - `keel output <runId>` prints the terminal workflow output as JSON.
+- `keel report <runId> [--output json|text]` prints a journaled per-node result
+  digest, and execute control scripts can call `keel.report(runId)`.
 - `keel gc` prunes old unreferenced workflow definition rows and rebuildable
   materialized definition cache directories.
 - Immutable workflow definition snapshots are stored by content hash and
@@ -30,6 +33,9 @@
   Existing path-based schedules are disabled by migration.
 - `keel launch --detach` now returns JSON containing `runId` and
   `capabilityRef` by default. Raw run capabilities require `--emit-capability`.
+- CLI output selection now uses shared `--output json|text|ndjson` rendering
+  flags. `--json` has been removed, `watch` and attached `launch` default to
+  NDJSON event streams, and human transcripts require `--output text`.
 - Run lifecycle operations are capability-gated by the daemon. Run id alone is
   no longer authority to inspect or mutate a run.
 - Resume/retry/rewind/fork execute the run's stored workflow definition snapshot;

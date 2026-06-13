@@ -9,7 +9,7 @@ import type {
   RunOutcome,
   RunStart,
 } from "../rpc/contract.ts";
-import type { RunProjection, RunSummary } from "../rpc/projection.ts";
+import type { RunProjection, RunReport, RunSummary } from "../rpc/projection.ts";
 
 /** Async-shaped client over the socket (the in-process KeelApi is sync; the wire
  * is async). Same method names, Promise-returning. */
@@ -58,7 +58,8 @@ export class DaemonClient {
       event?: EventEnvelope & { subId: string };
     };
     if (msg.event) {
-      this.subs.get(msg.event.subId)?.(msg.event);
+      const { subId, ...event } = msg.event;
+      this.subs.get(subId)?.(event);
       return;
     }
     if (typeof msg.id === "number") {
@@ -102,6 +103,9 @@ export class DaemonClient {
   }
   getRun(runId: string): Promise<RunProjection | null> {
     return this.rpc("getRun", { runId });
+  }
+  getRunReport(runId: string): Promise<RunReport | null> {
+    return this.rpc("getRunReport", { runId });
   }
   retryRun(runId: string): Promise<RunStart> {
     return this.rpc("retryRun", { runId });
@@ -163,12 +167,18 @@ export class DaemonClient {
     runId: string,
     afterSeq: number,
     onEvent: (e: EventEnvelope) => void,
+    onError?: (err: unknown) => void,
   ): () => void {
     let subId: string | null = null;
-    void this.rpc<{ subId: string }>("subscribeEvents", { runId, afterSeq }).then((r) => {
-      subId = r.subId;
-      this.subs.set(r.subId, onEvent);
-    });
+    void this.rpc<{ subId: string }>("subscribeEvents", { runId, afterSeq }).then(
+      (r) => {
+        subId = r.subId;
+        this.subs.set(r.subId, onEvent);
+      },
+      (err) => {
+        onError?.(err);
+      },
+    );
     return () => {
       if (subId) this.subs.delete(subId);
     };

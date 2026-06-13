@@ -20,8 +20,10 @@ import type {
 import {
   type Blockage,
   type RunProjection,
+  type RunReport,
   type RunSummary,
   buildProjection,
+  buildRunReport,
   getBlockage,
   listRunSummaries,
 } from "./projection.ts";
@@ -85,6 +87,10 @@ export class InProcessKeel implements KeelApi {
 
   getRun(runId: string): RunProjection | null {
     return buildProjection(this.store, runId);
+  }
+
+  getRunReport(runId: string): RunReport | null {
+    return buildRunReport(this.store, runId);
   }
 
   getBlockage(runId: string): Blockage {

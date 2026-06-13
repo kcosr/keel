@@ -32,11 +32,15 @@ import { DaemonClient } from "../daemon/client.ts";
 import { KeelDaemon } from "../daemon/server.ts";
 import { runExecuteScript } from "../execute/runtime.ts";
 import type { EventEnvelope, RunOutcome, WorkflowProvenance } from "../rpc/contract.ts";
+import type { RunReport } from "../rpc/projection.ts";
 
 const KEEL_DIR = process.env.KEEL_DIR ?? join(homedir(), ".keel");
 const SOCKET = process.env.KEEL_SOCKET ?? join(KEEL_DIR, "keel.sock");
 const DB = process.env.KEEL_DB ?? join(KEEL_DIR, "keel.db");
 const CAP_DIR = process.env.KEEL_CAP_DIR ?? join(KEEL_DIR, "caps");
+
+export const OUTPUT_FORMATS = ["json", "text", "ndjson"] as const;
+export type OutputFormat = (typeof OUTPUT_FORMATS)[number];
 
 /** Connect a client, authenticating with the caller's presented capability. */
 async function openClient(credential = loadCredential()): Promise<DaemonClient> {
@@ -51,13 +55,18 @@ const COMMANDS: [string, string, string][] = [
   ["link", "[dir]", "make <dir> (default: cwd) able to import the @kcosr/keel SDK"],
   [
     "launch",
-    "[workflow.ts] [--name n] [--input json] [--detach] [--emit-capability]",
+    "[workflow.ts] [--name n] [--input json] [--output json|text|ndjson] [--detach] [--emit-capability]",
     "start a run from client-captured workflow source",
   ],
-  ["run", "[workflow.ts] [--name n] [--input json] [--json]", "launch and print the result"],
-  ["watch", "[--json] <runId>", "stream a run's events until it finishes"],
+  [
+    "run",
+    "[workflow.ts] [--name n] [--input json] [--output json|text|ndjson]",
+    "launch and print the result",
+  ],
+  ["watch", "<runId> [--output ndjson|text]", "stream a run's events until it finishes"],
   ["get", "<runId>", "print a run's projection as JSON"],
-  ["output", "<runId>", "print a run's terminal output as JSON"],
+  ["output", "<runId> [--output json|text]", "print a run's terminal output"],
+  ["report", "<runId> [--output json|text]", "print a run's per-node result digest"],
   ["list", "", "list runs"],
   ["gc", "", "prune unreferenced workflow definitions and cache entries"],
   ["resume", "[--detach] <runId>", "resume a parked or incomplete run"],
@@ -66,7 +75,7 @@ const COMMANDS: [string, string, string][] = [
   ["fork", "<runId> [atStepKey]", "copy a run into a new independent run"],
   [
     "execute",
-    "[file] [--entry name] [--state file] [--cap-file file] [--emit-capability] [-- args...]",
+    "[file] [--entry name] [--state file] [--cap-file file] [--output json] [--emit-capability] [-- args...]",
     "run a stateless TypeScript control script",
   ],
   ["approve", "<runId> <key> [note]", "approve a ctx.human gate"],
@@ -161,6 +170,13 @@ async function main(argv: string[]): Promise<number> {
     }
     case "launch": {
       const launchOpts = parseLaunchArgs(rest);
+      const output = launchOpts.output ?? (launchOpts.detach ? "json" : "ndjson");
+      if (launchOpts.detach && output === "ndjson") {
+        throw new Error("--output ndjson is not available for launch --detach");
+      }
+      if (!launchOpts.detach && output === "json") {
+        throw new Error("--output json is not available for attached launch");
+      }
       const captured = await readCommandSource(launchOpts.file, "workflow");
       const client = await openClient();
       const launched = await client.launchRun({
@@ -175,24 +191,41 @@ async function main(argv: string[]): Promise<number> {
           ? writeCapabilityFile(runId, launched.capability)
           : null;
       if (launched.capability) await client.authenticate(launched.capability);
-      if (!launchOpts.detach) process.stdout.write(formatRunHeader(runId));
-      if (!launchOpts.detach && capabilityRef)
-        process.stdout.write(`capability ${capabilityRef}\n`);
-      if (!launchOpts.detach && launchOpts.emitCapability && launched.capability) {
-        process.stdout.write(`capability ${launched.capability}\n`);
-      }
-      const terminal = launchOpts.detach ? null : await watchRun(client, runId, { json: false });
       if (launchOpts.detach) {
         const payload = launchOpts.emitCapability
           ? { runId, capability: launched.capability ?? null }
           : { runId, capabilityRef };
-        process.stdout.write(`${JSON.stringify(payload)}\n`);
+        process.stdout.write(
+          output === "json" ? `${JSON.stringify(payload)}\n` : formatLaunchText(payload),
+        );
+        client.close();
+        return 0;
       }
+      if (output === "text") {
+        process.stdout.write(formatRunHeader(runId));
+        if (capabilityRef) process.stdout.write(`capability ${capabilityRef}\n`);
+        if (launchOpts.emitCapability && launched.capability) {
+          process.stdout.write(`capability ${launched.capability}\n`);
+        }
+      } else if (output === "ndjson") {
+        process.stdout.write(
+          `${JSON.stringify({
+            seq: 0,
+            type: "launch.started",
+            payload: launchOpts.emitCapability
+              ? { runId, capability: launched.capability ?? null }
+              : { runId, capabilityRef },
+            atMs: Date.now(),
+          })}\n`,
+        );
+      }
+      const terminal = await watchRun(client, runId, { output });
       client.close();
-      return terminal === "failed" ? 1 : 0;
+      return statusExitCode(terminal);
     }
     case "run": {
       const runOpts = parseRunArgs(rest);
+      const output = runOpts.output ?? "json";
       const captured = await readCommandSource(runOpts.file, "workflow");
       const client = await openClient();
       const launched = await client.launchRun({
@@ -205,31 +238,31 @@ async function main(argv: string[]): Promise<number> {
         ? writeCapabilityFile(launched.runId, launched.capability)
         : null;
       if (launched.capability) await client.authenticate(launched.capability);
-      const outcome = await client.waitForRun(launched.runId);
-      const blockage = isParked(outcome.status) ? await client.getBlockage(launched.runId) : null;
-      if (runOpts.json) {
+      if (output === "json") {
+        const outcome = await client.waitForRun(launched.runId);
+        const blockage = isParked(outcome.status) ? await client.getBlockage(launched.runId) : null;
         process.stdout.write(`${JSON.stringify(runEnvelope(outcome, capabilityRef, blockage))}\n`);
-      } else {
-        process.stdout.write(`run ${launched.runId}\n`);
-        if (outcome.status === "finished") {
-          process.stdout.write(formatHumanOutput(outcome.output));
-        } else if (outcome.status === "failed") {
-          process.stderr.write(`${outcome.error?.message ?? "run failed"}\n`);
-        } else {
-          process.stdout.write(`${outcome.status}\n`);
-        }
+        client.close();
+        return statusExitCode(outcome.status);
       }
+      if (output === "text") {
+        process.stdout.write(`run ${launched.runId}\n`);
+      }
+      const terminal = await watchRun(client, launched.runId, { output });
       client.close();
-      return outcome.status === "failed" ? 1 : outcome.status === "finished" ? 0 : 3;
+      return statusExitCode(terminal);
     }
     case "watch": {
       const parsed = parseWatchArgs(rest);
+      if (parsed.output === "json") {
+        throw new Error("--output json is not available for watch");
+      }
       const { runId } = parsed;
       if (!runId) return usage("watch needs a runId");
       const client = await openClient();
-      const terminal = await watchRun(client, runId, { json: parsed.json });
+      const terminal = await watchRun(client, runId, { output: parsed.output ?? "ndjson" });
       client.close();
-      return terminal === "failed" ? 1 : 0;
+      return statusExitCode(terminal);
     }
     case "get": {
       const [runId] = rest;
@@ -240,7 +273,8 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     }
     case "output": {
-      const [runId] = rest;
+      const parsed = parseRunIdOutputArgs(rest, "output", "json", ["json", "text"]);
+      const { runId } = parsed;
       if (!runId) return usage("output needs a runId");
       const client = await openClient();
       const out = await client.getRunOutput(runId);
@@ -249,9 +283,30 @@ async function main(argv: string[]): Promise<number> {
         client.close();
         return out.status === "failed" ? 1 : 3;
       }
-      process.stdout.write(`${JSON.stringify(out.output ?? null)}\n`);
+      process.stdout.write(
+        parsed.output === "json"
+          ? `${JSON.stringify(out.output ?? null)}\n`
+          : formatHumanOutput(out.output),
+      );
       client.close();
       return 0;
+    }
+    case "report": {
+      const parsed = parseRunIdOutputArgs(rest, "report", "json", ["json", "text"]);
+      const { runId } = parsed;
+      if (!runId) return usage("report needs a runId");
+      const client = await openClient();
+      const report = await client.getRunReport(runId);
+      if (!report) {
+        process.stderr.write(`run ${runId} not found\n`);
+        client.close();
+        return 1;
+      }
+      process.stdout.write(
+        parsed.output === "json" ? `${JSON.stringify(report)}\n` : formatRunReportText(report),
+      );
+      client.close();
+      return statusExitCode(report.status);
     }
     case "resume": {
       const parsed = parseLifecycleArgs(rest);
@@ -260,7 +315,7 @@ async function main(argv: string[]): Promise<number> {
       const client = await openClient();
       const out = await client.resumeRun(runId);
       if (!parsed.detach) process.stdout.write(formatRunHeader(out.runId));
-      const terminal = parsed.detach ? null : await watchRun(client, out.runId, { json: false });
+      const terminal = parsed.detach ? null : await watchRun(client, out.runId, { output: "text" });
       if (parsed.detach) process.stdout.write(`${out.runId}\t${out.status}\n`);
       client.close();
       return terminal === "failed" ? 1 : 0;
@@ -313,7 +368,7 @@ async function main(argv: string[]): Promise<number> {
       const client = await openClient();
       const out = await client.retryRun(runId);
       if (!parsed.detach) process.stdout.write(formatRunHeader(out.runId));
-      const terminal = parsed.detach ? null : await watchRun(client, out.runId, { json: false });
+      const terminal = parsed.detach ? null : await watchRun(client, out.runId, { output: "text" });
       if (parsed.detach) process.stdout.write(`${out.runId}\t${out.status}\n`);
       client.close();
       return terminal === "failed" ? 1 : 0;
@@ -325,7 +380,7 @@ async function main(argv: string[]): Promise<number> {
       const client = await openClient();
       const out = await client.rewindRun(runId, step);
       if (!parsed.detach) process.stdout.write(formatRunHeader(out.runId));
-      const terminal = parsed.detach ? null : await watchRun(client, out.runId, { json: false });
+      const terminal = parsed.detach ? null : await watchRun(client, out.runId, { output: "text" });
       if (parsed.detach) process.stdout.write(`${out.runId}\t${out.status}\n`);
       client.close();
       return terminal === "failed" ? 1 : 0;
@@ -344,6 +399,9 @@ async function main(argv: string[]): Promise<number> {
       let client: DaemonClient | null = null;
       try {
         const parsed = parseExecuteArgs(rest);
+        if (parsed.output !== "json") {
+          throw new Error(`--output ${parsed.output} is not available for execute`);
+        }
         const credential = parsed.capFile
           ? loadCredentialFromFile(parsed.capFile)
           : loadCredential();
@@ -382,16 +440,22 @@ export function parseLifecycleArgs(args: string[]): { detach: boolean; args: str
   return { detach: false, args };
 }
 
+export function parseOutputFormat(value: string): OutputFormat {
+  if ((OUTPUT_FORMATS as readonly string[]).includes(value)) return value as OutputFormat;
+  throw new Error(`invalid --output ${value}; expected json, text, or ndjson`);
+}
+
 export interface LaunchArgs {
   detach: boolean;
   emitCapability: boolean;
+  output?: OutputFormat;
   file?: string;
   name?: string | null;
   input: unknown;
 }
 
 export interface RunArgs {
-  json: boolean;
+  output?: OutputFormat;
   file?: string;
   name?: string | null;
   input: unknown;
@@ -402,24 +466,25 @@ export interface ExecuteArgs {
   entry?: string;
   stateFile?: string;
   capFile?: string;
+  output: OutputFormat;
   emitCapability: boolean;
   args: string[];
 }
 
 export function parseLaunchArgs(args: string[]): LaunchArgs {
   const out: LaunchArgs = { detach: false, emitCapability: false, input: {} };
-  parseSourceArgs(args, out, { detach: true, emitCapability: true, json: false });
+  parseSourceArgs(args, out, { detach: true, emitCapability: true, output: true });
   return out;
 }
 
 export function parseRunArgs(args: string[]): RunArgs {
-  const out: RunArgs = { json: false, input: {} };
-  parseSourceArgs(args, out, { detach: false, emitCapability: false, json: true });
+  const out: RunArgs = { input: {} };
+  parseSourceArgs(args, out, { detach: false, emitCapability: false, output: true });
   return out;
 }
 
 export function parseExecuteArgs(args: string[]): ExecuteArgs {
-  const out: ExecuteArgs = { emitCapability: false, args: [] };
+  const out: ExecuteArgs = { output: "json", emitCapability: false, args: [] };
   const script: string[] = [];
   let i = 0;
   while (i < args.length) {
@@ -440,6 +505,9 @@ export function parseExecuteArgs(args: string[]): ExecuteArgs {
     } else if (arg === "--emit-capability") {
       out.emitCapability = true;
       i += 1;
+    } else if (arg === "--output") {
+      out.output = parseOutputFormat(requireFlagValue(args, i, "--output"));
+      i += 2;
     } else if (arg.startsWith("--")) {
       throw new Error(`unknown execute flag ${arg}`);
     } else {
@@ -462,9 +530,9 @@ function parseSourceArgs(
     input: unknown;
     detach?: boolean;
     emitCapability?: boolean;
-    json?: boolean;
+    output?: OutputFormat;
   },
-  flags: { detach: boolean; emitCapability: boolean; json: boolean },
+  flags: { detach: boolean; emitCapability: boolean; output: boolean },
 ): void {
   const positional: string[] = [];
   let i = 0;
@@ -476,9 +544,9 @@ function parseSourceArgs(
     } else if (arg === "--emit-capability" && flags.emitCapability) {
       out.emitCapability = true;
       i += 1;
-    } else if (arg === "--json" && flags.json) {
-      out.json = true;
-      i += 1;
+    } else if (arg === "--output" && flags.output) {
+      out.output = parseOutputFormat(requireFlagValue(args, i, "--output"));
+      i += 2;
     } else if (arg === "--name") {
       out.name = requireFlagValue(args, i, "--name");
       i += 2;
@@ -521,6 +589,36 @@ export function parseLaunchInput(inputJson: string | undefined): unknown {
     throw new Error("launch input must be valid JSON; omit it for {}");
   }
   return JSON.parse(inputJson);
+}
+
+export function parseRunIdOutputArgs(
+  args: string[],
+  command: string,
+  defaultOutput: OutputFormat,
+  allowed: readonly OutputFormat[],
+): { runId?: string; output: OutputFormat } {
+  let output = defaultOutput;
+  const positional: string[] = [];
+  let i = 0;
+  while (i < args.length) {
+    const arg = args[i] as string;
+    if (arg === "--output") {
+      output = parseOutputFormat(requireFlagValue(args, i, "--output"));
+      i += 2;
+    } else if (arg.startsWith("--")) {
+      throw new Error(`unknown ${command} flag ${arg}`);
+    } else {
+      positional.push(arg);
+      i += 1;
+    }
+  }
+  if (!allowed.includes(output)) {
+    throw new Error(`--output ${output} is not available for ${command}`);
+  }
+  if (positional.length > 1) {
+    throw new Error(`unexpected argument ${positional[1]} for ${command}`);
+  }
+  return { runId: positional[0], output };
 }
 
 export function resolveWorkflowPath(workflow: string, cwd = process.cwd()): string {
@@ -569,6 +667,18 @@ function isParked(status: string): boolean {
   return status.startsWith("waiting-");
 }
 
+function statusExitCode(status: string): number {
+  if (status === "failed") return 1;
+  return status === "finished" || status === "continued" ? 0 : 3;
+}
+
+function parkedStatus(payload: unknown): WatchStatus {
+  const kind = prop(payload, "kind");
+  if (kind === "timer") return "waiting-timer";
+  if (kind === "human") return "waiting-human";
+  return "waiting-signal";
+}
+
 function runEnvelope(
   outcome: RunOutcome,
   capabilityRef: string | null,
@@ -589,33 +699,89 @@ function formatHumanOutput(output: unknown): string {
   return `${JSON.stringify(output ?? null)}\n`;
 }
 
+function formatLaunchText(payload: {
+  runId: string;
+  capability?: string | null;
+  capabilityRef?: string | null;
+}): string {
+  return [
+    `run ${payload.runId}`,
+    ...(payload.capabilityRef ? [`capability ${payload.capabilityRef}`] : []),
+    ...(payload.capability ? [`capability ${payload.capability}`] : []),
+    "",
+  ].join("\n");
+}
+
+export function formatRunReportText(report: RunReport): string {
+  const lines = [
+    `run ${report.runId}`,
+    `status ${report.status}`,
+    `workflow ${displayName(report.workflowName)}`,
+  ];
+  if (report.outputOmitted) {
+    lines.push(`output omitted ${report.outputByteLength ?? 0} bytes`);
+  } else if ("output" in report) {
+    lines.push(`output ${compact(report.output)}`);
+  }
+  if (report.error) lines.push(`error ${report.error.name}: ${report.error.message}`);
+  if (report.blockage) lines.push(`blockage ${report.blockage.reason}: ${report.blockage.context}`);
+  lines.push(
+    `stats steps=${report.stats.steps} agents=${report.stats.agents} artifacts=${report.stats.artifacts}`,
+  );
+  for (const node of report.nodes) {
+    const label = `${node.stableKey} ${node.status} ${node.effectType} attempt=${node.attempt}`;
+    if (node.resultOmitted) {
+      lines.push(`${label} result omitted ${node.resultByteLength ?? 0} bytes`);
+    } else if ("result" in node) {
+      lines.push(`${label} result ${compact(node.result)}`);
+    } else {
+      lines.push(label);
+    }
+  }
+  return `${lines.join("\n")}\n`;
+}
+
 export function formatRunHeader(runId: string): string {
   return `run ${runId}\n`;
 }
 
-export function parseWatchArgs(args: string[]): { runId?: string; json: boolean } {
-  if (args[0] === "--json") return { runId: args[1], json: true };
-  return { runId: args[0], json: false };
+export function parseWatchArgs(args: string[]): { runId?: string; output: OutputFormat } {
+  return parseRunIdOutputArgs(args, "watch", "ndjson", ["json", "text", "ndjson"]);
 }
+
+type WatchStatus = RunOutcome["status"];
 
 async function watchRun(
   client: DaemonClient,
   runId: string,
-  opts: { json?: boolean },
-): Promise<"finished" | "failed" | "continued"> {
-  return new Promise<"finished" | "failed" | "continued">((resolve) => {
-    client.subscribeEvents(runId, 0, (e) => {
-      process.stdout.write(formatWatchEvent(e, opts));
-      if (e.type === "run.finished") resolve("finished");
-      if (e.type === "run.failed") resolve("failed");
-      if (e.type === "run.continued") resolve("continued");
-    });
+  opts: { output: OutputFormat },
+): Promise<WatchStatus> {
+  return new Promise<WatchStatus>((resolve) => {
+    client.subscribeEvents(
+      runId,
+      0,
+      (e) => {
+        process.stdout.write(formatWatchEvent(e, opts));
+        if (e.type === "run.finished") resolve("finished");
+        if (e.type === "run.failed") resolve("failed");
+        if (e.type === "run.continued") resolve("continued");
+        if (e.type === "run.parked") resolve(parkedStatus(e.payload));
+        if (e.type === "authorization.failed") resolve("failed");
+      },
+      (err) => {
+        process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+        resolve("failed");
+      },
+    );
   });
 }
 
-export function formatWatchEvent(event: EventEnvelope, opts: { json?: boolean } = {}): string {
+export function formatWatchEvent(
+  event: EventEnvelope,
+  opts: { output?: OutputFormat } = {},
+): string {
   const safeEvent = redactCapabilityTokensInValue(event);
-  if (opts.json) return `${JSON.stringify(safeEvent)}\n`;
+  if ((opts.output ?? "text") === "ndjson") return `${JSON.stringify(safeEvent)}\n`;
 
   const prefix = `[${safeEvent.seq}]`;
   const payload = safeEvent.payload;

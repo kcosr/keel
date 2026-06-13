@@ -2,7 +2,8 @@
 
 A **workflow** is an `async (ctx, input) => output` function. You call agents and
 do work through `ctx`; Keel runs it durably and survives crashes. Write a `.ts`
-file, then run it with `keel launch`.
+workflow file, then use `keel execute` for agent-friendly control scripts that
+launch, wait, inspect, and return one JSON result.
 
 ---
 
@@ -150,15 +151,53 @@ export default async function adversarialReview(ctx: Ctx, input: { root: string 
 }
 ```
 
-## 7. Run it
+## 7. Run it with `execute`
+
+For agent-driven work, prefer `keel execute`: it lets you write the orchestration
+around workflow commands in TypeScript, avoid repeated CLI round trips, and return
+one structured JSON value.
+
+```ts
+// run-review.control.ts
+const run = await keel.launch({
+  workflow: "./adversarial-review.workflow.ts",
+  input: { root: "/abs/path/to/code" },
+});
+
+const settled = await keel.wait(run.runId);
+return {
+  runId: run.runId,
+  capabilityRef: run.capabilityRef,
+  status: settled.status,
+  output: settled.output,
+};
+```
+
+```bash
+keel execute ./run-review.control.ts
+```
+
+`execute` is stateless. Pass only non-secret handles through `--state`; pass
+capabilities through credential channels such as `KEEL_CAP_FILE`,
+`KEEL_RUN_CAP`, `KEEL_ADMIN_TOKEN`, or `--cap-file`. Child launches return a
+`capabilityRef` by default. Raw child capabilities require `--emit-capability`.
+
+Use `execute` when the next action is computable from the prior result: launch
+fan-out, wait, retry, inspect output, shape JSON, or decide a simple branch.
+Durable pauses, replayable workflow logic, and long-running state belong in the
+workflow itself, not in `execute`.
+
+## 8. CLI Reference
+
+Use individual CLI verbs for quick one-shot commands or when you need to inspect
+the result and decide the next action manually:
 
 ```bash
 keel launch ./adversarial-review.workflow.ts '{"root":"/abs/path/to/code"}'
 ```
 
-`keel launch` watches by default. Use `keel launch --detach ...` when you need a
-run id for scripting; detached launch returns JSON with `runId` and
-`capabilityRef`, and follow-up commands need that cap file:
+`keel launch` watches by default. Detached launch returns JSON with `runId` and
+`capabilityRef`; follow-up commands need that cap file:
 
 ```bash
 LAUNCH=$(keel launch --detach ./adversarial-review.workflow.ts '{"root":"/abs/path/to/code"}')
@@ -168,9 +207,18 @@ KEEL_CAP_FILE="$CAP" keel watch "$RUN"
 KEEL_CAP_FILE="$CAP" keel get "$RUN"       # final result (JSON)
 ```
 
+Other useful verbs:
+
+```bash
+KEEL_CAP_FILE="$CAP" keel resume "$RUN"
+KEEL_CAP_FILE="$CAP" keel retry "$RUN"
+KEEL_CAP_FILE="$CAP" keel rewind "$RUN" <stepKey>
+KEEL_CAP_FILE="$CAP" keel fork "$RUN" [atStepKey]
+```
+
 Omit the input argument for `{}`. Pass valid JSON for any other input.
 
-## 8. Tips
+## 9. Tips
 
 - Use **absolute paths** for the code you're reviewing.
 - On optional review fan-out agents, set **`toolPolicy: "read-only"`**, **`lenient:
@@ -178,6 +226,5 @@ Omit the input argument for `{}`. Pass valid JSON for any other input.
   For required agents, omit `onFailure` so failures can be retried.
 - A run resumes from its immutable launch-time workflow snapshot. Edit the source
   file only when you intend a later rerun/adopt-latest path to snapshot new code.
-- Use `keel execute` for short stateless control scripts that launch/resume/wait
-  and shape JSON output. Do not put durable orchestration state in `execute`;
-  durable pauses belong in workflow code.
+- Use individual CLI verbs when judgment is needed between steps; use `execute`
+  when the next step is mechanical.

@@ -4,9 +4,12 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  renameSync,
+  rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { builtinModules } from "node:module";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -60,6 +63,7 @@ export interface SnapshotWorkflowOptions {
 
 const DEFINITION_PREFIX = "wf_sha256_";
 export const MAX_WORKFLOW_SOURCE_BYTES = 256 * 1024;
+export const DEFAULT_WORKFLOW_DEFINITION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const NODE_BUILTINS = new Set([...builtinModules, ...builtinModules.map((name) => `node:${name}`)]);
 const KEEL_PACKAGE_ROOT = resolve(fileURLToPath(new URL("../../", import.meta.url)));
 const tsTranspiler = new Bun.Transpiler({ loader: "tsx" });
@@ -100,26 +104,64 @@ export function materializeWorkflowDefinition(
   if (!row) throw new Error(`workflow definition ${hash} not found`);
   const manifest = parseManifest(row);
   const root = join(cacheRoot, hash);
+  const entryPath = join(root, manifest.modules.length === 0 ? "entry.ts" : manifest.entry);
+  if (existsSync(entryPath)) return entryPath;
 
+  mkdirSync(cacheRoot, { recursive: true });
+  const tmp = join(cacheRoot, `.tmp-${hash}-${randomUUID()}`);
+  rmSync(tmp, { recursive: true, force: true });
+  mkdirSync(tmp, { recursive: true });
   for (const module of manifest.modules) {
-    const dest = join(root, module.path);
+    const dest = join(tmp, module.path);
     mkdirSync(dirname(dest), { recursive: true });
     writeFileSync(dest, module.code, "utf8");
   }
   if (manifest.modules.length === 0) {
-    const entry = join(root, "entry.ts");
+    const entry = join(tmp, "entry.ts");
     mkdirSync(dirname(entry), { recursive: true });
     writeFileSync(entry, row.code, "utf8");
-    return entry;
   }
 
   linkExternalResolution(
-    root,
+    tmp,
     manifest.sourceRoot,
     manifest.externalImports,
     manifest.externalPackages,
   );
-  return join(root, manifest.entry);
+  try {
+    renameSync(tmp, root);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== "EEXIST" && code !== "ENOTEMPTY") throw err;
+    rmSync(tmp, { recursive: true, force: true });
+    if (!existsSync(entryPath)) {
+      rmSync(root, { recursive: true, force: true });
+      materializeWorkflowDefinition(store, hash, cacheRoot);
+    }
+  }
+  return entryPath;
+}
+
+export function evictWorkflowDefinitionCache(
+  store: JournalStore,
+  opts: { cacheRoot?: string; nowMs: number; minAgeMs?: number },
+): number {
+  const cacheRoot = opts.cacheRoot ?? defaultDefinitionCacheRoot();
+  if (!existsSync(cacheRoot)) return 0;
+  const active = new Set(store.listActiveWorkflowDefinitionHashes());
+  const minAgeMs = opts.minAgeMs ?? 0;
+  let removed = 0;
+  for (const name of readdirSync(cacheRoot)) {
+    if (!isWorkflowDefinitionHash(name)) continue;
+    if (active.has(name)) continue;
+    const path = join(cacheRoot, name);
+    const stat = lstatSync(path);
+    if (!stat.isDirectory()) continue;
+    if (opts.nowMs - stat.mtimeMs < minAgeMs) continue;
+    rmSync(path, { recursive: true, force: true });
+    removed += 1;
+  }
+  return removed;
 }
 
 export function isWorkflowDefinitionHash(value: string): boolean {

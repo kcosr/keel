@@ -408,6 +408,35 @@ describe("keel CLI", () => {
     }
   });
 
+  test("gc runs as an admin daemon operation", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-gc-"));
+    const socketPath = join(dir, "keel.sock");
+    const dbPath = join(dir, "keel.db");
+    const daemon = new KeelDaemon({
+      socketPath,
+      dbPath,
+      agents: new AgentProviderRegistry().register(new MockProvider()),
+      adminToken: "kc_admin_gc_test",
+    });
+    await daemon.start();
+    try {
+      const out = await runCli(["gc"], dir, {
+        KEEL_SOCKET: socketPath,
+        KEEL_DB: dbPath,
+        KEEL_DIR: dir,
+        KEEL_ADMIN_TOKEN: "kc_admin_gc_test",
+      });
+      expect(out.code).toBe(0);
+      expect(JSON.parse(out.stdout)).toEqual({
+        workflowDefinitionsRemoved: 0,
+        definitionCacheEntriesRemoved: 0,
+      });
+    } finally {
+      daemon.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("execute runs a stateless TypeScript control script over the daemon", async () => {
     const dir = mkdtempSync(join(tmpdir(), "keel-execute-"));
     const socketPath = join(dir, "keel.sock");

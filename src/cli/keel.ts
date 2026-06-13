@@ -59,6 +59,7 @@ const COMMANDS: [string, string, string][] = [
   ["get", "<runId>", "print a run's projection as JSON"],
   ["output", "<runId>", "print a run's terminal output as JSON"],
   ["list", "", "list runs"],
+  ["gc", "", "prune unreferenced workflow definitions and cache entries"],
   ["resume", "[--detach] <runId>", "resume a parked or incomplete run"],
   ["retry", "[--detach] <runId>", "re-run a failed run from its failed step"],
   ["rewind", "[--detach] <runId> <stepKey>", "discard everything after a step and re-run"],
@@ -270,6 +271,13 @@ async function main(argv: string[]): Promise<number> {
       for (const r of await client.listRuns()) {
         process.stdout.write(`${r.runId}\t${r.status}\t${displayName(r.workflowName)}\n`);
       }
+      client.close();
+      return 0;
+    }
+    case "gc": {
+      const client = await openClient();
+      const out = await client.gcDefinitions();
+      process.stdout.write(`${JSON.stringify(out)}\n`);
       client.close();
       return 0;
     }

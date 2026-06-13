@@ -395,6 +395,38 @@ export class JournalStore {
     return r ? mapWorkflowDefinition(r) : null;
   }
 
+  listActiveWorkflowDefinitionHashes(): string[] {
+    return this.db
+      .query<{ hash: string }, []>(
+        `SELECT DISTINCT definition_version AS hash FROM runs
+         WHERE status IN ('running', 'waiting-human', 'waiting-signal', 'waiting-timer')`,
+      )
+      .all()
+      .map((r) => r.hash);
+  }
+
+  pruneWorkflowDefinitions(opts: { nowMs: number; ttlMs: number }): number {
+    const cutoff = opts.nowMs - opts.ttlMs;
+    const removed =
+      this.db
+        .query<{ c: number }, [number]>(
+          `SELECT COUNT(*) AS c FROM workflow_definitions
+           WHERE created_at_ms < ?
+             AND hash NOT IN (SELECT definition_version FROM runs)
+             AND hash NOT IN (SELECT workflow_ref FROM schedules WHERE enabled = 1)`,
+        )
+        .get(cutoff)?.c ?? 0;
+    this.db
+      .query(
+        `DELETE FROM workflow_definitions
+         WHERE created_at_ms < ?
+           AND hash NOT IN (SELECT definition_version FROM runs)
+           AND hash NOT IN (SELECT workflow_ref FROM schedules WHERE enabled = 1)`,
+      )
+      .run(cutoff);
+    return removed;
+  }
+
   // ---- capabilities ------------------------------------------------------
 
   putCapability(row: NewCapabilityRow): void {

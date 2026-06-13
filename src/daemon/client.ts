@@ -138,6 +138,12 @@ export class DaemonClient {
   }): Promise<{ ok: boolean }> {
     return this.rpc("putSchedule", req);
   }
+  gcDefinitions(req: { ttlMs?: number; cacheMinAgeMs?: number } = {}): Promise<{
+    workflowDefinitionsRemoved: number;
+    definitionCacheEntriesRemoved: number;
+  }> {
+    return this.rpc("gcDefinitions", req);
+  }
   listRuns(): Promise<RunSummary[]> {
     return this.rpc("listRuns", {});
   }

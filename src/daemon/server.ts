@@ -22,7 +22,11 @@ import { RealmKernel } from "../kernel/realm/realm-host.ts";
 import { Supervisor } from "../kernel/supervisor.ts";
 import type { EventEnvelope, WorkflowProvenance } from "../rpc/contract.ts";
 import { InProcessKeel } from "../rpc/in-process.ts";
-import { snapshotWorkflowSource } from "../workflow-definitions/snapshot.ts";
+import {
+  DEFAULT_WORKFLOW_DEFINITION_TTL_MS,
+  evictWorkflowDefinitionCache,
+  snapshotWorkflowSource,
+} from "../workflow-definitions/snapshot.ts";
 
 export interface DaemonOptions {
   socketPath: string;
@@ -54,6 +58,7 @@ const DEFAULT_HEARTBEAT_MS = 10_000;
 const DEFAULT_SUPERVISE_MS = 1000;
 const OWNER_STALE_HEARTBEATS = 3;
 const AUTH_RECHECK_MS = 100;
+const DEFAULT_DEFINITION_CACHE_MIN_AGE_MS = 60_000;
 
 export class KeelDaemon {
   readonly ownerId: string;
@@ -381,6 +386,25 @@ export class KeelDaemon {
         });
         return { ok: true };
       }
+      case "gcDefinitions": {
+        this.authorizeAdmin(conn);
+        const ttlMs =
+          typeof p.ttlMs === "number" ? p.ttlMs : definitionTtlMsFromEnv();
+        const cacheMinAgeMs =
+          typeof p.cacheMinAgeMs === "number"
+            ? p.cacheMinAgeMs
+            : DEFAULT_DEFINITION_CACHE_MIN_AGE_MS;
+        const workflowDefinitionsRemoved = this.store.pruneWorkflowDefinitions({
+          nowMs: this.clock(),
+          ttlMs,
+        });
+        const definitionCacheEntriesRemoved = evictWorkflowDefinitionCache(this.store, {
+          cacheRoot: this.opts.definitionCacheRoot ?? join(dirname(this.opts.dbPath), "definitions"),
+          nowMs: this.clock(),
+          minAgeMs: cacheMinAgeMs,
+        });
+        return { workflowDefinitionsRemoved, definitionCacheEntriesRemoved };
+      }
       case "ping":
         return { ok: true, ownerId: this.ownerId };
       default:
@@ -438,4 +462,14 @@ export class KeelDaemon {
       );
     });
   }
+}
+
+function definitionTtlMsFromEnv(): number {
+  const raw = process.env.KEEL_DEFINITION_TTL_MS;
+  if (raw === undefined) return DEFAULT_WORKFLOW_DEFINITION_TTL_MS;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0) {
+    throw new Error(`KEEL_DEFINITION_TTL_MS must be a non-negative number of milliseconds`);
+  }
+  return value;
 }

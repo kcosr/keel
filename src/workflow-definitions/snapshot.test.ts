@@ -1,9 +1,22 @@
 import { describe, expect, test } from "bun:test";
-import { lstatSync, mkdtempSync, readlinkSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readlinkSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { JournalStore } from "../journal/store.ts";
-import { snapshotWorkflowSource } from "./snapshot.ts";
+import {
+  evictWorkflowDefinitionCache,
+  materializeWorkflowDefinition,
+  snapshotWorkflowSource,
+} from "./snapshot.ts";
 
 describe("workflow definition snapshots", () => {
   test("@kcosr/keel externals link to the package root", () => {
@@ -77,6 +90,71 @@ describe("workflow definition snapshots", () => {
       ).toThrow(/not allowed/);
     } finally {
       store.close();
+    }
+  });
+
+  test("materialization recovers from a partial cache directory", () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-snapshot-partial-"));
+    const store = JournalStore.memory();
+    try {
+      const cacheRoot = join(dir, "definitions");
+      const source = "export default async function wf() { return 1; }\n";
+      const { snapshot } = snapshotWorkflowSource(store, source, {
+        name: "partial",
+        nowMs: 1,
+        cacheRoot,
+      });
+      const root = join(cacheRoot, snapshot.hash);
+      rmSync(root, { recursive: true, force: true });
+      mkdirSync(root, { recursive: true });
+      writeFileSync(join(root, "partial.txt"), "incomplete");
+
+      const entry = materializeWorkflowDefinition(store, snapshot.hash, cacheRoot);
+      expect(readFileSync(entry, "utf8")).toBe(source);
+      expect(existsSync(join(root, "partial.txt"))).toBe(false);
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("cache eviction skips definitions used by active runs", () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-snapshot-gc-"));
+    const store = JournalStore.memory();
+    try {
+      const cacheRoot = join(dir, "definitions");
+      const active = snapshotWorkflowSource(store, "export default async () => 1;\n", {
+        name: "active",
+        nowMs: 1,
+        cacheRoot,
+      }).snapshot.hash;
+      const inactive = snapshotWorkflowSource(store, "export default async () => 2;\n", {
+        name: "inactive",
+        nowMs: 1,
+        cacheRoot,
+      }).snapshot.hash;
+      store.insertRun({
+        runId: "r_active",
+        workflowName: "active",
+        definitionVersion: active,
+        workflowRef: "stdin",
+        status: "waiting-human",
+        parentRunId: null,
+        tenantId: null,
+        inputRef: "null",
+        outputRef: null,
+        errorJson: null,
+        heartbeatAtMs: null,
+        runtimeOwnerId: null,
+        createdAtMs: 1,
+      });
+
+      expect(evictWorkflowDefinitionCache(store, { cacheRoot, nowMs: Date.now() })).toBe(1);
+      expect(existsSync(join(cacheRoot, active))).toBe(true);
+      expect(existsSync(join(cacheRoot, inactive))).toBe(false);
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

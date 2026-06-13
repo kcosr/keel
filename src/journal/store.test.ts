@@ -185,6 +185,49 @@ describe("JournalStore (in-memory)", () => {
     expect(got?.createdAtMs).toBe(1000);
   });
 
+  test("workflow definition pruning preserves run and enabled-schedule references", () => {
+    for (const hash of [
+      "wf_sha256_orphan",
+      "wf_sha256_run",
+      "wf_sha256_schedule",
+      "wf_sha256_disabled_schedule",
+      "wf_sha256_fresh",
+    ]) {
+      store.putWorkflowDefinition({
+        hash,
+        name: null,
+        kind: "source",
+        code: "export default async () => 1;",
+        sourceMap: null,
+        manifestJson: '{"format":"keel.workflow-definition.v1"}',
+        createdAtMs: hash === "wf_sha256_fresh" ? 95 : 1,
+      });
+    }
+    store.insertRun({ ...newRun("r_def"), definitionVersion: "wf_sha256_run" });
+    store.putSchedule({
+      name: "enabled",
+      workflowRef: "wf_sha256_schedule",
+      inputJson: null,
+      intervalMs: 1000,
+      nextFireMs: 1,
+    });
+    store.putSchedule({
+      name: "disabled",
+      workflowRef: "wf_sha256_disabled_schedule",
+      inputJson: null,
+      intervalMs: 1000,
+      nextFireMs: 1,
+    });
+    store.db.query("UPDATE schedules SET enabled = 0 WHERE name = 'disabled'").run();
+
+    expect(store.pruneWorkflowDefinitions({ nowMs: 100, ttlMs: 10 })).toBe(2);
+    expect(store.getWorkflowDefinition("wf_sha256_orphan")).toBeNull();
+    expect(store.getWorkflowDefinition("wf_sha256_disabled_schedule")).toBeNull();
+    expect(store.getWorkflowDefinition("wf_sha256_run")).not.toBeNull();
+    expect(store.getWorkflowDefinition("wf_sha256_schedule")).not.toBeNull();
+    expect(store.getWorkflowDefinition("wf_sha256_fresh")).not.toBeNull();
+  });
+
   test("capabilities round-trip by secret hash without storing raw tokens", () => {
     store.putCapability({
       id: "cap_1",

@@ -318,7 +318,7 @@ async function main(argv: string[]): Promise<number> {
       const terminal = parsed.detach ? null : await watchRun(client, out.runId, { output: "text" });
       if (parsed.detach) process.stdout.write(`${out.runId}\t${out.status}\n`);
       client.close();
-      return terminal === "failed" ? 1 : 0;
+      return parsed.detach ? 0 : statusExitCode(terminal ?? out.status);
     }
     case "list": {
       const client = await openClient();
@@ -371,7 +371,7 @@ async function main(argv: string[]): Promise<number> {
       const terminal = parsed.detach ? null : await watchRun(client, out.runId, { output: "text" });
       if (parsed.detach) process.stdout.write(`${out.runId}\t${out.status}\n`);
       client.close();
-      return terminal === "failed" ? 1 : 0;
+      return parsed.detach ? 0 : statusExitCode(terminal ?? out.status);
     }
     case "rewind": {
       const parsed = parseLifecycleArgs(rest);
@@ -383,7 +383,7 @@ async function main(argv: string[]): Promise<number> {
       const terminal = parsed.detach ? null : await watchRun(client, out.runId, { output: "text" });
       if (parsed.detach) process.stdout.write(`${out.runId}\t${out.status}\n`);
       client.close();
-      return terminal === "failed" ? 1 : 0;
+      return parsed.detach ? 0 : statusExitCode(terminal ?? out.status);
     }
     case "fork": {
       const [runId, atStableKey] = rest;

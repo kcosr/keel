@@ -428,11 +428,12 @@ describe.if(LIVE)("LIVE claude smoke", () => {
     let client: InstanceType<typeof DaemonClient> | null = null;
     try {
       client = await DaemonClient.connect(socketPath);
-      const { runId } = await client.launchRun({
+      const { runId, capability } = await client.launchRun({
         ...liveUrl,
         input: null,
         name: "live-claude",
       });
+      await client.authenticate(capability as string);
       const outcome = await client.waitForRun(runId);
       expect(outcome.status).toBe("finished");
       expect(outcome.output).toBe(12);

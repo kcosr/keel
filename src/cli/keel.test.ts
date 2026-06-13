@@ -496,6 +496,52 @@ describe("keel CLI", () => {
   );
 
   test(
+    "attached lifecycle commands exit 3 when the run parks",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "keel-lifecycle-parked-"));
+      const socketPath = join(dir, "keel.sock");
+      const dbPath = join(dir, "keel.db");
+      const daemon = new KeelDaemon({
+        socketPath,
+        dbPath,
+        agents: new AgentProviderRegistry().register(new MockProvider()),
+        adminToken: "kc_admin_lifecycle_test",
+      });
+      await daemon.start();
+      try {
+        const env = {
+          KEEL_SOCKET: socketPath,
+          KEEL_DB: dbPath,
+          KEEL_DIR: dir,
+          KEEL_ADMIN_TOKEN: "kc_admin_lifecycle_test",
+        };
+        const launched = await runCli(["launch", "--detach", gateUrl], dir, env);
+        expect(launched.code).toBe(0);
+        const payload = JSON.parse(launched.stdout) as { runId: string; capabilityRef: string };
+        await waitForCliStatus(payload.runId, dir, env, "waiting-human");
+
+        const detached = await runCli(["resume", "--detach", payload.runId], dir, env);
+        expect(detached.code).toBe(0);
+        expect(detached.stdout).toContain(`${payload.runId}\t`);
+        await waitForCliStatus(payload.runId, dir, env, "waiting-human");
+
+        const resumed = await runCli(["resume", payload.runId], dir, env);
+        expect(resumed.code).toBe(3);
+        expect(resumed.stdout).toContain(`run ${payload.runId}`);
+        expect(resumed.stdout).toContain("run.parked human approve-deploy");
+
+        const approved = await runCli(["approve", payload.runId, "approve-deploy"], dir, env);
+        expect(approved.code).toBe(0);
+        await waitForCliStatus(payload.runId, dir, env);
+      } finally {
+        daemon.stop();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    DAEMON_TEST_TIMEOUT_MS,
+  );
+
+  test(
     "launch reads workflow source from stdin when no file is passed",
     async () => {
       const dir = mkdtempSync(join(tmpdir(), "keel-launch-stdin-"));

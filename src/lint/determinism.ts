@@ -12,6 +12,7 @@
 // view and checks `.type` explicitly. The realm runner runs this before spawning
 // the worker; a violation fails the run with guidance.
 
+import { builtinModules } from "node:module";
 import { parse } from "acorn";
 
 /** Loose AST node view (acorn nodes have all fields at runtime). */
@@ -24,7 +25,10 @@ export interface Violation {
   column: number;
 }
 
+const NODE_BUILTINS = new Set([...builtinModules, ...builtinModules.map((name) => `node:${name}`)]);
+
 const FORBIDDEN_MODULES = new Set([
+  ...NODE_BUILTINS,
   "fs",
   "node:fs",
   "fs/promises",
@@ -48,6 +52,8 @@ const FORBIDDEN_MODULES = new Set([
   "bun",
   "@kcosr/keel/execute",
 ]);
+
+const FORBIDDEN_GLOBALS = new Set(["process", "module", "require", "Buffer", "URLPattern"]);
 
 // Globals every workflow may rely on (pure/deterministic or provided by ctx).
 const ALLOWED_GLOBALS = new Set([
@@ -123,6 +129,13 @@ export function lintWorkflowSource(source: string, filename = "workflow"): Viola
           ...at(node),
         });
       }
+      if (isForbiddenGlobalMember(obj, moduleScope)) {
+        violations.push({
+          rule: "no-ambient-host-global",
+          message: `${memberRootName(obj)}.* is not allowed in workflow code; use ctx.* or explicit inputs.`,
+          ...at(node),
+        });
+      }
       if (obj?.type === "Identifier" && prop?.type === "Identifier") {
         const o = obj.name as string;
         const p = prop.name as string;
@@ -148,6 +161,19 @@ export function lintWorkflowSource(source: string, filename = "workflow"): Viola
       }
     }
 
+    if (
+      node.type === "Identifier" &&
+      FORBIDDEN_GLOBALS.has(node.name as string) &&
+      !moduleScope.has(node.name as string) &&
+      isReferenceIdentifier(node, ancestors)
+    ) {
+      violations.push({
+        rule: "no-ambient-host-global",
+        message: `${node.name as string} is not allowed in workflow code.`,
+        ...at(node),
+      });
+    }
+
     // argless new Date() / new Function(...)
     if (node.type === "NewExpression") {
       const callee = node.callee as AnyNode;
@@ -170,7 +196,7 @@ export function lintWorkflowSource(source: string, filename = "workflow"): Viola
       }
     }
 
-    // eval / require / fetch as bare calls
+    // eval / Function / require / fetch as calls, including globalThis.eval(...)
     if (node.type === "CallExpression") {
       const callee = node.callee as AnyNode;
       if (callee?.type === "Identifier") {
@@ -194,7 +220,25 @@ export function lintWorkflowSource(source: string, filename = "workflow"): Viola
               "fetch(...) is not allowed in workflow code; use ctx.agent() or journaled inputs.",
             ...at(node),
           });
+        } else if (name === "Function") {
+          violations.push({
+            rule: "no-dynamic-code",
+            message: "Function(...) is not allowed in workflow code.",
+            ...at(node),
+          });
         }
+      } else if (callee?.type === "MemberExpression" && isGlobalThisMember(callee, "eval")) {
+        violations.push({
+          rule: "no-dynamic-code",
+          message: "globalThis.eval(...) is not allowed in workflow code.",
+          ...at(node),
+        });
+      } else if (callee?.type === "MemberExpression" && isGlobalThisMember(callee, "Function")) {
+        violations.push({
+          rule: "no-dynamic-code",
+          message: "globalThis.Function(...) is not allowed in workflow code.",
+          ...at(node),
+        });
       }
     }
 
@@ -211,14 +255,17 @@ export function lintWorkflowSource(source: string, filename = "workflow"): Viola
     }
     if (node.type === "ImportExpression") {
       const src = node.source as AnyNode;
-      if (
-        src?.type === "Literal" &&
-        typeof src.value === "string" &&
-        FORBIDDEN_MODULES.has(src.value)
-      ) {
+      if (src?.type === "Literal" && typeof src.value === "string") {
+        if (!FORBIDDEN_MODULES.has(src.value)) return;
         violations.push({
           rule: "no-forbidden-import",
           message: `dynamic import("${src.value}") is not allowed in workflow code.`,
+          ...at(node),
+        });
+      } else {
+        violations.push({
+          rule: "no-dynamic-import",
+          message: "dynamic import(...) is not allowed in workflow code.",
           ...at(node),
         });
       }
@@ -238,6 +285,55 @@ export function lintWorkflowSource(source: string, filename = "workflow"): Viola
   });
 
   return violations;
+}
+
+function isGlobalThisMember(node: AnyNode, propName: string): boolean {
+  const obj = node.object as AnyNode | undefined;
+  const prop = node.property as AnyNode | undefined;
+  return (
+    obj?.type === "Identifier" &&
+    obj.name === "globalThis" &&
+    prop?.type === "Identifier" &&
+    prop.name === propName
+  );
+}
+
+function isForbiddenGlobalMember(obj: AnyNode | undefined, moduleScope: Set<string>): boolean {
+  const root = memberRootName(obj);
+  return root !== null && FORBIDDEN_GLOBALS.has(root) && !moduleScope.has(root);
+}
+
+function memberRootName(node: AnyNode | undefined): string | null {
+  if (!node) return null;
+  if (node.type === "Identifier") return node.name as string;
+  if (node.type === "MemberExpression") {
+    const obj = node.object as AnyNode | undefined;
+    const prop = node.property as AnyNode | undefined;
+    if (obj?.type === "Identifier" && obj.name === "globalThis" && prop?.type === "Identifier") {
+      return prop.name as string;
+    }
+    return memberRootName(obj);
+  }
+  return null;
+}
+
+function isReferenceIdentifier(node: AnyNode, ancestors: AnyNode[]): boolean {
+  const parent = ancestors.at(-1);
+  if (!parent) return true;
+  if (
+    (parent.type === "VariableDeclarator" && parent.id === node) ||
+    ((parent.type === "FunctionDeclaration" ||
+      parent.type === "FunctionExpression" ||
+      parent.type === "ClassDeclaration") &&
+      parent.id === node)
+  ) {
+    return false;
+  }
+  if (parent.type === "MemberExpression" && parent.property === node && !parent.computed)
+    return false;
+  if (parent.type === "Property" && parent.key === node && !parent.computed) return false;
+  if (parent.type === "ImportSpecifier" || parent.type === "ImportDefaultSpecifier") return false;
+  return true;
 }
 
 function parseError(filename: string, message: string): Violation {

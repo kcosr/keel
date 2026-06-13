@@ -24,6 +24,25 @@ describe("determinism lint — forbidden ambient globals", () => {
     expect(rules("export default async () => Bun.spawn(['true']);")).toContain("no-bun-global");
   });
 
+  test("host process and dynamic code escape paths are rejected", () => {
+    const source = `
+      import process from "node:process";
+      import { createRequire } from "node:module";
+      process.env.SECRET;
+      globalThis.eval("1 + 1");
+      Function("return 1")();
+      createRequire(import.meta.url)("node:fs");
+      import(foo);
+    `;
+    const rules = lintWorkflowSource(source).map((v) => v.rule);
+    expect(rules).toContain("no-forbidden-import");
+    expect(rules).toContain("no-dynamic-code");
+    expect(rules).toContain("no-dynamic-import");
+    expect(lintWorkflowSource("globalThis.process.env.SECRET;").map((v) => v.rule)).toContain(
+      "no-ambient-host-global",
+    );
+  });
+
   test("new Date(ms) with an explicit arg is allowed", () => {
     expect(rules("export default async () => new Date(0).getTime();")).toEqual([]);
   });

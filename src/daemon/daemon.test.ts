@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MockProvider } from "../agents/mock.ts";
 import { AgentProviderRegistry } from "../agents/types.ts";
+import { hashCapabilityToken } from "../auth/capabilities.ts";
 import { JournalStore } from "../journal/store.ts";
 import { DaemonClient } from "./client.ts";
 import { KeelDaemon } from "./server.ts";
@@ -17,6 +18,7 @@ const FIX = new URL("../kernel/realm/fixtures/", import.meta.url);
 const chainUrl = new URL("chain.workflow.ts", FIX).pathname;
 const TEST_DAEMON = new URL("./test-daemon.ts", import.meta.url).pathname;
 const onceUrl = new URL("./fixtures/once-pi.workflow.ts", import.meta.url).pathname;
+const napUrl = new URL("../kernel/realm/fixtures/nap.workflow.ts", import.meta.url).pathname;
 const ADMIN_TOKEN = "kc_admin_test";
 
 let dir: string;
@@ -101,6 +103,15 @@ describe("capability auth", () => {
       await scoped.authenticate(first.capability as string);
       expect((await scoped.getRun(first.runId))?.status).toBe("finished");
       await expect(scoped.getRun(second.runId)).rejects.toThrow(/different resource/);
+      await expect(scoped.getBlockage(second.runId)).rejects.toThrow(/different resource/);
+      await expect(scoped.waitForRun(second.runId)).rejects.toThrow(/different resource/);
+      await expect(scoped.resumeRun(second.runId)).rejects.toThrow(/different resource/);
+      await expect(scoped.retryRun(second.runId)).rejects.toThrow(/different resource/);
+      await expect(scoped.rewindRun(second.runId, "compute")).rejects.toThrow(/different resource/);
+      await expect(scoped.forkRun(second.runId)).rejects.toThrow(/different resource/);
+      await expect(scoped.sendSignal(second.runId, "go", null)).rejects.toThrow(
+        /different resource/,
+      );
       await expect(scoped.listRuns()).rejects.toThrow(/admin/);
 
       const admin = await DaemonClient.connect(socketPath);
@@ -115,6 +126,48 @@ describe("capability auth", () => {
       daemon.stop();
     }
   });
+
+  test("revocation interrupts long-lived waits and event streams", async () => {
+    const socketPath = join(dir, "revoke.sock");
+    const dbPath = join(dir, "revoke.db");
+    const daemon = new KeelDaemon({
+      socketPath,
+      dbPath,
+      agents: new AgentProviderRegistry().register(
+        new MockProvider({ default: { outputs: ['{"value":1}'], delayMs: 1000 } }),
+      ),
+      adminToken: ADMIN_TOKEN,
+    });
+    await daemon.start();
+    try {
+      const client = await DaemonClient.connect(socketPath);
+      const { runId, capability } = await client.launchRun({
+        workflowUrl: onceUrl,
+        input: null,
+        name: "once",
+      });
+      await client.authenticate(capability as string);
+
+      const events: string[] = [];
+      const unsubscribe = client.subscribeEvents(runId, 0, (event) => events.push(event.type));
+      const waiting = client.waitForRun(runId);
+      await Bun.sleep(150);
+
+      const store = JournalStore.open(dbPath);
+      const capRow = store.getCapabilityByHash(hashCapabilityToken(capability as string));
+      store.revokeCapability(capRow?.id as string, Date.now());
+      store.close();
+
+      await expect(waiting).rejects.toThrow(/revoked/);
+      await until(() => Promise.resolve(events.includes("authorization.failed")), 2000);
+      unsubscribe();
+      await client.authenticate(ADMIN_TOKEN);
+      await client.waitForRun(runId);
+      client.close();
+    } finally {
+      daemon.stop();
+    }
+  }, 8000);
 });
 
 describe("CAS ownership fence", () => {
@@ -216,7 +269,6 @@ describe("CAS ownership fence", () => {
 describe("daemon supervisor tick over the socket", () => {
   test("a run parked on ctx.sleep is woken by the daemon's supervisor and finishes", async () => {
     const socketPath = join(dir, "sup.sock");
-    const napUrl = new URL("../kernel/realm/fixtures/nap.workflow.ts", import.meta.url).pathname;
     const daemon = new KeelDaemon({
       socketPath,
       dbPath: join(dir, "sup.db"),
@@ -272,7 +324,7 @@ describe("HITL over the socket", () => {
         c.decideApproval(runId, "approve-deploy", { status: "approved" }),
       ).rejects.toThrow(/admin/);
       await c.authenticate(ADMIN_TOKEN);
-      const out = await c.decideApproval(runId, "approve-deploy", { status: "approved" });
+      const out = await c.decideApproval(runId, "approve-deploy", { status: "denied" });
       expect(out.status).toBe("finished");
       expect((await c.getRun(runId))?.status).toBe("finished");
       c.close();

@@ -16,6 +16,7 @@ import {
   ensureAdminCapability,
   issueRunCapability,
 } from "../auth/capabilities.ts";
+import { redactCapabilityTokensInValue } from "../auth/redaction.ts";
 import { JournalStore } from "../journal/store.ts";
 import { RealmKernel } from "../kernel/realm/realm-host.ts";
 import { Supervisor } from "../kernel/supervisor.ts";
@@ -51,6 +52,7 @@ interface Conn {
 const DEFAULT_HEARTBEAT_MS = 10_000;
 const DEFAULT_SUPERVISE_MS = 1000;
 const OWNER_STALE_HEARTBEATS = 3;
+const AUTH_RECHECK_MS = 100;
 
 export class KeelDaemon {
   readonly ownerId: string;
@@ -216,7 +218,11 @@ export class KeelDaemon {
                 action: err.request.action,
                 resource: err.request.resource,
               }
-            : { message: err instanceof Error ? err.message : String(err) },
+            : {
+                message: redactCapabilityTokensInValue(
+                  err instanceof Error ? err.message : String(err),
+                ),
+              },
       });
     }
   }
@@ -263,36 +269,57 @@ export class KeelDaemon {
         return this.api.listRuns();
       case "waitForRun":
         this.authorizeRun(conn, p.runId as string, "run:watch");
-        return this.api.waitForRun(p.runId as string).finally(() => {
-          this.authorizeRun(conn, p.runId as string, "run:watch");
-        });
+        return this.waitForRunAuthorized(conn, p.runId as string);
       case "subscribeEvents": {
         this.authorizeRun(conn, p.runId as string, "run:events");
         const subId = randomUUID();
         let unsub = () => {};
+        let stopped = false;
+        const stop = () => {
+          if (stopped) return;
+          stopped = true;
+          clearInterval(recheck);
+          unsub();
+          conn.subs.delete(subId);
+        };
+        const sendAuthFailure = (err: unknown, seq = 0) => {
+          this.send(conn, {
+            event: {
+              subId,
+              seq,
+              type: "authorization.failed",
+              payload: {
+                message: redactCapabilityTokensInValue(
+                  err instanceof Error ? err.message : String(err),
+                ),
+              },
+              atMs: this.clock(),
+            },
+          });
+        };
+        const recheck = setInterval(() => {
+          try {
+            this.authorizeRun(conn, p.runId as string, "run:events");
+          } catch (err) {
+            sendAuthFailure(err);
+            stop();
+          }
+        }, AUTH_RECHECK_MS);
         unsub = this.api.subscribeEvents(
           p.runId as string,
           (p.afterSeq as number) ?? 0,
           (event: EventEnvelope) => {
             try {
+              if (stopped) return;
               this.authorizeRun(conn, p.runId as string, "run:events");
-              this.send(conn, { event: { subId, ...event } });
+              this.send(conn, { event: { subId, ...redactCapabilityTokensInValue(event) } });
             } catch (err) {
-              this.send(conn, {
-                event: {
-                  subId,
-                  seq: event.seq,
-                  type: "authorization.failed",
-                  payload: { message: err instanceof Error ? err.message : String(err) },
-                  atMs: this.clock(),
-                },
-              });
-              unsub();
-              conn.subs.delete(subId);
+              sendAuthFailure(err, event.seq);
+              stop();
             }
           },
         );
-        conn.subs.set(subId, unsub);
+        conn.subs.set(subId, stop);
         return { subId };
       }
       case "retryRun": {
@@ -362,5 +389,35 @@ export class KeelDaemon {
       { action: "admin", resource: { kind: "daemon" } },
       this.clock(),
     );
+  }
+
+  private waitForRunAuthorized(conn: Conn, runId: string): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (fn: () => void) => {
+        if (settled) return;
+        settled = true;
+        clearInterval(recheck);
+        fn();
+      };
+      const recheck = setInterval(() => {
+        try {
+          this.authorizeRun(conn, runId, "run:watch");
+        } catch (err) {
+          finish(() => reject(err));
+        }
+      }, AUTH_RECHECK_MS);
+      this.api.waitForRun(runId).then(
+        (out) => {
+          try {
+            this.authorizeRun(conn, runId, "run:watch");
+            finish(() => resolve(out));
+          } catch (err) {
+            finish(() => reject(err));
+          }
+        },
+        (err) => finish(() => reject(err)),
+      );
+    });
   }
 }

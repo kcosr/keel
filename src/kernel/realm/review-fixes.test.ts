@@ -3,7 +3,7 @@
 // result (#3).
 
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { JournalStore } from "../../journal/store.ts";
@@ -37,6 +37,44 @@ describe("#1 helper-closure versioning", () => {
     const second = await k.rerun<number>("run_0", url("helper-v2.workflow.ts"));
     expect(second.output).toBe(15); // 5 * 3 — the step RE-EXECUTED
     expect(exec).toEqual(["compute"]);
+  });
+
+  test("editing an extensionless imported helper re-executes the step", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-helper-import-"));
+    try {
+      const workflow = join(dir, "wf.ts");
+      const helper = join(dir, "helper.ts");
+      const cacheRoot = join(dir, "definitions");
+      writeFileSync(
+        workflow,
+        `
+          import { transform } from "./helper";
+          export default async function wf(ctx, input) {
+            const Schema = { parse: (v) => v };
+            return ctx.step("compute", Schema, { n: input.n }, ({ n }) => transform(n));
+          }
+        `,
+      );
+      writeFileSync(helper, "export function transform(n) { return n * 2; }\n");
+
+      const store = JournalStore.memory();
+      const exec: string[] = [];
+      const k = fixed(store, {
+        definitionCacheRoot: cacheRoot,
+        onStepExecute: (key: string) => exec.push(key),
+      });
+      const first = await k.run<number>(workflow, { n: 5 }, { name: "h" });
+      expect(first.output).toBe(10);
+      expect(exec).toEqual(["compute"]);
+      exec.length = 0;
+
+      writeFileSync(helper, "export function transform(n) { return n * 3; }\n");
+      const second = await k.rerun<number>("run_0", workflow);
+      expect(second.output).toBe(15);
+      expect(exec).toEqual(["compute"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -93,6 +131,90 @@ describe("#2 resume uses immutable workflow snapshots", () => {
       );
       expect(resumed.status).toBe("finished");
       expect(resumed.output).toBe(14);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("legacy non-snapshot runs fail closed instead of using workflow_ref", async () => {
+    const store = JournalStore.memory();
+    store.insertRun({
+      runId: "run_legacy",
+      workflowName: "legacy",
+      definitionVersion: "v0",
+      workflowRef: url("helper-v1.workflow.ts"),
+      status: "running",
+      parentRunId: null,
+      tenantId: null,
+      inputRef: '{"n":1}',
+      outputRef: null,
+      errorJson: null,
+      heartbeatAtMs: null,
+      runtimeOwnerId: null,
+      createdAtMs: 1,
+    });
+
+    await expect(fixed(store).resume("run_legacy", url("helper-v1.workflow.ts"))).rejects.toThrow(
+      /no immutable workflow definition snapshot/,
+    );
+  });
+
+  test("missing snapshot rows fail closed", async () => {
+    const store = JournalStore.memory();
+    store.insertRun({
+      runId: "run_missing_snapshot",
+      workflowName: "missing",
+      definitionVersion: "wf_sha256_missing",
+      workflowRef: url("helper-v1.workflow.ts"),
+      status: "running",
+      parentRunId: null,
+      tenantId: null,
+      inputRef: '{"n":1}',
+      outputRef: null,
+      errorJson: null,
+      heartbeatAtMs: null,
+      runtimeOwnerId: null,
+      createdAtMs: 1,
+    });
+
+    await expect(
+      fixed(store).resume("run_missing_snapshot", url("helper-v1.workflow.ts")),
+    ).rejects.toThrow(/workflow definition wf_sha256_missing not found/);
+  });
+
+  test("external package drift fails closed at materialization", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-external-drift-"));
+    try {
+      const pkgRoot = join(dir, "node_modules", "pkg");
+      mkdirSync(pkgRoot, { recursive: true });
+      writeFileSync(join(pkgRoot, "package.json"), '{"name":"pkg","type":"module"}\n');
+      writeFileSync(join(pkgRoot, "index.js"), "export const value = 2;\n");
+      writeFileSync(join(dir, "package.json"), '{"type":"module"}\n');
+      const workflow = join(dir, "wf.ts");
+      writeFileSync(
+        workflow,
+        `
+          import { value } from "pkg";
+          export default async function wf(ctx, input) {
+            const Schema = { parse: (v) => v };
+            return ctx.step("compute", Schema, { n: input.n }, ({ n }) => n * value);
+          }
+        `,
+      );
+
+      const store = JournalStore.memory();
+      const k1 = fixed(store, {
+        definitionCacheRoot: join(dir, "definitions"),
+        fault: (p: string, key: string) => {
+          if (p === "after-pending" && key === "compute") throw new Error("CRASH");
+        },
+      });
+      await k1.run(workflow, { n: 5 }, { name: "external" }).catch(() => null);
+      writeFileSync(join(pkgRoot, "index.js"), "export const value = 3;\n");
+
+      await expect(
+        fixed(store, { definitionCacheRoot: join(dir, "definitions") }).resume("run_0", workflow),
+      ).rejects.toThrow(/external package "pkg" changed/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

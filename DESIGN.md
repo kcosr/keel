@@ -489,6 +489,11 @@ root, and capability/nondeterministic imports are rejected by the snapshot/lint
 boundary. Resume/retry/rewind/fork use the stored definition. Rerun/adopt-latest
 creates a new snapshot intentionally.
 
+External package imports are recorded with package-tree integrity metadata. Keel
+does not vendor external packages into the journal in v1; instead,
+materialization validates the current package tree against the snapshot and
+fails closed if it drifted.
+
 ### 8.5 Run capabilities
 
 Run id is an identifier, not authority. Launch mints a broad run capability for

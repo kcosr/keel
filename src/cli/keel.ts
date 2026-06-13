@@ -25,6 +25,7 @@ import { basename, join, resolve } from "node:path";
 import { ClaudeProvider } from "../agents/claude.ts";
 import { PiProvider } from "../agents/pi.ts";
 import { AgentProviderRegistry } from "../agents/types.ts";
+import { redactCapabilityTokens, redactCapabilityTokensInValue } from "../auth/redaction.ts";
 import { DaemonClient } from "../daemon/client.ts";
 import { KeelDaemon } from "../daemon/server.ts";
 import { runExecuteScript } from "../execute/runtime.ts";
@@ -285,10 +286,13 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     }
     case "execute": {
-      const parsed = parseExecuteArgs(rest);
-      const credential = parsed.capFile ? loadCredentialFromFile(parsed.capFile) : loadCredential();
-      const client = await openClient(credential);
+      let client: DaemonClient | null = null;
       try {
+        const parsed = parseExecuteArgs(rest);
+        const credential = parsed.capFile
+          ? loadCredentialFromFile(parsed.capFile)
+          : loadCredential();
+        client = await openClient(credential);
         const source = parsed.stdin
           ? await new Response(Bun.stdin.stream()).text()
           : readFileSync(parsed.file as string, "utf8");
@@ -310,7 +314,7 @@ async function main(argv: string[]): Promise<number> {
         process.stderr.write(`${JSON.stringify({ error: structuredError(err) })}\n`);
         return 1;
       } finally {
-        client.close();
+        client?.close();
       }
     }
     default:
@@ -426,11 +430,12 @@ async function watchRun(
 }
 
 export function formatWatchEvent(event: EventEnvelope, opts: { json?: boolean } = {}): string {
-  if (opts.json) return `${JSON.stringify(event)}\n`;
+  const safeEvent = redactCapabilityTokensInValue(event);
+  if (opts.json) return `${JSON.stringify(safeEvent)}\n`;
 
-  const prefix = `[${event.seq}]`;
-  const payload = event.payload;
-  switch (event.type) {
+  const prefix = `[${safeEvent.seq}]`;
+  const payload = safeEvent.payload;
+  switch (safeEvent.type) {
     case "agent.event":
       return `${prefix} ${formatAgentEvent(payload)}\n`;
     case "phase": {
@@ -463,7 +468,7 @@ export function formatWatchEvent(event: EventEnvelope, opts: { json?: boolean } 
       return `${prefix} run.failed${message ? `: ${compact(message)}` : formatPayload(payload)}\n`;
     }
     default:
-      return `${prefix} ${event.type}${formatPayload(payload)}\n`;
+      return `${prefix} ${safeEvent.type}${formatPayload(payload)}\n`;
   }
 }
 
@@ -507,6 +512,7 @@ function compact(value: unknown, max = 300): string {
       text = String(value);
     }
   }
+  text = redactCapabilityTokens(text);
   text = text.replaceAll("\\", "\\\\").replaceAll("\n", "\\n").replaceAll("\r", "\\r");
   return text.length > max ? `${text.slice(0, max - 1)}...` : text;
 }
@@ -522,9 +528,9 @@ function usage(message: string): number {
 
 function structuredError(err: unknown): { code: string; message: string; name: string } {
   if (err instanceof Error) {
-    return { code: "execute_failed", name: err.name, message: err.message };
+    return { code: "execute_failed", name: err.name, message: redactCapabilityTokens(err.message) };
   }
-  return { code: "execute_failed", name: "Error", message: String(err) };
+  return { code: "execute_failed", name: "Error", message: redactCapabilityTokens(String(err)) };
 }
 
 function loadCredential(): string | null {

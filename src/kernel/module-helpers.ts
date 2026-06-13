@@ -7,11 +7,13 @@
 // name → normalized source; the worker folds the fn's referenced closure into
 // the version hash.
 
-import { readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { existsSync, lstatSync, readFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { parse } from "acorn";
 
 const transpiler = new Bun.Transpiler({ loader: "tsx", minifyWhitespace: true });
+const IMPORT_EXTENSIONS = ["", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"];
+const INDEX_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"];
 
 type AnyNode = { type: string; start: number; end: number } & Record<string, unknown>;
 
@@ -62,7 +64,7 @@ export function extractModuleHelpers(
     if ((stmt.type === "ImportDeclaration" || stmt.type === "ExportNamedDeclaration") && fromPath) {
       const spec = (stmt.source as AnyNode | undefined)?.value;
       if (typeof spec === "string" && (spec.startsWith("./") || spec.startsWith("../"))) {
-        const childPath = resolve(dirname(fromPath), spec);
+        const childPath = resolveRelativeImport(fromPath, spec);
         if (!visited.has(childPath)) {
           visited.add(childPath);
           try {
@@ -76,4 +78,17 @@ export function extractModuleHelpers(
     }
   }
   return out;
+}
+
+function resolveRelativeImport(fromPath: string, spec: string): string {
+  const base = resolve(dirname(fromPath), spec);
+  for (const ext of IMPORT_EXTENSIONS) {
+    const candidate = `${base}${ext}`;
+    if (existsSync(candidate) && lstatSync(candidate).isFile()) return candidate;
+  }
+  for (const ext of INDEX_EXTENSIONS) {
+    const candidate = join(base, `index${ext}`);
+    if (existsSync(candidate) && lstatSync(candidate).isFile()) return candidate;
+  }
+  return base;
 }

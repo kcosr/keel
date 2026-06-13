@@ -3,6 +3,7 @@ import {
   lstatSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -28,11 +29,18 @@ interface WorkflowDefinitionManifest {
   entry: string;
   modules: CapturedModule[];
   externalImports: string[];
+  externalPackages: CapturedExternalPackage[];
   sourceRoot: string;
   runtime: {
     bunVersion: string;
     keelDefinitionAbi: 1;
   };
+}
+
+interface CapturedExternalPackage {
+  name: string;
+  root: string;
+  integrity: string;
 }
 
 export interface WorkflowDefinitionSnapshot {
@@ -106,7 +114,12 @@ export function materializeWorkflowDefinition(
     return entry;
   }
 
-  linkExternalResolution(root, manifest.sourceRoot, manifest.externalImports);
+  linkExternalResolution(
+    root,
+    manifest.sourceRoot,
+    manifest.externalImports,
+    manifest.externalPackages,
+  );
   return join(root, manifest.entry);
 }
 
@@ -125,11 +138,13 @@ function createWorkflowDefinitionSnapshot(
   const entryModule = modules.find((m) => m.path === entry);
   if (!entryModule) throw new Error(`workflow entry ${entryPath} was not captured`);
 
+  const externalImports = collectExternalImports(modules).sort();
   const manifest: WorkflowDefinitionManifest = {
     format: "keel.workflow-definition.v1",
     entry,
     modules,
-    externalImports: collectExternalImports(modules).sort(),
+    externalImports,
+    externalPackages: collectExternalPackages(sourceRoot, externalImports),
     sourceRoot,
     runtime: {
       bunVersion: Bun.version,
@@ -142,6 +157,7 @@ function createWorkflowDefinitionSnapshot(
       entry: manifest.entry,
       modules: manifest.modules,
       externalImports: manifest.externalImports,
+      externalPackages: manifest.externalPackages,
       runtime: manifest.runtime,
     }),
   )}`;
@@ -289,6 +305,7 @@ function linkExternalResolution(
   cacheRoot: string,
   sourceRoot: string,
   externalImports: string[],
+  packagePins: CapturedExternalPackage[],
 ): void {
   const nodeModules = join(cacheRoot, "node_modules");
   mkdirSync(nodeModules, { recursive: true });
@@ -299,11 +316,11 @@ function linkExternalResolution(
     if (packageName) packageNames.add(packageName);
   }
   for (const packageName of packageNames) {
+    const pinned = packagePins.find((pkg) => pkg.name === packageName);
     if (packageName === "@kcosr/keel") {
-      linkPackage(
-        join(nodeModules, "@kcosr", "keel"),
-        dirname(fileURLToPath(new URL("../..", import.meta.url))),
-      );
+      const src = dirname(fileURLToPath(new URL("../..", import.meta.url)));
+      validatePackageIntegrity(packageName, src, pinned);
+      linkPackage(join(nodeModules, "@kcosr", "keel"), src);
     } else {
       const src = join(sourceRoot, "node_modules", ...packageName.split("/"));
       if (!existsSync(src)) {
@@ -311,9 +328,75 @@ function linkExternalResolution(
           `workflow definition requires external package "${packageName}", but ${src} does not exist`,
         );
       }
+      validatePackageIntegrity(packageName, src, pinned);
       linkPackage(join(nodeModules, ...packageName.split("/")), src);
     }
   }
+}
+
+function collectExternalPackages(
+  sourceRoot: string,
+  externalImports: string[],
+): CapturedExternalPackage[] {
+  const names = new Set<string>();
+  for (const specifier of externalImports) {
+    const packageName = packageNameForImport(specifier);
+    if (packageName) names.add(packageName);
+  }
+  return [...names].sort().map((name) => {
+    const root =
+      name === "@kcosr/keel"
+        ? dirname(fileURLToPath(new URL("../..", import.meta.url)))
+        : join(sourceRoot, "node_modules", ...name.split("/"));
+    if (!existsSync(root)) {
+      throw new Error(`workflow external package "${name}" is missing at ${root}`);
+    }
+    return { name, root, integrity: hashPackageTree(root) };
+  });
+}
+
+function validatePackageIntegrity(
+  name: string,
+  root: string,
+  pinned: CapturedExternalPackage | undefined,
+): void {
+  if (!pinned) throw new Error(`workflow definition is missing integrity metadata for ${name}`);
+  const actual = hashPackageTree(root);
+  if (actual !== pinned.integrity) {
+    throw new Error(`workflow external package "${name}" changed since snapshot`);
+  }
+}
+
+function hashPackageTree(root: string): string {
+  const files: { path: string; hash: string }[] = [];
+  const visit = (dir: string) => {
+    for (const name of readdirSync(dir).sort()) {
+      if (shouldSkipPackagePath(name)) continue;
+      const abs = join(dir, name);
+      const st = lstatSync(abs);
+      if (st.isSymbolicLink()) continue;
+      if (st.isDirectory()) {
+        visit(abs);
+      } else if (st.isFile()) {
+        files.push({
+          path: relative(root, abs).split(sep).join("/"),
+          hash: sha256Hex(readFileSync(abs, "utf8")),
+        });
+      }
+    }
+  };
+  visit(root);
+  return sha256Hex(canonicalJson(files));
+}
+
+function shouldSkipPackagePath(name: string): boolean {
+  return (
+    name === ".git" ||
+    name === ".specs" ||
+    name === "node_modules" ||
+    name === "definitions" ||
+    name === ".DS_Store"
+  );
 }
 
 function packageNameForImport(specifier: string): string | null {

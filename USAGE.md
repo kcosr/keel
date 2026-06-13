@@ -564,12 +564,12 @@ interface LaunchRequest {
 
 ```ts
 interface KeelApi {
-  launchRun(req: LaunchRequest): Promise<{ runId: string }>;
+  launchRun(req: LaunchRequest): Promise<RunLaunchResult>;
   resumeRun(runId: string): Promise<RunStart>;
   rerunRun(runId: string, opts?: { workflowUrl?: string; input?: unknown }): Promise<RunStart>;
   retryRun(runId: string): Promise<RunStart>;
   rewindRun(runId: string, toStableKey: string): Promise<RunStart>;
-  forkRun(runId: string, opts?: { atStableKey?: string; newRunId?: string }): { runId: string };
+  forkRun(runId: string, opts?: { atStableKey?: string; newRunId?: string }): RunLaunchResult;
   getRun(runId: string): RunProjection | null;
   getBlockage(runId: string): Blockage;
   listRuns(): RunSummary[];
@@ -580,11 +580,19 @@ interface KeelApi {
     onEvent: (event: EventEnvelope) => void,
   ): () => void;
 }
+
+interface RunLaunchResult {
+  runId: string;
+  capability?: string;
+  capabilityId?: string;
+}
 ```
 
 Lifecycle methods start work in the background and return a `RunStart` or run id.
 Use `waitForRun` to wait for terminal status or `subscribeEvents` to stream
-events.
+events. The daemon returns a raw run capability on launch/fork so clients can
+establish authority for follow-up operations. The CLI writes that capability to a
+local cap file by default and only prints raw tokens with `--emit-capability`.
 
 ### EventEnvelope
 
@@ -646,8 +654,9 @@ runs.
 - Saved workflows, saved tasks, durable task pause/re-entry, and durable child
   workflow spawning (`ctx.spawn`) are not implemented in this v1 execute/auth
   pass.
-- Workflow definition manifests include runtime/import metadata, but they do not
-  yet include full package lockfile or external package integrity proofs.
+- Workflow definition manifests include runtime/import metadata and external
+  package tree integrity checks, but Keel does not vendor external packages into
+  the journal or provide lockfile-level package-store replay in v1.
 - SQLite is the only implemented store. Postgres compatibility is a discipline
   enforced by tests, not a working backend.
 - Secrets and profiles are programmatic-only on the bundled daemon.

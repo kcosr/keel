@@ -132,6 +132,17 @@ describe("keel CLI", () => {
     ).toBe('[236] agent: {"provider":"future","detail":"new shape"}\n');
   });
 
+  test("watch formatter redacts capability-looking strings", () => {
+    const event = {
+      seq: 238,
+      type: "log",
+      payload: { message: "cap kc_run_secretValue and kc_admin_secretValue" },
+      atMs: 891,
+    };
+    expect(formatWatchEvent(event)).toContain("«redacted-capability»");
+    expect(formatWatchEvent(event, { json: true })).not.toContain("kc_run_secretValue");
+  });
+
   test("watch formatter tolerates missing agent event payloads", () => {
     expect(
       formatWatchEvent({
@@ -254,6 +265,7 @@ describe("keel CLI", () => {
       };
       const launched = await runCli(["launch", "--detach", chainUrl, '{"n":1}'], dir, env);
       expect(launched.code).toBe(0);
+      expect(launched.stdout).not.toContain("kc_run_");
       const payload = JSON.parse(launched.stdout) as { runId: string; capabilityRef: string };
       expect(payload.capabilityRef).toBe(join(capDir, `${payload.runId}.cap`));
       const capFile = JSON.parse(readFileSync(payload.capabilityRef, "utf8")) as {
@@ -268,6 +280,20 @@ describe("keel CLI", () => {
       expect(got.code).toBe(0);
       expect(JSON.parse(got.stdout).runId).toBe(payload.runId);
       await waitForCliStatus(payload.runId, dir, { ...env, KEEL_CAP_FILE: payload.capabilityRef });
+
+      const raw = await runCli(
+        ["launch", "--detach", "--emit-capability", chainUrl, '{"n":3}'],
+        dir,
+        env,
+      );
+      expect(raw.code).toBe(0);
+      const rawPayload = JSON.parse(raw.stdout) as { runId: string; capability: string };
+      expect(rawPayload.capability.startsWith("kc_run_")).toBe(true);
+      expect(raw.stdout).not.toContain("capabilityRef");
+      await waitForCliStatus(rawPayload.runId, dir, {
+        ...env,
+        KEEL_RUN_CAP: rawPayload.capability,
+      });
     } finally {
       daemon.stop();
       rmSync(dir, { recursive: true, force: true });
@@ -306,6 +332,12 @@ describe("keel CLI", () => {
       expect(result.output).toBe(2);
       expect(result.capabilityRef).toBe(join(capDir, `${result.runId}.cap`));
       expect(readFileSync(result.capabilityRef, "utf8")).toContain("kc_run_");
+
+      const raw = await runCli(["execute", "--emit-capability", script], dir, env);
+      expect(raw.code).toBe(0);
+      const rawResult = JSON.parse(raw.stdout) as { capability: string; capabilityRef?: string };
+      expect(rawResult.capability.startsWith("kc_run_")).toBe(true);
+      expect(rawResult.capabilityRef).toBeUndefined();
     } finally {
       daemon.stop();
       rmSync(dir, { recursive: true, force: true });
@@ -317,7 +349,7 @@ describe("keel CLI", () => {
     const socketPath = join(dir, "keel.sock");
     const dbPath = join(dir, "keel.db");
     const script = join(dir, "bad.ts");
-    writeFileSync(script, 'throw new Error("bad control script");\n');
+    writeFileSync(script, 'throw new Error("bad control script kc_run_secretValue");\n');
     const daemon = new KeelDaemon({
       socketPath,
       dbPath,
@@ -333,10 +365,27 @@ describe("keel CLI", () => {
       expect(out.code).toBe(1);
       expect(JSON.parse(out.stderr).error).toMatchObject({
         code: "execute_failed",
-        message: "bad control script",
+        message: "bad control script «redacted-capability»",
       });
     } finally {
       daemon.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("execute writes structured errors for argument/setup failures", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-execute-arg-error-"));
+    try {
+      const out = await runCli(["execute", "--unknown"], dir, {
+        KEEL_SOCKET: join(dir, "missing.sock"),
+      });
+      expect(out.code).toBe(1);
+      expect(JSON.parse(out.stderr).error).toMatchObject({
+        code: "execute_failed",
+        message: "unknown execute flag --unknown",
+      });
+      expect(out.stderr).not.toContain("keel:");
+    } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
@@ -351,12 +400,13 @@ function writeControlScript(path: string, workflowUrl: string): void {
         input: { n: 2 },
       });
       const settled = await keel.wait(run.runId);
-      return {
-        runId: run.runId,
-        capabilityRef: run.capabilityRef,
-        status: settled.status,
-        output: settled.output,
-      };
+        return {
+          runId: run.runId,
+          capabilityRef: run.capabilityRef,
+          capability: run.capability,
+          status: settled.status,
+          output: settled.output,
+        };
     `,
   );
 }

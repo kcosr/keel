@@ -2,7 +2,7 @@
 //
 // Before importing any workflow code it installs throwing shims for the ambient
 // globals (Date.now, argless new Date(), Math.random, crypto.randomUUID,
-// fetch, performance.now, Bun.*) so that workflow code physically cannot read
+// fetch, eval/Function, process, performance.now, Bun.*) so that workflow code physically cannot read
 // non-determinism — the only time/entropy is ctx.now()/ctx.random(). Module
 // imports of fs/child_process/http are rejected by the static lint (Phase 5);
 // this layer seals the globals (§6 layer 2).
@@ -191,14 +191,54 @@ function installShims(): void {
   globalThis.fetch = (() => {
     throw realmError("fetch()", "ctx.agent() or pass data in as a journaled step input");
   }) as unknown as typeof fetch;
+  globalThis.eval = (() => {
+    throw realmError("eval()", "static workflow code");
+  }) as unknown as typeof eval;
+  globalThis.Function = (() => {
+    throw realmError("Function()", "static workflow code");
+  }) as unknown as FunctionConstructor;
 
   const g = globalThis as unknown as {
     Bun?: unknown;
     crypto?: { randomUUID?: unknown; getRandomValues?: unknown };
     performance?: { now?: unknown };
     __KEEL_WORKFLOW_REALM__?: true;
+    process?: unknown;
+    module?: unknown;
+    require?: unknown;
   };
   g.__KEEL_WORKFLOW_REALM__ = true;
+  const deniedHostGlobal = (name: string) =>
+    new Proxy(Object.create(null), {
+      get() {
+        throw realmError(name, "ctx.* or explicit workflow inputs");
+      },
+      set() {
+        throw realmError(name, "ctx.* or explicit workflow inputs");
+      },
+      has() {
+        throw realmError(name, "ctx.* or explicit workflow inputs");
+      },
+      ownKeys() {
+        throw realmError(name, "ctx.* or explicit workflow inputs");
+      },
+    });
+  for (const name of ["process", "module", "require"] as const) {
+    try {
+      Object.defineProperty(globalThis, name, {
+        value: deniedHostGlobal(name),
+        writable: false,
+        enumerable: false,
+        configurable: false,
+      });
+    } catch {
+      try {
+        g[name] = deniedHostGlobal(name);
+      } catch {
+        // Static lint remains the fail-closed guard for non-patchable globals.
+      }
+    }
+  }
   if (g.Bun) {
     installBunShims(g.Bun);
   }

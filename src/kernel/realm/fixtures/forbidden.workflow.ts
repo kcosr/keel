@@ -12,6 +12,13 @@ export default async function forbidden(_ctx: Ctx, input: { what: string }): Pro
       return new Date().getTime();
     case "fetch":
       return (await fetch("http://example.com")).status;
+    case "eval":
+      // biome-ignore lint/security/noGlobalEval: fixture intentionally reaches the runtime shim.
+      return globalThis.eval("1 + 1");
+    case "function":
+      return globalThis.Function("return 1")();
+    case "process":
+      return globalThis.process.env.PATH;
     case "bun-env":
       return Bun.env.PATH;
     case "bun-write":

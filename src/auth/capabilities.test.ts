@@ -56,4 +56,25 @@ describe("capability authorization", () => {
       store.close();
     }
   });
+
+  test("bootstrap admin does not un-revoke an existing token", () => {
+    const store = JournalStore.memory();
+    try {
+      ensureAdminCapability(store, "kc_admin_test", 1000);
+      const row = store.getCapabilityByHash(hashCapabilityToken("kc_admin_test"));
+      expect(row).not.toBeNull();
+      store.revokeCapability(row?.id as string, 1100);
+
+      ensureAdminCapability(store, "kc_admin_test", 1200);
+
+      expect(store.getCapabilityByHash(hashCapabilityToken("kc_admin_test"))?.revokedAtMs).toBe(
+        1100,
+      );
+      expect(() =>
+        authorize(store, "kc_admin_test", { action: "admin", resource: { kind: "daemon" } }, 1300),
+      ).toThrow(/revoked/);
+    } finally {
+      store.close();
+    }
+  });
 });

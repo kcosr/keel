@@ -71,9 +71,11 @@ export function issueRunCapability(
 }
 
 export function ensureAdminCapability(store: JournalStore, token: string, atMs: number): void {
+  const secretHash = hashCapabilityToken(token);
+  if (store.getCapabilityByHash(secretHash)) return;
   store.putCapability({
     id: `cap_admin_${shortHash(token)}`,
-    secretHash: hashCapabilityToken(token),
+    secretHash,
     resourceJson: canonicalJson({ kind: "daemon" } satisfies CapabilityResource),
     actionsJson: canonicalJson(["admin"] satisfies CapabilityAction[]),
     createdAtMs: atMs,

@@ -11,14 +11,15 @@ import { MockProvider } from "../agents/mock.ts";
 import { AgentProviderRegistry } from "../agents/types.ts";
 import { hashCapabilityToken } from "../auth/capabilities.ts";
 import { JournalStore } from "../journal/store.ts";
+import { captureWorkflowFile } from "../workflow-definitions/capture.ts";
 import { DaemonClient } from "./client.ts";
 import { KeelDaemon } from "./server.ts";
 
 const FIX = new URL("../kernel/realm/fixtures/", import.meta.url);
-const chainUrl = new URL("chain.workflow.ts", FIX).pathname;
+const chainUrl = captureWorkflowFile(new URL("chain.workflow.ts", FIX).pathname);
 const TEST_DAEMON = new URL("./test-daemon.ts", import.meta.url).pathname;
-const onceUrl = new URL("./fixtures/once-pi.workflow.ts", import.meta.url).pathname;
-const napUrl = new URL("../kernel/realm/fixtures/nap.workflow.ts", import.meta.url).pathname;
+const onceUrl = captureWorkflowFile(new URL("./fixtures/once-pi.workflow.ts", import.meta.url).pathname);
+const napUrl = captureWorkflowFile(new URL("../kernel/realm/fixtures/nap.workflow.ts", import.meta.url).pathname);
 const ADMIN_TOKEN = "kc_admin_test";
 
 let dir: string;
@@ -42,7 +43,7 @@ describe("daemon multi-client over the socket", () => {
       const b = await DaemonClient.connect(socketPath);
 
       const { runId, capability } = await a.launchRun({
-        workflowUrl: chainUrl,
+        ...chainUrl,
         input: { n: 3 },
         name: "chain",
       });
@@ -83,7 +84,7 @@ describe("capability auth", () => {
 
       const launcher = await DaemonClient.connect(socketPath);
       const first = await launcher.launchRun({
-        workflowUrl: chainUrl,
+        ...chainUrl,
         input: { n: 1 },
         name: "chain",
       });
@@ -92,7 +93,7 @@ describe("capability auth", () => {
       await launcher.waitForRun(first.runId);
 
       const second = await launcher.launchRun({
-        workflowUrl: chainUrl,
+        ...chainUrl,
         input: { n: 2 },
         name: "chain",
       });
@@ -142,7 +143,7 @@ describe("capability auth", () => {
     try {
       const client = await DaemonClient.connect(socketPath);
       const { runId, capability } = await client.launchRun({
-        workflowUrl: onceUrl,
+        ...onceUrl,
         input: null,
         name: "once",
       });
@@ -182,7 +183,7 @@ describe("capability auth", () => {
     await daemon.start();
     try {
       const client = await DaemonClient.connect(socketPath);
-      const first = await client.launchRun({ workflowUrl: onceUrl, input: null, name: "first" });
+      const first = await client.launchRun({ ...onceUrl, input: null, name: "first" });
       await client.authenticate(first.capability as string);
       const firstEvents: string[] = [];
       const unsubscribe = client.subscribeEvents(first.runId, 0, (event) =>
@@ -191,7 +192,7 @@ describe("capability auth", () => {
       await until(() => Promise.resolve(firstEvents.includes("run.started")), 2000);
 
       const second = await client.launchRun({
-        workflowUrl: chainUrl,
+        ...chainUrl,
         input: { n: 2 },
         name: "second",
       });
@@ -274,7 +275,7 @@ describe("CAS ownership fence", () => {
     await a.start();
     const ca = await DaemonClient.connect(join(dir, "a.sock"));
     const { runId, capability } = await ca.launchRun({
-      workflowUrl: onceUrl2,
+      ...onceUrl2,
       input: null,
       name: "once",
     });
@@ -319,7 +320,7 @@ describe("daemon supervisor tick over the socket", () => {
     try {
       const c = await DaemonClient.connect(socketPath);
       const { runId, capability } = await c.launchRun({
-        workflowUrl: napUrl,
+        ...napUrl,
         input: null,
         name: "nap",
       });
@@ -339,7 +340,7 @@ describe("daemon supervisor tick over the socket", () => {
 describe("HITL over the socket", () => {
   test("a run parks on ctx.human and a decideApproval over the socket finishes it", async () => {
     const socketPath = join(dir, "h.sock");
-    const gateUrl = new URL("../kernel/realm/fixtures/gate.workflow.ts", import.meta.url).pathname;
+    const gateUrl = captureWorkflowFile(new URL("../kernel/realm/fixtures/gate.workflow.ts", import.meta.url).pathname);
     const daemon = new KeelDaemon({
       socketPath,
       dbPath: join(dir, "h.db"),
@@ -351,7 +352,7 @@ describe("HITL over the socket", () => {
     try {
       const c = await DaemonClient.connect(socketPath);
       const { runId, capability } = await c.launchRun({
-        workflowUrl: gateUrl,
+        ...gateUrl,
         input: null,
         name: "gate",
       });
@@ -394,7 +395,7 @@ describe("kill -9 daemon recovery", () => {
     await waitForLine(d1.stdout, "READY");
     const c1 = await DaemonClient.connect(socketPath);
     const { runId, capability } = await c1.launchRun({
-      workflowUrl: onceUrl,
+      ...onceUrl,
       input: null,
       name: "once",
     });

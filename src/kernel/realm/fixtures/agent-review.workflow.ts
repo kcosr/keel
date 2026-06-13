@@ -1,7 +1,6 @@
 // Phase 7 fixture: a small fan-out/aggregate using ctx.agent with structured
 // output — the shape of the review workload in miniature.
-import type { Ctx } from "../../ctx.ts";
-import { jsonSchema, passthrough } from "../../schema.ts";
+import { type Ctx, jsonSchema, passthrough } from "@kcosr/keel";
 
 const Findings = jsonSchema<{ findings: { title: string }[] }>({
   type: "object",

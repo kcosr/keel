@@ -1,7 +1,6 @@
 // Phase 17 fixture: a human-in-the-loop gate. The run parks at ctx.human until a
 // decision is delivered, then continues with it.
-import type { Ctx } from "../../ctx.ts";
-import { passthrough } from "../../schema.ts";
+import { type Ctx, passthrough } from "@kcosr/keel";
 
 const str = passthrough<string>();
 

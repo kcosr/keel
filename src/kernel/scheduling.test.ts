@@ -2,11 +2,13 @@
 
 import { describe, expect, test } from "bun:test";
 import { JournalStore } from "../journal/store.ts";
+import { captureWorkflowFile } from "../workflow-definitions/capture.ts";
+import { snapshotWorkflowSource } from "../workflow-definitions/snapshot.ts";
 import { RealmKernel } from "./realm/realm-host.ts";
 import { Supervisor } from "./supervisor.ts";
 
-const napUrl = new URL("./realm/fixtures/nap.workflow.ts", import.meta.url).pathname;
-const chainUrl = new URL("./realm/fixtures/chain.workflow.ts", import.meta.url).pathname;
+const napUrl = captureWorkflowFile(new URL("./realm/fixtures/nap.workflow.ts", import.meta.url).pathname);
+const chainUrl = captureWorkflowFile(new URL("./realm/fixtures/chain.workflow.ts", import.meta.url).pathname);
 
 describe("durable ctx.sleep park/wake", () => {
   test("a run parks at sleep and a supervisor tick wakes it to finish", async () => {
@@ -57,9 +59,13 @@ describe("cron schedules", () => {
     const t = 1000;
     let n = 0;
     const kernel = new RealmKernel(store, { idgen: () => `cron-${n++}`, clock: () => t });
+    const { snapshot } = snapshotWorkflowSource(store, chainUrl.source, {
+      name: "hourly",
+      nowMs: t,
+    });
     store.putSchedule({
       name: "hourly",
-      workflowRef: chainUrl,
+      workflowRef: snapshot.hash,
       inputJson: JSON.stringify({ n: 2 }),
       intervalMs: 3_600_000,
       nextFireMs: 500, // already due at t=1000

@@ -7,9 +7,10 @@ import { resolveProfile } from "../agents/profiles.ts";
 import type { AgentInvocation, AgentProvider, AgentResult } from "../agents/types.ts";
 import { AgentProviderRegistry } from "../agents/types.ts";
 import { JournalStore } from "../journal/store.ts";
+import { captureWorkflowFile } from "../workflow-definitions/capture.ts";
 import { RealmKernel } from "./realm/realm-host.ts";
 
-const profiledUrl = new URL("./realm/fixtures/profiled.workflow.ts", import.meta.url).pathname;
+const profiledUrl = captureWorkflowFile(new URL("./realm/fixtures/profiled.workflow.ts", import.meta.url).pathname);
 
 describe("resolveProfile", () => {
   test("inherits profile fields, explicit spec wins, unknown profile throws", () => {

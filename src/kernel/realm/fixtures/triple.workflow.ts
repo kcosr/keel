@@ -1,6 +1,5 @@
 // Phase 18 fixture: a three-step chain for rewind/fork.
-import type { Ctx } from "../../ctx.ts";
-import { passthrough } from "../../schema.ts";
+import { type Ctx, passthrough } from "@kcosr/keel";
 
 const num = passthrough<number>();
 

@@ -1,8 +1,7 @@
 // Phase 6 fixture: `gen` adds an item ("ccc"), drifting the fan-out key set.
 // On rerun: gen re-executes; verify:a and verify:bb replay; verify:ccc executes;
 // total re-executes (its input array changed). No mis-alignment.
-import type { Ctx } from "../../ctx.ts";
-import { passthrough } from "../../schema.ts";
+import { type Ctx, passthrough } from "@kcosr/keel";
 
 const num = passthrough<number>();
 const arr = passthrough<string[]>();

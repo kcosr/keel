@@ -4,7 +4,7 @@
 // or tricks. Integers are epoch-ms; JSON travels as TEXT. Reserved tables
 // (approvals/signals/timers) are created now though their effects land later.
 
-export const SCHEMA_VERSION = 8;
+export const SCHEMA_VERSION = 10;
 
 export const DDL = /* sql */ `
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS schema_meta (
 
 CREATE TABLE IF NOT EXISTS runs (
   run_id             TEXT PRIMARY KEY,
-  workflow_name      TEXT NOT NULL,
+  workflow_name      TEXT,
   definition_version TEXT NOT NULL,
   workflow_ref       TEXT,
   status             TEXT NOT NULL,
@@ -118,7 +118,7 @@ CREATE TABLE IF NOT EXISTS schedules (
 
 CREATE TABLE IF NOT EXISTS workflow_definitions (
   hash          TEXT PRIMARY KEY,
-  name          TEXT NOT NULL,
+  name          TEXT,
   kind          TEXT NOT NULL,
   code          TEXT NOT NULL,
   source_map    TEXT,

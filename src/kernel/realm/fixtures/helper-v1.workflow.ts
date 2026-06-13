@@ -1,7 +1,6 @@
 // Review-fix fixture: a step whose fn calls a module helper. Editing the helper
 // (helper-v2) must change the step's version even though the fn body is identical.
-import type { Ctx } from "../../ctx.ts";
-import { passthrough } from "../../schema.ts";
+import { type Ctx, passthrough } from "@kcosr/keel";
 
 const num = passthrough<number>();
 

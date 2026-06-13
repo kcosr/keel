@@ -22,6 +22,14 @@ function newRun(runId: string): NewRunRow {
   };
 }
 
+function unnamedRun(runId: string): NewRunRow {
+  return {
+    ...newRun(runId),
+    workflowName: null,
+    workflowRef: "stdin",
+  };
+}
+
 describe("JournalStore (in-memory)", () => {
   let store: JournalStore;
   beforeEach(() => {
@@ -36,6 +44,11 @@ describe("JournalStore (in-memory)", () => {
     expect(got?.workflowName).toBe("demo");
     expect(got?.status).toBe("running");
     expect(got?.finishedAtMs).toBeNull();
+  });
+
+  test("runs may be genuinely unnamed", () => {
+    store.insertRun(unnamedRun("r_unnamed"));
+    expect(store.getRun("r_unnamed")?.workflowName).toBeNull();
   });
 
   test("updateRun patches only named columns", () => {
@@ -145,6 +158,31 @@ describe("JournalStore (in-memory)", () => {
     expect(got?.name).toBe("demo");
     expect(got?.code).toContain("export default");
     expect(got?.manifestJson).toContain("keel.workflow-definition.v1");
+  });
+
+  test("workflow definition names are nullable and first-writer-wins by hash", () => {
+    store.putWorkflowDefinition({
+      hash: "wf_sha256_same",
+      name: null,
+      kind: "source",
+      code: "export default async () => 1;",
+      sourceMap: null,
+      manifestJson: '{"format":"keel.workflow-definition.v1"}',
+      createdAtMs: 1000,
+    });
+    store.putWorkflowDefinition({
+      hash: "wf_sha256_same",
+      name: "later",
+      kind: "source",
+      code: "export default async () => 1;",
+      sourceMap: null,
+      manifestJson: '{"format":"keel.workflow-definition.v1"}',
+      createdAtMs: 2000,
+    });
+
+    const got = store.getWorkflowDefinition("wf_sha256_same");
+    expect(got?.name).toBeNull();
+    expect(got?.createdAtMs).toBe(1000);
   });
 
   test("capabilities round-trip by secret hash without storing raw tokens", () => {

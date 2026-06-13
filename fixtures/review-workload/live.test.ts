@@ -4,9 +4,11 @@
 
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
+import { captureWorkflowFile } from "../../src/workflow-definitions/capture.ts";
 
 const HERE = new URL(".", import.meta.url).pathname;
 const reviewUrl = `${HERE}review.workflow.ts`;
+const reviewWorkflow = captureWorkflowFile(reviewUrl);
 const targetRoot = `${HERE}sample-target`;
 const LIVE = process.env.KEEL_LIVE === "1";
 
@@ -49,7 +51,7 @@ describe.if(LIVE)("LIVE review workload rehearsal", () => {
         }
       },
     });
-    await k1.run(reviewUrl, input, { name: "review-workload" }).catch(() => null);
+    await k1.run(reviewWorkflow, input, { name: "review-workload" }).catch(() => null);
     expect(crashed).toBe(true);
     expect(store.getRun("tn")?.status).toBe("running"); // resumable
 
@@ -62,7 +64,7 @@ describe.if(LIVE)("LIVE review workload rehearsal", () => {
     const k2 = new RealmKernel(store, { idgen: () => "tn", agents });
     const resumed = await k2.resume<{
       stats: { raw: number; deduped: number; confirmed: number };
-    }>("tn", reviewUrl);
+    }>("tn");
 
     expect(resumed.status).toBe("finished");
     expect(resumed.output?.stats.confirmed).toBeGreaterThan(0); // found real issues

@@ -1,7 +1,6 @@
 // Phase 8 fixture: `big` produces a >1KB output (content-addressed); `small`
 // stays inline; `echo` re-derives the SAME big value (refcount dedup).
-import type { Ctx } from "../../ctx.ts";
-import { passthrough } from "../../schema.ts";
+import { type Ctx, passthrough } from "@kcosr/keel";
 
 const obj = passthrough<{ blob: string; len: number }>();
 

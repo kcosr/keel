@@ -6,11 +6,12 @@ import { describe, expect, test } from "bun:test";
 import { MockProvider } from "../../agents/mock.ts";
 import { AgentProviderRegistry } from "../../agents/types.ts";
 import { JournalStore } from "../../journal/store.ts";
+import { captureWorkflowFile } from "../../workflow-definitions/capture.ts";
 import { RealmKernel } from "./realm-host.ts";
 
 const FIX = new URL("./fixtures/", import.meta.url);
-const reviewUrl = new URL("agent-review.workflow.ts", FIX).pathname;
-const singleUrl = new URL("agent-single.workflow.ts", FIX).pathname;
+const reviewUrl = captureWorkflowFile(new URL("agent-review.workflow.ts", FIX).pathname);
+const singleUrl = captureWorkflowFile(new URL("agent-single.workflow.ts", FIX).pathname);
 
 function kernel(
   store: JournalStore,
@@ -112,7 +113,7 @@ describe("ctx.agent — replay vs re-execution", () => {
     expect(store.getRun("run_0")?.status).toBe("running"); // resumable
 
     const k2 = kernel(store, counting as MockProvider);
-    const resumed = await k2.resume<number>("run_0", singleUrl);
+    const resumed = await k2.resume<number>("run_0");
     expect(resumed.output).toBe(10);
     expect(asks).toBe(1); // agent REPLAYED — not re-asked (exactly-once)
   });
@@ -143,7 +144,7 @@ describe("ctx.agent — replay vs re-execution", () => {
     expect(store.getRun("run_0")?.status).toBe("running");
 
     const k2 = kernel(store, counting as MockProvider);
-    const resumed = await k2.resume<number>("run_0", singleUrl);
+    const resumed = await k2.resume<number>("run_0");
     expect(resumed.output).toBe(14);
     expect(asks).toBe(2); // re-executed on resume (at-least-once)
   });

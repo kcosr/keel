@@ -7,11 +7,18 @@
 
 import type { Blockage, RunProjection, RunSummary } from "./projection.ts";
 
+export type WorkflowProvenance =
+  | { kind: "stdin" }
+  | { kind: "clientPath"; path: string };
+
 export interface LaunchRequest {
-  /** The workflow definition: a module path (Phase 11) or inline source (Phase 12, §7.5). */
-  workflowUrl: string;
+  /** Workflow TypeScript captured by the client. The daemon never reads client paths. */
+  source: string;
   input: unknown;
-  name: string;
+  /** Optional display label; absent/null is stored as an unnamed run. */
+  name?: string | null;
+  /** Display-only provenance. It is never opened or parsed for execution. */
+  provenance?: WorkflowProvenance;
 }
 
 export interface RunOutcome {
@@ -44,8 +51,11 @@ export interface KeelApi {
   launchRun(req: LaunchRequest): Promise<RunLaunchResult>;
   /** Resume a non-terminal run in the background. */
   resumeRun(runId: string): Promise<RunStart>;
-  /** Re-execute a run against (possibly edited) code in the background. */
-  rerunRun(runId: string, opts?: { workflowUrl?: string; input?: unknown }): Promise<RunStart>;
+  /** Re-execute a run against its stored definition or a new client-captured source. */
+  rerunRun(
+    runId: string,
+    opts?: { source?: string; input?: unknown; name?: string | null; provenance?: WorkflowProvenance },
+  ): Promise<RunStart>;
   /** Re-run a failed run from its failed step in the background. */
   retryRun(runId: string): Promise<RunStart>;
   /** Discard everything after a step and re-run in the background. */

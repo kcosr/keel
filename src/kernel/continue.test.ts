@@ -2,9 +2,10 @@
 
 import { describe, expect, test } from "bun:test";
 import { JournalStore } from "../journal/store.ts";
+import { captureWorkflowFile } from "../workflow-definitions/capture.ts";
 import { RealmKernel } from "./realm/realm-host.ts";
 
-const loopUrl = new URL("./realm/fixtures/loop.workflow.ts", import.meta.url).pathname;
+const loopUrl = captureWorkflowFile(new URL("./realm/fixtures/loop.workflow.ts", import.meta.url).pathname);
 
 describe("continueAsNew", () => {
   test("ends the run as 'continued' and chains a fresh run until it returns", async () => {
@@ -46,7 +47,7 @@ describe("continueAsNew", () => {
     await until(() => store.getRun("c-1")?.status === "finished", 4000);
     const before = store.listRuns().length;
     // c-0 is terminal 'continued'; resuming it must short-circuit, not re-launch
-    const resumed = await kernel.resume("c-0", loopUrl);
+    const resumed = await kernel.resume("c-0");
     expect(resumed.status).toBe("continued");
     expect(store.listRuns().length).toBe(before); // no new run created
   });

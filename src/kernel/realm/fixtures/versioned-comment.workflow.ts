@@ -1,7 +1,6 @@
 // Phase 5 fixture: identical to versioned-v1 except a comment inside step a's
 // body. The normalized fn source — and thus the version — must be unchanged.
-import type { Ctx } from "../../ctx.ts";
-import { passthrough } from "../../schema.ts";
+import { type Ctx, passthrough } from "@kcosr/keel";
 
 const num = passthrough<number>();
 

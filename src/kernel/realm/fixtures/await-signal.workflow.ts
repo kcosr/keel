@@ -1,6 +1,5 @@
 // Phase 17 fixture: block on an external signal and return its payload.
-import type { Ctx } from "../../ctx.ts";
-import { passthrough } from "../../schema.ts";
+import { type Ctx, passthrough } from "@kcosr/keel";
 
 const obj = passthrough<{ go: boolean; by: string }>();
 

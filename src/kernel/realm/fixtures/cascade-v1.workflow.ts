@@ -1,7 +1,6 @@
 // Phase 6 fixture: three steps. `indep` is independent; `base` feeds `derived`.
 // Sibling files edit exactly one step so a rerun re-executes only what changed.
-import type { Ctx } from "../../ctx.ts";
-import { passthrough } from "../../schema.ts";
+import { type Ctx, passthrough } from "@kcosr/keel";
 
 const num = passthrough<number>();
 

@@ -4,10 +4,13 @@
 import { describe, expect, test } from "bun:test";
 import { JournalStore } from "../journal/store.ts";
 import { buildProjection, getBlockage } from "../rpc/projection.ts";
+import { captureWorkflowFile } from "../workflow-definitions/capture.ts";
 import { RealmKernel } from "./realm/realm-host.ts";
 
-const gateUrl = new URL("./realm/fixtures/gate.workflow.ts", import.meta.url).pathname;
-const sigUrl = new URL("./realm/fixtures/await-signal.workflow.ts", import.meta.url).pathname;
+const gateUrl = captureWorkflowFile(new URL("./realm/fixtures/gate.workflow.ts", import.meta.url).pathname);
+const sigUrl = captureWorkflowFile(
+  new URL("./realm/fixtures/await-signal.workflow.ts", import.meta.url).pathname,
+);
 
 describe("ctx.human approval gate", () => {
   test("parks at ctx.human; a delivered decision resumes it with the decision", async () => {
@@ -26,7 +29,7 @@ describe("ctx.human approval gate", () => {
 
     // deliver the decision out-of-band, then resume (the daemon does both)
     store.decideApproval("r", "approve-deploy", { status: "approved", note: "lgtm" }, 1);
-    const resumed = await kernel.resume<string>("r", gateUrl);
+    const resumed = await kernel.resume<string>("r");
     expect(resumed.status).toBe("finished");
     expect(resumed.output).toBe("deploy:approved");
   });
@@ -38,10 +41,7 @@ describe("ctx.human approval gate", () => {
 
     store.decideApproval("r2", "approve-deploy", { status: "denied" }, 1);
     // a brand-new kernel (restart) resumes from the journal
-    const resumed = await new RealmKernel(store, { idgen: () => "r2" }).resume<string>(
-      "r2",
-      gateUrl,
-    );
+    const resumed = await new RealmKernel(store, { idgen: () => "r2" }).resume<string>("r2");
     expect(resumed.output).toBe("deploy:denied");
   });
 });
@@ -56,11 +56,11 @@ describe("ctx.signal", () => {
 
     // a non-matching signal does not wake it
     store.putSignal("s", "other", { x: 1 }, 1);
-    expect((await kernel.resume<unknown>("s", sigUrl)).status).toBe("waiting-signal");
+    expect((await kernel.resume<unknown>("s")).status).toBe("waiting-signal");
 
     // the matching signal delivers its payload
     store.putSignal("s", "proceed", { go: true, by: "alice" }, 2);
-    const resumed = await kernel.resume<{ go: boolean; by: string }>("s", sigUrl);
+    const resumed = await kernel.resume<{ go: boolean; by: string }>("s");
     expect(resumed.status).toBe("finished");
     expect(resumed.output).toEqual({ go: true, by: "alice" });
   });

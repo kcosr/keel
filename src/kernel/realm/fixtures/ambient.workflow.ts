@@ -1,5 +1,5 @@
 // Realm test fixture: the ONLY allowed time/entropy — ctx.now()/ctx.random().
-import type { Ctx } from "../../ctx.ts";
+import type { Ctx } from "@kcosr/keel";
 
 export default async function ambient(ctx: Ctx): Promise<{ t: number; r: number }> {
   const t = ctx.now();

@@ -20,8 +20,9 @@ import { redactCapabilityTokensInValue } from "../auth/redaction.ts";
 import { JournalStore } from "../journal/store.ts";
 import { RealmKernel } from "../kernel/realm/realm-host.ts";
 import { Supervisor } from "../kernel/supervisor.ts";
-import type { EventEnvelope } from "../rpc/contract.ts";
+import type { EventEnvelope, WorkflowProvenance } from "../rpc/contract.ts";
 import { InProcessKeel } from "../rpc/in-process.ts";
+import { snapshotWorkflowSource } from "../workflow-definitions/snapshot.ts";
 
 export interface DaemonOptions {
   socketPath: string;
@@ -172,7 +173,6 @@ export class KeelDaemon {
   private recoverOrphans(): void {
     const staleBefore = this.clock() - OWNER_STALE_HEARTBEATS * this.heartbeatMs;
     for (const run of this.store.listRunsByStatus("running")) {
-      if (!run.workflowRef) continue;
       if (this.store.claimRun(run.runId, this.ownerId, staleBefore, this.clock())) {
         this.owned.add(run.runId);
         void this.api.resumeRun(run.runId).catch(() => {});
@@ -236,9 +236,10 @@ export class KeelDaemon {
     switch (method) {
       case "launchRun": {
         const res = await this.api.launchRun({
-          workflowUrl: p.workflowUrl as string,
+          source: p.source as string,
           input: p.input,
-          name: p.name as string,
+          name: (p.name as string | null | undefined) ?? null,
+          provenance: p.provenance as WorkflowProvenance | undefined,
         });
         this.store.claimRun(res.runId, this.ownerId, this.clock(), this.clock());
         this.owned.add(res.runId);
@@ -255,7 +256,12 @@ export class KeelDaemon {
         this.claimOrReject(p.runId as string);
         return this.api.rerunRun(
           p.runId as string,
-          p.opts as { workflowUrl?: string; input?: unknown },
+          p.opts as {
+            source?: string;
+            input?: unknown;
+            name?: string | null;
+            provenance?: WorkflowProvenance;
+          },
         );
       }
       case "getRun":
@@ -358,9 +364,14 @@ export class KeelDaemon {
       }
       case "putSchedule": {
         this.authorizeAdmin(conn);
+        const snapshot = snapshotWorkflowSource(this.store, p.source as string, {
+          name: (p.workflowName as string | null | undefined) ?? (p.name as string),
+          nowMs: this.clock(),
+          cacheRoot: this.opts.definitionCacheRoot ?? join(dirname(this.opts.dbPath), "definitions"),
+        }).snapshot;
         this.store.putSchedule({
           name: p.name as string,
-          workflowRef: p.workflowUrl as string,
+          workflowRef: snapshot.hash,
           inputJson: p.input != null ? JSON.stringify(p.input) : null,
           intervalMs: p.intervalMs as number,
           nextFireMs: (p.firstFireMs as number) ?? this.clock(),

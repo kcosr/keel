@@ -1,6 +1,5 @@
 // Realm test fixture: an N-step accumulator chain. Runs inside the worker realm.
-import type { Ctx } from "../../ctx.ts";
-import { passthrough } from "../../schema.ts";
+import { type Ctx, passthrough } from "@kcosr/keel";
 
 const num = passthrough<number>();
 

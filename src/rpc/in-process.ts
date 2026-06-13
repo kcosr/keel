@@ -5,7 +5,14 @@
 
 import type { JournalStore } from "../journal/store.ts";
 import type { RealmKernel, RunHandle } from "../kernel/realm/realm-host.ts";
-import type { EventEnvelope, KeelApi, LaunchRequest, RunOutcome, RunStart } from "./contract.ts";
+import type {
+  EventEnvelope,
+  KeelApi,
+  LaunchRequest,
+  RunOutcome,
+  RunStart,
+  WorkflowProvenance,
+} from "./contract.ts";
 import {
   type Blockage,
   type RunProjection,
@@ -17,7 +24,6 @@ import {
 
 export class InProcessKeel implements KeelApi {
   private readonly running = new Map<string, Promise<RunHandle<unknown>>>();
-  private readonly workflowUrls = new Map<string, string>();
 
   constructor(
     private readonly kernel: RealmKernel,
@@ -25,8 +31,11 @@ export class InProcessKeel implements KeelApi {
   ) {}
 
   async launchRun(req: LaunchRequest): Promise<{ runId: string }> {
-    const { runId, done } = this.kernel.launch(req.workflowUrl, req.input, { name: req.name });
-    this.workflowUrls.set(runId, req.workflowUrl);
+    const { runId, done } = this.kernel.launch({
+      source: req.source,
+      name: req.name ?? null,
+      provenance: req.provenance,
+    }, req.input);
     this.running.set(
       runId,
       done.catch((err) => ({ runId, status: "failed", output: undefined }) as RunHandle<unknown>),
@@ -35,34 +44,35 @@ export class InProcessKeel implements KeelApi {
   }
 
   async resumeRun(runId: string): Promise<RunStart> {
-    const url = this.requireUrl(runId);
-    this.start(this.kernel.startResume<unknown>(runId, url));
+    this.start(this.kernel.startResume<unknown>(runId));
     return this.started(runId);
   }
 
   async rerunRun(
     runId: string,
-    opts?: { workflowUrl?: string; input?: unknown },
+    opts?: {
+      source?: string;
+      input?: unknown;
+      name?: string | null;
+      provenance?: WorkflowProvenance;
+    },
   ): Promise<RunStart> {
-    const url = opts?.workflowUrl ?? this.requireUrl(runId);
-    if (opts?.workflowUrl) this.workflowUrls.set(runId, opts.workflowUrl);
-    this.start(this.kernel.startRerun<unknown>(runId, url, opts?.input));
+    this.start(this.kernel.startRerun<unknown>(runId, opts));
     return this.started(runId);
   }
 
   async retryRun(runId: string): Promise<RunStart> {
-    this.start(this.kernel.startRetry<unknown>(runId, this.requireUrl(runId)));
+    this.start(this.kernel.startRetry<unknown>(runId));
     return this.started(runId);
   }
 
   async rewindRun(runId: string, toStableKey: string): Promise<RunStart> {
-    this.start(this.kernel.startRewind<unknown>(runId, toStableKey, this.requireUrl(runId)));
+    this.start(this.kernel.startRewind<unknown>(runId, toStableKey));
     return this.started(runId);
   }
 
   forkRun(runId: string, opts: { atStableKey?: string; newRunId?: string }): { runId: string } {
     const newId = this.kernel.fork(runId, opts);
-    this.workflowUrls.set(newId, this.requireUrl(runId));
     return { runId: newId };
   }
 
@@ -119,14 +129,6 @@ export class InProcessKeel implements KeelApi {
       stopped = true;
       clearTimeout(timer);
     };
-  }
-
-  private requireUrl(runId: string): string {
-    // After a daemon restart the in-memory map is empty; fall back to the
-    // workflow_ref persisted on the run row (recovery).
-    const url = this.workflowUrls.get(runId) ?? this.store.getRun(runId)?.workflowRef ?? null;
-    if (!url) throw new Error(`no workflow url registered for run ${runId} (launch it first)`);
-    return url;
   }
 
   private start(handle: { runId: string; done: Promise<RunHandle<unknown>> }): void {

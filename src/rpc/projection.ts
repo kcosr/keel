@@ -26,7 +26,7 @@ export interface RunStats {
 
 export interface RunProjection {
   runId: string;
-  workflowName: string;
+  workflowName: string | null;
   status: RunStatus;
   definitionVersion: string;
   parentRunId: string | null;
@@ -162,7 +162,7 @@ export function getBlockage(
 
 export interface RunSummary {
   runId: string;
-  workflowName: string;
+  workflowName: string | null;
   status: RunStatus;
 }
 

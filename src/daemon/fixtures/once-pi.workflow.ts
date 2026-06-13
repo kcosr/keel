@@ -1,6 +1,5 @@
 // Daemon test fixture: one pi-provider agent (driven by the daemon's mock).
-import type { Ctx } from "../../kernel/ctx.ts";
-import { jsonSchema } from "../../kernel/schema.ts";
+import { type Ctx, jsonSchema } from "@kcosr/keel";
 
 const Out = jsonSchema<{ value: number }>({
   type: "object",

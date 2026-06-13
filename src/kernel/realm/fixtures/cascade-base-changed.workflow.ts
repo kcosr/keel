@@ -1,8 +1,7 @@
 // Phase 6 fixture: `base` logic changed (×2 → ×3). On rerun: base re-executes
 // (version changed), derived re-executes (base's output changed → its inputHash
 // changed), indep replays (untouched).
-import type { Ctx } from "../../ctx.ts";
-import { passthrough } from "../../schema.ts";
+import { type Ctx, passthrough } from "@kcosr/keel";
 
 const num = passthrough<number>();
 

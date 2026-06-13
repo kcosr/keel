@@ -89,7 +89,15 @@ export class DaemonClient {
   resumeRun(runId: string): Promise<RunStart> {
     return this.rpc("resumeRun", { runId });
   }
-  rerunRun(runId: string, opts?: { workflowUrl?: string; input?: unknown }): Promise<RunStart> {
+  rerunRun(
+    runId: string,
+    opts?: {
+      source?: string;
+      input?: unknown;
+      name?: string | null;
+      provenance?: LaunchRequest["provenance"];
+    },
+  ): Promise<RunStart> {
     return this.rpc("rerunRun", { runId, opts });
   }
   getRun(runId: string): Promise<RunProjection | null> {
@@ -122,7 +130,8 @@ export class DaemonClient {
   }
   putSchedule(req: {
     name: string;
-    workflowUrl: string;
+    source: string;
+    workflowName?: string | null;
     input?: unknown;
     intervalMs: number;
     firstFireMs?: number;

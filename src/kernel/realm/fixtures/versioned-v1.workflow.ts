@@ -1,7 +1,6 @@
 // Phase 5 fixture (v1): two steps. Sibling files differ from this only by a
 // comment (same version) or by step b's logic (changed version).
-import type { Ctx } from "../../ctx.ts";
-import { passthrough } from "../../schema.ts";
+import { type Ctx, passthrough } from "@kcosr/keel";
 
 const num = passthrough<number>();
 

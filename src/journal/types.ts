@@ -21,9 +21,9 @@ export type RunStatus =
 
 export interface RunRow {
   runId: string;
-  workflowName: string;
+  workflowName: string | null;
   definitionVersion: string;
-  /** The workflow module path/ref used to (re)execute the run (recovery). */
+  /** Display-only workflow provenance. Execution uses definitionVersion. */
   workflowRef: string | null;
   status: RunStatus;
   parentRunId: string | null;
@@ -112,7 +112,7 @@ export interface ArtifactRow {
 
 export interface WorkflowDefinitionRow {
   hash: string;
-  name: string;
+  name: string | null;
   kind: string;
   code: string;
   sourceMap: string | null;

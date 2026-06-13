@@ -4,11 +4,12 @@ import { describe, expect, test } from "bun:test";
 import { MockProvider } from "../../agents/mock.ts";
 import { AgentProviderRegistry } from "../../agents/types.ts";
 import { JournalStore } from "../../journal/store.ts";
+import { captureWorkflowFile } from "../../workflow-definitions/capture.ts";
 import { RealmKernel } from "./realm-host.ts";
 
-const tripleUrl = new URL("./fixtures/triple.workflow.ts", import.meta.url).pathname;
-const flakyUrl = new URL("./fixtures/flaky.workflow.ts", import.meta.url).pathname;
-const napUrl = new URL("./fixtures/nap.workflow.ts", import.meta.url).pathname;
+const tripleUrl = captureWorkflowFile(new URL("./fixtures/triple.workflow.ts", import.meta.url).pathname);
+const flakyUrl = captureWorkflowFile(new URL("./fixtures/flaky.workflow.ts", import.meta.url).pathname);
+const napUrl = captureWorkflowFile(new URL("./fixtures/nap.workflow.ts", import.meta.url).pathname);
 
 describe("retry", () => {
   test("a failed run retries only from the failed step; upstream replays", async () => {
@@ -30,7 +31,7 @@ describe("retry", () => {
     expect(first).toBeNull();
 
     executed.length = 0;
-    const retried = await kernel.retry<string>("r", flakyUrl);
+    const retried = await kernel.retry<string>("r");
     expect(retried.status).toBe("finished");
     expect(retried.output).toBe("done:true");
     // pre REPLAYED (not re-executed); only the flaky agent + post ran on retry
@@ -53,7 +54,7 @@ describe("rewind", () => {
     expect(store.getLatestAttempt("r", "c")).not.toBeNull();
 
     executed.length = 0;
-    const rewound = await kernel.rewind<number>("r", "b", tripleUrl);
+    const rewound = await kernel.rewind<number>("r", "b");
     expect(rewound.status).toBe("finished");
     expect(rewound.output).toBe(3);
     // a, b replayed; only c re-executed
@@ -75,7 +76,7 @@ describe("rewind clears unresolved durable-wait state", () => {
 
     // rewind to the 'before' step → the unfired timer is cleared
     t = 5; // not yet elapsed for a fresh timer
-    const rewound = await kernel.rewind("r", "before", napUrl);
+    const rewound = await kernel.rewind("r", "before");
     expect(rewound.status).toBe("waiting-timer"); // re-parked fresh
     // exactly one timer again (the freshly re-created one), still unfired
     expect(
@@ -101,7 +102,7 @@ describe("fork fencing + state copy", () => {
     // run the nap to completion (timer fires)
     await kernel.run(napUrl, null, { name: "nap" }); // run-0 parks
     t = 5000;
-    await kernel.resume("run-0", napUrl); // run-0 finishes; its timer is fired
+    await kernel.resume("run-0"); // run-0 finishes; its timer is fired
     expect(store.getRun("run-0")?.status).toBe("finished");
 
     const forkId = kernel.fork("run-0", { newRunId: "fork-1" });

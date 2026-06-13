@@ -160,12 +160,13 @@ async function main(argv: string[]): Promise<number> {
       const [workflow, inputJson] = parsed.args;
       if (!workflow) return usage("launch needs a workflow path");
       const input = parseLaunchInput(inputJson);
-      const workflowUrl = resolveWorkflowPath(workflow);
+      const workflowPath = resolveWorkflowPath(workflow);
       const client = await openClient();
       const launched = await client.launchRun({
-        workflowUrl,
+        source: readFileSync(workflowPath, "utf8"),
         input,
-        name: workflowName(workflowUrl),
+        name: workflowName(workflowPath),
+        provenance: { kind: "clientPath", path: workflowPath },
       });
       const { runId } = launched;
       const capabilityRef =

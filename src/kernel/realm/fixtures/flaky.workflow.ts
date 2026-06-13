@@ -1,7 +1,6 @@
 // Phase 18 fixture: a pre step, a flaky agent (fails the first run, succeeds on
 // retry), and a post step — to show retry re-runs only from the failure.
-import type { Ctx } from "../../ctx.ts";
-import { jsonSchema, passthrough } from "../../schema.ts";
+import { type Ctx, jsonSchema, passthrough } from "@kcosr/keel";
 
 const num = passthrough<number>();
 const Out = jsonSchema<{ ok: boolean }>({

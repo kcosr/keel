@@ -4,14 +4,14 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { JournalStore } from "../journal/store.ts";
+import { captureWorkflowFile } from "../workflow-definitions/capture.ts";
 import { RealmKernel } from "../kernel/realm/realm-host.ts";
 import { ClaudeProvider } from "./claude.ts";
 import type { AgentHooks, AgentInvocation, AgentProvider, AgentResult } from "./types.ts";
 import { AgentProviderRegistry } from "./types.ts";
 
 const RESUME_ID = "11111111-1111-4111-8111-111111111111";
-const onceUrl = new URL("../kernel/realm/fixtures/agent-once-claude.workflow.ts", import.meta.url)
-  .pathname;
+const onceUrl = captureWorkflowFile(new URL("../kernel/realm/fixtures/agent-once-claude.workflow.ts", import.meta.url).pathname);
 
 class FakeClaudeVendor implements AgentProvider {
   readonly name = "claude";
@@ -62,7 +62,7 @@ describe("Claude session-resume four-branch table (through the realm)", () => {
     expect(store.getJournalRow("r", "ask", 1)?.status).toBe("pending");
     expect(store.getJournalRow("r", "ask", 1)?.sessionToken).toBe("sess-abc");
 
-    const resumed = await kernel(store, vendor).resume<{ value: number }>("r", onceUrl);
+    const resumed = await kernel(store, vendor).resume<{ value: number }>("r");
     expect(resumed.output).toEqual({ value: 1 });
     expect(vendor.calls).toHaveLength(2);
     expect(vendor.calls[1]?.resumeToken).toBe("sess-abc");
@@ -79,7 +79,7 @@ describe("Claude session-resume four-branch table (through the realm)", () => {
     await k1.run(onceUrl, null, { name: "t" }).catch(() => null);
     expect(store.getJournalRow("r", "ask", 1)?.sessionToken).toBeNull();
 
-    await kernel(store, vendor).resume("r", onceUrl);
+    await kernel(store, vendor).resume("r");
     expect(vendor.calls.at(-1)?.resumeToken).toBeUndefined();
   });
 
@@ -92,7 +92,7 @@ describe("Claude session-resume four-branch table (through the realm)", () => {
       },
     });
     await k1.run(onceUrl, null, { name: "t" }).catch(() => null);
-    await kernel(store, vendor).resume("r", onceUrl);
+    await kernel(store, vendor).resume("r");
     expect(vendor.calls.at(-1)?.resumeToken).toBe("sess-stale");
   });
 });
@@ -406,10 +406,10 @@ describe.if(LIVE)("LIVE claude smoke", () => {
     const { KeelDaemon } = await import("../daemon/server.ts");
     const { DaemonClient } = await import("../daemon/client.ts");
     const { AgentProviderRegistry } = await import("./types.ts");
-    const liveUrl = new URL(
+    const liveUrl = captureWorkflowFile(new URL(
       "../kernel/realm/fixtures/agent-live-claude.workflow.ts",
       import.meta.url,
-    ).pathname;
+    ).pathname);
     const dir = mkdtempSync(join(tmpdir(), "keel-live-claude-daemon-"));
     const socketPath = join(dir, "keel.sock");
     const dbPath = join(dir, "keel.db");
@@ -432,7 +432,7 @@ describe.if(LIVE)("LIVE claude smoke", () => {
     try {
       client = await DaemonClient.connect(socketPath);
       const { runId } = await client.launchRun({
-        workflowUrl: liveUrl,
+        ...liveUrl,
         input: null,
         name: "live-claude",
       });

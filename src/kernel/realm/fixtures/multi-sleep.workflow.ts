@@ -1,6 +1,5 @@
 // Commit 5 fixture: two durable sleeps with distinct author keys, around a step.
-import type { Ctx } from "../../ctx.ts";
-import { passthrough } from "../../schema.ts";
+import { type Ctx, passthrough } from "@kcosr/keel";
 
 const num = passthrough<number>();
 

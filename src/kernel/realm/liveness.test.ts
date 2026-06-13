@@ -14,10 +14,11 @@ import { StepTimeoutError, runAgentWithStall } from "../../agents/execute.ts";
 import { MockProvider } from "../../agents/mock.ts";
 import { AgentProviderRegistry } from "../../agents/types.ts";
 import { JournalStore } from "../../journal/store.ts";
+import { captureWorkflowFile } from "../../workflow-definitions/capture.ts";
 import { getBlockage } from "../../rpc/projection.ts";
 import { RealmKernel } from "./realm-host.ts";
 
-const stallUrl = new URL("./fixtures/stall.workflow.ts", import.meta.url).pathname;
+const stallUrl = captureWorkflowFile(new URL("./fixtures/stall.workflow.ts", import.meta.url).pathname);
 
 function kernel(store: JournalStore, mock: MockProvider, extra: Record<string, unknown> = {}) {
   return new RealmKernel(store, {

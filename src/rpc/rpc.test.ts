@@ -6,13 +6,14 @@ import { describe, expect, test } from "bun:test";
 import { MockProvider } from "../agents/mock.ts";
 import { AgentProviderRegistry } from "../agents/types.ts";
 import { JournalStore } from "../journal/store.ts";
+import { captureWorkflowFile } from "../workflow-definitions/capture.ts";
 import { RealmKernel } from "../kernel/realm/realm-host.ts";
 import { InProcessKeel } from "./in-process.ts";
 
 const FIX = new URL("../kernel/realm/fixtures/", import.meta.url);
-const reviewUrl = new URL("agent-review.workflow.ts", FIX).pathname;
-const chainUrl = new URL("chain.workflow.ts", FIX).pathname;
-const flakyUrl = new URL("flaky.workflow.ts", FIX).pathname;
+const reviewUrl = captureWorkflowFile(new URL("agent-review.workflow.ts", FIX).pathname);
+const chainUrl = captureWorkflowFile(new URL("chain.workflow.ts", FIX).pathname);
+const flakyUrl = captureWorkflowFile(new URL("flaky.workflow.ts", FIX).pathname);
 
 function keel(store: JournalStore, mock?: MockProvider): InProcessKeel {
   let id = 0;
@@ -37,7 +38,7 @@ describe("RPC contract drives a workflow end-to-end", () => {
     const api = keel(store, mock);
 
     const { runId } = await api.launchRun({
-      workflowUrl: reviewUrl,
+      ...reviewUrl,
       input: { domains: ["auth", "net"] },
       name: "review",
     });
@@ -61,8 +62,8 @@ describe("RPC contract drives a workflow end-to-end", () => {
   test("listRuns summarizes every run", async () => {
     const store = JournalStore.memory();
     const api = keel(store);
-    await api.launchRun({ workflowUrl: chainUrl, input: { n: 3 }, name: "c1" });
-    await api.launchRun({ workflowUrl: chainUrl, input: { n: 2 }, name: "c2" });
+    await api.launchRun({ ...chainUrl, input: { n: 3 }, name: "c1" });
+    await api.launchRun({ ...chainUrl, input: { n: 2 }, name: "c2" });
     await api.waitForRun("run_0");
     await api.waitForRun("run_1");
     const runs = api.listRuns();
@@ -75,7 +76,7 @@ describe("projection is golden-locked", () => {
   test("a chain run produces the exact expected projection", async () => {
     const store = JournalStore.memory();
     const api = keel(store);
-    await api.launchRun({ workflowUrl: chainUrl, input: { n: 3 }, name: "chain" });
+    await api.launchRun({ ...chainUrl, input: { n: 3 }, name: "chain" });
     await api.waitForRun("run_0");
     const p = api.getRun("run_0");
     const definitionVersion = p?.definitionVersion ?? "";
@@ -125,7 +126,7 @@ describe("event subscription", () => {
     const api = keel(store);
     const seen: string[] = [];
     const { runId } = await api.launchRun({
-      workflowUrl: chainUrl,
+      ...chainUrl,
       input: { n: 2 },
       name: "chain",
     });
@@ -150,7 +151,7 @@ describe("lifecycle start methods", () => {
     });
     const api = keel(store, mock);
 
-    const { runId } = await api.launchRun({ workflowUrl: flakyUrl, input: null, name: "flaky" });
+    const { runId } = await api.launchRun({ ...flakyUrl, input: null, name: "flaky" });
     expect((await api.waitForRun(runId)).status).toBe("failed");
 
     const started = await api.retryRun(runId);
@@ -165,7 +166,7 @@ describe("lifecycle start methods", () => {
   test("retryRun precondition errors reject without fake failed outcome", async () => {
     const store = JournalStore.memory();
     const api = keel(store);
-    const { runId } = await api.launchRun({ workflowUrl: chainUrl, input: { n: 2 }, name: "ok" });
+    const { runId } = await api.launchRun({ ...chainUrl, input: { n: 2 }, name: "ok" });
     expect((await api.waitForRun(runId)).status).toBe("finished");
 
     await expect(api.retryRun(runId)).rejects.toThrow("retry needs a failed run (is finished)");
@@ -176,7 +177,7 @@ describe("lifecycle start methods", () => {
   test("rewindRun to an unknown step rejects without starting work", async () => {
     const store = JournalStore.memory();
     const api = keel(store);
-    const { runId } = await api.launchRun({ workflowUrl: chainUrl, input: { n: 2 }, name: "ok" });
+    const { runId } = await api.launchRun({ ...chainUrl, input: { n: 2 }, name: "ok" });
     expect((await api.waitForRun(runId)).status).toBe("finished");
 
     await expect(api.rewindRun(runId, "missing")).rejects.toThrow(

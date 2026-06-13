@@ -45,23 +45,21 @@ interface CapturedExternalPackage {
 
 export interface WorkflowDefinitionSnapshot {
   hash: string;
-  name: string;
-  kind: "path";
+  name: string | null;
+  kind: "source";
   code: string;
   manifest: WorkflowDefinitionManifest;
-  provenance: string;
 }
 
 export interface SnapshotWorkflowOptions {
-  name: string;
+  name?: string | null;
   nowMs: number;
   lint?: boolean;
   cacheRoot?: string;
 }
 
 const DEFINITION_PREFIX = "wf_sha256_";
-const IMPORT_EXTENSIONS = ["", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"];
-const INDEX_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"];
+export const MAX_WORKFLOW_SOURCE_BYTES = 256 * 1024;
 const NODE_BUILTINS = new Set([...builtinModules, ...builtinModules.map((name) => `node:${name}`)]);
 const KEEL_PACKAGE_ROOT = resolve(fileURLToPath(new URL("../../", import.meta.url)));
 const tsTranspiler = new Bun.Transpiler({ loader: "tsx" });
@@ -70,12 +68,12 @@ export function defaultDefinitionCacheRoot(): string {
   return process.env.KEEL_DEFINITION_CACHE_DIR ?? join(homedir(), ".keel", "definitions");
 }
 
-export function snapshotWorkflowPath(
+export function snapshotWorkflowSource(
   store: JournalStore,
-  workflowUrl: string,
+  source: string,
   opts: SnapshotWorkflowOptions,
 ): { snapshot: WorkflowDefinitionSnapshot; entryPath: string } {
-  const snapshot = createWorkflowDefinitionSnapshot(workflowUrl, opts);
+  const snapshot = createWorkflowDefinitionSnapshot(source, opts);
   store.putWorkflowDefinition({
     hash: snapshot.hash,
     name: snapshot.name,
@@ -129,17 +127,40 @@ export function isWorkflowDefinitionHash(value: string): boolean {
 }
 
 function createWorkflowDefinitionSnapshot(
-  workflowUrl: string,
+  source: string,
   opts: SnapshotWorkflowOptions,
 ): WorkflowDefinitionSnapshot {
-  const entryPath = pathFromWorkflowUrl(workflowUrl);
-  const sourceRoot = findPackageRoot(dirname(entryPath));
-  const modules = collectModules(entryPath, sourceRoot, opts.lint ?? true);
-  const entry = relativeModulePath(sourceRoot, entryPath);
-  const entryModule = modules.find((m) => m.path === entry);
-  if (!entryModule) throw new Error(`workflow entry ${entryPath} was not captured`);
-
+  const size = new TextEncoder().encode(source).byteLength;
+  if (size > MAX_WORKFLOW_SOURCE_BYTES) {
+    throw new Error(
+      `workflow source is ${size} bytes; maximum is ${MAX_WORKFLOW_SOURCE_BYTES} bytes`,
+    );
+  }
+  const name = opts.name ?? null;
+  const filename = name ?? "workflow";
+  if (opts.lint ?? true) {
+    const violations = lintWorkflowSource(source, filename);
+    if (violations.length > 0) {
+      throw new Error(
+        `workflow failed the determinism lint:\n${formatViolations(violations, filename)}`,
+      );
+    }
+  }
+  const imports = staticImports(source, filename);
+  for (const spec of imports) {
+    if (spec.startsWith(".") || isAbsolute(spec)) {
+      throw new Error(
+        `workflow must be a single self-contained file; import "${spec}" is not supported yet`,
+      );
+    }
+    if (spec !== "@kcosr/keel") {
+      throw new Error(`workflow import "${spec}" is not allowed; only @kcosr/keel is supported`);
+    }
+  }
+  const modules: CapturedModule[] = [{ path: "entry.ts", code: source }];
+  const entry = "entry.ts";
   const externalImports = collectExternalImports(modules).sort();
+  const sourceRoot = "client-captured://source";
   const manifest: WorkflowDefinitionManifest = {
     format: "keel.workflow-definition.v1",
     entry,
@@ -165,46 +186,11 @@ function createWorkflowDefinitionSnapshot(
 
   return {
     hash,
-    name: opts.name,
-    kind: "path",
-    code: entryModule.code,
+    name,
+    kind: "source",
+    code: source,
     manifest,
-    provenance: entryPath,
   };
-}
-
-function collectModules(entryPath: string, sourceRoot: string, lint: boolean): CapturedModule[] {
-  const seen = new Set<string>();
-  const modules = new Map<string, CapturedModule>();
-  const visit = (file: string) => {
-    const abs = resolve(file);
-    if (seen.has(abs)) return;
-    seen.add(abs);
-
-    const rel = relativeModulePath(sourceRoot, abs);
-    const code = readFileSync(abs, "utf8");
-    if (lint) {
-      const violations = lintWorkflowSource(code, abs);
-      if (violations.length > 0) {
-        throw new Error(
-          `workflow failed the determinism lint:\n${formatViolations(violations, abs)}`,
-        );
-      }
-    }
-    modules.set(rel, { path: rel, code });
-
-    for (const spec of staticImports(code, abs)) {
-      if (spec.startsWith(".")) {
-        const dep = resolveRelativeImport(abs, spec);
-        assertInsideRoot(sourceRoot, dep, spec);
-        visit(dep);
-      } else if (isAbsolute(spec)) {
-        throw new Error(`absolute workflow import "${spec}" is not allowed in ${abs}`);
-      }
-    }
-  };
-  visit(entryPath);
-  return [...modules.values()].sort((a, b) => a.path.localeCompare(b.path));
 }
 
 function staticImports(source: string, filename: string): string[] {
@@ -245,50 +231,6 @@ function collectExternalImports(modules: CapturedModule[]): string[] {
     }
   }
   return [...imports];
-}
-
-function resolveRelativeImport(fromFile: string, spec: string): string {
-  const base = resolve(dirname(fromFile), spec);
-  for (const ext of IMPORT_EXTENSIONS) {
-    const candidate = `${base}${ext}`;
-    if (existsSync(candidate) && lstatSync(candidate).isFile()) return candidate;
-  }
-  for (const ext of INDEX_EXTENSIONS) {
-    const candidate = join(base, `index${ext}`);
-    if (existsSync(candidate) && lstatSync(candidate).isFile()) return candidate;
-  }
-  throw new Error(`could not resolve workflow import "${spec}" from ${fromFile}`);
-}
-
-function pathFromWorkflowUrl(workflowUrl: string): string {
-  const path = workflowUrl.startsWith("file:") ? fileURLToPath(workflowUrl) : workflowUrl;
-  const abs = resolve(path);
-  if (!existsSync(abs) || !lstatSync(abs).isFile()) {
-    throw new Error(`workflow path ${workflowUrl} is not a readable file`);
-  }
-  return abs;
-}
-
-function findPackageRoot(startDir: string): string {
-  let dir = resolve(startDir);
-  while (true) {
-    if (existsSync(join(dir, "package.json")) || existsSync(join(dir, ".git"))) return dir;
-    const parent = dirname(dir);
-    if (parent === dir) return resolve(startDir);
-    dir = parent;
-  }
-}
-
-function relativeModulePath(root: string, file: string): string {
-  assertInsideRoot(root, file, file);
-  return relative(root, file).split(sep).join("/");
-}
-
-function assertInsideRoot(root: string, file: string, label: string): void {
-  const rel = relative(root, file);
-  if (rel.startsWith("..") || isAbsolute(rel)) {
-    throw new Error(`workflow import "${label}" escapes workflow root ${root}`);
-  }
 }
 
 function parseManifest(row: WorkflowDefinitionRow): WorkflowDefinitionManifest {

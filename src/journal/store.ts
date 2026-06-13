@@ -140,6 +140,7 @@ export class JournalStore {
       Pick<
         RunRow,
         | "status"
+        | "workflowName"
         | "inputRef"
         | "outputRef"
         | "errorJson"
@@ -157,6 +158,7 @@ export class JournalStore {
       params[`$${key}`] = val;
     };
     if ("status" in patch) add("status", "status", patch.status ?? null);
+    if ("workflowName" in patch) add("workflow_name", "workflowName", patch.workflowName ?? null);
     if ("inputRef" in patch) add("input_ref", "inputRef", patch.inputRef ?? null);
     if ("outputRef" in patch) add("output_ref", "outputRef", patch.outputRef ?? null);
     if ("errorJson" in patch) add("error_json", "errorJson", patch.errorJson ?? null);
@@ -836,7 +838,7 @@ function withJournalDefaults(row: NewJournalRow): JournalRow {
 
 interface RawRunRow {
   run_id: string;
-  workflow_name: string;
+  workflow_name: string | null;
   definition_version: string;
   workflow_ref: string | null;
   status: string;
@@ -888,7 +890,7 @@ interface RawArtifactRow {
 
 interface RawWorkflowDefinitionRow {
   hash: string;
-  name: string;
+  name: string | null;
   kind: string;
   code: string;
   source_map: string | null;

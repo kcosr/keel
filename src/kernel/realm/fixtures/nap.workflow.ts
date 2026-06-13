@@ -1,7 +1,6 @@
 // Phase 16 fixture: a step, a durable sleep, then a step. The run parks at the
 // sleep and a supervisor wakes it to finish.
-import type { Ctx } from "../../ctx.ts";
-import { passthrough } from "../../schema.ts";
+import { type Ctx, passthrough } from "@kcosr/keel";
 
 const num = passthrough<number>();
 

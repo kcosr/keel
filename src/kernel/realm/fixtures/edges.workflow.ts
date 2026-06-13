@@ -1,7 +1,6 @@
 // Realm test fixture: step b consumes step a's object result, so the dependency
 // edge must be detected across the JSON boundary (§5.4 tagged envelopes).
-import type { Ctx } from "../../ctx.ts";
-import { passthrough } from "../../schema.ts";
+import { type Ctx, passthrough } from "@kcosr/keel";
 
 const obj = passthrough<{ items: number[] }>();
 const num = passthrough<number>();

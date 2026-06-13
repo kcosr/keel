@@ -174,7 +174,20 @@ return {
 ```
 
 ```bash
-keel execute < run-review.control.ts
+cat run-review.control.ts | keel execute
+```
+
+For one-off control scripts, use a TypeScript heredoc:
+
+```bash
+keel execute <<'TS'
+const run = await keel.launch({
+  workflow: "./adversarial-review.workflow.ts",
+  input: { root: "/abs/path/to/code" },
+});
+const settled = await keel.wait(run.runId);
+return { runId: run.runId, capabilityRef: run.capabilityRef, status: settled.status };
+TS
 ```
 
 `execute` is stateless. Pass only non-secret handles through `--state`; pass

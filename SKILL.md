@@ -68,7 +68,8 @@ ctx.agent({
 ```
 
 Filter tolerated failures out with `.filter(Boolean)`. Do not use `onFailure:
-"null"` for required agents; let those failures fail the run so `keel retry` works.
+"null"` for required agents; let those failures fail the run so the run can be
+retried.
 
 ## 5. Schemas
 
@@ -190,49 +191,25 @@ return { runId: run.runId, capabilityRef: run.capabilityRef, status: settled.sta
 TS
 ```
 
-`execute` is stateless. Pass only non-secret handles through `--state`; pass
-capabilities through credential channels such as `KEEL_CAP_FILE`,
-`KEEL_RUN_CAP`, or `--cap-file`. Child launches return a `capabilityRef` by
-default. Raw child capabilities require `--emit-capability`.
+Inside `execute`, use the TypeScript control surface:
 
-Use `execute` when the next action is computable from the prior result: launch
+```ts
+const run = await keel.launch({ workflow: "./workflow.ts", input: {} });
+const settled = await keel.wait(run.runId);
+const projection = await keel.get(run.runId);
+const output = settled.status === "finished" ? await keel.output(run.runId) : null;
+await keel.retry(run.runId);
+await keel.resume(run.runId);
+```
+
+`execute` is stateless. Return the small JSON result the caller needs: usually
+`runId`, `capabilityRef`, `status`, `output`, and any next-step context. Use
+`execute` when the next action is computable from the prior result: launch
 fan-out, wait, retry, inspect output, shape JSON, or decide a simple branch.
 Durable pauses, replayable workflow logic, and long-running state belong in the
 workflow itself, not in `execute`.
 
-## 8. CLI Reference
-
-Use individual CLI verbs for quick one-shot commands or when you need to inspect
-the result and decide the next action manually:
-
-```bash
-keel launch ./adversarial-review.workflow.ts --input '{"root":"/abs/path/to/code"}'
-```
-
-`keel launch` watches by default. Detached launch returns JSON with `runId` and
-`capabilityRef`; follow-up commands need that cap file:
-
-```bash
-LAUNCH=$(keel launch --detach ./adversarial-review.workflow.ts --input '{"root":"/abs/path/to/code"}')
-RUN=$(printf '%s' "$LAUNCH" | jq -r .runId)
-CAP=$(printf '%s' "$LAUNCH" | jq -r .capabilityRef)
-KEEL_CAP_FILE="$CAP" keel watch "$RUN"
-KEEL_CAP_FILE="$CAP" keel get "$RUN"       # run projection (JSON)
-KEEL_CAP_FILE="$CAP" keel output "$RUN"    # terminal output (JSON)
-```
-
-Other useful verbs:
-
-```bash
-KEEL_CAP_FILE="$CAP" keel resume "$RUN"
-KEEL_CAP_FILE="$CAP" keel retry "$RUN"
-KEEL_CAP_FILE="$CAP" keel rewind "$RUN" <stepKey>
-KEEL_CAP_FILE="$CAP" keel fork "$RUN" [atStepKey]
-```
-
-Omit `--input` for `{}`. Pass valid JSON through `--input` for any other input.
-
-## 9. Tips
+## 8. Tips
 
 - Use **absolute paths** for the code you're reviewing.
 - On optional review fan-out agents, set **`toolPolicy: "read-only"`**, **`lenient:
@@ -241,5 +218,5 @@ Omit `--input` for `{}`. Pass valid JSON through `--input` for any other input.
 - A run resumes from its immutable launch-time workflow snapshot. Edit the source
   file only when you intend a later rerun with a source override to snapshot new
   code.
-- Use individual CLI verbs when judgment is needed between steps; use `execute`
-  when the next step is mechanical.
+- Use `execute` for mechanical follow-up; return concise JSON for the human or
+  calling agent to inspect.

@@ -311,6 +311,35 @@ describe("keel CLI", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  test("execute writes structured errors to stderr", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-execute-error-"));
+    const socketPath = join(dir, "keel.sock");
+    const dbPath = join(dir, "keel.db");
+    const script = join(dir, "bad.ts");
+    writeFileSync(script, 'throw new Error("bad control script");\n');
+    const daemon = new KeelDaemon({
+      socketPath,
+      dbPath,
+      agents: new AgentProviderRegistry().register(new MockProvider()),
+    });
+    await daemon.start();
+    try {
+      const out = await runCli(["execute", script], dir, {
+        KEEL_SOCKET: socketPath,
+        KEEL_DB: dbPath,
+        KEEL_DIR: dir,
+      });
+      expect(out.code).toBe(1);
+      expect(JSON.parse(out.stderr).error).toMatchObject({
+        code: "execute_failed",
+        message: "bad control script",
+      });
+    } finally {
+      daemon.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 function writeControlScript(path: string, workflowUrl: string): void {

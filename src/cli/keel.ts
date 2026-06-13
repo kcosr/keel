@@ -306,6 +306,9 @@ async function main(argv: string[]): Promise<number> {
         });
         process.stdout.write(`${JSON.stringify(result ?? null)}\n`);
         return 0;
+      } catch (err) {
+        process.stderr.write(`${JSON.stringify({ error: structuredError(err) })}\n`);
+        return 1;
       } finally {
         client.close();
       }
@@ -515,6 +518,13 @@ function usage(message: string): number {
   if (cmdNames.has(name)) process.stderr.write(`${cmdHelp(name)}`);
   else process.stderr.write("Run `keel help` for usage.\n");
   return 2;
+}
+
+function structuredError(err: unknown): { code: string; message: string; name: string } {
+  if (err instanceof Error) {
+    return { code: "execute_failed", name: err.name, message: err.message };
+  }
+  return { code: "execute_failed", name: "Error", message: String(err) };
 }
 
 function loadCredential(): string | null {

@@ -28,6 +28,7 @@ import {
 const CLI = new URL("./keel.ts", import.meta.url).pathname;
 const FIX = new URL("../kernel/realm/fixtures/", import.meta.url);
 const chainUrl = new URL("chain.workflow.ts", FIX).pathname;
+const gateUrl = new URL("gate.workflow.ts", FIX).pathname;
 
 async function runCli(
   args: string[],
@@ -338,6 +339,46 @@ describe("keel CLI", () => {
       const rawResult = JSON.parse(raw.stdout) as { capability: string; capabilityRef?: string };
       expect(rawResult.capability.startsWith("kc_run_")).toBe(true);
       expect(rawResult.capabilityRef).toBeUndefined();
+    } finally {
+      daemon.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("execute approve reuses the original admin credential after launching a child run", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-execute-approve-"));
+    const socketPath = join(dir, "keel.sock");
+    const dbPath = join(dir, "keel.db");
+    const script = join(dir, "approve.ts");
+    writeFileSync(
+      script,
+      `
+        const run = await keel.launch({ workflow: ${JSON.stringify(gateUrl)}, input: null });
+        await keel.wait(run.runId, { timeoutMs: 2000 });
+        const decision = await keel.approve(run.runId, "approve-deploy");
+        const done = await keel.wait(run.runId);
+        return { decision: decision.status, output: done.output };
+      `,
+    );
+    const daemon = new KeelDaemon({
+      socketPath,
+      dbPath,
+      agents: new AgentProviderRegistry().register(new MockProvider()),
+      adminToken: "kc_admin_execute_test",
+    });
+    await daemon.start();
+    try {
+      const out = await runCli(["execute", script], dir, {
+        KEEL_SOCKET: socketPath,
+        KEEL_DB: dbPath,
+        KEEL_DIR: dir,
+        KEEL_ADMIN_TOKEN: "kc_admin_execute_test",
+      });
+      expect(out.code).toBe(0);
+      expect(JSON.parse(out.stdout)).toEqual({
+        decision: "finished",
+        output: "deploy:approved",
+      });
     } finally {
       daemon.stop();
       rmSync(dir, { recursive: true, force: true });

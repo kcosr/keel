@@ -168,6 +168,46 @@ describe("capability auth", () => {
       daemon.stop();
     }
   }, 8000);
+
+  test("long-lived subscriptions keep their original credential after re-authentication", async () => {
+    const socketPath = join(dir, "credential-race.sock");
+    const daemon = new KeelDaemon({
+      socketPath,
+      dbPath: join(dir, "credential-race.db"),
+      agents: new AgentProviderRegistry().register(
+        new MockProvider({ default: { outputs: ['{"value":1}'], delayMs: 350 } }),
+      ),
+      adminToken: ADMIN_TOKEN,
+    });
+    await daemon.start();
+    try {
+      const client = await DaemonClient.connect(socketPath);
+      const first = await client.launchRun({ workflowUrl: onceUrl, input: null, name: "first" });
+      await client.authenticate(first.capability as string);
+      const firstEvents: string[] = [];
+      const unsubscribe = client.subscribeEvents(first.runId, 0, (event) =>
+        firstEvents.push(event.type),
+      );
+      await until(() => Promise.resolve(firstEvents.includes("run.started")), 2000);
+
+      const second = await client.launchRun({
+        workflowUrl: chainUrl,
+        input: { n: 2 },
+        name: "second",
+      });
+      await client.authenticate(second.capability as string);
+      await client.waitForRun(second.runId);
+
+      await until(() => Promise.resolve(firstEvents.includes("run.finished")), 3000);
+      expect(firstEvents).not.toContain("authorization.failed");
+      unsubscribe();
+      await client.authenticate(first.capability as string);
+      await client.waitForRun(first.runId);
+      client.close();
+    } finally {
+      daemon.stop();
+    }
+  }, 8000);
 });
 
 describe("CAS ownership fence", () => {

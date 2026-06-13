@@ -299,6 +299,7 @@ async function main(argv: string[]): Promise<number> {
         const state = parsed.stateFile ? JSON.parse(readFileSync(parsed.stateFile, "utf8")) : null;
         const result = await runExecuteScript({
           client,
+          credential,
           cwd: process.cwd(),
           source,
           ...(parsed.entry ? { entry: parsed.entry } : {}),

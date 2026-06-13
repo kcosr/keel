@@ -74,6 +74,9 @@ describe("determinism lint — forbidden imports", () => {
     expect(rules('export default async () => { await import("node:http"); };')).toContain(
       "no-forbidden-import",
     );
+    expect(rules('export default async () => { await import("./helper"); };')).toContain(
+      "no-dynamic-import",
+    );
     expect(rules('import "bun";\nexport default async () => 1;')).toContain("no-forbidden-import");
     expect(
       rules('import { keel } from "@kcosr/keel/execute";\nexport default async () => 1;'),

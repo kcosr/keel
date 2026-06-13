@@ -1,7 +1,7 @@
-const CAPABILITY_TOKEN_PATTERN = /\bkc_(?:run|admin)_[A-Za-z0-9_-]+\b/g;
+const CAPABILITY_TOKEN_PATTERN = /(^|[^A-Za-z0-9_-])(kc_(?:run|admin)_[A-Za-z0-9_-]+)/g;
 
 export function redactCapabilityTokens(text: string): string {
-  return text.replace(CAPABILITY_TOKEN_PATTERN, "«redacted-capability»");
+  return text.replace(CAPABILITY_TOKEN_PATTERN, "$1«redacted-capability»");
 }
 
 export function redactCapabilityTokensInValue<T>(value: T): T {

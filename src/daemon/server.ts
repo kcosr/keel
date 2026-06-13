@@ -269,9 +269,10 @@ export class KeelDaemon {
         return this.api.listRuns();
       case "waitForRun":
         this.authorizeRun(conn, p.runId as string, "run:watch");
-        return this.waitForRunAuthorized(conn, p.runId as string);
+        return this.waitForRunAuthorized(conn.credential, p.runId as string);
       case "subscribeEvents": {
         this.authorizeRun(conn, p.runId as string, "run:events");
+        const credential = conn.credential;
         const subId = randomUUID();
         let unsub = () => {};
         let stopped = false;
@@ -299,7 +300,7 @@ export class KeelDaemon {
         };
         const recheck = setInterval(() => {
           try {
-            this.authorizeRun(conn, p.runId as string, "run:events");
+            this.authorizeRunCredential(credential, p.runId as string, "run:events");
           } catch (err) {
             sendAuthFailure(err);
             stop();
@@ -311,7 +312,7 @@ export class KeelDaemon {
           (event: EventEnvelope) => {
             try {
               if (stopped) return;
-              this.authorizeRun(conn, p.runId as string, "run:events");
+              this.authorizeRunCredential(credential, p.runId as string, "run:events");
               this.send(conn, { event: { subId, ...redactCapabilityTokensInValue(event) } });
             } catch (err) {
               sendAuthFailure(err, event.seq);
@@ -374,12 +375,15 @@ export class KeelDaemon {
   }
 
   private authorizeRun(conn: Conn, runId: string, action: CapabilityAction): void {
-    authorize(
-      this.store,
-      conn.credential,
-      { action, resource: { kind: "run", runId } },
-      this.clock(),
-    );
+    this.authorizeRunCredential(conn.credential, runId, action);
+  }
+
+  private authorizeRunCredential(
+    credential: string | null,
+    runId: string,
+    action: CapabilityAction,
+  ): void {
+    authorize(this.store, credential, { action, resource: { kind: "run", runId } }, this.clock());
   }
 
   private authorizeAdmin(conn: Conn): void {
@@ -391,7 +395,7 @@ export class KeelDaemon {
     );
   }
 
-  private waitForRunAuthorized(conn: Conn, runId: string): Promise<unknown> {
+  private waitForRunAuthorized(credential: string | null, runId: string): Promise<unknown> {
     return new Promise((resolve, reject) => {
       let settled = false;
       const finish = (fn: () => void) => {
@@ -402,7 +406,7 @@ export class KeelDaemon {
       };
       const recheck = setInterval(() => {
         try {
-          this.authorizeRun(conn, runId, "run:watch");
+          this.authorizeRunCredential(credential, runId, "run:watch");
         } catch (err) {
           finish(() => reject(err));
         }
@@ -410,7 +414,7 @@ export class KeelDaemon {
       this.api.waitForRun(runId).then(
         (out) => {
           try {
-            this.authorizeRun(conn, runId, "run:watch");
+            this.authorizeRunCredential(credential, runId, "run:watch");
             finish(() => resolve(out));
           } catch (err) {
             finish(() => reject(err));

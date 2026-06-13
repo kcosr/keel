@@ -48,6 +48,7 @@ export interface ExecuteRunning {
 
 export interface ExecuteRuntimeOptions {
   client: DaemonClient;
+  credential?: string | null;
   cwd: string;
   args: string[];
   state: unknown;
@@ -92,6 +93,9 @@ export function createExecuteKeel(opts: ExecuteRuntimeOptions): ExecuteKeel {
   const authenticateKnownRun = async (runId: string) => {
     const cap = runCaps.get(runId);
     if (cap) await opts.client.authenticate(cap);
+  };
+  const authenticateControlCredential = async () => {
+    if (opts.credential) await opts.client.authenticate(opts.credential);
   };
   const handle = async (
     runId: string,
@@ -162,9 +166,11 @@ export function createExecuteKeel(opts: ExecuteRuntimeOptions): ExecuteKeel {
       return opts.client.sendSignal(runId, name, payload);
     },
     async approve(runId, key, approveOpts = {}) {
+      await authenticateControlCredential();
       return opts.client.decideApproval(runId, key, { status: "approved", ...approveOpts });
     },
     async deny(runId, key, denyOpts = {}) {
+      await authenticateControlCredential();
       return opts.client.decideApproval(runId, key, { status: "denied", ...denyOpts });
     },
   };

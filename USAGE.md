@@ -217,7 +217,9 @@ a new definition.
 `workspaceIsolation: true`:
 
 ```bash
-KEEL_WORKSPACE_ROOT=/home/kevin/worktrees/keel keel daemon
+KEEL_ADMIN_TOKEN=kc_admin_local \
+  KEEL_WORKSPACE_ROOT=/home/kevin/worktrees/keel \
+  keel daemon
 ```
 
 Agents that do not request workspace isolation do not require a workspace root.
@@ -266,6 +268,11 @@ an admin capability. Admin is required for daemon-wide `list` and
 `approve`/`deny` of `ctx.human` gates. Raw run capabilities are printed only
 with explicit `--emit-capability`; avoid this in transcripts unless you intend
 to handle the token as a secret.
+
+Socket `authenticate` records the credential for later requests on that
+connection. It does not validate by itself; protected daemon methods return the
+authorization error if the credential is invalid, revoked, expired, or scoped to
+another resource.
 
 ### Execute
 

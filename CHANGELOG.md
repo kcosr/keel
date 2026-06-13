@@ -19,7 +19,8 @@
 - Resume/retry/rewind/fork execute the run's stored workflow definition snapshot;
   rerun/adopt-latest creates a fresh snapshot.
 - Long-lived waits/event streams re-check capability validity and fail when a
-  presented capability is revoked or expires.
+  presented capability is revoked or expires; each wait/subscription is bound to
+  the credential presented when it was started.
 - `KEEL_TOKENS`/`KEEL_TOKEN` read-write auth has been replaced by
   `KEEL_ADMIN_TOKEN`, `KEEL_RUN_CAP`, `KEEL_CAP_FILE`, and cap files under
   `KEEL_CAP_DIR`.
@@ -32,3 +33,5 @@
 - Bootstrap admin capability setup no longer re-enables a revoked bootstrap token
   on daemon restart.
 - Workflow snapshots now fail closed when pinned external package bytes drift.
+- `@kcosr/keel` workflow snapshot materialization now links to the package root
+  instead of its parent directory.

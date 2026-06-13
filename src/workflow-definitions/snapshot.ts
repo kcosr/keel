@@ -63,6 +63,7 @@ const DEFINITION_PREFIX = "wf_sha256_";
 const IMPORT_EXTENSIONS = ["", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"];
 const INDEX_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"];
 const NODE_BUILTINS = new Set([...builtinModules, ...builtinModules.map((name) => `node:${name}`)]);
+const KEEL_PACKAGE_ROOT = resolve(fileURLToPath(new URL("../../", import.meta.url)));
 const tsTranspiler = new Bun.Transpiler({ loader: "tsx" });
 
 export function defaultDefinitionCacheRoot(): string {
@@ -318,7 +319,7 @@ function linkExternalResolution(
   for (const packageName of packageNames) {
     const pinned = packagePins.find((pkg) => pkg.name === packageName);
     if (packageName === "@kcosr/keel") {
-      const src = dirname(fileURLToPath(new URL("../..", import.meta.url)));
+      const src = KEEL_PACKAGE_ROOT;
       validatePackageIntegrity(packageName, src, pinned);
       linkPackage(join(nodeModules, "@kcosr", "keel"), src);
     } else {
@@ -346,7 +347,7 @@ function collectExternalPackages(
   return [...names].sort().map((name) => {
     const root =
       name === "@kcosr/keel"
-        ? dirname(fileURLToPath(new URL("../..", import.meta.url)))
+        ? KEEL_PACKAGE_ROOT
         : join(sourceRoot, "node_modules", ...name.split("/"));
     if (!existsSync(root)) {
       throw new Error(`workflow external package "${name}" is missing at ${root}`);

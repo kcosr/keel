@@ -6,6 +6,7 @@ import {
   hashCapabilityToken,
   issueRunCapability,
 } from "./capabilities.ts";
+import { redactCapabilityTokens } from "./redaction.ts";
 
 describe("capability authorization", () => {
   test("run tokens authorize only their scoped run actions", () => {
@@ -76,5 +77,11 @@ describe("capability authorization", () => {
     } finally {
       store.close();
     }
+  });
+
+  test("capability redaction includes tokens ending in base64url punctuation", () => {
+    expect(redactCapabilityTokens("x=kc_run_abc-_ y=kc_admin_def_")).toBe(
+      "x=«redacted-capability» y=«redacted-capability»",
+    );
   });
 });

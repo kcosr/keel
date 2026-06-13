@@ -256,9 +256,8 @@ export function lintWorkflowSource(source: string, filename = "workflow"): Viola
     if (node.type === "ImportExpression") {
       const src = node.source as AnyNode;
       if (src?.type === "Literal" && typeof src.value === "string") {
-        if (!FORBIDDEN_MODULES.has(src.value)) return;
         violations.push({
-          rule: "no-forbidden-import",
+          rule: FORBIDDEN_MODULES.has(src.value) ? "no-forbidden-import" : "no-dynamic-import",
           message: `dynamic import("${src.value}") is not allowed in workflow code.`,
           ...at(node),
         });

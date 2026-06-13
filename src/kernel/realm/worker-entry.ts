@@ -2,7 +2,7 @@
 //
 // Before importing any workflow code it installs throwing shims for the ambient
 // globals (Date.now, argless new Date(), Math.random, crypto.randomUUID,
-// fetch, performance.now) so that workflow code physically cannot read
+// fetch, performance.now, Bun.*) so that workflow code physically cannot read
 // non-determinism — the only time/entropy is ctx.now()/ctx.random(). Module
 // imports of fs/child_process/http are rejected by the static lint (Phase 5);
 // this layer seals the globals (§6 layer 2).
@@ -41,6 +41,127 @@ function realmError(what: string, instead: string): Error {
   );
 }
 
+function installBunShims(bunValue: unknown): void {
+  if (!bunValue || (typeof bunValue !== "object" && typeof bunValue !== "function")) return;
+
+  const bun = bunValue as Record<PropertyKey, unknown>;
+  const throwBun = (what: string): never => {
+    throw realmError(`Bun.${what}`, "ctx.* or a host-mediated capability");
+  };
+  const deniedFunction = (what: string) => () => throwBun(what);
+  const deniedObject = (what: string) =>
+    new Proxy(Object.create(null), {
+      get() {
+        return throwBun(what);
+      },
+      set() {
+        return throwBun(what);
+      },
+      has() {
+        return throwBun(what);
+      },
+      ownKeys() {
+        return throwBun(what);
+      },
+      getOwnPropertyDescriptor() {
+        return throwBun(what);
+      },
+    });
+
+  const replaceProperty = (target: Record<PropertyKey, unknown>, prop: string, value: unknown) => {
+    try {
+      Object.defineProperty(target, prop, {
+        value,
+        writable: true,
+        enumerable: true,
+        configurable: false,
+      });
+    } catch {
+      try {
+        target[prop] = value;
+      } catch {
+        // Some Bun globals are non-writable and non-configurable; static lint is
+        // the primary guard for those. Patch what the runtime permits.
+      }
+    }
+  };
+
+  const hardenObjectProperty = (prop: string) => {
+    const value = bun[prop];
+    if (!value || (typeof value !== "object" && typeof value !== "function")) {
+      replaceProperty(bun, prop, deniedObject(prop));
+      return;
+    }
+
+    const object = value as Record<PropertyKey, unknown>;
+    for (const key of Object.keys(object)) {
+      try {
+        Object.defineProperty(object, key, {
+          get() {
+            throwBun(prop);
+          },
+          set() {
+            throwBun(prop);
+          },
+          enumerable: true,
+          configurable: true,
+        });
+      } catch {
+        try {
+          object[key] = deniedFunction(prop);
+        } catch {
+          // Leave non-patchable properties to the static lint layer.
+        }
+      }
+    }
+    try {
+      Object.setPrototypeOf(
+        object,
+        new Proxy(Object.getPrototypeOf(object) ?? Object.prototype, {
+          get() {
+            return throwBun(prop);
+          },
+          set() {
+            return throwBun(prop);
+          },
+          has() {
+            return throwBun(prop);
+          },
+          ownKeys() {
+            return throwBun(prop);
+          },
+          getOwnPropertyDescriptor() {
+            return throwBun(prop);
+          },
+        }),
+      );
+    } catch {
+      // Best effort only; own environment properties above cover known keys.
+    }
+  };
+
+  for (const prop of [
+    "$",
+    "build",
+    "connect",
+    "file",
+    "listen",
+    "openInEditor",
+    "plugin",
+    "serve",
+    "spawn",
+    "spawnSync",
+    "sql",
+    "write",
+  ]) {
+    replaceProperty(bun, prop, deniedFunction(prop));
+  }
+
+  for (const prop of ["dns", "env", "postgres", "redis", "s3", "secrets", "unsafe"]) {
+    hardenObjectProperty(prop);
+  }
+}
+
 function installShims(): void {
   const RealDate = Date;
   // A Proxy over Date traps construction and `.now` while passing everything else
@@ -72,9 +193,15 @@ function installShims(): void {
   }) as unknown as typeof fetch;
 
   const g = globalThis as unknown as {
+    Bun?: unknown;
     crypto?: { randomUUID?: unknown; getRandomValues?: unknown };
     performance?: { now?: unknown };
+    __KEEL_WORKFLOW_REALM__?: true;
   };
+  g.__KEEL_WORKFLOW_REALM__ = true;
+  if (g.Bun) {
+    installBunShims(g.Bun);
+  }
   if (g.crypto) {
     g.crypto.randomUUID = () => {
       throw realmError("crypto.randomUUID()", "ctx.random() or a content-derived key");

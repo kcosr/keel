@@ -15,6 +15,15 @@ describe("determinism lint — forbidden ambient globals", () => {
     expect(rules("export default async () => new Date();")).toContain("no-ambient-time-entropy");
   });
 
+  test("Bun ambient APIs are rejected", () => {
+    expect(rules("export default async () => Bun.env.PATH;")).toContain("no-bun-global");
+    expect(rules('export default async () => Bun["env"].PATH;')).toContain("no-bun-global");
+    expect(rules("export default async () => Bun.write('/tmp/x', 'x');")).toContain(
+      "no-bun-global",
+    );
+    expect(rules("export default async () => Bun.spawn(['true']);")).toContain("no-bun-global");
+  });
+
   test("new Date(ms) with an explicit arg is allowed", () => {
     expect(rules("export default async () => new Date(0).getTime();")).toEqual([]);
   });
@@ -36,7 +45,7 @@ describe("determinism lint — dynamic code & network", () => {
 });
 
 describe("determinism lint — forbidden imports", () => {
-  test("fs / child_process / http", () => {
+  test("fs / child_process / http / bun", () => {
     expect(
       rules('import { readFileSync } from "node:fs";\nexport default async () => 1;'),
     ).toContain("no-forbidden-import");
@@ -46,6 +55,7 @@ describe("determinism lint — forbidden imports", () => {
     expect(rules('export default async () => { await import("node:http"); };')).toContain(
       "no-forbidden-import",
     );
+    expect(rules('import "bun";\nexport default async () => 1;')).toContain("no-forbidden-import");
   });
 
   test("allowed imports (zod, local modules) are clean", () => {

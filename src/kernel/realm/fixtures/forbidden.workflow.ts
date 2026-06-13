@@ -12,6 +12,12 @@ export default async function forbidden(_ctx: Ctx, input: { what: string }): Pro
       return new Date().getTime();
     case "fetch":
       return (await fetch("http://example.com")).status;
+    case "bun-env":
+      return Bun.env.PATH;
+    case "bun-write":
+      return Bun.write("/tmp/keel-forbidden-write", "nope");
+    case "bun-spawn":
+      return Bun.spawn(["true"]);
     default:
       throw new Error(`unknown case ${input.what}`);
   }

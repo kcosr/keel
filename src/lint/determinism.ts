@@ -1,10 +1,11 @@
 // Determinism lint (DESIGN.md §6 layer 1) — the static gate.
 //
 // Rejects, in workflow source: forbidden ambient globals (Date.now, Math.random,
-// crypto.randomUUID, argless new Date(), eval, new Function), forbidden module
-// imports (fs/child_process/http/...), and illegal data capture by a ctx.step
-// fn (§5.3 — data must flow through the explicit `inputs` argument, not be
-// captured from an enclosing function scope; module-scope helpers are allowed).
+// crypto.randomUUID, Bun.*, argless new Date(), eval, new Function), forbidden
+// module imports (fs/child_process/http/...), and illegal data capture by a
+// ctx.step fn (§5.3 — data must flow through the explicit `inputs` argument, not
+// be captured from an enclosing function scope; module-scope helpers are
+// allowed).
 //
 // AST-based (acorn) so it is precise rather than regex-fragile. acorn's exported
 // `Node` is not a discriminated union, so the analysis uses a loose `AnyNode`
@@ -44,6 +45,7 @@ const FORBIDDEN_MODULES = new Set([
   "node:os",
   "worker_threads",
   "node:worker_threads",
+  "bun",
 ]);
 
 // Globals every workflow may rely on (pure/deterministic or provided by ctx).
@@ -112,6 +114,14 @@ export function lintWorkflowSource(source: string, filename = "workflow"): Viola
     if (node.type === "MemberExpression") {
       const obj = node.object as AnyNode;
       const prop = node.property as AnyNode;
+      if (obj?.type === "Identifier" && obj.name === "Bun" && !moduleScope.has("Bun")) {
+        violations.push({
+          rule: "no-bun-global",
+          message:
+            "Bun.* is not allowed in workflow code; use ctx.* or a host-mediated capability.",
+          ...at(node),
+        });
+      }
       if (obj?.type === "Identifier" && prop?.type === "Identifier") {
         const o = obj.name as string;
         const p = prop.name as string;

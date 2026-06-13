@@ -49,6 +49,18 @@ async function openClient(credential = loadCredential()): Promise<DaemonClient> 
   return c;
 }
 
+async function withClient<T>(
+  fn: (client: DaemonClient) => Promise<T>,
+  credential = loadCredential(),
+): Promise<T> {
+  const client = await openClient(credential);
+  try {
+    return await fn(client);
+  } finally {
+    client.close();
+  }
+}
+
 /** [name, args, summary] — single source for help + dispatch. */
 const COMMANDS: [string, string, string][] = [
   ["daemon", "", "start the daemon (foreground; owns the journal + runs workflows)"],
@@ -267,46 +279,44 @@ async function main(argv: string[]): Promise<number> {
     case "get": {
       const [runId] = rest;
       if (!runId) return usage("get needs a runId");
-      const client = await openClient();
-      process.stdout.write(`${JSON.stringify(await client.getRun(runId), null, 2)}\n`);
-      client.close();
-      return 0;
+      return withClient(async (client) => {
+        process.stdout.write(`${JSON.stringify(await client.getRun(runId), null, 2)}\n`);
+        return 0;
+      });
     }
     case "output": {
       const parsed = parseRunIdOutputArgs(rest, "output", "json", ["json", "text"]);
       const { runId } = parsed;
       if (!runId) return usage("output needs a runId");
-      const client = await openClient();
-      const out = await client.getRunOutput(runId);
-      if (out.status !== "finished") {
-        process.stderr.write(`run ${runId} is ${out.status}; no terminal output available\n`);
-        client.close();
-        return out.status === "failed" ? 1 : 3;
-      }
-      process.stdout.write(
-        parsed.output === "json"
-          ? `${JSON.stringify(out.output ?? null)}\n`
-          : formatHumanOutput(out.output),
-      );
-      client.close();
-      return 0;
+      return withClient(async (client) => {
+        const out = await client.getRunOutput(runId);
+        if (out.status !== "finished") {
+          process.stderr.write(`run ${runId} is ${out.status}; no terminal output available\n`);
+          return out.status === "failed" ? 1 : 3;
+        }
+        process.stdout.write(
+          parsed.output === "json"
+            ? `${JSON.stringify(out.output ?? null)}\n`
+            : formatHumanOutput(out.output),
+        );
+        return 0;
+      });
     }
     case "report": {
       const parsed = parseRunIdOutputArgs(rest, "report", "json", ["json", "text"]);
       const { runId } = parsed;
       if (!runId) return usage("report needs a runId");
-      const client = await openClient();
-      const report = await client.getRunReport(runId);
-      if (!report) {
-        process.stderr.write(`run ${runId} not found\n`);
-        client.close();
-        return 1;
-      }
-      process.stdout.write(
-        parsed.output === "json" ? `${JSON.stringify(report)}\n` : formatRunReportText(report),
-      );
-      client.close();
-      return statusExitCode(report.status);
+      return withClient(async (client) => {
+        const report = await client.getRunReport(runId);
+        if (!report) {
+          process.stderr.write(`run ${runId} not found\n`);
+          return 1;
+        }
+        process.stdout.write(
+          parsed.output === "json" ? `${JSON.stringify(report)}\n` : formatRunReportText(report),
+        );
+        return statusExitCode(report.status);
+      });
     }
     case "resume": {
       const parsed = parseLifecycleArgs(rest);
@@ -321,12 +331,12 @@ async function main(argv: string[]): Promise<number> {
       return parsed.detach ? 0 : statusExitCode(terminal ?? out.status);
     }
     case "list": {
-      const client = await openClient();
-      for (const r of await client.listRuns()) {
-        process.stdout.write(`${r.runId}\t${r.status}\t${displayName(r.workflowName)}\n`);
-      }
-      client.close();
-      return 0;
+      return withClient(async (client) => {
+        for (const r of await client.listRuns()) {
+          process.stdout.write(`${r.runId}\t${r.status}\t${displayName(r.workflowName)}\n`);
+        }
+        return 0;
+      });
     }
     case "gc": {
       const client = await openClient();

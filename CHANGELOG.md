@@ -54,6 +54,8 @@
   standalone binary and triggered a recursive scan from `/` (surfacing as
   `EACCES … /etc/.pwd.lock`). The root is resolved lazily and the daemon asserts
   it at startup, failing fast with an actionable message if it cannot be found.
+- CLI commands that fail authorization while using a daemon client now close the
+  socket before exiting instead of printing the error and hanging.
 - CLI exit handling no longer uses `process.exit(code)` after writes, avoiding
   truncated piped JSON output.
 - `run.finished` events include small terminal outputs and omit large outputs

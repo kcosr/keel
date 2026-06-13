@@ -36,7 +36,15 @@ export class DaemonClient {
   }
 
   close(): void {
-    this.socket?.end();
+    const socket = this.socket;
+    this.socket = null;
+    this.failAll(new Error("daemon client closed"));
+    socket?.end();
+    const force = socket as
+      | ({ flush?: () => void; terminate?: () => void } & Socket<undefined>)
+      | null;
+    force?.flush?.();
+    force?.terminate?.();
   }
 
   private onData(data: Buffer): void {

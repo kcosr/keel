@@ -38,7 +38,8 @@ async function runCli(
   cwd: string,
   env?: Record<string, string>,
   stdin?: string,
-): Promise<{ code: number; stdout: string; stderr: string }> {
+  timeoutMs?: number,
+): Promise<{ code: number; stdout: string; stderr: string; timedOut: boolean }> {
   const baseEnv = Object.fromEntries(
     Object.entries(process.env).filter(([key]) => !key.startsWith("KEEL_")),
   ) as Record<string, string>;
@@ -49,12 +50,24 @@ async function runCli(
     stdout: "pipe",
     stderr: "pipe",
   });
-  const [stdout, stderr, code] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  return { code, stdout, stderr };
+  let timedOut = false;
+  const timeout =
+    timeoutMs === undefined
+      ? null
+      : setTimeout(() => {
+          timedOut = true;
+          proc.kill();
+        }, timeoutMs);
+  try {
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    return { code, stdout, stderr, timedOut };
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 describe("keel CLI", () => {
@@ -480,6 +493,11 @@ describe("keel CLI", () => {
         expect(text.code).toBe(0);
         expect(text.stdout).toContain(`run ${runId}`);
         expect(text.stdout).toContain("s0 completed pure attempt=1 result 1");
+
+        const unauthorized = await runCli(["report", runId], dir, env, undefined, 1_000);
+        expect(unauthorized.timedOut).toBe(false);
+        expect(unauthorized.code).toBe(1);
+        expect(unauthorized.stderr).toContain("not authorized");
 
         const invalid = await runCli(["report", runId, "--output", "ndjson"], dir, {
           ...env,

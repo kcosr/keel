@@ -124,20 +124,23 @@ describe("event subscription", () => {
   test("subscribeEvents streams a run's events", async () => {
     const store = JournalStore.memory();
     const api = keel(store);
-    const seen: string[] = [];
+    const seen: { type: string; payload: unknown }[] = [];
     const { runId } = await api.launchRun({
       ...chainUrl,
       input: { n: 2 },
       name: "chain",
     });
-    const unsub = api.subscribeEvents(runId, 0, (e) => seen.push(e.type));
+    const unsub = api.subscribeEvents(runId, 0, (e) =>
+      seen.push({ type: e.type, payload: e.payload }),
+    );
     await api.waitForRun(runId);
     // give the poller a tick to drain
     await new Promise((r) => setTimeout(r, 60));
     unsub();
-    expect(seen).toContain("run.started");
-    expect(seen).toContain("run.finished");
-    expect(seen.filter((t) => t === "step.completed").length).toBe(2);
+    expect(seen.map((e) => e.type)).toContain("run.started");
+    expect(seen.map((e) => e.type)).toContain("run.finished");
+    expect(seen.filter((e) => e.type === "step.completed").length).toBe(2);
+    expect(seen.find((e) => e.type === "run.finished")?.payload).toEqual({ output: 2 });
   });
 });
 

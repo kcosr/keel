@@ -150,6 +150,9 @@ export class DaemonClient {
   waitForRun(runId: string): Promise<RunOutcome> {
     return this.rpc("waitForRun", { runId });
   }
+  getRunOutput(runId: string): Promise<RunOutcome> {
+    return this.rpc("getRunOutput", { runId });
+  }
   subscribeEvents(
     runId: string,
     afterSeq: number,

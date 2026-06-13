@@ -276,6 +276,9 @@ export class KeelDaemon {
       case "waitForRun":
         this.authorizeRun(conn, p.runId as string, "run:watch");
         return this.waitForRunAuthorized(conn.credential, p.runId as string);
+      case "getRunOutput":
+        this.authorizeRun(conn, p.runId as string, "run:output");
+        return this.api.getRunOutput(p.runId as string);
       case "subscribeEvents": {
         this.authorizeRun(conn, p.runId as string, "run:events");
         const credential = conn.credential;

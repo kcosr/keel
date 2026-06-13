@@ -70,6 +70,8 @@ export interface KeelApi {
   listRuns(): RunSummary[];
   /** Await a run's completion (terminal status) and return its outcome. */
   waitForRun(runId: string): Promise<RunOutcome>;
+  /** Return a run's terminal output without subscribing to events. */
+  getRunOutput(runId: string): Promise<RunOutcome>;
   /** Subscribe to a run's events after `afterSeq`; returns an unsubscribe fn. */
   subscribeEvents(
     runId: string,

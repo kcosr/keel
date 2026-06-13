@@ -68,6 +68,7 @@ const TERMINAL: ReadonlySet<RunStatus> = new Set<RunStatus>([
 ]);
 
 const WORKER_URL = new URL("./worker-entry.ts", import.meta.url);
+const RUN_FINISHED_INLINE_OUTPUT_BYTES = 8 * 1024;
 
 function canWriteOrRunShell(caps: Capabilities): boolean {
   return caps.fs === "workspace-write" || caps.shell;
@@ -98,6 +99,13 @@ function assertWorkflowDefinitionHash(hash: string): void {
   if (!isWorkflowDefinitionHash(hash)) {
     throw new Error(`workflow definition ${hash} is not a valid definition hash`);
   }
+}
+
+function runFinishedPayload(output: unknown): unknown {
+  const text = JSON.stringify(output);
+  const byteLength = Buffer.byteLength(text, "utf8");
+  if (byteLength <= RUN_FINISHED_INLINE_OUTPUT_BYTES) return { output };
+  return { outputOmitted: true, outputByteLength: byteLength };
 }
 
 /** Runs workflows defined as ES modules (default export) in a Worker realm. */
@@ -804,7 +812,12 @@ export class RealmKernel {
                 outputRef: JSON.stringify(m.output ?? null),
                 finishedAtMs: this.host.clock(),
               });
-              this.store.appendEvent(runId, "run.finished", {}, this.host.clock());
+              this.store.appendEvent(
+                runId,
+                "run.finished",
+                runFinishedPayload(m.output ?? null),
+                this.host.clock(),
+              );
               this.secrets?.wipe(runId); // §11.2: secrets live per-run; wipe on terminal
               finish(() => resolve({ runId, status: "finished", output: m.output as O }));
               break;

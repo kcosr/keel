@@ -104,6 +104,17 @@ export class InProcessKeel implements KeelApi {
     };
   }
 
+  async getRunOutput(runId: string): Promise<RunOutcome> {
+    const run = this.store.getRun(runId);
+    if (!run) throw new Error(`run ${runId} not found`);
+    return {
+      runId,
+      status: run.status,
+      output: run.outputRef ? JSON.parse(run.outputRef) : undefined,
+      error: run.errorJson ? JSON.parse(run.errorJson) : null,
+    };
+  }
+
   subscribeEvents(
     runId: string,
     afterSeq: number,

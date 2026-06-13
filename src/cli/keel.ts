@@ -3,7 +3,8 @@
 // result. The daemon (never the CLI) hosts the realm and spawns agents (L4).
 //
 //   keel daemon                         start the daemon (foreground)
-//   keel launch [--detach] <workflow.ts> [json]  launch a run and watch it
+//   keel launch [workflow.ts] [--input json]     launch a run and watch it
+//   keel run [workflow.ts] [--input json]        launch and print terminal output
 //   keel watch <runId>                  stream a run's events until terminal
 //   keel get <runId>                    print the run projection
 //   keel resume <runId>                 resume a non-terminal run
@@ -22,6 +23,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { ClaudeProvider } from "../agents/claude.ts";
 import { PiProvider } from "../agents/pi.ts";
 import { AgentProviderRegistry } from "../agents/types.ts";
@@ -29,7 +31,7 @@ import { redactCapabilityTokens, redactCapabilityTokensInValue } from "../auth/r
 import { DaemonClient } from "../daemon/client.ts";
 import { KeelDaemon } from "../daemon/server.ts";
 import { runExecuteScript } from "../execute/runtime.ts";
-import type { EventEnvelope } from "../rpc/contract.ts";
+import type { EventEnvelope, RunOutcome, WorkflowProvenance } from "../rpc/contract.ts";
 
 const KEEL_DIR = process.env.KEEL_DIR ?? join(homedir(), ".keel");
 const SOCKET = process.env.KEEL_SOCKET ?? join(KEEL_DIR, "keel.sock");
@@ -49,11 +51,13 @@ const COMMANDS: [string, string, string][] = [
   ["link", "[dir]", "make <dir> (default: cwd) able to import the @kcosr/keel SDK"],
   [
     "launch",
-    "[--detach] [--emit-capability] <workflow.ts> [json]",
-    "start a run from a workflow file",
+    "[workflow.ts] [--name n] [--input json] [--detach] [--emit-capability]",
+    "start a run from client-captured workflow source",
   ],
+  ["run", "[workflow.ts] [--name n] [--input json] [--json]", "launch and print the result"],
   ["watch", "[--json] <runId>", "stream a run's events until it finishes"],
   ["get", "<runId>", "print a run's projection as JSON"],
+  ["output", "<runId>", "print a run's terminal output as JSON"],
   ["list", "", "list runs"],
   ["resume", "[--detach] <runId>", "resume a parked or incomplete run"],
   ["retry", "[--detach] <runId>", "re-run a failed run from its failed step"],
@@ -61,7 +65,7 @@ const COMMANDS: [string, string, string][] = [
   ["fork", "<runId> [atStepKey]", "copy a run into a new independent run"],
   [
     "execute",
-    "[--stdin|file] [--entry name] [--state file] [--cap-file file] [--emit-capability] [-- args...]",
+    "[file] [--entry name] [--state file] [--cap-file file] [--emit-capability] [-- args...]",
     "run a stateless TypeScript control script",
   ],
   ["approve", "<runId> <key> [note]", "approve a ctx.human gate"],
@@ -156,17 +160,13 @@ async function main(argv: string[]): Promise<number> {
     }
     case "launch": {
       const launchOpts = parseLaunchArgs(rest);
-      const parsed = parseLifecycleArgs(launchOpts.args);
-      const [workflow, inputJson] = parsed.args;
-      if (!workflow) return usage("launch needs a workflow path");
-      const input = parseLaunchInput(inputJson);
-      const workflowPath = resolveWorkflowPath(workflow);
+      const captured = await readCommandSource(launchOpts.file, "workflow");
       const client = await openClient();
       const launched = await client.launchRun({
-        source: readFileSync(workflowPath, "utf8"),
-        input,
-        name: workflowName(workflowPath),
-        provenance: { kind: "clientPath", path: workflowPath },
+        source: captured.source,
+        input: launchOpts.input,
+        name: launchOpts.name ?? captured.defaultName,
+        provenance: captured.provenance,
       });
       const { runId } = launched;
       const capabilityRef =
@@ -174,13 +174,13 @@ async function main(argv: string[]): Promise<number> {
           ? writeCapabilityFile(runId, launched.capability)
           : null;
       if (launched.capability) await client.authenticate(launched.capability);
-      if (!parsed.detach) process.stdout.write(formatRunHeader(runId));
-      if (!parsed.detach && capabilityRef) process.stdout.write(`capability ${capabilityRef}\n`);
-      if (!parsed.detach && launchOpts.emitCapability && launched.capability) {
+      if (!launchOpts.detach) process.stdout.write(formatRunHeader(runId));
+      if (!launchOpts.detach && capabilityRef) process.stdout.write(`capability ${capabilityRef}\n`);
+      if (!launchOpts.detach && launchOpts.emitCapability && launched.capability) {
         process.stdout.write(`capability ${launched.capability}\n`);
       }
-      const terminal = parsed.detach ? null : await watchRun(client, runId, { json: false });
-      if (parsed.detach) {
+      const terminal = launchOpts.detach ? null : await watchRun(client, runId, { json: false });
+      if (launchOpts.detach) {
         const payload = launchOpts.emitCapability
           ? { runId, capability: launched.capability ?? null }
           : { runId, capabilityRef };
@@ -188,6 +188,39 @@ async function main(argv: string[]): Promise<number> {
       }
       client.close();
       return terminal === "failed" ? 1 : 0;
+    }
+    case "run": {
+      const runOpts = parseRunArgs(rest);
+      const captured = await readCommandSource(runOpts.file, "workflow");
+      const client = await openClient();
+      const launched = await client.launchRun({
+        source: captured.source,
+        input: runOpts.input,
+        name: runOpts.name ?? captured.defaultName,
+        provenance: captured.provenance,
+      });
+      const capabilityRef = launched.capability
+        ? writeCapabilityFile(launched.runId, launched.capability)
+        : null;
+      if (launched.capability) await client.authenticate(launched.capability);
+      const outcome = await client.waitForRun(launched.runId);
+      const blockage = isParked(outcome.status) ? await client.getBlockage(launched.runId) : null;
+      if (runOpts.json) {
+        process.stdout.write(
+          `${JSON.stringify(runEnvelope(outcome, capabilityRef, blockage))}\n`,
+        );
+      } else {
+        process.stdout.write(`run ${launched.runId}\n`);
+        if (outcome.status === "finished") {
+          process.stdout.write(formatHumanOutput(outcome.output));
+        } else if (outcome.status === "failed") {
+          process.stderr.write(`${outcome.error?.message ?? "run failed"}\n`);
+        } else {
+          process.stdout.write(`${outcome.status}\n`);
+        }
+      }
+      client.close();
+      return outcome.status === "failed" ? 1 : outcome.status === "finished" ? 0 : 3;
     }
     case "watch": {
       const parsed = parseWatchArgs(rest);
@@ -206,6 +239,20 @@ async function main(argv: string[]): Promise<number> {
       client.close();
       return 0;
     }
+    case "output": {
+      const [runId] = rest;
+      if (!runId) return usage("output needs a runId");
+      const client = await openClient();
+      const out = await client.getRunOutput(runId);
+      if (out.status !== "finished") {
+        process.stderr.write(`run ${runId} is ${out.status}; no terminal output available\n`);
+        client.close();
+        return out.status === "failed" ? 1 : 3;
+      }
+      process.stdout.write(`${JSON.stringify(out.output ?? null)}\n`);
+      client.close();
+      return 0;
+    }
     case "resume": {
       const parsed = parseLifecycleArgs(rest);
       const [runId] = parsed.args;
@@ -221,7 +268,7 @@ async function main(argv: string[]): Promise<number> {
     case "list": {
       const client = await openClient();
       for (const r of await client.listRuns()) {
-        process.stdout.write(`${r.runId}\t${r.status}\t${r.workflowName}\n`);
+        process.stdout.write(`${r.runId}\t${r.status}\t${displayName(r.workflowName)}\n`);
       }
       client.close();
       return 0;
@@ -294,9 +341,7 @@ async function main(argv: string[]): Promise<number> {
           ? loadCredentialFromFile(parsed.capFile)
           : loadCredential();
         client = await openClient(credential);
-        const source = parsed.stdin
-          ? await new Response(Bun.stdin.stream()).text()
-          : readFileSync(parsed.file as string, "utf8");
+        const source = (await readCommandSource(parsed.file, "control script")).source;
         const state = parsed.stateFile ? JSON.parse(readFileSync(parsed.stateFile, "utf8")) : null;
         const result = await runExecuteScript({
           client,
@@ -330,15 +375,22 @@ export function parseLifecycleArgs(args: string[]): { detach: boolean; args: str
   return { detach: false, args };
 }
 
-export function parseLaunchArgs(args: string[]): { emitCapability: boolean; args: string[] } {
-  return {
-    emitCapability: args.includes("--emit-capability"),
-    args: args.filter((arg) => arg !== "--emit-capability"),
-  };
+export interface LaunchArgs {
+  detach: boolean;
+  emitCapability: boolean;
+  file?: string;
+  name?: string | null;
+  input: unknown;
+}
+
+export interface RunArgs {
+  json: boolean;
+  file?: string;
+  name?: string | null;
+  input: unknown;
 }
 
 export interface ExecuteArgs {
-  stdin: boolean;
   file?: string;
   entry?: string;
   stateFile?: string;
@@ -347,8 +399,20 @@ export interface ExecuteArgs {
   args: string[];
 }
 
+export function parseLaunchArgs(args: string[]): LaunchArgs {
+  const out: LaunchArgs = { detach: false, emitCapability: false, input: {} };
+  parseSourceArgs(args, out, { detach: true, emitCapability: true, json: false });
+  return out;
+}
+
+export function parseRunArgs(args: string[]): RunArgs {
+  const out: RunArgs = { json: false, input: {} };
+  parseSourceArgs(args, out, { detach: false, emitCapability: false, json: true });
+  return out;
+}
+
 export function parseExecuteArgs(args: string[]): ExecuteArgs {
-  const out: ExecuteArgs = { stdin: false, emitCapability: false, args: [] };
+  const out: ExecuteArgs = { emitCapability: false, args: [] };
   const script: string[] = [];
   let i = 0;
   while (i < args.length) {
@@ -357,10 +421,7 @@ export function parseExecuteArgs(args: string[]): ExecuteArgs {
       out.args = args.slice(i + 1);
       break;
     }
-    if (arg === "--stdin") {
-      out.stdin = true;
-      i += 1;
-    } else if (arg === "--entry") {
+    if (arg === "--entry") {
       out.entry = requireFlagValue(args, i, "--entry");
       i += 2;
     } else if (arg === "--state") {
@@ -379,14 +440,48 @@ export function parseExecuteArgs(args: string[]): ExecuteArgs {
       i += 1;
     }
   }
-  if (out.stdin && script.length > 0)
-    throw new Error("execute accepts --stdin or a file, not both");
-  if (!out.stdin) {
-    if (script.length !== 1)
-      throw new Error("execute needs exactly one TypeScript file or --stdin");
+  if (script.length > 1) throw new Error("execute accepts at most one TypeScript file");
+  if (script.length === 1) {
     out.file = script[0];
   }
   return out;
+}
+
+function parseSourceArgs(
+  args: string[],
+  out: { file?: string; name?: string | null; input: unknown; detach?: boolean; emitCapability?: boolean; json?: boolean },
+  flags: { detach: boolean; emitCapability: boolean; json: boolean },
+): void {
+  const positional: string[] = [];
+  let i = 0;
+  while (i < args.length) {
+    const arg = args[i] as string;
+    if (arg === "--detach" && flags.detach) {
+      out.detach = true;
+      i += 1;
+    } else if (arg === "--emit-capability" && flags.emitCapability) {
+      out.emitCapability = true;
+      i += 1;
+    } else if (arg === "--json" && flags.json) {
+      out.json = true;
+      i += 1;
+    } else if (arg === "--name") {
+      out.name = requireFlagValue(args, i, "--name");
+      i += 2;
+    } else if (arg === "--input") {
+      out.input = parseLaunchInput(requireFlagValue(args, i, "--input"));
+      i += 2;
+    } else if (arg.startsWith("--")) {
+      throw new Error(`unknown flag ${arg}`);
+    } else {
+      positional.push(arg);
+      i += 1;
+    }
+  }
+  if (positional.length > 1) {
+    throw new Error(`unexpected argument ${positional[1]}; workflow input must use --input`);
+  }
+  if (positional.length === 1) out.file = positional[0];
 }
 
 export function parseLaunchInput(inputJson: string | undefined): unknown {
@@ -398,13 +493,69 @@ export function parseLaunchInput(inputJson: string | undefined): unknown {
 }
 
 export function resolveWorkflowPath(workflow: string, cwd = process.cwd()): string {
-  if (workflow.startsWith("file:")) return workflow;
+  if (workflow.startsWith("file:")) return fileURLToPath(workflow);
   return resolve(cwd, workflow);
 }
 
 export function workflowName(workflowUrl: string): string {
-  const path = workflowUrl.startsWith("file:") ? new URL(workflowUrl).pathname : workflowUrl;
+  const path = workflowUrl.startsWith("file:") ? fileURLToPath(workflowUrl) : workflowUrl;
   return basename(path) || "workflow";
+}
+
+interface CapturedCommandSource {
+  source: string;
+  defaultName: string | null;
+  provenance: WorkflowProvenance;
+}
+
+async function readCommandSource(
+  file: string | undefined,
+  label: "workflow" | "control script",
+): Promise<CapturedCommandSource> {
+  if (file) {
+    const path = resolveWorkflowPath(file);
+    return {
+      source: readFileSync(path, "utf8"),
+      defaultName: workflowName(path),
+      provenance: { kind: "clientPath", path },
+    };
+  }
+  if (process.stdin.isTTY) {
+    throw new Error(`no ${label} source: pass a file or pipe stdin`);
+  }
+  return {
+    source: await new Response(Bun.stdin.stream()).text(),
+    defaultName: null,
+    provenance: { kind: "stdin" },
+  };
+}
+
+function displayName(name: string | null | undefined): string {
+  return name ?? "(unnamed)";
+}
+
+function isParked(status: string): boolean {
+  return status.startsWith("waiting-");
+}
+
+function runEnvelope(
+  outcome: RunOutcome,
+  capabilityRef: string | null,
+  blockage: unknown,
+): Record<string, unknown> {
+  return {
+    runId: outcome.runId,
+    capabilityRef,
+    status: outcome.status,
+    ...(outcome.output !== undefined ? { output: outcome.output } : {}),
+    ...(outcome.error ? { error: outcome.error } : {}),
+    ...(blockage ? { blockage } : {}),
+  };
+}
+
+function formatHumanOutput(output: unknown): string {
+  if (typeof output === "string") return output.endsWith("\n") ? output : `${output}\n`;
+  return `${JSON.stringify(output ?? null)}\n`;
 }
 
 export function formatRunHeader(runId: string): string {
@@ -554,7 +705,7 @@ function loadCredentialFromFile(path: string): string {
 
 function requireFlagValue(args: string[], index: number, flag: string): string {
   const value = args[index + 1];
-  if (!value || value.startsWith("--")) throw new Error(`${flag} needs a value`);
+  if (value === undefined) throw new Error(`${flag} needs a value`);
   return value;
 }
 
@@ -582,9 +733,11 @@ function writeCapabilityFile(runId: string, capability: string): string {
 
 if (import.meta.main) {
   main(process.argv.slice(2))
-    .then((code) => process.exit(code))
+    .then((code) => {
+      process.exitCode = code;
+    })
     .catch((err) => {
       process.stderr.write(`keel: ${err instanceof Error ? err.message : String(err)}\n`);
-      process.exit(1);
+      process.exitCode = 1;
     });
 }

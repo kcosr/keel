@@ -162,28 +162,6 @@ For agent-driven work, prefer `keel execute`: it lets you write the orchestratio
 around workflow commands in TypeScript, avoid repeated CLI round trips, and return
 one structured JSON value.
 
-```ts
-// run-review.control.ts
-const run = await keel.launch({
-  workflow: "./adversarial-review.workflow.ts",
-  input: { root: "/abs/path/to/code" },
-});
-
-const settled = await keel.wait(run.runId);
-return {
-  runId: run.runId,
-  capabilityRef: run.capabilityRef,
-  status: settled.status,
-  output: settled.output,
-};
-```
-
-```bash
-cat run-review.control.ts | keel execute
-```
-
-For one-off control scripts, use a TypeScript heredoc:
-
 ```bash
 keel execute <<'TS'
 const run = await keel.launch({

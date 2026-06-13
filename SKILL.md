@@ -180,7 +180,7 @@ cat run-review.control.ts | keel execute
 For one-off control scripts, use a TypeScript heredoc:
 
 ```bash
-cat <<'TS' | keel execute
+keel execute <<'TS'
 const run = await keel.launch({
   workflow: "./adversarial-review.workflow.ts",
   input: { root: "/abs/path/to/code" },

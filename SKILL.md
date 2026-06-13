@@ -1,9 +1,9 @@
 # Writing & running a Keel workflow
 
 A **workflow** is an `async (ctx, input) => output` function. You call agents and
-do work through `ctx`; Keel runs it durably and survives crashes. Write a `.ts`
-workflow file, then use `keel execute` for agent-friendly control scripts that
-launch, wait, inspect, and return one JSON result.
+do work through `ctx`; Keel runs it durably and survives crashes. For
+agent-driven work, put the workflow source inline inside a `keel execute`
+TypeScript heredoc, then launch, wait, inspect, and return one JSON result.
 
 Assume the daemon is already running and the `keel` CLI is already configured to
 reach it. Do not start the daemon, restart systemd, or use admin credentials from
@@ -164,19 +164,40 @@ one structured JSON value.
 
 ```bash
 keel execute <<'TS'
+const workflowSource = String.raw`
+import { type Ctx, passthrough } from "@kcosr/keel";
+
+const Out = passthrough<{ root: string; checked: boolean }>();
+
+export default async function workflow(ctx: Ctx, input: { root: string }) {
+  return ctx.step("report", Out, { root: input.root }, ({ root }) => ({
+    root,
+    checked: true,
+  }));
+}
+`;
+
 const run = await keel.launch({
-  workflow: "./adversarial-review.workflow.ts",
+  workflow: { kind: "source", name: "adversarial-review", source: workflowSource },
   input: { root: "/abs/path/to/code" },
 });
 const settled = await keel.wait(run.runId);
-return { runId: run.runId, capabilityRef: run.capabilityRef, status: settled.status };
+return {
+  runId: run.runId,
+  capabilityRef: run.capabilityRef,
+  status: settled.status,
+  output: settled.output,
+};
 TS
 ```
 
 Inside `execute`, use the TypeScript control surface:
 
 ```ts
-const run = await keel.launch({ workflow: "./workflow.ts", input: {} });
+const run = await keel.launch({
+  workflow: { kind: "source", name: "workflow", source: workflowSource },
+  input: {},
+});
 const settled = await keel.wait(run.runId);
 const projection = await keel.get(run.runId);
 const output = settled.status === "finished" ? await keel.output(run.runId) : null;
@@ -197,8 +218,7 @@ workflow itself, not in `execute`.
 - On optional review fan-out agents, set **`toolPolicy: "read-only"`**, **`lenient:
   true`**, and **`onFailure: "null"`** so one flaky branch doesn't sink the run.
   For required agents, omit `onFailure` so failures can be retried.
-- A run resumes from its immutable launch-time workflow snapshot. Edit the source
-  file only when you intend a later rerun with a source override to snapshot new
-  code.
+- A run resumes from its immutable launch-time workflow snapshot. To change code,
+  launch or rerun with new inline source.
 - Use `execute` for mechanical follow-up; return concise JSON for the human or
   calling agent to inspect.

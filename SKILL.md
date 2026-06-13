@@ -174,13 +174,13 @@ return {
 ```
 
 ```bash
-keel execute ./run-review.control.ts
+keel execute < run-review.control.ts
 ```
 
 `execute` is stateless. Pass only non-secret handles through `--state`; pass
 capabilities through credential channels such as `KEEL_CAP_FILE`,
-`KEEL_RUN_CAP`, `KEEL_ADMIN_TOKEN`, or `--cap-file`. Child launches return a
-`capabilityRef` by default. Raw child capabilities require `--emit-capability`.
+`KEEL_RUN_CAP`, or `--cap-file`. Child launches return a `capabilityRef` by
+default. Raw child capabilities require `--emit-capability`.
 
 Use `execute` when the next action is computable from the prior result: launch
 fan-out, wait, retry, inspect output, shape JSON, or decide a simple branch.

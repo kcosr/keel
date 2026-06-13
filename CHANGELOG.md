@@ -48,6 +48,12 @@
   `KEEL_CAP_DIR`.
 
 ### Fixed
+- Workflow snapshotting resolves the `@kcosr/keel` SDK package root from the
+  repository (env override, source location, then runtime paths) instead of
+  `import.meta.url` alone, which resolved to the filesystem root in the compiled
+  standalone binary and triggered a recursive scan from `/` (surfacing as
+  `EACCES … /etc/.pwd.lock`). The root is resolved lazily and the daemon asserts
+  it at startup, failing fast with an actionable message if it cannot be found.
 - CLI exit handling no longer uses `process.exit(code)` after writes, avoiding
   truncated piped JSON output.
 - `run.finished` events include small terminal outputs and omit large outputs

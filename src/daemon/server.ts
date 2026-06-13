@@ -25,6 +25,7 @@ import { InProcessKeel } from "../rpc/in-process.ts";
 import {
   DEFAULT_WORKFLOW_DEFINITION_TTL_MS,
   evictWorkflowDefinitionCache,
+  keelPackageRoot,
   snapshotWorkflowSource,
 } from "../workflow-definitions/snapshot.ts";
 
@@ -109,6 +110,17 @@ export class KeelDaemon {
   }
 
   async start(): Promise<void> {
+    // Snapshotting workflows needs the on-disk @kcosr/keel SDK root. Resolve it
+    // once here so a misconfigured root (e.g. a relocated standalone binary)
+    // fails fast with a clear message at startup, rather than mid-run or as a
+    // transitive import crash.
+    try {
+      keelPackageRoot();
+    } catch (err) {
+      throw new Error(
+        `keel daemon cannot start: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
     // A crashed predecessor may have left a stale socket file; unlink it so we
     // can bind (recovery after kill -9).
     try {

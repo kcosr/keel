@@ -15,10 +15,51 @@ import { JournalStore } from "../journal/store.ts";
 import {
   evictWorkflowDefinitionCache,
   materializeWorkflowDefinition,
+  resolveKeelPackageRoot,
   snapshotWorkflowSource,
 } from "./snapshot.ts";
 
 describe("workflow definition snapshots", () => {
+  test("resolves the Keel package root from the source module location", () => {
+    expect(resolveKeelPackageRoot({ moduleUrl: import.meta.url })).toBe(
+      resolve(import.meta.dir, "..", ".."),
+    );
+  });
+
+  test("bundled module paths fall back to real runtime paths without accepting filesystem root", () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-package-root-"));
+    try {
+      const packageRoot = join(dir, "keel");
+      mkdirSync(join(packageRoot, "src"), { recursive: true });
+      mkdirSync(join(packageRoot, "dist"), { recursive: true });
+      writeFileSync(join(packageRoot, "package.json"), '{"name":"@kcosr/keel"}\n');
+      writeFileSync(join(packageRoot, "src", "sdk.ts"), "export {};\n");
+      writeFileSync(join(packageRoot, "dist", "keel"), "");
+
+      expect(
+        resolveKeelPackageRoot({
+          moduleUrl: "file:///$bunfs/root/keel",
+          cwd: "/",
+          argv1: join(packageRoot, "dist", "keel"),
+          execPath: "/usr/bin/bun",
+        }),
+      ).toBe(packageRoot);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("fails with an actionable error when no candidate resolves", () => {
+    expect(() =>
+      resolveKeelPackageRoot({
+        moduleUrl: "file:///$bunfs/root/keel",
+        cwd: "/",
+        argv1: "/",
+        execPath: "/",
+      }),
+    ).toThrow("set KEEL_PACKAGE_ROOT to the repository root");
+  });
+
   test("@kcosr/keel externals link to the package root", () => {
     const dir = mkdtempSync(join(tmpdir(), "keel-snapshot-sdk-"));
     try {
@@ -40,6 +81,9 @@ describe("workflow definition snapshots", () => {
         const link = join(cacheRoot, snapshot.hash, "node_modules", "@kcosr", "keel");
         expect(lstatSync(link).isSymbolicLink()).toBe(true);
         expect(resolve(readlinkSync(link))).toBe(resolve(import.meta.dir, "..", ".."));
+        expect(readFileSync(join(cacheRoot, snapshot.hash, "entry.ts"), "utf8")).toContain(
+          'from "./node_modules/@kcosr/keel/src/sdk.ts"',
+        );
       } finally {
         store.close();
       }
@@ -205,7 +249,9 @@ describe("workflow definition snapshots", () => {
         createdAtMs: 1,
       });
 
-      expect(evictWorkflowDefinitionCache(store, { cacheRoot, nowMs: Date.now() })).toBe(1);
+      expect(
+        evictWorkflowDefinitionCache(store, { cacheRoot, nowMs: Number.MAX_SAFE_INTEGER }),
+      ).toBe(1);
       expect(existsSync(join(cacheRoot, active))).toBe(true);
       expect(existsSync(join(cacheRoot, inactive))).toBe(false);
     } finally {

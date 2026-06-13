@@ -5,6 +5,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   renameSync,
   rmSync,
   symlinkSync,
@@ -13,6 +14,7 @@ import {
 import { builtinModules } from "node:module";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { posix } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "acorn";
 import { canonicalJson, sha256Hex } from "../hash.ts";
@@ -65,8 +67,58 @@ const DEFINITION_PREFIX = "wf_sha256_";
 export const MAX_WORKFLOW_SOURCE_BYTES = 256 * 1024;
 export const DEFAULT_WORKFLOW_DEFINITION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const NODE_BUILTINS = new Set([...builtinModules, ...builtinModules.map((name) => `node:${name}`)]);
-const KEEL_PACKAGE_ROOT = resolve(fileURLToPath(new URL("../../", import.meta.url)));
 const tsTranspiler = new Bun.Transpiler({ loader: "tsx" });
+
+interface KeelPackageRootInputs {
+  envRoot?: string | undefined;
+  moduleUrl?: string | undefined;
+  cwd?: string | undefined;
+  argv1?: string | undefined;
+  execPath?: string | undefined;
+}
+
+export function resolveKeelPackageRoot(inputs: KeelPackageRootInputs = {}): string {
+  const candidates: string[] = [];
+  const envRoot = inputs.envRoot ?? process.env.KEEL_PACKAGE_ROOT;
+  if (envRoot) candidates.push(envRoot);
+
+  const moduleUrl = inputs.moduleUrl ?? import.meta.url;
+  try {
+    candidates.push(resolve(fileURLToPath(new URL("../../", moduleUrl))));
+  } catch {
+    // Bundled binaries may expose a virtual import.meta.url. Try runtime paths below.
+  }
+
+  candidates.push(
+    inputs.cwd ?? process.cwd(),
+    inputs.argv1 ?? process.argv[1] ?? "",
+    inputs.execPath ?? process.execPath,
+  );
+
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    const root = findKeelPackageRoot(candidate);
+    if (root) return root;
+  }
+
+  throw new Error(
+    "could not locate @kcosr/keel package root; set KEEL_PACKAGE_ROOT to the repository root",
+  );
+}
+
+let cachedKeelPackageRoot: string | null = null;
+
+/**
+ * On-disk root of the @kcosr/keel SDK package, used to integrity-hash and link
+ * the SDK into snapshotted workflows. Resolved lazily (never at import) and
+ * memoized, so `keel --help` and read-only commands neither pay for nor crash on
+ * resolution. The daemon asserts it explicitly at startup so a misconfigured
+ * root fails fast with a clear message instead of a transitive import crash.
+ */
+export function keelPackageRoot(): string {
+  if (cachedKeelPackageRoot === null) cachedKeelPackageRoot = resolveKeelPackageRoot();
+  return cachedKeelPackageRoot;
+}
 
 export function defaultDefinitionCacheRoot(): string {
   return process.env.KEEL_DEFINITION_CACHE_DIR ?? join(homedir(), ".keel", "definitions");
@@ -117,12 +169,12 @@ export function materializeWorkflowDefinition(
   for (const module of manifest.modules) {
     const dest = join(tmp, module.path);
     mkdirSync(dirname(dest), { recursive: true });
-    writeFileSync(dest, module.code, "utf8");
+    writeFileSync(dest, rewriteSdkImportsForMaterialization(module.code, module.path), "utf8");
   }
   if (manifest.modules.length === 0) {
     const entry = join(tmp, "entry.ts");
     mkdirSync(dirname(entry), { recursive: true });
-    writeFileSync(entry, row.code, "utf8");
+    writeFileSync(entry, rewriteSdkImportsForMaterialization(row.code, "entry.ts"), "utf8");
   }
 
   linkExternalResolution(
@@ -164,7 +216,7 @@ function isMaterializationComplete(root: string, manifest: WorkflowDefinitionMan
 
 function validateExternalPackagePins(packagePins: CapturedExternalPackage[]): void {
   for (const pinned of packagePins) {
-    const root = pinned.name === "@kcosr/keel" ? KEEL_PACKAGE_ROOT : pinned.root;
+    const root = pinned.name === "@kcosr/keel" ? keelPackageRoot() : pinned.root;
     validatePackageIntegrity(pinned.name, root, pinned);
   }
 }
@@ -330,7 +382,7 @@ function linkExternalResolution(
   for (const packageName of packageNames) {
     const pinned = packagePins.find((pkg) => pkg.name === packageName);
     if (packageName === "@kcosr/keel") {
-      const src = KEEL_PACKAGE_ROOT;
+      const src = keelPackageRoot();
       validatePackageIntegrity(packageName, src, pinned);
       linkPackage(join(nodeModules, "@kcosr", "keel"), src);
     } else {
@@ -358,7 +410,7 @@ function collectExternalPackages(
   return [...names].sort().map((name) => {
     const root =
       name === "@kcosr/keel"
-        ? KEEL_PACKAGE_ROOT
+        ? keelPackageRoot()
         : join(sourceRoot, "node_modules", ...name.split("/"));
     if (!existsSync(root)) {
       throw new Error(`workflow external package "${name}" is missing at ${root}`);
@@ -376,6 +428,42 @@ function validatePackageIntegrity(
   const actual = hashPackageTree(root);
   if (actual !== pinned.integrity) {
     throw new Error(`workflow external package "${name}" changed since snapshot`);
+  }
+}
+
+function findKeelPackageRoot(start: string): string | null {
+  let current = normalizePackageRootCandidate(start);
+  while (true) {
+    if (isKeelPackageRoot(current)) return current;
+    const parent = dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
+}
+
+function normalizePackageRootCandidate(start: string): string {
+  let current = resolve(start);
+  try {
+    current = realpathSync(current);
+  } catch {
+    // Keep the resolved path and walk upward; a parent may still identify the package.
+  }
+  try {
+    if (existsSync(current) && lstatSync(current).isFile()) current = dirname(current);
+  } catch {
+    current = dirname(current);
+  }
+  return current;
+}
+
+function isKeelPackageRoot(dir: string): boolean {
+  const packageJson = join(dir, "package.json");
+  if (!existsSync(packageJson)) return false;
+  try {
+    const pkg = JSON.parse(readFileSync(packageJson, "utf8")) as { name?: unknown };
+    return pkg.name === "@kcosr/keel" && existsSync(join(dir, "src", "sdk.ts"));
+  } catch {
+    return false;
   }
 }
 
@@ -427,6 +515,19 @@ function linkPackage(dest: string, src: string): void {
   if (existsSync(dest)) return;
   mkdirSync(dirname(dest), { recursive: true });
   symlinkSync(src, dest, "dir");
+}
+
+function rewriteSdkImportsForMaterialization(code: string, modulePath: string): string {
+  const sdkPath = sdkMaterializedSpecifier(modulePath);
+  return code
+    .replace(/(\bfrom\s*)["@']@kcosr\/keel["@']/g, `$1"${sdkPath}"`)
+    .replace(/(\bimport\s*)["@']@kcosr\/keel["@']/g, `$1"${sdkPath}"`);
+}
+
+function sdkMaterializedSpecifier(modulePath: string): string {
+  const fromDir = posix.dirname(modulePath.split(sep).join(posix.sep));
+  const rel = posix.relative(fromDir, "node_modules/@kcosr/keel/src/sdk.ts");
+  return rel.startsWith(".") ? rel : `./${rel}`;
 }
 
 function walk(root: AnyNode, fn: (node: AnyNode) => void): void {

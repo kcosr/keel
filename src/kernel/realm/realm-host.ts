@@ -7,6 +7,8 @@
 
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import type { Capabilities } from "../../agents/capabilities.ts";
 import { AgentFailure, executeAgent, runAgentWithStall } from "../../agents/execute.ts";
 import { type SecretStore, redact } from "../../agents/secrets.ts";
@@ -19,6 +21,7 @@ import {
   defaultDefinitionCacheRoot,
   isWorkflowDefinitionHash,
   materializeWorkflowDefinition,
+  resolveKeelPackageRoot,
   snapshotWorkflowSource,
 } from "../../workflow-definitions/snapshot.ts";
 import { createWorktree } from "../../workspace/worktree.ts";
@@ -68,7 +71,9 @@ const TERMINAL: ReadonlySet<RunStatus> = new Set<RunStatus>([
   "continued",
 ]);
 
-const WORKER_URL = new URL("./worker-entry.ts", import.meta.url);
+const WORKER_URL = pathToFileURL(
+  join(resolveKeelPackageRoot(), "src", "kernel", "realm", "worker-entry.ts"),
+);
 
 function canWriteOrRunShell(caps: Capabilities): boolean {
   return caps.fs === "workspace-write" || caps.shell;

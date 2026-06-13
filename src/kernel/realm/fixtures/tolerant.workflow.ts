@@ -1,8 +1,7 @@
 // Review-fix fixture: an onFailure:'null' agent followed by a step. A crash
 // after the agent is accepted-as-null but before the run finishes must NOT
 // re-call the agent on resume — it replays the journaled null.
-import type { Ctx } from "../../ctx.ts";
-import { jsonSchema, passthrough } from "../../schema.ts";
+import { type Ctx, jsonSchema, passthrough } from "@kcosr/keel";
 
 const Out = jsonSchema<{ value: number }>({
   type: "object",

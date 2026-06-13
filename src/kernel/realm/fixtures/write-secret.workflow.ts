@@ -1,5 +1,5 @@
 // Verification fixture: a workspace-isolated agent that also receives a secret.
-import type { Ctx } from "../../ctx.ts";
+import type { Ctx } from "@kcosr/keel";
 
 export default async function writeSecret(ctx: Ctx, _input: null): Promise<string> {
   return ctx.agent({

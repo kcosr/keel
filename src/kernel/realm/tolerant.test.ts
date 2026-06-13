@@ -6,9 +6,12 @@ import { describe, expect, test } from "bun:test";
 import { MockProvider } from "../../agents/mock.ts";
 import { AgentProviderRegistry } from "../../agents/types.ts";
 import { JournalStore } from "../../journal/store.ts";
+import { captureWorkflowFile } from "../../workflow-definitions/capture.ts";
 import { RealmKernel } from "./realm-host.ts";
 
-const url = new URL("./fixtures/tolerant.workflow.ts", import.meta.url).pathname;
+const url = captureWorkflowFile(
+  new URL("./fixtures/tolerant.workflow.ts", import.meta.url).pathname,
+);
 
 function kernel(store: JournalStore, mock: MockProvider, extra: Record<string, unknown> = {}) {
   return new RealmKernel(store, {
@@ -64,7 +67,7 @@ describe("onFailure:'null' is journaled as completed null and replays", () => {
 
     // resume: the agent REPLAYS its null; only `use` re-runs
     const k2 = kernel(store, counting as MockProvider);
-    const resumed = await k2.resume<number>("r", url);
+    const resumed = await k2.resume<number>("r");
     expect(resumed.output).toBe(1);
     expect(calls).toBe(afterRun); // agent NOT re-called (the bug: it would increase)
   });

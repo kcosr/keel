@@ -1,6 +1,5 @@
 // Phase 10 live fixture: two real pi agents + a pure reducer, through the realm.
-import type { Ctx } from "../../ctx.ts";
-import { jsonSchema, passthrough } from "../../schema.ts";
+import { type Ctx, jsonSchema, passthrough } from "@kcosr/keel";
 
 const Num = jsonSchema<{ value: number }>({
   type: "object",

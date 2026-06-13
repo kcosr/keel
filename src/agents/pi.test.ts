@@ -7,12 +7,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { JournalStore } from "../journal/store.ts";
 import { RealmKernel } from "../kernel/realm/realm-host.ts";
+import { captureWorkflowFile } from "../workflow-definitions/capture.ts";
 import { PiProvider } from "./pi.ts";
 import type { AgentHooks, AgentInvocation, AgentProvider, AgentResult } from "./types.ts";
 import { AgentProviderRegistry } from "./types.ts";
 
-const onceUrl = new URL("../kernel/realm/fixtures/agent-once.workflow.ts", import.meta.url)
-  .pathname;
+const onceUrl = captureWorkflowFile(
+  new URL("../kernel/realm/fixtures/agent-once.workflow.ts", import.meta.url).pathname,
+);
 
 /** A fake vendor that records every invocation and emits a Pi-like session token. */
 class FakeVendor implements AgentProvider {
@@ -65,7 +67,7 @@ describe("session-resume four-branch table (through the realm)", () => {
     expect(store.getJournalRow("r", "ask", 1)?.status).toBe("pending");
     expect(store.getJournalRow("r", "ask", 1)?.sessionToken).toBe("sess-abc");
 
-    const resumed = await kernel(store, vendor).resume<{ value: number }>("r", onceUrl);
+    const resumed = await kernel(store, vendor).resume<{ value: number }>("r");
     expect(resumed.output).toEqual({ value: 1 });
     expect(vendor.calls).toHaveLength(2);
     expect(vendor.calls[1]?.resumeToken).toBe("sess-abc"); // reconnect
@@ -83,7 +85,7 @@ describe("session-resume four-branch table (through the realm)", () => {
     await k1.run(onceUrl, null, { name: "t" }).catch(() => null);
     expect(store.getJournalRow("r", "ask", 1)?.sessionToken).toBeNull();
 
-    await kernel(store, vendor).resume("r", onceUrl);
+    await kernel(store, vendor).resume("r");
     expect(vendor.calls.at(-1)?.resumeToken).toBeUndefined(); // fresh, no reconnect
   });
 
@@ -96,7 +98,7 @@ describe("session-resume four-branch table (through the realm)", () => {
       },
     });
     await k1.run(onceUrl, null, { name: "t" }).catch(() => null);
-    await kernel(store, vendor).resume("r", onceUrl);
+    await kernel(store, vendor).resume("r");
     // the kernel forwards the carried token; Pi maps a missing --session to fresh
     expect(vendor.calls.at(-1)?.resumeToken).toBe("sess-stale");
   });
@@ -423,8 +425,9 @@ describe.if(LIVE)("LIVE pi smoke", () => {
     const { KeelDaemon } = await import("../daemon/server.ts");
     const { DaemonClient } = await import("../daemon/client.ts");
     const { PiProvider } = await import("./pi.ts");
-    const liveUrl = new URL("../kernel/realm/fixtures/agent-live.workflow.ts", import.meta.url)
-      .pathname;
+    const liveUrl = captureWorkflowFile(
+      new URL("../kernel/realm/fixtures/agent-live.workflow.ts", import.meta.url).pathname,
+    );
 
     const dir = mkdtempSync(join(tmpdir(), "keel-live-pi-daemon-"));
     const socketPath = join(dir, "keel.sock");
@@ -448,7 +451,7 @@ describe.if(LIVE)("LIVE pi smoke", () => {
     try {
       client = await DaemonClient.connect(socketPath);
       const { runId } = await client.launchRun({
-        workflowUrl: liveUrl,
+        ...liveUrl,
         input: null,
         name: "live-pi",
       });

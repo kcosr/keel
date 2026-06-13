@@ -9,8 +9,7 @@
 // Provider and root are inputs: provider "mock" drives CI, and provider "pi"
 // drives the gated live rehearsal against a real target.
 
-import type { Ctx } from "../../src/kernel/ctx.ts";
-import { jsonSchema, passthrough } from "../../src/kernel/schema.ts";
+import { type Ctx, jsonSchema, passthrough } from "@kcosr/keel";
 
 // ---- schemas ---------------------------------------------------------------
 

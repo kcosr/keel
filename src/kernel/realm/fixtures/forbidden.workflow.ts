@@ -1,6 +1,6 @@
 // Realm test fixtures: each reaches for a forbidden ambient global and must
 // throw the realm guidance error (§6 acceptance b/c). Selected by input.what.
-import type { Ctx } from "../../ctx.ts";
+import type { Ctx } from "@kcosr/keel";
 
 export default async function forbidden(_ctx: Ctx, input: { what: string }): Promise<unknown> {
   switch (input.what) {

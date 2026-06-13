@@ -1,8 +1,7 @@
-// Claude agent provider — drives `claude-pty-wrapper -p --output-format stream-json`.
+// Claude agent provider — drives `claude -p --output-format stream-json`.
 //
-// The wrapper hides Claude's interactive PTY behind Claude-compatible JSONL for
-// print-mode calls. Keel treats it like any other streaming provider and records
-// the wrapper/Claude session id before model work starts for crash reconnects.
+// Keel treats Claude like any other streaming provider and records the Claude
+// session id before model work starts for crash reconnects.
 
 import { randomUUID } from "node:crypto";
 import { appendFileSync, mkdirSync } from "node:fs";
@@ -17,17 +16,17 @@ import type {
   TraceEvent,
 } from "./types.ts";
 
-const WRAPPER_EXIT_GRACE_MS = 5_000;
+const CLAUDE_EXIT_GRACE_MS = 5_000;
 const STDERR_DRAIN_GRACE_MS = 100;
 
 export interface ClaudeProviderOptions {
   /** Working directory; defaults to process.cwd(). */
   cwd?: string;
-  /** Wrapper binary name/path (default KEEL_CLAUDE_BIN, then "claude-pty-wrapper"). */
+  /** Claude binary name/path (default KEEL_CLAUDE_BIN, then "claude"). */
   bin?: string;
   /** Per-call timeout in ms before abort (default 1 hour). */
   timeoutMs?: number;
-  /** Extra env passed to the wrapper process. */
+  /** Extra env passed to the Claude process. */
   env?: Record<string, string>;
   /** Secret-bearing raw JSONL diagnostic log path. Defaults to KEEL_CLAUDE_RAW_LOG. */
   rawLogPath?: string;
@@ -43,7 +42,7 @@ export class ClaudeProvider implements AgentProvider {
 
   constructor(opts: ClaudeProviderOptions = {}) {
     this.cwd = opts.cwd ?? process.cwd();
-    this.bin = opts.bin ?? process.env.KEEL_CLAUDE_BIN ?? "claude-pty-wrapper";
+    this.bin = opts.bin ?? process.env.KEEL_CLAUDE_BIN ?? "claude";
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_AGENT_TIMEOUT_MS;
     this.extraEnv = opts.env ?? {};
     this.rawLogPath = opts.rawLogPath ?? process.env.KEEL_CLAUDE_RAW_LOG;
@@ -209,7 +208,7 @@ export class ClaudeProvider implements AgentProvider {
       if (!text) throw new Error(`claude agent "${invocation.key}" ended without assistant text`);
       const cleanExit = await Promise.race([
         exitPromise,
-        Bun.sleep(WRAPPER_EXIT_GRACE_MS).then(() => null),
+        Bun.sleep(CLAUDE_EXIT_GRACE_MS).then(() => null),
       ]);
       if (cleanExit === null) {
         proc.kill();

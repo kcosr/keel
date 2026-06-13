@@ -5,13 +5,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { JournalStore } from "../journal/store.ts";
 import { RealmKernel } from "../kernel/realm/realm-host.ts";
+import { captureWorkflowFile } from "../workflow-definitions/capture.ts";
 import { ClaudeProvider } from "./claude.ts";
 import type { AgentHooks, AgentInvocation, AgentProvider, AgentResult } from "./types.ts";
 import { AgentProviderRegistry } from "./types.ts";
 
 const RESUME_ID = "11111111-1111-4111-8111-111111111111";
-const onceUrl = new URL("../kernel/realm/fixtures/agent-once-claude.workflow.ts", import.meta.url)
-  .pathname;
+const onceUrl = captureWorkflowFile(
+  new URL("../kernel/realm/fixtures/agent-once-claude.workflow.ts", import.meta.url).pathname,
+);
 
 class FakeClaudeVendor implements AgentProvider {
   readonly name = "claude";
@@ -62,7 +64,7 @@ describe("Claude session-resume four-branch table (through the realm)", () => {
     expect(store.getJournalRow("r", "ask", 1)?.status).toBe("pending");
     expect(store.getJournalRow("r", "ask", 1)?.sessionToken).toBe("sess-abc");
 
-    const resumed = await kernel(store, vendor).resume<{ value: number }>("r", onceUrl);
+    const resumed = await kernel(store, vendor).resume<{ value: number }>("r");
     expect(resumed.output).toEqual({ value: 1 });
     expect(vendor.calls).toHaveLength(2);
     expect(vendor.calls[1]?.resumeToken).toBe("sess-abc");
@@ -79,7 +81,7 @@ describe("Claude session-resume four-branch table (through the realm)", () => {
     await k1.run(onceUrl, null, { name: "t" }).catch(() => null);
     expect(store.getJournalRow("r", "ask", 1)?.sessionToken).toBeNull();
 
-    await kernel(store, vendor).resume("r", onceUrl);
+    await kernel(store, vendor).resume("r");
     expect(vendor.calls.at(-1)?.resumeToken).toBeUndefined();
   });
 
@@ -92,7 +94,7 @@ describe("Claude session-resume four-branch table (through the realm)", () => {
       },
     });
     await k1.run(onceUrl, null, { name: "t" }).catch(() => null);
-    await kernel(store, vendor).resume("r", onceUrl);
+    await kernel(store, vendor).resume("r");
     expect(vendor.calls.at(-1)?.resumeToken).toBe("sess-stale");
   });
 });
@@ -102,9 +104,9 @@ describe("ClaudeProvider", () => {
     const dir = mkdtempSync(join(tmpdir(), "keel-claude-env-bin-"));
     const previous = process.env.KEEL_CLAUDE_BIN;
     try {
-      const bin = join(dir, "fake-claude-pty-wrapper");
+      const bin = join(dir, "fake-claude");
       const argsPath = join(dir, "args.json");
-      await writeFakeWrapper(bin, argsPath);
+      await writeFakeClaude(bin, argsPath);
       process.env.KEEL_CLAUDE_BIN = bin;
 
       const provider = new ClaudeProvider({ timeoutMs: 5_000 });
@@ -121,12 +123,12 @@ describe("ClaudeProvider", () => {
     }
   });
 
-  test("spawns claude-pty-wrapper in stream-json mode and maps events", async () => {
+  test("spawns claude in stream-json mode and maps events", async () => {
     const dir = mkdtempSync(join(tmpdir(), "keel-claude-provider-"));
     try {
-      const bin = join(dir, "fake-claude-pty-wrapper");
+      const bin = join(dir, "fake-claude");
       const argsPath = join(dir, "args.json");
-      await writeFakeWrapper(bin, argsPath);
+      await writeFakeClaude(bin, argsPath);
 
       const events: unknown[] = [];
       const tokens: string[] = [];
@@ -192,9 +194,9 @@ describe("ClaudeProvider", () => {
   test("resumes with the carried Claude session token", async () => {
     const dir = mkdtempSync(join(tmpdir(), "keel-claude-resume-"));
     try {
-      const bin = join(dir, "fake-claude-pty-wrapper");
+      const bin = join(dir, "fake-claude");
       const argsPath = join(dir, "args.json");
-      await writeFakeWrapper(bin, argsPath);
+      await writeFakeClaude(bin, argsPath);
 
       const tokens: string[] = [];
       const provider = new ClaudeProvider({ bin, timeoutMs: 5_000 });
@@ -225,9 +227,9 @@ describe("ClaudeProvider", () => {
   test("uses resolved invocation capabilities instead of the derived policy label", async () => {
     const dir = mkdtempSync(join(tmpdir(), "keel-claude-resolved-caps-"));
     try {
-      const bin = join(dir, "fake-claude-pty-wrapper");
+      const bin = join(dir, "fake-claude");
       const argsPath = join(dir, "args.json");
-      await writeFakeWrapper(bin, argsPath);
+      await writeFakeClaude(bin, argsPath);
 
       const provider = new ClaudeProvider({ bin, timeoutMs: 5_000 });
       await provider.generate(
@@ -261,13 +263,13 @@ describe("ClaudeProvider", () => {
     }
   });
 
-  test("waits for wrapper cleanup after the terminal result event", async () => {
+  test("waits for Claude process cleanup after the terminal result event", async () => {
     const dir = mkdtempSync(join(tmpdir(), "keel-claude-cleanup-"));
     try {
-      const bin = join(dir, "fake-claude-pty-wrapper");
+      const bin = join(dir, "fake-claude");
       const argsPath = join(dir, "args.json");
       const cleanupPath = join(dir, "cleanup");
-      await writeFakeWrapper(bin, argsPath, cleanupPath);
+      await writeFakeClaude(bin, argsPath, cleanupPath);
 
       const provider = new ClaudeProvider({ bin, timeoutMs: 5_000 });
       const result = await provider.generate(
@@ -287,10 +289,10 @@ describe("ClaudeProvider", () => {
     }
   });
 
-  test("does not hang if a wrapper descendant keeps stderr open after success", async () => {
+  test("does not hang if a Claude descendant keeps stderr open after success", async () => {
     const dir = mkdtempSync(join(tmpdir(), "keel-claude-stderr-open-"));
     try {
-      const bin = join(dir, "fake-claude-pty-wrapper");
+      const bin = join(dir, "fake-claude");
       const argsPath = join(dir, "args.json");
       await Bun.write(
         bin,
@@ -330,7 +332,7 @@ process.exit(0);
   });
 });
 
-async function writeFakeWrapper(
+async function writeFakeClaude(
   bin: string,
   argsPath: string,
   cleanupPath?: string,
@@ -406,10 +408,9 @@ describe.if(LIVE)("LIVE claude smoke", () => {
     const { KeelDaemon } = await import("../daemon/server.ts");
     const { DaemonClient } = await import("../daemon/client.ts");
     const { AgentProviderRegistry } = await import("./types.ts");
-    const liveUrl = new URL(
-      "../kernel/realm/fixtures/agent-live-claude.workflow.ts",
-      import.meta.url,
-    ).pathname;
+    const liveUrl = captureWorkflowFile(
+      new URL("../kernel/realm/fixtures/agent-live-claude.workflow.ts", import.meta.url).pathname,
+    );
     const dir = mkdtempSync(join(tmpdir(), "keel-live-claude-daemon-"));
     const socketPath = join(dir, "keel.sock");
     const dbPath = join(dir, "keel.db");
@@ -432,7 +433,7 @@ describe.if(LIVE)("LIVE claude smoke", () => {
     try {
       client = await DaemonClient.connect(socketPath);
       const { runId } = await client.launchRun({
-        workflowUrl: liveUrl,
+        ...liveUrl,
         input: null,
         name: "live-claude",
       });

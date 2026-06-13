@@ -2,10 +2,11 @@
 
 import { describe, expect, test } from "bun:test";
 import { JournalStore } from "../../journal/store.ts";
+import { captureWorkflowFile } from "../../workflow-definitions/capture.ts";
 import { RealmKernel } from "./realm-host.ts";
 
 const FIX = new URL("./fixtures/", import.meta.url);
-const url = (f: string) => new URL(f, FIX).pathname;
+const url = (f: string) => captureWorkflowFile(new URL(f, FIX).pathname);
 
 function harness(store: JournalStore, exec: string[]) {
   let id = 0;

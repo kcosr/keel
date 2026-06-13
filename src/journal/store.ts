@@ -140,6 +140,7 @@ export class JournalStore {
       Pick<
         RunRow,
         | "status"
+        | "workflowName"
         | "inputRef"
         | "outputRef"
         | "errorJson"
@@ -157,6 +158,7 @@ export class JournalStore {
       params[`$${key}`] = val;
     };
     if ("status" in patch) add("status", "status", patch.status ?? null);
+    if ("workflowName" in patch) add("workflow_name", "workflowName", patch.workflowName ?? null);
     if ("inputRef" in patch) add("input_ref", "inputRef", patch.inputRef ?? null);
     if ("outputRef" in patch) add("output_ref", "outputRef", patch.outputRef ?? null);
     if ("errorJson" in patch) add("error_json", "errorJson", patch.errorJson ?? null);
@@ -391,6 +393,38 @@ export class JournalStore {
       )
       .get(hash);
     return r ? mapWorkflowDefinition(r) : null;
+  }
+
+  listActiveWorkflowDefinitionHashes(): string[] {
+    return this.db
+      .query<{ hash: string }, []>(
+        `SELECT DISTINCT definition_version AS hash FROM runs
+         WHERE status IN ('running', 'waiting-human', 'waiting-signal', 'waiting-timer')`,
+      )
+      .all()
+      .map((r) => r.hash);
+  }
+
+  pruneWorkflowDefinitions(opts: { nowMs: number; ttlMs: number }): number {
+    const cutoff = opts.nowMs - opts.ttlMs;
+    const removed =
+      this.db
+        .query<{ c: number }, [number]>(
+          `SELECT COUNT(*) AS c FROM workflow_definitions
+           WHERE created_at_ms < ?
+             AND hash NOT IN (SELECT definition_version FROM runs)
+             AND hash NOT IN (SELECT workflow_ref FROM schedules WHERE enabled = 1)`,
+        )
+        .get(cutoff)?.c ?? 0;
+    this.db
+      .query(
+        `DELETE FROM workflow_definitions
+         WHERE created_at_ms < ?
+           AND hash NOT IN (SELECT definition_version FROM runs)
+           AND hash NOT IN (SELECT workflow_ref FROM schedules WHERE enabled = 1)`,
+      )
+      .run(cutoff);
+    return removed;
   }
 
   // ---- capabilities ------------------------------------------------------
@@ -836,7 +870,7 @@ function withJournalDefaults(row: NewJournalRow): JournalRow {
 
 interface RawRunRow {
   run_id: string;
-  workflow_name: string;
+  workflow_name: string | null;
   definition_version: string;
   workflow_ref: string | null;
   status: string;
@@ -888,7 +922,7 @@ interface RawArtifactRow {
 
 interface RawWorkflowDefinitionRow {
   hash: string;
-  name: string;
+  name: string | null;
   kind: string;
   code: string;
   source_map: string | null;

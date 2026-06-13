@@ -1,7 +1,6 @@
 // Commit 5 fixture: multiple signals — two of the same name + one other — to
 // exercise per-name occurrence keying (event:0, event:1, other:0).
-import type { Ctx } from "../../ctx.ts";
-import { passthrough } from "../../schema.ts";
+import { type Ctx, passthrough } from "@kcosr/keel";
 
 const arr = passthrough<number[]>();
 

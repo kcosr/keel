@@ -20,6 +20,7 @@ import {
   parseLaunchArgs,
   parseLaunchInput,
   parseLifecycleArgs,
+  parseRunArgs,
   parseWatchArgs,
   resolveWorkflowPath,
   workflowName,
@@ -34,10 +35,12 @@ async function runCli(
   args: string[],
   cwd: string,
   env?: Record<string, string>,
+  stdin?: string,
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   const proc = Bun.spawn([process.execPath, CLI, ...args], {
     cwd,
     env: { ...process.env, ...env },
+    stdin: stdin === undefined ? "ignore" : new Blob([stdin]),
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -171,15 +174,40 @@ describe("keel CLI", () => {
     });
   });
 
-  test("launch args require explicit raw capability opt-in", () => {
-    expect(parseLaunchArgs(["--emit-capability", "--detach", "wf.ts"])).toEqual({
+  test("launch args parse source path, input, name, detach, and capability emission", () => {
+    expect(
+      parseLaunchArgs([
+        "--emit-capability",
+        "--detach",
+        "--name",
+        "review",
+        "wf.ts",
+        "--input",
+        '{"n":1}',
+      ]),
+    ).toEqual({
+      detach: true,
       emitCapability: true,
-      args: ["--detach", "wf.ts"],
+      file: "wf.ts",
+      name: "review",
+      input: { n: 1 },
     });
     expect(parseLaunchArgs(["--detach", "wf.ts"])).toEqual({
+      detach: true,
       emitCapability: false,
-      args: ["--detach", "wf.ts"],
+      file: "wf.ts",
+      input: {},
     });
+    expect(() => parseLaunchArgs(["wf.ts", '{"n":1}'])).toThrow("workflow input must use --input");
+    expect(() => parseLaunchArgs(['{"n":1}'])).toThrow("workflow input must use --input");
+  });
+
+  test("run args parse json mode with optional source path", () => {
+    expect(parseRunArgs(["--json", "--input", "null"])).toEqual({
+      json: true,
+      input: null,
+    });
+    expect(() => parseRunArgs(['{"n":1}'])).toThrow("workflow input must use --input");
   });
 
   test("execute args parse source, state, cap file, entry, and script args", () => {
@@ -198,7 +226,6 @@ describe("keel CLI", () => {
         "b",
       ]),
     ).toEqual({
-      stdin: false,
       file: "control.ts",
       entry: "resume",
       stateFile: "state.json",
@@ -212,7 +239,7 @@ describe("keel CLI", () => {
     expect(formatRunHeader("run_123")).toBe("run run_123\n");
   });
 
-  test("launch input defaults to an object and rejects empty positional input", () => {
+  test("launch input defaults to an object and rejects empty --input values", () => {
     expect(parseLaunchInput(undefined)).toEqual({});
     expect(parseLaunchInput('{"n":1}')).toEqual({ n: 1 });
     expect(parseLaunchInput("null")).toBeNull();
@@ -226,16 +253,16 @@ describe("keel CLI", () => {
     );
     expect(resolveWorkflowPath("/repo/demo.workflow.ts", "/other")).toBe("/repo/demo.workflow.ts");
     expect(resolveWorkflowPath("file:///repo/demo.workflow.ts", "/other")).toBe(
-      "file:///repo/demo.workflow.ts",
+      "/repo/demo.workflow.ts",
     );
     expect(workflowName("/repo/demo.workflow.ts")).toBe("demo.workflow.ts");
     expect(workflowName("file:///repo/demo.workflow.ts")).toBe("demo.workflow.ts");
   });
 
-  test("launch rejects empty positional input before connecting to the daemon", async () => {
+  test("launch rejects empty --input before connecting to the daemon", async () => {
     const dir = mkdtempSync(join(tmpdir(), "keel-launch-empty-input-"));
     try {
-      const out = await runCli(["launch", "wf.ts", ""], dir, {
+      const out = await runCli(["launch", "wf.ts", "--input", ""], dir, {
         KEEL_SOCKET: join(dir, "missing.sock"),
       });
       expect(out.code).toBe(1);
@@ -264,7 +291,11 @@ describe("keel CLI", () => {
         KEEL_DIR: dir,
         KEEL_CAP_DIR: capDir,
       };
-      const launched = await runCli(["launch", "--detach", chainUrl, '{"n":1}'], dir, env);
+      const launched = await runCli(
+        ["launch", "--detach", chainUrl, "--input", '{"n":1}'],
+        dir,
+        env,
+      );
       expect(launched.code).toBe(0);
       expect(launched.stdout).not.toContain("kc_run_");
       const payload = JSON.parse(launched.stdout) as { runId: string; capabilityRef: string };
@@ -281,9 +312,15 @@ describe("keel CLI", () => {
       expect(got.code).toBe(0);
       expect(JSON.parse(got.stdout).runId).toBe(payload.runId);
       await waitForCliStatus(payload.runId, dir, { ...env, KEEL_CAP_FILE: payload.capabilityRef });
+      const output = await runCli(["output", payload.runId], dir, {
+        ...env,
+        KEEL_CAP_FILE: payload.capabilityRef,
+      });
+      expect(output.code).toBe(0);
+      expect(output.stdout).toBe("1\n");
 
       const raw = await runCli(
-        ["launch", "--detach", "--emit-capability", chainUrl, '{"n":3}'],
+        ["launch", "--detach", "--emit-capability", chainUrl, "--input", '{"n":3}'],
         dir,
         env,
       );
@@ -294,6 +331,101 @@ describe("keel CLI", () => {
       await waitForCliStatus(rawPayload.runId, dir, {
         ...env,
         KEEL_RUN_CAP: rawPayload.capability,
+      });
+    } finally {
+      daemon.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("run launches a workflow file and prints a JSON envelope", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-run-json-"));
+    const socketPath = join(dir, "keel.sock");
+    const dbPath = join(dir, "keel.db");
+    const daemon = new KeelDaemon({
+      socketPath,
+      dbPath,
+      agents: new AgentProviderRegistry().register(new MockProvider()),
+    });
+    await daemon.start();
+    try {
+      const env = { KEEL_SOCKET: socketPath, KEEL_DB: dbPath, KEEL_DIR: dir };
+      const out = await runCli(["run", "--json", chainUrl, "--input", '{"n":2}'], dir, env);
+      expect(out.code).toBe(0);
+      const payload = JSON.parse(out.stdout) as {
+        runId: string;
+        capabilityRef: string;
+        status: string;
+        output: number;
+      };
+      expect(payload.status).toBe("finished");
+      expect(payload.output).toBe(2);
+      expect(payload.capabilityRef).toBe(join(dir, "caps", `${payload.runId}.cap`));
+    } finally {
+      daemon.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("launch reads workflow source from stdin when no file is passed", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-launch-stdin-"));
+    const socketPath = join(dir, "keel.sock");
+    const dbPath = join(dir, "keel.db");
+    const daemon = new KeelDaemon({
+      socketPath,
+      dbPath,
+      agents: new AgentProviderRegistry().register(new MockProvider()),
+      adminToken: "kc_admin_cli_test",
+    });
+    await daemon.start();
+    try {
+      const env = {
+        KEEL_SOCKET: socketPath,
+        KEEL_DB: dbPath,
+        KEEL_DIR: dir,
+        KEEL_ADMIN_TOKEN: "kc_admin_cli_test",
+      };
+      const launched = await runCli(
+        ["launch", "--detach", "--input", '{"n":2}'],
+        dir,
+        env,
+        readFileSync(chainUrl, "utf8"),
+      );
+      expect(launched.code).toBe(0);
+      const payload = JSON.parse(launched.stdout) as { runId: string; capabilityRef: string };
+      await waitForCliStatus(payload.runId, dir, { ...env, KEEL_CAP_FILE: payload.capabilityRef });
+
+      const listed = await runCli(["list"], dir, env);
+      expect(listed.code).toBe(0);
+      expect(listed.stdout).toContain("(unnamed)");
+    } finally {
+      daemon.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("gc runs as an admin daemon operation", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-gc-"));
+    const socketPath = join(dir, "keel.sock");
+    const dbPath = join(dir, "keel.db");
+    const daemon = new KeelDaemon({
+      socketPath,
+      dbPath,
+      agents: new AgentProviderRegistry().register(new MockProvider()),
+      adminToken: "kc_admin_gc_test",
+    });
+    await daemon.start();
+    try {
+      const out = await runCli(["gc"], dir, {
+        KEEL_SOCKET: socketPath,
+        KEEL_DB: dbPath,
+        KEEL_DIR: dir,
+        KEEL_ADMIN_TOKEN: "kc_admin_gc_test",
+      });
+      expect(out.code).toBe(0);
+      expect(JSON.parse(out.stdout)).toEqual({
+        workflowDefinitionsRemoved: 0,
+        definitionCacheEntriesRemoved: 0,
       });
     } finally {
       daemon.stop();

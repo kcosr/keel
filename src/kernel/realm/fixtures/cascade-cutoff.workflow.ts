@@ -1,8 +1,7 @@
 // Phase 6 fixture (early cutoff): `base`'s fn is rewritten (n*2 → n+n) so its
 // VERSION changes, but its OUTPUT is byte-identical. On rerun: base re-executes
 // (version changed), but `derived`'s inputHash is unchanged → derived REPLAYS.
-import type { Ctx } from "../../ctx.ts";
-import { passthrough } from "../../schema.ts";
+import { type Ctx, passthrough } from "@kcosr/keel";
 
 const num = passthrough<number>();
 

@@ -1,7 +1,6 @@
 // Phase 7 fixture: a single agent step then a pure step, for replay/retry/crash
 // tests where the agent execution count matters.
-import type { Ctx } from "../../ctx.ts";
-import { jsonSchema, passthrough } from "../../schema.ts";
+import { type Ctx, jsonSchema, passthrough } from "@kcosr/keel";
 
 const Out = jsonSchema<{ value: number }>({
   type: "object",

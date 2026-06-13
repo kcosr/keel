@@ -8,9 +8,11 @@ import { MockProvider } from "../../src/agents/mock.ts";
 import { AgentProviderRegistry } from "../../src/agents/types.ts";
 import { JournalStore } from "../../src/journal/store.ts";
 import { RealmKernel } from "../../src/kernel/realm/realm-host.ts";
+import { captureWorkflowFile } from "../../src/workflow-definitions/capture.ts";
 
 const HERE = new URL(".", import.meta.url).pathname;
 const reviewUrl = `${HERE}review.workflow.ts`;
+const reviewWorkflow = captureWorkflowFile(reviewUrl);
 
 const DOMAINS = [
   "ssh-boundary", "http-core", "http-auth", "priv-bootstrap", "container-exec",
@@ -76,7 +78,7 @@ describe("review workload port on mock", () => {
     const store = JournalStore.memory();
     const handle = await kernel(store, buildMock(90)).run<{
       stats: { raw: number; deduped: number; confirmed: number };
-    }>(reviewUrl, { root: "/repo", provider: "mock" }, { name: "review" });
+    }>(reviewWorkflow, { root: "/repo", provider: "mock" }, { name: "review" });
 
     expect(handle.status).toBe("finished");
     expect(handle.output?.stats).toEqual({ raw: 90, deduped: 90, confirmed: 90 });
@@ -96,12 +98,12 @@ describe("review workload port on mock", () => {
         }
       },
     });
-    await k1.run(reviewUrl, { root: "/repo", provider: "mock" }, { name: "review" }).catch(() => null);
+    await k1.run(reviewWorkflow, { root: "/repo", provider: "mock" }, { name: "review" }).catch(() => null);
     expect(store.getRun("run_0")?.status).toBe("running");
 
     const resumeExec: string[] = [];
     const k2 = kernel(store, buildMock(90), { onStepExecute: (key: string) => resumeExec.push(key) });
-    const resumed = await k2.resume<{ stats: { confirmed: number } }>("run_0", reviewUrl);
+    const resumed = await k2.resume<{ stats: { confirmed: number } }>("run_0");
 
     expect(resumed.status).toBe("finished");
     expect(resumed.output?.stats.confirmed).toBe(90);
@@ -117,7 +119,7 @@ describe("review workload port on mock", () => {
   test("editing synthPrompt re-runs exactly one agent (synthesize)", async () => {
     const store = JournalStore.memory();
     const mock = buildMock(20);
-    await kernel(store, mock).run(reviewUrl, { root: "/repo", provider: "mock" }, { name: "review" });
+    await kernel(store, mock).run(reviewWorkflow, { root: "/repo", provider: "mock" }, { name: "review" });
 
     // Edit the synthPrompt helper's text and rerun against the edited file.
     const editedUrl = `${HERE}review-synthedit.workflow.ts`;
@@ -129,7 +131,7 @@ describe("review workload port on mock", () => {
     try {
       const exec: string[] = [];
       const k2 = kernel(store, mock, { onStepExecute: (key: string) => exec.push(key) });
-      const re = await k2.rerun("run_0", editedUrl);
+      const re = await k2.rerun("run_0", captureWorkflowFile(editedUrl));
       expect(re.status).toBe("finished");
       // only synthesize re-executed: its prompt (via the edited helper) changed,
       // so its version changed; everything upstream replayed.

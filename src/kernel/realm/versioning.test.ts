@@ -4,13 +4,14 @@
 
 import { describe, expect, test } from "bun:test";
 import { JournalStore } from "../../journal/store.ts";
+import { captureWorkflowFile } from "../../workflow-definitions/capture.ts";
 import { RealmKernel } from "./realm-host.ts";
 
 const FIX = new URL("./fixtures/", import.meta.url);
-const v1 = new URL("versioned-v1.workflow.ts", FIX).pathname;
-const vComment = new URL("versioned-comment.workflow.ts", FIX).pathname;
-const vLogic = new URL("versioned-logic.workflow.ts", FIX).pathname;
-const badImport = new URL("forbidden-import.workflow.ts", FIX).pathname;
+const v1 = captureWorkflowFile(new URL("versioned-v1.workflow.ts", FIX).pathname);
+const vComment = captureWorkflowFile(new URL("versioned-comment.workflow.ts", FIX).pathname);
+const vLogic = captureWorkflowFile(new URL("versioned-logic.workflow.ts", FIX).pathname);
+const badImport = captureWorkflowFile(new URL("forbidden-import.workflow.ts", FIX).pathname);
 
 function fixed(store: JournalStore, extra: Record<string, unknown> = {}): RealmKernel {
   return new RealmKernel(store, {
@@ -21,7 +22,7 @@ function fixed(store: JournalStore, extra: Record<string, unknown> = {}): RealmK
   });
 }
 
-async function versionsOf(file: string): Promise<{ a: string; b: string }> {
+async function versionsOf(file: typeof v1): Promise<{ a: string; b: string }> {
   const store = JournalStore.memory();
   await fixed(store).run(file, { n: 4 }, { name: "v" });
   const a = store.getJournalRow("r", "a", 1);
@@ -54,10 +55,11 @@ describe("realm determinism lint gate", () => {
     expect(store.listRuns()).toHaveLength(0);
   });
 
-  test("lint can be disabled (escape hatch) — run proceeds", async () => {
+  test("lint disabled still does not bypass the source import allowlist", async () => {
     const store = JournalStore.memory();
-    const handle = await fixed(store, { lint: false }).run(badImport, null, { name: "bad" });
-    expect(handle.status).toBe("finished");
-    expect(store.listRuns()).toHaveLength(1);
+    await expect(
+      fixed(store, { lint: false }).run(badImport, null, { name: "bad" }),
+    ).rejects.toThrow(/only @kcosr\/keel is supported/);
+    expect(store.listRuns()).toHaveLength(0);
   });
 });

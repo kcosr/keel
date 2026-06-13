@@ -89,7 +89,15 @@ export class DaemonClient {
   resumeRun(runId: string): Promise<RunStart> {
     return this.rpc("resumeRun", { runId });
   }
-  rerunRun(runId: string, opts?: { workflowUrl?: string; input?: unknown }): Promise<RunStart> {
+  rerunRun(
+    runId: string,
+    opts?: {
+      source?: string;
+      input?: unknown;
+      name?: string | null;
+      provenance?: LaunchRequest["provenance"];
+    },
+  ): Promise<RunStart> {
     return this.rpc("rerunRun", { runId, opts });
   }
   getRun(runId: string): Promise<RunProjection | null> {
@@ -122,12 +130,19 @@ export class DaemonClient {
   }
   putSchedule(req: {
     name: string;
-    workflowUrl: string;
+    source: string;
+    workflowName?: string | null;
     input?: unknown;
     intervalMs: number;
     firstFireMs?: number;
   }): Promise<{ ok: boolean }> {
     return this.rpc("putSchedule", req);
+  }
+  gcDefinitions(req: { ttlMs?: number; cacheMinAgeMs?: number } = {}): Promise<{
+    workflowDefinitionsRemoved: number;
+    definitionCacheEntriesRemoved: number;
+  }> {
+    return this.rpc("gcDefinitions", req);
   }
   listRuns(): Promise<RunSummary[]> {
     return this.rpc("listRuns", {});
@@ -140,6 +155,9 @@ export class DaemonClient {
   }
   waitForRun(runId: string): Promise<RunOutcome> {
     return this.rpc("waitForRun", { runId });
+  }
+  getRunOutput(runId: string): Promise<RunOutcome> {
+    return this.rpc("getRunOutput", { runId });
   }
   subscribeEvents(
     runId: string,

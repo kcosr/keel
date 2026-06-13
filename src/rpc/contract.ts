@@ -7,11 +7,16 @@
 
 import type { Blockage, RunProjection, RunSummary } from "./projection.ts";
 
+export type WorkflowProvenance = { kind: "stdin" } | { kind: "clientPath"; path: string };
+
 export interface LaunchRequest {
-  /** The workflow definition: a module path (Phase 11) or inline source (Phase 12, §7.5). */
-  workflowUrl: string;
+  /** Workflow TypeScript captured by the client. The daemon never reads client paths. */
+  source: string;
   input: unknown;
-  name: string;
+  /** Optional display label; absent/null is stored as an unnamed run. */
+  name?: string | null;
+  /** Display-only provenance. It is never opened or parsed for execution. */
+  provenance?: WorkflowProvenance;
 }
 
 export interface RunOutcome {
@@ -44,8 +49,16 @@ export interface KeelApi {
   launchRun(req: LaunchRequest): Promise<RunLaunchResult>;
   /** Resume a non-terminal run in the background. */
   resumeRun(runId: string): Promise<RunStart>;
-  /** Re-execute a run against (possibly edited) code in the background. */
-  rerunRun(runId: string, opts?: { workflowUrl?: string; input?: unknown }): Promise<RunStart>;
+  /** Re-execute a run against its stored definition or a new client-captured source. */
+  rerunRun(
+    runId: string,
+    opts?: {
+      source?: string;
+      input?: unknown;
+      name?: string | null;
+      provenance?: WorkflowProvenance;
+    },
+  ): Promise<RunStart>;
   /** Re-run a failed run from its failed step in the background. */
   retryRun(runId: string): Promise<RunStart>;
   /** Discard everything after a step and re-run in the background. */
@@ -60,6 +73,13 @@ export interface KeelApi {
   listRuns(): RunSummary[];
   /** Await a run's completion (terminal status) and return its outcome. */
   waitForRun(runId: string): Promise<RunOutcome>;
+  /** Return a run's terminal output without subscribing to events. */
+  getRunOutput(runId: string): Promise<RunOutcome>;
+  /** Prune unreferenced workflow definition rows and cache entries. */
+  gcDefinitions(opts?: { ttlMs?: number; cacheMinAgeMs?: number }): Promise<{
+    workflowDefinitionsRemoved: number;
+    definitionCacheEntriesRemoved: number;
+  }>;
   /** Subscribe to a run's events after `afterSeq`; returns an unsubscribe fn. */
   subscribeEvents(
     runId: string,

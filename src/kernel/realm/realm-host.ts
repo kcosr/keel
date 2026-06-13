@@ -14,12 +14,12 @@ import type { AgentProviderRegistry } from "../../agents/types.ts";
 import { type Json, hashJson } from "../../hash.ts";
 import type { JournalStore } from "../../journal/store.ts";
 import type { RunRow, RunStatus } from "../../journal/types.ts";
-import { formatViolations, lintWorkflowSource } from "../../lint/determinism.ts";
+import type { WorkflowProvenance } from "../../rpc/contract.ts";
 import {
   defaultDefinitionCacheRoot,
   isWorkflowDefinitionHash,
   materializeWorkflowDefinition,
-  snapshotWorkflowPath,
+  snapshotWorkflowSource,
 } from "../../workflow-definitions/snapshot.ts";
 import { createWorktree } from "../../workspace/worktree.ts";
 import type { CtxHost, FaultPoint } from "../ctx.ts";
@@ -68,6 +68,7 @@ const TERMINAL: ReadonlySet<RunStatus> = new Set<RunStatus>([
 ]);
 
 const WORKER_URL = new URL("./worker-entry.ts", import.meta.url);
+const RUN_FINISHED_INLINE_OUTPUT_BYTES = 8 * 1024;
 
 function canWriteOrRunShell(caps: Capabilities): boolean {
   return caps.fs === "workspace-write" || caps.shell;
@@ -81,6 +82,30 @@ function requiresSecretIsolation(message: {
   // Provider-native additions can include shell/write or exfiltration-capable
   // tools. Until those tools have typed capabilities, secrets require isolation.
   return message.allowTools.length > 0;
+}
+
+export interface ClientCapturedWorkflow {
+  source: string;
+  name?: string | null;
+  provenance?: WorkflowProvenance;
+}
+
+function workflowRefFromProvenance(provenance: WorkflowProvenance | undefined): string {
+  if (provenance?.kind === "clientPath") return `client-file:${provenance.path}`;
+  return "stdin";
+}
+
+function assertWorkflowDefinitionHash(hash: string): void {
+  if (!isWorkflowDefinitionHash(hash)) {
+    throw new Error(`workflow definition ${hash} is not a valid definition hash`);
+  }
+}
+
+function runFinishedPayload(output: unknown): unknown {
+  const text = JSON.stringify(output);
+  const byteLength = Buffer.byteLength(text, "utf8");
+  if (byteLength <= RUN_FINISHED_INLINE_OUTPUT_BYTES) return { output };
+  return { outputOmitted: true, outputByteLength: byteLength };
 }
 
 /** Runs workflows defined as ES modules (default export) in a Worker realm. */
@@ -114,28 +139,17 @@ export class RealmKernel {
   private readonly workspaceRoot?: string;
   private readonly agentProfiles?: Record<string, unknown>;
 
-  /** Determinism lint (§6 layer 1) — throws on violations. No-op if disabled. */
-  private runLint(workflowUrl: string): void {
-    const source = this.lintEnabled ? readSourceSafe(workflowUrl) : null;
-    if (source === null) return;
-    const violations = lintWorkflowSource(source, workflowUrl);
-    if (violations.length > 0) {
-      throw new Error(
-        `workflow failed the determinism lint:\n${formatViolations(violations, workflowUrl)}`,
-      );
-    }
-  }
-
   /** Start a run and return its id immediately, with a promise for completion.
    * The RPC layer/daemon uses this so launchRun returns before the run finishes. */
   launch<O>(
-    workflowUrl: string,
+    workflow: ClientCapturedWorkflow,
     input: unknown,
-    meta: { name: string },
+    meta: { name?: string | null } = {},
   ): { runId: string; done: Promise<RunHandle<O>> } {
     const at = this.host.clock();
-    const { snapshot, entryPath } = snapshotWorkflowPath(this.store, workflowUrl, {
-      name: meta.name,
+    const name = meta.name !== undefined ? meta.name : (workflow.name ?? null);
+    const { snapshot, entryPath } = snapshotWorkflowSource(this.store, workflow.source, {
+      name,
       nowMs: at,
       lint: this.lintEnabled,
       cacheRoot: this.definitionCacheRoot,
@@ -143,9 +157,9 @@ export class RealmKernel {
     const runId = this.idgen();
     this.store.insertRun({
       runId,
-      workflowName: meta.name,
+      workflowName: name,
       definitionVersion: snapshot.hash,
-      workflowRef: snapshot.provenance,
+      workflowRef: workflowRefFromProvenance(workflow.provenance),
       status: "running",
       parentRunId: null,
       tenantId: null,
@@ -159,24 +173,62 @@ export class RealmKernel {
     this.store.appendEvent(
       runId,
       "run.started",
-      { name: meta.name, definitionHash: snapshot.hash },
+      { name, definitionHash: snapshot.hash },
       this.host.clock(),
     );
     return { runId, done: this.execute<O>(runId, entryPath, input) };
   }
 
-  async run<O>(workflowUrl: string, input: unknown, meta: { name: string }): Promise<RunHandle<O>> {
-    return this.launch<O>(workflowUrl, input, meta).done;
+  async run<O>(
+    workflow: ClientCapturedWorkflow,
+    input: unknown,
+    meta: { name?: string | null } = {},
+  ): Promise<RunHandle<O>> {
+    return this.launch<O>(workflow, input, meta).done;
   }
 
-  async resume<O>(runId: string, workflowUrl: string): Promise<RunHandle<O>> {
-    return this.startResume<O>(runId, workflowUrl).done;
-  }
-
-  startResume<O>(
-    runId: string,
-    workflowUrl: string,
+  launchDefinition<O>(
+    definitionHash: string,
+    input: unknown,
+    meta: { name?: string | null; workflowRef?: string | null } = {},
   ): { runId: string; done: Promise<RunHandle<O>> } {
+    assertWorkflowDefinitionHash(definitionHash);
+    const entryPath = materializeWorkflowDefinition(
+      this.store,
+      definitionHash,
+      this.definitionCacheRoot,
+    );
+    const at = this.host.clock();
+    const runId = this.idgen();
+    this.store.insertRun({
+      runId,
+      workflowName: meta.name ?? null,
+      definitionVersion: definitionHash,
+      workflowRef: meta.workflowRef ?? definitionHash,
+      status: "running",
+      parentRunId: null,
+      tenantId: null,
+      inputRef: JSON.stringify(input ?? null),
+      outputRef: null,
+      errorJson: null,
+      heartbeatAtMs: null,
+      runtimeOwnerId: null,
+      createdAtMs: at,
+    });
+    this.store.appendEvent(
+      runId,
+      "run.started",
+      { name: meta.name ?? null, definitionHash },
+      this.host.clock(),
+    );
+    return { runId, done: this.execute<O>(runId, entryPath, input) };
+  }
+
+  async resume<O>(runId: string): Promise<RunHandle<O>> {
+    return this.startResume<O>(runId).done;
+  }
+
+  startResume<O>(runId: string): { runId: string; done: Promise<RunHandle<O>> } {
     const run = this.store.getRun(runId);
     if (!run) throw new Error(`run ${runId} not found`);
     if (TERMINAL.has(run.status)) {
@@ -204,26 +256,44 @@ export class RealmKernel {
    * edited step that yields a byte-identical output leaves downstream inputHashes
    * unchanged, so they replay.
    */
-  async rerun<O>(runId: string, workflowUrl: string, input?: unknown): Promise<RunHandle<O>> {
-    return this.startRerun<O>(runId, workflowUrl, input).done;
+  async rerun<O>(
+    runId: string,
+    opts: {
+      source?: string;
+      input?: unknown;
+      name?: string | null;
+      provenance?: WorkflowProvenance;
+    } = {},
+  ): Promise<RunHandle<O>> {
+    return this.startRerun<O>(runId, opts).done;
   }
 
   startRerun<O>(
     runId: string,
-    workflowUrl: string,
-    input?: unknown,
+    opts: {
+      source?: string;
+      input?: unknown;
+      name?: string | null;
+      provenance?: WorkflowProvenance;
+    } = {},
   ): { runId: string; done: Promise<RunHandle<O>> } {
     const run = this.store.getRun(runId);
     if (!run) throw new Error(`run ${runId} not found`);
-    const at = this.host.clock();
-    const { snapshot, entryPath } = snapshotWorkflowPath(this.store, workflowUrl, {
-      name: run.workflowName,
-      nowMs: at,
-      lint: this.lintEnabled,
-      cacheRoot: this.definitionCacheRoot,
-    });
-    const overriding = input !== undefined;
-    const effectiveInput = overriding ? input : run.inputRef ? JSON.parse(run.inputRef) : undefined;
+    const sourceOverride = opts.source !== undefined;
+    const name = opts.name !== undefined ? opts.name : run.workflowName;
+    const { definitionHash, workflowRef, entryPath } = sourceOverride
+      ? this.snapshotSourceForExistingRun(opts.source as string, name, opts.provenance)
+      : {
+          definitionHash: run.definitionVersion,
+          workflowRef: run.workflowRef,
+          entryPath: this.executionPathForRun(run),
+        };
+    const overriding = opts.input !== undefined;
+    const effectiveInput = overriding
+      ? opts.input
+      : run.inputRef
+        ? JSON.parse(run.inputRef)
+        : undefined;
     // Reset the run to running and clear the previous terminal result; persist an
     // override input so a later input-less rerun does not silently use the old one.
     this.store.updateRun(runId, {
@@ -231,28 +301,21 @@ export class RealmKernel {
       finishedAtMs: null,
       outputRef: null,
       errorJson: null,
-      ...(overriding ? { inputRef: JSON.stringify(input ?? null) } : {}),
+      ...(overriding ? { inputRef: JSON.stringify(opts.input ?? null) } : {}),
+      ...(opts.name !== undefined ? { workflowName: name } : {}),
     });
-    this.store.updateRunDefinition(runId, snapshot.hash, snapshot.provenance);
-    this.store.appendEvent(
-      runId,
-      "run.rerun",
-      { definitionHash: snapshot.hash },
-      this.host.clock(),
-    );
+    this.store.updateRunDefinition(runId, definitionHash, workflowRef);
+    this.store.appendEvent(runId, "run.rerun", { definitionHash }, this.host.clock());
     return { runId, done: this.execute<O>(runId, entryPath, effectiveInput) };
   }
 
   /** Retry a FAILED run from its failed step (§18) — the failed rows are dropped
    * so they re-execute; completed upstream replays. For transient agent failures. */
-  async retry<O>(runId: string, workflowUrl: string): Promise<RunHandle<O>> {
-    return this.startRetry<O>(runId, workflowUrl).done;
+  async retry<O>(runId: string): Promise<RunHandle<O>> {
+    return this.startRetry<O>(runId).done;
   }
 
-  startRetry<O>(
-    runId: string,
-    workflowUrl: string,
-  ): { runId: string; done: Promise<RunHandle<O>> } {
+  startRetry<O>(runId: string): { runId: string; done: Promise<RunHandle<O>> } {
     const run = this.store.getRun(runId);
     if (!run) throw new Error(`run ${runId} not found`);
     if (run.status !== "failed") throw new Error(`retry needs a failed run (is ${run.status})`);
@@ -266,14 +329,13 @@ export class RealmKernel {
 
   /** Rewind a run to a chosen step (§18): discard everything journaled after it,
    * then re-execute. The kept prefix replays; the rest re-runs (may diverge). */
-  async rewind<O>(runId: string, toStableKey: string, workflowUrl: string): Promise<RunHandle<O>> {
-    return this.startRewind<O>(runId, toStableKey, workflowUrl).done;
+  async rewind<O>(runId: string, toStableKey: string): Promise<RunHandle<O>> {
+    return this.startRewind<O>(runId, toStableKey).done;
   }
 
   startRewind<O>(
     runId: string,
     toStableKey: string,
-    workflowUrl: string,
   ): { runId: string; done: Promise<RunHandle<O>> } {
     const run = this.store.getRun(runId);
     if (!run) throw new Error(`run ${runId} not found`);
@@ -324,6 +386,24 @@ export class RealmKernel {
     throw new Error(
       `run ${run.runId} cannot be resumed because it has no immutable workflow definition snapshot (${run.definitionVersion})`,
     );
+  }
+
+  private snapshotSourceForExistingRun(
+    source: string,
+    name: string | null,
+    provenance: WorkflowProvenance | undefined,
+  ): { definitionHash: string; workflowRef: string; entryPath: string } {
+    const { snapshot, entryPath } = snapshotWorkflowSource(this.store, source, {
+      name,
+      nowMs: this.host.clock(),
+      lint: this.lintEnabled,
+      cacheRoot: this.definitionCacheRoot,
+    });
+    return {
+      definitionHash: snapshot.hash,
+      workflowRef: workflowRefFromProvenance(provenance),
+      entryPath,
+    };
   }
 
   private execute<O>(runId: string, workflowUrl: string, input: unknown): Promise<RunHandle<O>> {
@@ -737,7 +817,12 @@ export class RealmKernel {
                 outputRef: JSON.stringify(m.output ?? null),
                 finishedAtMs: this.host.clock(),
               });
-              this.store.appendEvent(runId, "run.finished", {}, this.host.clock());
+              this.store.appendEvent(
+                runId,
+                "run.finished",
+                runFinishedPayload(m.output ?? null),
+                this.host.clock(),
+              );
               this.secrets?.wipe(runId); // §11.2: secrets live per-run; wipe on terminal
               finish(() => resolve({ runId, status: "finished", output: m.output as O }));
               break;

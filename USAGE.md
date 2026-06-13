@@ -56,11 +56,19 @@ For local systemd usage in this workspace, see [`AGENTS.md`](./AGENTS.md).
 ### Launch A Workflow
 
 ```bash
-keel launch ./path/to/workflow.ts '{"n":3}'
+keel launch ./path/to/workflow.ts --input '{"n":3}'
 ```
 
-Lifecycle commands watch by default. They print the run id first, then stream
-events until the run reaches a terminal state:
+The CLI reads `workflow.ts` locally and sends the TypeScript source to the
+daemon. The daemon never opens the client path. Omit the file to read workflow
+source from stdin:
+
+```bash
+cat ./path/to/workflow.ts | keel run --input '{"n":3}' --json
+```
+
+Lifecycle commands watch by default. `launch` prints the run id first, then
+streams events until the run reaches a terminal state:
 
 ```text
 run run_...
@@ -71,21 +79,22 @@ run run_...
 Use `--detach` when a script needs the run id without streaming:
 
 ```bash
-LAUNCH=$(keel launch --detach ./path/to/workflow.ts '{"n":3}')
+LAUNCH=$(keel launch --detach ./path/to/workflow.ts --input '{"n":3}')
 RUN=$(printf '%s' "$LAUNCH" | jq -r .runId)
 CAP=$(printf '%s' "$LAUNCH" | jq -r .capabilityRef)
 KEEL_CAP_FILE="$CAP" keel watch "$RUN"
 KEEL_CAP_FILE="$CAP" keel get "$RUN"
+KEEL_CAP_FILE="$CAP" keel output "$RUN"
 ```
 
-Omit the input argument for `{}`:
+Omit `--input` for `{}`:
 
 ```bash
 keel launch ./path/to/no-input.workflow.ts
 ```
 
-Pass valid JSON for any other input, including `null` or `""`. An empty shell
-argument is rejected so script mistakes are visible.
+Pass valid JSON through `--input` for any other input, including `null` or `""`.
+An empty `--input` value is rejected so script mistakes are visible.
 
 ### Link Workflows Outside This Repo
 
@@ -120,15 +129,18 @@ bun src/cli/keel.ts <command> [args]
 |---|---|
 | `daemon` | Start the daemon in the foreground. |
 | `link [dir]` | Symlink this repo's SDK into `<dir>/node_modules`; defaults to the current directory. |
-| `launch [--detach] [--emit-capability] <workflow.ts> [json]` | Start a run from a workflow file. Watches by default. |
+| `launch [workflow.ts] [--name n] [--input json] [--detach] [--emit-capability]` | Start a run from client-captured workflow source. Watches by default. |
+| `run [workflow.ts] [--name n] [--input json] [--json]` | Launch a run and print its terminal output or JSON envelope. |
 | `watch [--json] <runId>` | Stream run events until terminal. |
 | `get <runId>` | Print the canonical run projection as JSON. |
+| `output <runId>` | Print the terminal workflow output as JSON. |
 | `list` | List run id, status, and workflow name. |
+| `gc` | Prune unreferenced workflow definition rows and cache entries. Requires admin. |
 | `resume [--detach] <runId>` | Resume a parked or incomplete run. Watches by default. |
 | `retry [--detach] <runId>` | Re-run a failed run from its failed step. Watches by default. |
 | `rewind [--detach] <runId> <stepKey>` | Discard everything after a step and re-run. Watches by default. |
 | `fork <runId> [atStepKey]` | Copy a terminal run into a new independent run. |
-| `execute [--stdin\|file] [--entry name] [--state file] [--cap-file file] [--emit-capability] [-- args...]` | Run a stateless TypeScript control script over the daemon API. |
+| `execute [file] [--entry name] [--state file] [--cap-file file] [--emit-capability] [-- args...]` | Run a stateless TypeScript control script over the daemon API. Omit `file` to read stdin. |
 | `approve <runId> <key> [note]` | Approve a `ctx.human` gate. |
 | `deny <runId> <key> [note]` | Deny a `ctx.human` gate. |
 | `signal <runId> <name> [json]` | Deliver a payload to `ctx.signal(name)`. |
@@ -146,7 +158,7 @@ They print `run <runId>` first and then behave like `keel watch <runId>`.
 Use `--detach` for background operation:
 
 ```bash
-keel launch --detach ./workflow.ts '{"target":"src"}'
+keel launch --detach ./workflow.ts --input '{"target":"src"}'
 keel resume --detach run_...
 keel retry --detach run_...
 keel rewind --detach run_... step-key
@@ -183,6 +195,7 @@ Raw events include `seq`, `type`, `payload`, and `atMs`.
 - `1`: attached run reached `failed`, JSON parsing failed, provider execution
   failed, or another runtime error occurred.
 - `2`: command usage error.
+- `3`: `keel run` reached a parked/non-terminal status such as `waiting-human`.
 
 ## Paths, State, And Workspaces
 
@@ -199,17 +212,28 @@ By default the daemon stores local state under `~/.keel`:
 The daemon is the single writer for the journal. CLI clients connect over the
 socket and do not open the database directly.
 
-### Workflow File Paths
+### Workflow Source Capture
 
-`keel launch <workflow.ts>` resolves non-`file:` workflow paths to absolute paths
-using the CLI process cwd before sending the request to the daemon. `file:` URLs
-are passed through as-is.
+`keel launch [workflow.ts]` and `keel run [workflow.ts]` use one source-delivery
+rule: an optional positional is a file path read by the CLI; omitting it reads
+source from stdin. With no positional and a terminal stdin, the CLI fails instead
+of waiting forever.
 
-On launch, the daemon stores an immutable workflow definition snapshot by
-content hash and runs from a daemon-owned materialized cache. Resume, retry,
-rewind, fork, and crash recovery use the stored definition, not the mutable
-source path. `rerun`/adopt-latest intentionally snapshots the current source as
-a new definition.
+Workflow input is always passed with `--input <json>`. The positional slot is
+only source, never input. `--name` is an optional display label; if omitted for
+stdin launches, the run is unnamed (`null` in JSON, `(unnamed)` in text output).
+Names are not handles and may repeat. Use run ids for follow-up commands.
+
+On launch, the daemon stores an immutable workflow definition snapshot by content
+hash and runs from a daemon-owned materialized cache. Resume, retry, rewind,
+fork, and crash recovery use the stored definition, never a client path.
+`rerun` with a source override snapshots the supplied source as a new definition.
+Workflow source is persisted verbatim in the journal database; do not embed
+secrets in workflow TypeScript.
+
+Client-captured workflow v1 is single-file only. The only external import a
+workflow source may use is the exact SDK import `@kcosr/keel`; relative imports,
+SDK subpaths, and arbitrary packages are rejected.
 
 ### Workspace Root
 
@@ -240,7 +264,7 @@ By default, commands that create a protected run write a capability file under
 `$KEEL_CAP_DIR` or `$KEEL_DIR/caps` and return a `capabilityRef`:
 
 ```bash
-keel launch --detach ./workflow.ts '{"n":3}'
+keel launch --detach ./workflow.ts --input '{"n":3}'
 ```
 
 ```json
@@ -283,7 +307,7 @@ runtime/authorization errors are structured JSON on stderr with a nonzero exit.
 
 ```bash
 keel execute ./control.ts -- root security
-keel execute --stdin < control.ts
+keel execute < control.ts
 keel execute ./control.ts --entry resume --state state.json --cap-file run.cap
 ```
 
@@ -550,6 +574,13 @@ with that name.
   refcounts for discarded rows, and clears unresolved waits.
 - `fork` copies a terminal run's journal prefix into a new independent run.
 
+### Schedules
+
+Schedules pin the workflow definition hash captured when the schedule is created.
+They do not reread a path or automatically adopt later source edits. Existing
+path-based schedules from older databases are disabled by migration and should
+be recreated from current source.
+
 ## API Reference
 
 All clients speak the same `KeelApi` contract. The daemon exposes it over the
@@ -559,13 +590,15 @@ Unix socket; tests and embedded callers may use it in-process.
 
 ```ts
 interface LaunchRequest {
-  workflowUrl: string;
+  source: string;
   input: unknown;
-  name: string;
+  name?: string | null;
+  provenance?: { kind: "stdin" } | { kind: "clientPath"; path: string };
 }
 ```
 
-`workflowUrl` is currently a module path or `file:` URL visible to the daemon.
+`source` is workflow TypeScript captured by the client. `provenance` is
+display-only; the daemon never opens or parses it for execution.
 
 ### KeelApi
 
@@ -573,7 +606,10 @@ interface LaunchRequest {
 interface KeelApi {
   launchRun(req: LaunchRequest): Promise<RunLaunchResult>;
   resumeRun(runId: string): Promise<RunStart>;
-  rerunRun(runId: string, opts?: { workflowUrl?: string; input?: unknown }): Promise<RunStart>;
+  rerunRun(
+    runId: string,
+    opts?: { source?: string; input?: unknown; name?: string | null; provenance?: LaunchRequest["provenance"] },
+  ): Promise<RunStart>;
   retryRun(runId: string): Promise<RunStart>;
   rewindRun(runId: string, toStableKey: string): Promise<RunStart>;
   forkRun(runId: string, opts?: { atStableKey?: string; newRunId?: string }): RunLaunchResult;
@@ -581,6 +617,11 @@ interface KeelApi {
   getBlockage(runId: string): Blockage;
   listRuns(): RunSummary[];
   waitForRun(runId: string): Promise<RunOutcome>;
+  getRunOutput(runId: string): Promise<RunOutcome>;
+  gcDefinitions(opts?: { ttlMs?: number; cacheMinAgeMs?: number }): Promise<{
+    workflowDefinitionsRemoved: number;
+    definitionCacheEntriesRemoved: number;
+  }>;
   subscribeEvents(
     runId: string,
     afterSeq: number,
@@ -600,6 +641,7 @@ Use `waitForRun` to wait for terminal status or `subscribeEvents` to stream
 events. The daemon returns a raw run capability on launch/fork so clients can
 establish authority for follow-up operations. The CLI writes that capability to a
 local cap file by default and only prints raw tokens with `--emit-capability`.
+`gcDefinitions` is an admin operation.
 
 ### EventEnvelope
 
@@ -642,6 +684,15 @@ add broad fallback branches for old schema shapes.
 
 `store.gcArtifacts()` reclaims content-addressed blobs no journal row references.
 Refcounts are recomputed from the journal, so GC self-heals after rewind/fork.
+
+### Workflow Definition GC
+
+`keel gc` asks the daemon to prune old unreferenced workflow definition rows and
+evict rebuildable materialized cache directories. It requires admin authority.
+Rows are kept when any run references their `definition_version` or any enabled
+schedule references their pinned hash. Cache directories are not evicted while a
+running or parked run uses that definition. `KEEL_DEFINITION_TTL_MS` overrides
+the default row TTL of 30 days.
 
 ### Multiple Processes
 

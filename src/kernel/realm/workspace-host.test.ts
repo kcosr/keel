@@ -15,17 +15,24 @@ import type {
 } from "../../agents/types.ts";
 import { AgentProviderRegistry } from "../../agents/types.ts";
 import { JournalStore } from "../../journal/store.ts";
+import { captureWorkflowFile } from "../../workflow-definitions/capture.ts";
 import { RealmKernel } from "./realm-host.ts";
 
-const writeUrl = new URL("./fixtures/write-agent.workflow.ts", import.meta.url).pathname;
-const readPlusBashUrl = new URL("./fixtures/read-plus-bash.workflow.ts", import.meta.url).pathname;
-const readPlusBashSecretUrl = new URL(
-  "./fixtures/read-plus-bash-secret.workflow.ts",
-  import.meta.url,
-).pathname;
-const streamUrl = new URL("./fixtures/stream-secret.workflow.ts", import.meta.url).pathname;
-const writeSecretLooseUrl = new URL("./fixtures/write-secret-loose.workflow.ts", import.meta.url)
-  .pathname;
+const writeUrl = captureWorkflowFile(
+  new URL("./fixtures/write-agent.workflow.ts", import.meta.url).pathname,
+);
+const readPlusBashUrl = captureWorkflowFile(
+  new URL("./fixtures/read-plus-bash.workflow.ts", import.meta.url).pathname,
+);
+const readPlusBashSecretUrl = captureWorkflowFile(
+  new URL("./fixtures/read-plus-bash-secret.workflow.ts", import.meta.url).pathname,
+);
+const streamUrl = captureWorkflowFile(
+  new URL("./fixtures/stream-secret.workflow.ts", import.meta.url).pathname,
+);
+const writeSecretLooseUrl = captureWorkflowFile(
+  new URL("./fixtures/write-secret-loose.workflow.ts", import.meta.url).pathname,
+);
 
 /** A provider that writes a file into its cwd (the worktree). */
 const writerProvider: AgentProvider = {
@@ -177,7 +184,9 @@ describe("durable diff + worktree cleanup", () => {
       workspaceRoot: repo,
       secrets,
     });
-    const writeSecretUrl = new URL("./fixtures/write-secret.workflow.ts", import.meta.url).pathname;
+    const writeSecretUrl = captureWorkflowFile(
+      new URL("./fixtures/write-secret.workflow.ts", import.meta.url).pathname,
+    );
     await kernel.run(writeSecretUrl, null, { name: "ws" });
     const diff = store.listEvents("r").find((e) => e.type === "agent.diff");
     expect(diff?.payloadJson).toContain("config.ini"); // the file is in the diff

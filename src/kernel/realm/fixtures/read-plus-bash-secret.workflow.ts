@@ -1,4 +1,4 @@
-import type { Ctx } from "../../ctx.ts";
+import type { Ctx } from "@kcosr/keel";
 
 export default async function readPlusBashSecret(ctx: Ctx, _input: null): Promise<string> {
   return ctx.agent({

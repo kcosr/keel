@@ -1,5 +1,5 @@
-// Commit 1: additive forward migrations — an older journal upgrades in place
-// instead of failing to open (review-log Phase 19 finding).
+// Forward migrations — an older journal upgrades in place instead of failing to
+// open, and persisted meaning changes are handled at the migration boundary.
 
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
@@ -41,8 +41,68 @@ function makeV4Db(path: string): void {
   db.close();
 }
 
+/** Build a v8 DB with the pre-v9 schedule meaning and pre-v10 NOT NULL names. */
+function makeV8Db(path: string): void {
+  const db = new Database(path, { create: true });
+  db.exec("PRAGMA journal_mode = WAL;");
+  db.exec(`
+    CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE runs (
+      run_id             TEXT PRIMARY KEY,
+      workflow_name      TEXT NOT NULL,
+      definition_version TEXT NOT NULL,
+      workflow_ref       TEXT,
+      status             TEXT NOT NULL,
+      parent_run_id      TEXT,
+      tenant_id          TEXT,
+      input_ref          TEXT,
+      output_ref         TEXT,
+      error_json         TEXT,
+      heartbeat_at_ms    INTEGER,
+      runtime_owner_id   TEXT,
+      created_at_ms      INTEGER NOT NULL,
+      finished_at_ms     INTEGER
+    );
+    CREATE TABLE schedules (
+      name         TEXT PRIMARY KEY,
+      workflow_ref TEXT NOT NULL,
+      input_json   TEXT,
+      interval_ms  INTEGER NOT NULL,
+      next_fire_ms INTEGER NOT NULL,
+      enabled      INTEGER NOT NULL DEFAULT 1,
+      last_run_id  TEXT
+    );
+    CREATE TABLE workflow_definitions (
+      hash          TEXT PRIMARY KEY,
+      name          TEXT NOT NULL,
+      kind          TEXT NOT NULL,
+      code          TEXT NOT NULL,
+      source_map    TEXT,
+      manifest_json TEXT,
+      created_at_ms INTEGER NOT NULL
+    );
+  `);
+  db.query("INSERT INTO schema_meta (key, value) VALUES ('schema_version', '8')").run();
+  db.query(
+    `INSERT INTO runs (
+      run_id, workflow_name, definition_version, workflow_ref, status, input_ref, created_at_ms
+    ) VALUES ('r_path', 'path-run', 'wf_sha256_old', '/daemon/path.workflow.ts', 'finished', 'null', 1)`,
+  ).run();
+  db.query(
+    `INSERT INTO schedules (
+      name, workflow_ref, input_json, interval_ms, next_fire_ms, enabled
+    ) VALUES ('hourly', '/daemon/path.workflow.ts', 'null', 3600000, 1000, 1)`,
+  ).run();
+  db.query(
+    `INSERT INTO workflow_definitions (
+      hash, name, kind, code, source_map, manifest_json, created_at_ms
+    ) VALUES ('wf_sha256_old', 'path-run', 'path', 'export default async () => 1;', NULL, '{}', 1)`,
+  ).run();
+  db.close();
+}
+
 describe("schema migrations", () => {
-  test("a v4 DB migrates forward to v8 in place, additively and idempotently", () => {
+  test("a v4 DB migrates forward to v10 in place and idempotently", () => {
     const dir = mkdtempSync(join(tmpdir(), "keel-mig-"));
     try {
       const path = join(dir, "old.db");
@@ -55,7 +115,7 @@ describe("schema migrations", () => {
       const ver = store.db
         .query<{ value: string }, []>("SELECT value FROM schema_meta WHERE key='schema_version'")
         .get();
-      expect(ver?.value).toBe("8");
+      expect(ver?.value).toBe("10");
 
       // new columns exist
       const jcols = store.db.query<{ name: string }, []>("PRAGMA table_info(journal)").all();
@@ -96,7 +156,60 @@ describe("schema migrations", () => {
     const ver = store.db
       .query<{ value: string }, []>("SELECT value FROM schema_meta WHERE key='schema_version'")
       .get();
-    expect(ver?.value).toBe("8");
+    expect(ver?.value).toBe("10");
     store.close();
+  });
+
+  test("v8 path schedules are disabled and display-name columns become nullable", () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-mig-v8-"));
+    try {
+      const path = join(dir, "old.db");
+      makeV8Db(path);
+
+      const store = JournalStore.open(path);
+      const ver = store.db
+        .query<{ value: string }, []>("SELECT value FROM schema_meta WHERE key='schema_version'")
+        .get();
+      expect(ver?.value).toBe("10");
+
+      const schedule = store.db
+        .query<{ enabled: number; workflow_ref: string }, []>(
+          "SELECT enabled, workflow_ref FROM schedules WHERE name = 'hourly'",
+        )
+        .get();
+      expect(schedule).toEqual({ enabled: 0, workflow_ref: "/daemon/path.workflow.ts" });
+      expect(store.getRun("r_path")?.workflowName).toBe("path-run");
+      expect(store.getWorkflowDefinition("wf_sha256_old")?.name).toBe("path-run");
+
+      store.insertRun({
+        runId: "r_null",
+        workflowName: null,
+        definitionVersion: "wf_sha256_new",
+        workflowRef: "stdin",
+        status: "running",
+        parentRunId: null,
+        tenantId: null,
+        inputRef: "null",
+        outputRef: null,
+        errorJson: null,
+        heartbeatAtMs: null,
+        runtimeOwnerId: null,
+        createdAtMs: 2,
+      });
+      store.putWorkflowDefinition({
+        hash: "wf_sha256_new",
+        name: null,
+        kind: "source",
+        code: "export default async () => 1;",
+        sourceMap: null,
+        manifestJson: "{}",
+        createdAtMs: 2,
+      });
+      expect(store.getRun("r_null")?.workflowName).toBeNull();
+      expect(store.getWorkflowDefinition("wf_sha256_new")?.name).toBeNull();
+      store.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

@@ -1,6 +1,7 @@
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { DaemonClient } from "../daemon/client.ts";
-import type { EventEnvelope, RunOutcome, RunStart } from "../rpc/contract.ts";
+import type { EventEnvelope, LaunchRequest, RunOutcome, RunStart } from "../rpc/contract.ts";
 import type { Blockage, RunProjection } from "../rpc/projection.ts";
 
 export interface ExecuteKeel {
@@ -29,9 +30,9 @@ export interface ExecuteKeel {
 export type ExecuteLaunchRequest =
   | string
   | {
-      workflow: string | { kind: "path"; path: string };
+      workflow: string | { kind: "source"; name?: string | null; source: string };
       input?: unknown;
-      name?: string;
+      name?: string | null;
     };
 
 export interface ExecuteRunHandle {
@@ -176,24 +177,30 @@ export function createExecuteKeel(opts: ExecuteRuntimeOptions): ExecuteKeel {
   };
 }
 
-function normalizeLaunch(
-  req: ExecuteLaunchRequest,
-  cwd: string,
-): {
-  workflowUrl: string;
-  input: unknown;
-  name: string;
-} {
+function normalizeLaunch(req: ExecuteLaunchRequest, cwd: string): LaunchRequest {
   if (typeof req === "string") {
-    const workflowUrl = resolve(cwd, req);
-    return { workflowUrl, input: {}, name: workflowName(workflowUrl) };
+    const path = resolve(cwd, req);
+    return {
+      source: readFileSync(path, "utf8"),
+      input: {},
+      name: workflowName(path),
+      provenance: { kind: "clientPath", path },
+    };
   }
-  const workflow = typeof req.workflow === "string" ? req.workflow : req.workflow.path;
-  const workflowUrl = resolve(cwd, workflow);
+  if (typeof req.workflow === "string") {
+    const path = resolve(cwd, req.workflow);
+    return {
+      source: readFileSync(path, "utf8"),
+      input: req.input ?? {},
+      name: req.name ?? workflowName(path),
+      provenance: { kind: "clientPath", path },
+    };
+  }
   return {
-    workflowUrl,
+    source: req.workflow.source,
     input: req.input ?? {},
-    name: req.name ?? workflowName(workflowUrl),
+    name: req.name ?? req.workflow.name ?? null,
+    provenance: { kind: "stdin" },
   };
 }
 

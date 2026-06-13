@@ -1,6 +1,5 @@
 // Phase 19 fixture: continueAsNew chains a fresh run until count reaches 2.
-import type { Ctx } from "../../ctx.ts";
-import { passthrough } from "../../schema.ts";
+import { type Ctx, passthrough } from "@kcosr/keel";
 
 const num = passthrough<number>();
 

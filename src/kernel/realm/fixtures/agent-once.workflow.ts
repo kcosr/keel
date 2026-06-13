@@ -1,7 +1,6 @@
 // Phase 10 fixture: a single pi-provider agent step. Used to exercise the
 // session-resume four-branch table through the realm.
-import type { Ctx } from "../../ctx.ts";
-import { jsonSchema } from "../../schema.ts";
+import { type Ctx, jsonSchema } from "@kcosr/keel";
 
 const Out = jsonSchema<{ value: number }>({
   type: "object",

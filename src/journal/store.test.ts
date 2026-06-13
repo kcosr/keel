@@ -22,6 +22,14 @@ function newRun(runId: string): NewRunRow {
   };
 }
 
+function unnamedRun(runId: string): NewRunRow {
+  return {
+    ...newRun(runId),
+    workflowName: null,
+    workflowRef: "stdin",
+  };
+}
+
 describe("JournalStore (in-memory)", () => {
   let store: JournalStore;
   beforeEach(() => {
@@ -36,6 +44,11 @@ describe("JournalStore (in-memory)", () => {
     expect(got?.workflowName).toBe("demo");
     expect(got?.status).toBe("running");
     expect(got?.finishedAtMs).toBeNull();
+  });
+
+  test("runs may be genuinely unnamed", () => {
+    store.insertRun(unnamedRun("r_unnamed"));
+    expect(store.getRun("r_unnamed")?.workflowName).toBeNull();
   });
 
   test("updateRun patches only named columns", () => {
@@ -145,6 +158,74 @@ describe("JournalStore (in-memory)", () => {
     expect(got?.name).toBe("demo");
     expect(got?.code).toContain("export default");
     expect(got?.manifestJson).toContain("keel.workflow-definition.v1");
+  });
+
+  test("workflow definition names are nullable and first-writer-wins by hash", () => {
+    store.putWorkflowDefinition({
+      hash: "wf_sha256_same",
+      name: null,
+      kind: "source",
+      code: "export default async () => 1;",
+      sourceMap: null,
+      manifestJson: '{"format":"keel.workflow-definition.v1"}',
+      createdAtMs: 1000,
+    });
+    store.putWorkflowDefinition({
+      hash: "wf_sha256_same",
+      name: "later",
+      kind: "source",
+      code: "export default async () => 1;",
+      sourceMap: null,
+      manifestJson: '{"format":"keel.workflow-definition.v1"}',
+      createdAtMs: 2000,
+    });
+
+    const got = store.getWorkflowDefinition("wf_sha256_same");
+    expect(got?.name).toBeNull();
+    expect(got?.createdAtMs).toBe(1000);
+  });
+
+  test("workflow definition pruning preserves run and enabled-schedule references", () => {
+    for (const hash of [
+      "wf_sha256_orphan",
+      "wf_sha256_run",
+      "wf_sha256_schedule",
+      "wf_sha256_disabled_schedule",
+      "wf_sha256_fresh",
+    ]) {
+      store.putWorkflowDefinition({
+        hash,
+        name: null,
+        kind: "source",
+        code: "export default async () => 1;",
+        sourceMap: null,
+        manifestJson: '{"format":"keel.workflow-definition.v1"}',
+        createdAtMs: hash === "wf_sha256_fresh" ? 95 : 1,
+      });
+    }
+    store.insertRun({ ...newRun("r_def"), definitionVersion: "wf_sha256_run" });
+    store.putSchedule({
+      name: "enabled",
+      workflowRef: "wf_sha256_schedule",
+      inputJson: null,
+      intervalMs: 1000,
+      nextFireMs: 1,
+    });
+    store.putSchedule({
+      name: "disabled",
+      workflowRef: "wf_sha256_disabled_schedule",
+      inputJson: null,
+      intervalMs: 1000,
+      nextFireMs: 1,
+    });
+    store.db.query("UPDATE schedules SET enabled = 0 WHERE name = 'disabled'").run();
+
+    expect(store.pruneWorkflowDefinitions({ nowMs: 100, ttlMs: 10 })).toBe(2);
+    expect(store.getWorkflowDefinition("wf_sha256_orphan")).toBeNull();
+    expect(store.getWorkflowDefinition("wf_sha256_disabled_schedule")).toBeNull();
+    expect(store.getWorkflowDefinition("wf_sha256_run")).not.toBeNull();
+    expect(store.getWorkflowDefinition("wf_sha256_schedule")).not.toBeNull();
+    expect(store.getWorkflowDefinition("wf_sha256_fresh")).not.toBeNull();
   });
 
   test("capabilities round-trip by secret hash without storing raw tokens", () => {

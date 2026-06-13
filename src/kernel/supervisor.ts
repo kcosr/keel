@@ -40,11 +40,11 @@ export class Supervisor {
     const woken: string[] = [];
     for (const runId of this.store.dueTimerRunIds(now)) {
       const run = this.store.getRun(runId);
-      if (!run || !run.workflowRef) continue;
+      if (!run) continue;
       if (run.status !== "waiting-timer") continue;
       if (!this.claim(runId)) continue;
       try {
-        await this.kernel.resume(runId, run.workflowRef);
+        await this.kernel.resume(runId);
         woken.push(runId);
       } catch {
         // a resume that re-parks (a later timer) or errors is left for next tick
@@ -56,13 +56,15 @@ export class Supervisor {
   private async fireDueSchedules(now: number): Promise<string[]> {
     const fired: string[] = [];
     for (const s of this.store.dueSchedules(now)) {
-      const { runId } = this.kernel.launch(
+      const { runId } = this.kernel.launchDefinition(
         s.workflowRef,
         s.inputJson ? JSON.parse(s.inputJson) : null,
         {
           name: s.name,
+          workflowRef: s.workflowRef,
         },
       );
+      if (!this.claim(runId)) continue;
       // advance to the next slot from the scheduled time (not drifting on now)
       const next = Math.max(s.nextFireMs + s.intervalMs, now + s.intervalMs);
       this.store.advanceSchedule(s.name, next, runId);

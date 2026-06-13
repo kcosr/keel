@@ -5,13 +5,14 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { hashJson } from "../../hash.ts";
 import { JournalStore } from "../../journal/store.ts";
+import { captureWorkflowFile } from "../../workflow-definitions/capture.ts";
 import { RealmKernel } from "./realm-host.ts";
 
 const FIXTURES = new URL("./fixtures/", import.meta.url);
-const chainUrl = new URL("chain.workflow.ts", FIXTURES).pathname;
-const edgesUrl = new URL("edges.workflow.ts", FIXTURES).pathname;
-const ambientUrl = new URL("ambient.workflow.ts", FIXTURES).pathname;
-const forbiddenUrl = new URL("forbidden.workflow.ts", FIXTURES).pathname;
+const chainUrl = captureWorkflowFile(new URL("chain.workflow.ts", FIXTURES).pathname);
+const edgesUrl = captureWorkflowFile(new URL("edges.workflow.ts", FIXTURES).pathname);
+const ambientUrl = captureWorkflowFile(new URL("ambient.workflow.ts", FIXTURES).pathname);
+const forbiddenUrl = captureWorkflowFile(new URL("forbidden.workflow.ts", FIXTURES).pathname);
 
 function fixed(store: JournalStore, extra: Record<string, unknown> = {}): RealmKernel {
   let id = 0;
@@ -104,7 +105,7 @@ describe("realm — crash consistency (write-ahead through the realm)", () => {
 
     // Resume with no fault.
     const healthy = fixed(store, { onStepExecute: tick });
-    const handle = await healthy.resume<number>("run_0", chainUrl);
+    const handle = await healthy.resume<number>("run_0");
     expect(handle.status).toBe("finished");
     expect(handle.output).toBe(4);
 

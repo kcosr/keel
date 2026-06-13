@@ -1,7 +1,6 @@
 // Phase 13 fixture: one agent with a tight stall timeout. The mock is scripted
 // to stall on the first attempt and respond fast on the retry.
-import type { Ctx } from "../../ctx.ts";
-import { jsonSchema } from "../../schema.ts";
+import { type Ctx, jsonSchema } from "@kcosr/keel";
 
 const Out = jsonSchema<{ value: number }>({
   type: "object",

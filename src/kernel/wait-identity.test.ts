@@ -3,11 +3,15 @@
 
 import { describe, expect, test } from "bun:test";
 import { JournalStore } from "../journal/store.ts";
+import { captureWorkflowFile } from "../workflow-definitions/capture.ts";
 import { RealmKernel } from "./realm/realm-host.ts";
 
-const multiSleepUrl = new URL("./realm/fixtures/multi-sleep.workflow.ts", import.meta.url).pathname;
-const multiSignalUrl = new URL("./realm/fixtures/multi-signal.workflow.ts", import.meta.url)
-  .pathname;
+const multiSleepUrl = captureWorkflowFile(
+  new URL("./realm/fixtures/multi-sleep.workflow.ts", import.meta.url).pathname,
+);
+const multiSignalUrl = captureWorkflowFile(
+  new URL("./realm/fixtures/multi-signal.workflow.ts", import.meta.url).pathname,
+);
 
 describe("keyed durable sleeps", () => {
   test("two sleeps park/wake under distinct stable keys", async () => {
@@ -26,7 +30,7 @@ describe("keyed durable sleeps", () => {
 
     // wake first → runs to the second sleep, parks again under second-nap
     t = 150;
-    h = await kernel.resume<number>("r", multiSleepUrl);
+    h = await kernel.resume<number>("r");
     expect(h.status).toBe("waiting-timer");
     timers = store.db
       .query<{ stable_key: string }, []>("SELECT stable_key FROM timers WHERE run_id='r'")
@@ -35,7 +39,7 @@ describe("keyed durable sleeps", () => {
 
     // wake second → finishes
     t = 400;
-    h = await kernel.resume<number>("r", multiSleepUrl);
+    h = await kernel.resume<number>("r");
     expect(h.status).toBe("finished");
     expect(h.output).toBe(2);
   });
@@ -62,7 +66,7 @@ describe("per-name signal occurrence keys", () => {
     store.putSignal("r", "event", 10, 1);
     store.putSignal("r", "event", 20, 2);
     store.putSignal("r", "other", 30, 3);
-    h = await kernel.resume<number[]>("r", multiSignalUrl);
+    h = await kernel.resume<number[]>("r");
     expect(h.status).toBe("finished");
     expect(h.output).toEqual([10, 20, 30]);
 

@@ -6,9 +6,10 @@ import { SecretStore } from "../../agents/secrets.ts";
 import type { AgentInvocation, AgentProvider, AgentResult } from "../../agents/types.ts";
 import { AgentProviderRegistry } from "../../agents/types.ts";
 import { JournalStore } from "../../journal/store.ts";
+import { captureWorkflowFile } from "../../workflow-definitions/capture.ts";
 import { RealmKernel } from "./realm-host.ts";
 
-const url = new URL("./fixtures/secret.workflow.ts", import.meta.url).pathname;
+const url = captureWorkflowFile(new URL("./fixtures/secret.workflow.ts", import.meta.url).pathname);
 
 /** A provider that echoes whatever secret env it was injected with. */
 const echoProvider: AgentProvider = {

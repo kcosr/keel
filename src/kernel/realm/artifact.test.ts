@@ -4,10 +4,11 @@
 import { describe, expect, test } from "bun:test";
 import { hashJson, sha256Hex } from "../../hash.ts";
 import { JournalStore } from "../../journal/store.ts";
+import { captureWorkflowFile } from "../../workflow-definitions/capture.ts";
 import { RealmKernel } from "./realm-host.ts";
 
 const FIX = new URL("./fixtures/", import.meta.url);
-const url = (f: string) => new URL(f, FIX).pathname;
+const url = (f: string) => captureWorkflowFile(new URL(f, FIX).pathname);
 
 function fixed(store: JournalStore, extra: Record<string, unknown> = {}): RealmKernel {
   let id = 0;
@@ -66,7 +67,7 @@ describe("two-tier artifact store", () => {
     exec.length = 0;
 
     const k2 = fixed(store, { onStepExecute: (k: string) => exec.push(k) });
-    const resumed = await k2.resume<number>("run_0", url("artifact.workflow.ts"));
+    const resumed = await k2.resume<number>("run_0");
     expect(resumed.output).toBe(4000 + 4000 + 4);
     // big and echo replayed from artifacts (not re-executed); only small ran
     expect(exec).not.toContain("big");
@@ -90,7 +91,7 @@ describe("two-tier artifact store", () => {
     expect(store.getArtifact(expectedHash)).toBeNull(); // no dangling artifact
 
     // resume completes; now both exist
-    const resumed = await fixed(store).resume<number>("run_0", url("artifact.workflow.ts"));
+    const resumed = await fixed(store).resume<number>("run_0");
     expect(resumed.status).toBe("finished");
     expect(store.getArtifact(expectedHash)).not.toBeNull();
   });

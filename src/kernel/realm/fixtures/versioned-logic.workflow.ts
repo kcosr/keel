@@ -1,7 +1,6 @@
 // Phase 5 fixture: step a is byte-identical to versioned-v1; step b's logic
 // changed (×10 → ×100), so only b's version changes.
-import type { Ctx } from "../../ctx.ts";
-import { passthrough } from "../../schema.ts";
+import { type Ctx, passthrough } from "@kcosr/keel";
 
 const num = passthrough<number>();
 

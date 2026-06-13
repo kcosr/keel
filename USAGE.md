@@ -1,0 +1,586 @@
+# Keel Usage Reference
+
+Keel is a durable agent-workflow orchestrator. A workflow is an ordinary
+`async (ctx, input) => output` TypeScript function; every external effect goes
+through `ctx.*` and is journaled by a single-writer daemon. If the process dies,
+resuming re-runs the workflow body and replays completed effects from the
+journal, so only incomplete work runs again.
+
+Use this file as the operational reference: install, run, command syntax, paths,
+workflow API, agent API, daemon behavior, and current limitations. For a compact
+agent-facing authoring guide, read [`SKILL.md`](./SKILL.md). For repository
+working conventions, read [`AGENTS.md`](./AGENTS.md). `DESIGN.md` is architecture
+and design-history material, not the command/API reference.
+
+## Contents
+
+- [Quick Start](#quick-start)
+- [CLI Reference](#cli-reference)
+- [Paths, State, And Workspaces](#paths-state-and-workspaces)
+- [Workflow Authoring](#workflow-authoring)
+- [Agent Calls](#agent-calls)
+- [Capabilities And Secrets](#capabilities-and-secrets)
+- [Durability Features](#durability-features)
+- [API Reference](#api-reference)
+- [Development And Operations](#development-and-operations)
+- [Known Limitations](#known-limitations)
+
+## Quick Start
+
+Keel runs on [Bun](https://bun.sh). The repo is self-contained.
+
+### Install The CLI
+
+```bash
+export PATH="$HOME/.bun/bin:$PATH"
+cd /path/to/keel
+bun link
+keel help
+```
+
+`bun link` creates a live symlink to this repo, so edits take effect without
+reinstalling. Without the link, run the CLI directly:
+
+```bash
+bun /path/to/keel/src/cli/keel.ts help
+```
+
+### Start The Daemon
+
+```bash
+keel daemon
+```
+
+For local systemd usage in this workspace, see [`AGENTS.md`](./AGENTS.md).
+
+### Launch A Workflow
+
+```bash
+keel launch ./path/to/workflow.ts '{"n":3}'
+```
+
+Lifecycle commands watch by default. They print the run id first, then stream
+events until the run reaches a terminal state:
+
+```text
+run run_...
+[1] run.started {"name":"workflow.ts"}
+...
+```
+
+Use `--detach` when a script needs the run id without streaming:
+
+```bash
+RUN=$(keel launch --detach ./path/to/workflow.ts '{"n":3}')
+keel watch "$RUN"
+keel get "$RUN"
+```
+
+Omit the input argument for `{}`:
+
+```bash
+keel launch ./path/to/no-input.workflow.ts
+```
+
+Pass valid JSON for any other input, including `null` or `""`. An empty shell
+argument is rejected so script mistakes are visible.
+
+### Link Workflows Outside This Repo
+
+Workflow files import the SDK as `@kcosr/keel`:
+
+```ts
+import { jsonSchema, type Ctx } from "@kcosr/keel";
+```
+
+Inside this repo that resolves automatically. For workflows in another
+directory, link the SDK once:
+
+```bash
+keel link ~/my-workflows
+```
+
+## CLI Reference
+
+Run `keel help` for the command list and `keel help <command>` for command-level
+usage.
+
+The installed command and the source command are equivalent:
+
+```bash
+keel <command> [args]
+bun src/cli/keel.ts <command> [args]
+```
+
+### Command Summary
+
+| Command | Purpose |
+|---|---|
+| `daemon` | Start the daemon in the foreground. |
+| `link [dir]` | Symlink this repo's SDK into `<dir>/node_modules`; defaults to the current directory. |
+| `launch [--detach] <workflow.ts> [json]` | Start a run from a workflow file. Watches by default. |
+| `watch [--json] <runId>` | Stream run events until terminal. |
+| `get <runId>` | Print the canonical run projection as JSON. |
+| `list` | List run id, status, and workflow name. |
+| `resume [--detach] <runId>` | Resume a parked or incomplete run. Watches by default. |
+| `retry [--detach] <runId>` | Re-run a failed run from its failed step. Watches by default. |
+| `rewind [--detach] <runId> <stepKey>` | Discard everything after a step and re-run. Watches by default. |
+| `fork <runId> [atStepKey]` | Copy a terminal run into a new independent run. |
+| `approve <runId> <key> [note]` | Approve a `ctx.human` gate. |
+| `deny <runId> <key> [note]` | Deny a `ctx.human` gate. |
+| `signal <runId> <name> [json]` | Deliver a payload to `ctx.signal(name)`. |
+
+### Attach And Detach Behavior
+
+`launch`, `resume`, `retry`, and `rewind` attach by default:
+
+```bash
+keel retry run_...
+```
+
+They print `run <runId>` first and then behave like `keel watch <runId>`.
+
+Use `--detach` for background operation:
+
+```bash
+keel launch --detach ./workflow.ts '{"target":"src"}'
+keel resume --detach run_...
+keel retry --detach run_...
+keel rewind --detach run_... step-key
+```
+
+Detached `launch` prints only the run id. Detached `resume`, `retry`, and
+`rewind` print the run id and status separated by a tab.
+
+### Watch Output
+
+Default watch output is human-oriented and compact:
+
+```text
+[1] run.started {"name":"review.workflow.ts"}
+[2] phase: Find
+[3] agent review:auth session: 019...
+[4] step.completed review:auth (effectful)
+[5] run.finished
+```
+
+Use `--json` to print raw event envelopes, one JSON object per line:
+
+```bash
+keel watch --json run_...
+```
+
+Raw events include `seq`, `type`, `payload`, and `atMs`.
+
+### Exit Codes
+
+- `0`: command succeeded; attached run reached `finished` or `continued`.
+- `1`: attached run reached `failed`, JSON parsing failed, provider execution
+  failed, or another runtime error occurred.
+- `2`: command usage error.
+
+## Paths, State, And Workspaces
+
+### Daemon State
+
+By default the daemon stores local state under `~/.keel`:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `KEEL_DIR` | `~/.keel` | Base directory for default socket and database paths. |
+| `KEEL_SOCKET` | `$KEEL_DIR/keel.sock` | Unix socket used by CLI clients. |
+| `KEEL_DB` | `$KEEL_DIR/keel.db` | SQLite journal database owned by the daemon. |
+
+The daemon is the single writer for the journal. CLI clients connect over the
+socket and do not open the database directly.
+
+### Workflow File Paths
+
+`keel launch <workflow.ts>` resolves non-`file:` workflow paths to absolute paths
+using the CLI process cwd before sending the request to the daemon. `file:` URLs
+are passed through as-is.
+
+The daemon loads the workflow module from the resolved path. The workflow file
+must therefore be visible to the daemon host at that path.
+
+### Workspace Root
+
+`KEEL_WORKSPACE_ROOT` points to the git repository root used when an agent sets
+`workspaceIsolation: true`:
+
+```bash
+KEEL_WORKSPACE_ROOT=/home/kevin/worktrees/keel keel daemon
+```
+
+Agents that do not request workspace isolation do not require a workspace root.
+An agent with `workspaceIsolation: true` fails closed without one; it does not
+fall back to editing the daemon cwd.
+
+When enabled, the agent works in an isolated git worktree at the run's base
+commit. Its changes are captured as an `agent.diff` event and are not merged
+into the real tree automatically.
+
+### Auth
+
+Set `KEEL_TOKENS` when starting the daemon to require scoped bearer tokens:
+
+```bash
+KEEL_TOKENS='{"reader":"read","writer":"write"}' keel daemon
+```
+
+CLI clients authenticate with:
+
+```bash
+KEEL_TOKEN=writer keel list
+```
+
+Read tokens may only call read methods.
+
+### Diagnostics
+
+Set `KEEL_PI_RAW_LOG` to capture raw Pi stdout/stderr diagnostics:
+
+```bash
+KEEL_PI_RAW_LOG=/tmp/pi.jsonl keel daemon
+```
+
+Treat this file as secret-bearing and delete it after debugging.
+
+## Workflow Authoring
+
+A workflow module default-exports `async (ctx, input) => output`.
+
+```ts
+import type { Ctx } from "@kcosr/keel";
+import { passthrough } from "@kcosr/keel";
+
+const num = passthrough<number>();
+
+export default async function example(ctx: Ctx, input: { n: number }): Promise<number> {
+  return ctx.step("double", num, { n: input.n }, ({ n }) => n * 2);
+}
+```
+
+Workflow inputs and outputs must be JSON-serializable.
+
+### Determinism Rules
+
+The determinism lint runs before launch/resume and rejects unsupported workflow
+code:
+
+- Do not use ambient non-determinism in the workflow body: `Date.now()`,
+  `new Date()`, `Math.random()`, `crypto`, `fetch`, `eval`, `new Function`,
+  `require`, or direct `fs`/`child_process`/`http` imports.
+- Use `ctx.now()` and `ctx.random()` for journaled time and entropy.
+- A `ctx.step` callback must be a pure function of its explicit `inputs`. Do not
+  close over enclosing-scope data inside the callback; pass values through
+  `inputs`.
+
+Module-level helpers are allowed. Editing helper code participates in step
+versioning and can cause affected steps to re-run.
+
+### The `ctx` API
+
+| Member | What It Does |
+|---|---|
+| `step(key, schema, inputs, fn, opts?)` | Pure, memoized step. Re-runs only if inputs or version change. |
+| `agent(spec)` | Journaled LLM agent call. A completed agent effect never re-runs on resume. |
+| `now()` / `random()` | Journaled wall-clock and entropy. Recorded once, replayed thereafter. |
+| `sleep(key, ms)` | Durable sleep. Parks the run until the supervisor wakes it. |
+| `human(spec)` | Park until a human approval/denial is delivered. |
+| `signal(name)` | Park until an external signal payload is delivered. |
+| `continueAsNew(input)` | End this run as `continued` and start a fresh run of the same workflow. |
+| `stepKey(name, id)` | Build a stable fan-out key from semantic name plus content-derived id. |
+| `log(msg, data?)` / `phase(title)` | Advisory narration to the event log. |
+
+Fan-out is plain `Promise.all` over `ctx.agent` or `ctx.step` calls. Keys must be
+stable across resumes, so derive fan-out keys from content, not array index:
+
+```ts
+ctx.stepKey("verify", `${finding.file}|${finding.title}`);
+```
+
+## Agent Calls
+
+```ts
+import { jsonSchema } from "@kcosr/keel";
+
+const Finding = jsonSchema<{ title: string; severity: "high" | "low" }>({
+  type: "object",
+  additionalProperties: false,
+  required: ["title", "severity"],
+  properties: {
+    title: { type: "string" },
+    severity: { type: "string", enum: ["high", "low"] },
+  },
+});
+
+const finding = await ctx.agent({
+  key: "review:auth",
+  prompt: "Review the auth module for security issues.",
+  provider: "pi",
+  schema: Finding,
+  toolPolicy: "read-only",
+  reasoning: "high",
+  onFailure: "null",
+  lenient: true,
+});
+```
+
+### AgentSpec Fields
+
+| Field | Meaning |
+|---|---|
+| `key` | Required stable key for this agent effect. |
+| `prompt` | Prompt text sent to the provider. |
+| `profile?` | Named preset resolved before identity/versioning. Programmatic only on the bundled daemon. |
+| `provider?` | `"pi"`, `"claude"`, or `"mock"`. |
+| `schema?` | Structured output schema. If present, replies are validated. |
+| `model?` | Provider model name. |
+| `reasoning?` | Provider reasoning/thinking effort. Pi supports `off`, `minimal`, `low`, `medium`, `high`, `xhigh`. |
+| `toolPolicy?` | `"none"`, `"read-only"`, `"workspace-write"`, or `"unrestricted"`. Defaults to `"read-only"`. |
+| `allowTools?` | Provider-native tool additions after policy resolution. |
+| `denyTools?` | Provider-native tool removals after policy resolution. |
+| `workspaceIsolation?` | Explicit opt-in to isolated worktree execution and `agent.diff` capture. |
+| `capabilities?` | Explicit normalized capability declaration used when `toolPolicy` is omitted. |
+| `secrets?` | Secret names to inject from the side channel. |
+| `onFailure?` | `"throw"` by default, or `"null"` to tolerate terminal failure. |
+| `maxRetries?` | In-session structured-output validation retries. Default: `2`. |
+| `lenient?` | Opt into tolerant structured-output coercion. Default: strict validation. |
+| `timeoutMs?` | Per-attempt stall timeout. Default: `1 hour`. |
+| `stallRetries?` | Retries after stalled attempts. Default: `1`. |
+| `bump?` / `version?` | Explicit version controls for invalidation. |
+
+### Structured Output
+
+With `schema`, Keel injects the JSON Schema into the prompt and validates the
+reply. Validation is strict by default. Set `lenient: true` for tolerant coercion
+of common model drift such as lowercase enums, number-to-string values, and
+unknown fields.
+
+If validation fails, the provider is re-invoked inside the same agent session up
+to `maxRetries`.
+
+### Failure Handling
+
+Terminal agent failures throw by default and fail the run. Use
+`onFailure: "null"` only for optional fan-out where partial results are intended:
+
+```ts
+const results = await Promise.all(optionalPrompts.map((prompt) =>
+  ctx.agent({ key: ctx.stepKey("review", prompt.id), prompt, onFailure: "null" }),
+));
+const present = results.filter(Boolean);
+```
+
+When `onFailure: "null"` is used, the `null` result is journaled as completed; a
+later resume replays `null` rather than calling the agent again.
+
+### Session Resume
+
+Pi and Claude session tokens are captured write-ahead. If the daemon dies during
+an agent call, resume reconnects to the same provider session when possible
+rather than starting a fresh call.
+
+## Capabilities And Secrets
+
+Agents default to read-only provider tools. Use `toolPolicy: "none"` to disable
+tools, or declare broader access with `toolPolicy` or explicit `capabilities`.
+If both `toolPolicy` and `capabilities` are set, `toolPolicy` controls provider
+tools. `toolPolicy: "unrestricted"` cannot be combined with `allowTools` or
+`denyTools` until provider-native deny semantics are supported.
+
+```ts
+toolPolicy: "read-only";
+capabilities: {
+  fs: "workspace-write",
+  network: "none",
+  shell: false,
+  secrets: ["DEPLOY_KEY"],
+};
+allowTools: ["Bash"];
+denyTools: ["LS"];
+workspaceIsolation: true; // opt into worktree + diff capture
+```
+
+Capability enforcement is mapped to provider-specific tool flags in one place,
+including Pi and Claude mappings.
+
+Filesystem capability levels:
+
+| Level | Meaning |
+|---|---|
+| `"none"` | No file tools. |
+| `"read"` | Read, grep, and list. |
+| `"workspace-write"` | Edit/write in an isolated workspace. |
+
+Secrets named in `secrets` are injected from a side channel keyed by run. They do
+not enter the journal. Exact secret values are also redacted from final output,
+streamed events, captured diffs, and tolerated-failure errors.
+Agents with secrets and write/shell capabilities or provider-native
+`allowTools` additions must set `workspaceIsolation: true`.
+
+The bundled `keel daemon` does not yet construct a `SecretStore`; secret
+injection requires constructing `RealmKernel` or `KeelDaemon` programmatically
+with one. Redaction still runs harmlessly when no values are present.
+
+## Durability Features
+
+### Durable Sleep
+
+```ts
+await ctx.sleep("hourly", 3_600_000);
+```
+
+The run parks at `waiting-timer` and the daemon supervisor wakes it. The sleep
+key is part of the durable identity; changing the key or duration creates a new
+timer identity.
+
+### Human Approval
+
+```ts
+const decision = await ctx.human({
+  key: "approve-deploy",
+  prompt: "Approve deployment?",
+});
+```
+
+Deliver a decision from the CLI:
+
+```bash
+keel approve "$RUN" approve-deploy "looks good"
+keel deny "$RUN" approve-deploy "needs changes"
+```
+
+### Signals
+
+```ts
+const payload = await ctx.signal("proceed");
+```
+
+Deliver a signal:
+
+```bash
+keel signal "$RUN" proceed '{"go":true}'
+```
+
+Signals are ordered. The Nth `ctx.signal(name)` consumes the Nth delivered signal
+with that name.
+
+### Time Travel
+
+`retry`, `rewind`, and `fork` operate on durable journal state:
+
+- `retry` requires a failed run and drops the failed rows so they re-execute.
+- `rewind` truncates the journal after a chosen step, decrements artifact
+  refcounts for discarded rows, and clears unresolved waits.
+- `fork` copies a terminal run's journal prefix into a new independent run.
+
+## API Reference
+
+All clients speak the same `KeelApi` contract. The daemon exposes it over the
+Unix socket; tests and embedded callers may use it in-process.
+
+### LaunchRequest
+
+```ts
+interface LaunchRequest {
+  workflowUrl: string;
+  input: unknown;
+  name: string;
+}
+```
+
+`workflowUrl` is currently a module path or `file:` URL visible to the daemon.
+
+### KeelApi
+
+```ts
+interface KeelApi {
+  launchRun(req: LaunchRequest): Promise<{ runId: string }>;
+  resumeRun(runId: string): Promise<RunStart>;
+  rerunRun(runId: string, opts?: { workflowUrl?: string; input?: unknown }): Promise<RunStart>;
+  retryRun(runId: string): Promise<RunStart>;
+  rewindRun(runId: string, toStableKey: string): Promise<RunStart>;
+  forkRun(runId: string, opts?: { atStableKey?: string; newRunId?: string }): { runId: string };
+  getRun(runId: string): RunProjection | null;
+  getBlockage(runId: string): Blockage;
+  listRuns(): RunSummary[];
+  waitForRun(runId: string): Promise<RunOutcome>;
+  subscribeEvents(
+    runId: string,
+    afterSeq: number,
+    onEvent: (event: EventEnvelope) => void,
+  ): () => void;
+}
+```
+
+Lifecycle methods start work in the background and return a `RunStart` or run id.
+Use `waitForRun` to wait for terminal status or `subscribeEvents` to stream
+events.
+
+### EventEnvelope
+
+```ts
+interface EventEnvelope {
+  seq: number;
+  type: string;
+  payload: unknown;
+  atMs: number;
+}
+```
+
+`seq` is monotonically increasing per run. CLI `watch --json` prints these
+envelopes exactly.
+
+## Development And Operations
+
+### Checks
+
+```bash
+bun test
+bun run typecheck
+bun run lint
+```
+
+Live provider tests are gated:
+
+```bash
+KEEL_LIVE=1 NODE_TLS_REJECT_UNAUTHORIZED=0 bun test fixtures/review-workload/live.test.ts -t LIVE
+```
+
+### Migrations
+
+The journal upgrades older databases in place through the migration ladder in
+`src/journal/migrations.ts`. Existing databases should migrate forward at daemon
+startup. Runtime code should then operate against the current schema only; do not
+add broad fallback branches for old schema shapes.
+
+### Artifact GC
+
+`store.gcArtifacts()` reclaims content-addressed blobs no journal row references.
+Refcounts are recomputed from the journal, so GC self-heals after rewind/fork.
+
+### Multiple Processes
+
+The daemon is the single writer. A run can be launched by one client, watched by
+another, and resumed by a third. A heartbeat-based ownership fence prevents two
+daemons from driving the same run; after restart, the daemon reclaims orphaned
+runs.
+
+## Known Limitations
+
+- Durable wait identity is stable across crash-resume of unchanged code, not
+  across edits that rekey a parked wait. Changing a sleep duration, renaming a
+  wait key, or inserting a wait before an existing parked site can make the run
+  re-park or wait for a new signal.
+- Partial `fork` does not copy durable waits. Treat divergent forks of
+  wait-heavy workflows with care.
+- SQLite is the only implemented store. Postgres compatibility is a discipline
+  enforced by tests, not a working backend.
+- Secrets and profiles are programmatic-only on the bundled daemon.
+- The full 111-agent workload remains budget/target-repo dependent; shape,
+  durability, and crash-resume are covered by mock scale tests and reduced live
+  runs.
+- OS-level sandbox enforcement is not implemented beneath provider tool flags
+  and workspace isolation.

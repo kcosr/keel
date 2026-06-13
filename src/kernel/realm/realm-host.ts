@@ -1,0 +1,798 @@
+// Realm host (DESIGN.md §6) — the main-thread side of the worker bridge.
+//
+// Spawns one Worker per execution, answers its journaled effect requests through
+// the shared StepEngine, and resolves when the body returns. The journal and all
+// fault hooks live here on the host, so crash semantics match the in-process
+// path (the StepEngine is identical, validated under real kill -9 in Phase 3).
+
+import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import type { Capabilities } from "../../agents/capabilities.ts";
+import { AgentFailure, executeAgent, runAgentWithStall } from "../../agents/execute.ts";
+import { type SecretStore, redact } from "../../agents/secrets.ts";
+import type { AgentProviderRegistry } from "../../agents/types.ts";
+import { type Json, hashJson } from "../../hash.ts";
+import type { JournalStore } from "../../journal/store.ts";
+import type { RunStatus } from "../../journal/types.ts";
+import { formatViolations, lintWorkflowSource } from "../../lint/determinism.ts";
+import { createWorktree } from "../../workspace/worktree.ts";
+import type { CtxHost, FaultPoint } from "../ctx.ts";
+import { extractModuleHelpers } from "../module-helpers.ts";
+import { StepEngine } from "../step-engine.ts";
+import {
+  CONTROL_WORDS,
+  type HostReply,
+  SAB_BYTES,
+  VALUE_OFFSET,
+  type WorkerRequest,
+} from "./protocol.ts";
+
+export interface RunHandle<O> {
+  runId: string;
+  status: RunStatus;
+  output?: O;
+}
+
+export interface RealmKernelOptions {
+  clock?: () => number;
+  rng?: () => number;
+  idgen?: () => string;
+  fault?: (point: FaultPoint, key: string) => void;
+  /** Called once per real step-fn execution (used by crash tests to count). */
+  onStepExecute?: (key: string) => void;
+  /** Run the determinism lint on the workflow source before spawning (default true). */
+  lint?: boolean;
+  /** Agent provider registry for ctx.agent (the daemon owns providers, L4). */
+  agents?: AgentProviderRegistry;
+  /** Side-channel secret store (§11.2); enables injection + output redaction. */
+  secrets?: SecretStore;
+  /** Git repo root for agents that explicitly request workspaceIsolation (§11.3). */
+  workspaceRoot?: string;
+  /** Named agent profiles resolved before version computation (§10.2). */
+  agentProfiles?: Record<string, unknown>;
+}
+
+const TERMINAL: ReadonlySet<RunStatus> = new Set<RunStatus>([
+  "finished",
+  "failed",
+  "cancelled",
+  "continued",
+]);
+
+const WORKER_URL = new URL("./worker-entry.ts", import.meta.url);
+
+function canWriteOrRunShell(caps: Capabilities): boolean {
+  return caps.fs === "workspace-write" || caps.shell;
+}
+
+function requiresSecretIsolation(message: {
+  capabilities?: Capabilities;
+  allowTools: string[];
+}): boolean {
+  if (message.capabilities && canWriteOrRunShell(message.capabilities)) return true;
+  // Provider-native additions can include shell/write or exfiltration-capable
+  // tools. Until those tools have typed capabilities, secrets require isolation.
+  return message.allowTools.length > 0;
+}
+
+/** Runs workflows defined as ES modules (default export) in a Worker realm. */
+export class RealmKernel {
+  private readonly store: JournalStore;
+  private readonly host: CtxHost;
+  private readonly idgen: () => string;
+  private readonly onStepExecute?: (key: string) => void;
+  private readonly lintEnabled: boolean;
+  private readonly registry?: AgentProviderRegistry;
+
+  constructor(store: JournalStore, opts: RealmKernelOptions = {}) {
+    this.store = store;
+    this.host = {
+      clock: opts.clock ?? (() => Date.now()),
+      rng: opts.rng ?? Math.random,
+      ...(opts.fault ? { fault: opts.fault } : {}),
+    };
+    this.idgen = opts.idgen ?? (() => `run_${randomUUID()}`);
+    if (opts.onStepExecute) this.onStepExecute = opts.onStepExecute;
+    this.lintEnabled = opts.lint ?? true;
+    if (opts.agents) this.registry = opts.agents;
+    if (opts.secrets) this.secrets = opts.secrets;
+    if (opts.workspaceRoot) this.workspaceRoot = opts.workspaceRoot;
+    if (opts.agentProfiles) this.agentProfiles = opts.agentProfiles;
+  }
+
+  private readonly secrets?: SecretStore;
+  private readonly workspaceRoot?: string;
+  private readonly agentProfiles?: Record<string, unknown>;
+
+  /** Determinism lint (§6 layer 1) — throws on violations. No-op if disabled. */
+  private runLint(workflowUrl: string): void {
+    const source = this.lintEnabled ? readSourceSafe(workflowUrl) : null;
+    if (source === null) return;
+    const violations = lintWorkflowSource(source, workflowUrl);
+    if (violations.length > 0) {
+      throw new Error(
+        `workflow failed the determinism lint:\n${formatViolations(violations, workflowUrl)}`,
+      );
+    }
+  }
+
+  /** Start a run and return its id immediately, with a promise for completion.
+   * The RPC layer/daemon uses this so launchRun returns before the run finishes. */
+  launch<O>(
+    workflowUrl: string,
+    input: unknown,
+    meta: { name: string },
+  ): { runId: string; done: Promise<RunHandle<O>> } {
+    this.runLint(workflowUrl);
+    const runId = this.idgen();
+    this.store.insertRun({
+      runId,
+      workflowName: meta.name,
+      definitionVersion: "v0",
+      workflowRef: workflowUrl,
+      status: "running",
+      parentRunId: null,
+      tenantId: null,
+      inputRef: JSON.stringify(input ?? null),
+      outputRef: null,
+      errorJson: null,
+      heartbeatAtMs: null,
+      runtimeOwnerId: null,
+      createdAtMs: this.host.clock(),
+    });
+    this.store.appendEvent(runId, "run.started", { name: meta.name }, this.host.clock());
+    return { runId, done: this.execute<O>(runId, workflowUrl, input) };
+  }
+
+  async run<O>(workflowUrl: string, input: unknown, meta: { name: string }): Promise<RunHandle<O>> {
+    return this.launch<O>(workflowUrl, input, meta).done;
+  }
+
+  async resume<O>(runId: string, workflowUrl: string): Promise<RunHandle<O>> {
+    return this.startResume<O>(runId, workflowUrl).done;
+  }
+
+  startResume<O>(
+    runId: string,
+    workflowUrl: string,
+  ): { runId: string; done: Promise<RunHandle<O>> } {
+    const run = this.store.getRun(runId);
+    if (!run) throw new Error(`run ${runId} not found`);
+    if (TERMINAL.has(run.status)) {
+      return {
+        runId,
+        done: Promise.resolve({
+          runId,
+          status: run.status,
+          output: run.outputRef ? (JSON.parse(run.outputRef) as O) : undefined,
+        }),
+      };
+    }
+    // Until archived definitions exist (Phase 12), workflowUrl is mutable, so the
+    // determinism gate must run on resume too.
+    this.runLint(workflowUrl);
+    const input = run.inputRef ? JSON.parse(run.inputRef) : undefined;
+    this.store.appendEvent(runId, "run.resumed", {}, this.host.clock());
+    return { runId, done: this.execute<O>(runId, workflowUrl, input) };
+  }
+
+  /**
+   * Re-execute a run against (possibly edited) code — the §7.5 `--adopt-latest`
+   * path (Phase 6). Unlike resume, this ignores terminal status: steps whose
+   * (inputHash, version) still match replay; steps whose version changed (edited
+   * logic/prompt) or whose inputs changed (because an upstream re-executed to a
+   * different value) re-execute as a new attempt. Early cutoff is automatic — an
+   * edited step that yields a byte-identical output leaves downstream inputHashes
+   * unchanged, so they replay.
+   */
+  async rerun<O>(runId: string, workflowUrl: string, input?: unknown): Promise<RunHandle<O>> {
+    return this.startRerun<O>(runId, workflowUrl, input).done;
+  }
+
+  startRerun<O>(
+    runId: string,
+    workflowUrl: string,
+    input?: unknown,
+  ): { runId: string; done: Promise<RunHandle<O>> } {
+    const run = this.store.getRun(runId);
+    if (!run) throw new Error(`run ${runId} not found`);
+    this.runLint(workflowUrl);
+    const overriding = input !== undefined;
+    const effectiveInput = overriding ? input : run.inputRef ? JSON.parse(run.inputRef) : undefined;
+    // Reset the run to running and clear the previous terminal result; persist an
+    // override input so a later input-less rerun does not silently use the old one.
+    this.store.updateRun(runId, {
+      status: "running",
+      finishedAtMs: null,
+      outputRef: null,
+      errorJson: null,
+      ...(overriding ? { inputRef: JSON.stringify(input ?? null) } : {}),
+    });
+    this.store.appendEvent(runId, "run.rerun", {}, this.host.clock());
+    return { runId, done: this.execute<O>(runId, workflowUrl, effectiveInput) };
+  }
+
+  /** Retry a FAILED run from its failed step (§18) — the failed rows are dropped
+   * so they re-execute; completed upstream replays. For transient agent failures. */
+  async retry<O>(runId: string, workflowUrl: string): Promise<RunHandle<O>> {
+    return this.startRetry<O>(runId, workflowUrl).done;
+  }
+
+  startRetry<O>(
+    runId: string,
+    workflowUrl: string,
+  ): { runId: string; done: Promise<RunHandle<O>> } {
+    const run = this.store.getRun(runId);
+    if (!run) throw new Error(`run ${runId} not found`);
+    if (run.status !== "failed") throw new Error(`retry needs a failed run (is ${run.status})`);
+    this.runLint(workflowUrl);
+    this.store.deleteFailedRows(runId);
+    this.store.updateRun(runId, { status: "running", errorJson: null, finishedAtMs: null });
+    this.store.appendEvent(runId, "run.retry", {}, this.host.clock());
+    const input = run.inputRef ? JSON.parse(run.inputRef) : undefined;
+    return { runId, done: this.execute<O>(runId, workflowUrl, input) };
+  }
+
+  /** Rewind a run to a chosen step (§18): discard everything journaled after it,
+   * then re-execute. The kept prefix replays; the rest re-runs (may diverge). */
+  async rewind<O>(runId: string, toStableKey: string, workflowUrl: string): Promise<RunHandle<O>> {
+    return this.startRewind<O>(runId, toStableKey, workflowUrl).done;
+  }
+
+  startRewind<O>(
+    runId: string,
+    toStableKey: string,
+    workflowUrl: string,
+  ): { runId: string; done: Promise<RunHandle<O>> } {
+    const run = this.store.getRun(runId);
+    if (!run) throw new Error(`run ${runId} not found`);
+    if (!this.store.getLatestAttempt(runId, toStableKey)) {
+      throw new Error(`cannot rewind to unknown step "${toStableKey}"`);
+    }
+    this.runLint(workflowUrl);
+    // Trim journal + decrement refcounts + clear unresolved waits as one snapshot.
+    this.store.deleteRunStateAfter(runId, toStableKey);
+    this.store.updateRun(runId, {
+      status: "running",
+      outputRef: null,
+      errorJson: null,
+      finishedAtMs: null,
+    });
+    this.store.appendEvent(runId, "run.rewind", { to: toStableKey }, this.host.clock());
+    const input = run.inputRef ? JSON.parse(run.inputRef) : undefined;
+    return { runId, done: this.execute<O>(runId, workflowUrl, input) };
+  }
+
+  /** Fork a TERMINAL run into a new independent run sharing the journal prefix
+   * and its resolved durable-wait history (§18); the new run can be rerun to
+   * diverge without touching the source. */
+  fork(runId: string, opts: { atStableKey?: string; newRunId?: string } = {}): string {
+    const src = this.store.getRun(runId);
+    if (!src) throw new Error(`fork source run ${runId} not found`);
+    // Fence: only fork a terminal run, so the prefix snapshot is consistent (no
+    // concurrent owner mutating it mid-copy) and all waits are resolved.
+    if (!TERMINAL.has(src.status)) {
+      throw new Error(
+        `cannot fork a non-terminal run (is ${src.status}); fork a finished/failed/continued run, or rewind first`,
+      );
+    }
+    const newId = opts.newRunId ?? this.idgen();
+    this.store.forkRun(runId, newId, opts.atStableKey ?? null, this.host.clock());
+    this.store.appendEvent(newId, "run.forked", { from: runId }, this.host.clock());
+    return newId;
+  }
+
+  private execute<O>(runId: string, workflowUrl: string, input: unknown): Promise<RunHandle<O>> {
+    const source = readSourceSafe(workflowUrl);
+    const sourcePath = workflowUrl.startsWith("file:")
+      ? new URL(workflowUrl).pathname
+      : workflowUrl;
+    const moduleHelpers = source ? extractModuleHelpers(source, sourcePath) : {};
+    return new Promise<RunHandle<O>>((resolve, reject) => {
+      const engine = new StepEngine(this.store, runId, this.host);
+      const sab = new SharedArrayBuffer(SAB_BYTES);
+      const control = new Int32Array(sab, 0, CONTROL_WORDS);
+      const valueView = new Float64Array(sab, VALUE_OFFSET, 1);
+      const worker = new Worker(WORKER_URL, { type: "module" });
+
+      let settled = false;
+      const finish = (fn: () => void): void => {
+        if (settled) return;
+        settled = true;
+        worker.terminate();
+        fn();
+      };
+      const reply = (id: number, payload: unknown): void => {
+        // After the run settles the worker is terminated; a late reply from an
+        // in-flight agent (e.g. another fan-out verifier finishing after a crash)
+        // would throw on postMessage. Drop it — the journal already holds its row.
+        if (settled) return;
+        try {
+          worker.postMessage({ type: "rpc-reply", id, payload } satisfies HostReply);
+        } catch {
+          // worker gone
+        }
+      };
+      // Settle a run as resumable (a host-side crash fault); the pending row
+      // written before the fault drives re-execution on the next run.
+      const abort = (err: unknown): void => {
+        this.store.appendEvent(
+          runId,
+          "run.aborted",
+          { name: "HostFault", message: String(err) },
+          this.host.clock(),
+        );
+        finish(() => reject(err));
+      };
+
+      worker.onmessage = (e: MessageEvent<WorkerRequest>) => {
+        const m = e.data;
+        try {
+          switch (m.type) {
+            case "ready":
+              worker.postMessage({
+                type: "init",
+                workflowUrl,
+                input,
+                sab,
+                moduleHelpers,
+                agentProfiles: this.agentProfiles ?? {},
+              } satisfies HostReply);
+              break;
+            case "step-begin": {
+              const begun = engine.beginStep(m.key, m.inputs as Json, m.version, m.deps);
+              if (begun.kind === "replay") {
+                reply(m.id, {
+                  action: "replay",
+                  value: begun.value,
+                  contentHash: hashJson(begun.value),
+                });
+              } else {
+                reply(m.id, {
+                  action: "execute",
+                  attempt: begun.attempt,
+                  inputHash: begun.inputHash,
+                  startedAtMs: begun.startedAtMs,
+                });
+              }
+              break;
+            }
+            case "step-commit": {
+              this.onStepExecute?.(m.key);
+              engine.completeStep(
+                m.key,
+                m.attempt,
+                m.version,
+                m.inputHash,
+                m.startedAtMs,
+                m.value,
+                m.deps,
+              );
+              reply(m.id, { contentHash: hashJson(m.value) });
+              break;
+            }
+            case "step-fail": {
+              this.onStepExecute?.(m.key);
+              engine.failStep(
+                m.key,
+                m.attempt,
+                m.version,
+                m.inputHash,
+                m.startedAtMs,
+                rebuildError(m.error),
+              );
+              reply(m.id, {});
+              break;
+            }
+            case "agent": {
+              const begun = engine.beginStep(
+                m.key,
+                m.inputs as Json,
+                m.version,
+                m.deps,
+                "effectful",
+              );
+              if (begun.kind === "replay") {
+                reply(m.id, { ok: true, output: begun.value, contentHash: hashJson(begun.value) });
+                break;
+              }
+              this.onStepExecute?.(m.key);
+              const registry = this.registry;
+              if (!registry) {
+                const err = new Error("ctx.agent requires an agent provider registry");
+                engine.failStep(
+                  m.key,
+                  begun.attempt,
+                  m.version,
+                  begun.inputHash,
+                  begun.startedAtMs,
+                  err,
+                  "effectful",
+                );
+                reply(m.id, { ok: false, error: { name: "Error", message: err.message } });
+                break;
+              }
+              // §11: an explicitly isolated agent edits in a git worktree;
+              // secrets are injected sealed from the side channel.
+              const caps = m.capabilities ?? undefined;
+              if (
+                !m.workspaceIsolation &&
+                m.secrets.length > 0 &&
+                requiresSecretIsolation({ capabilities: caps, allowTools: m.allowTools })
+              ) {
+                const err = new Error(
+                  `agent "${m.key}" requests secrets with write, shell, or provider-native tool additions but workspaceIsolation is not enabled`,
+                );
+                engine.failStep(
+                  m.key,
+                  begun.attempt,
+                  m.version,
+                  begun.inputHash,
+                  begun.startedAtMs,
+                  err,
+                  "effectful",
+                );
+                reply(m.id, { ok: false, error: { name: "Error", message: err.message } });
+                break;
+              }
+              if (m.workspaceIsolation && !this.workspaceRoot) {
+                const err = new Error(
+                  `agent "${m.key}" requests workspaceIsolation but the kernel has no workspaceRoot configured`,
+                );
+                engine.failStep(
+                  m.key,
+                  begun.attempt,
+                  m.version,
+                  begun.inputHash,
+                  begun.startedAtMs,
+                  err,
+                  "effectful",
+                );
+                reply(m.id, { ok: false, error: { name: "Error", message: err.message } });
+                break;
+              }
+              const worktree =
+                m.workspaceIsolation && this.workspaceRoot
+                  ? createWorktree(this.workspaceRoot, m.key)
+                  : null;
+              const secretRefs = this.secrets?.resolve(runId, m.secrets) ?? [];
+              const secretEnv: Record<string, string> = {};
+              for (const r of secretRefs) secretEnv[r.name] = r.value;
+              const allSecrets = this.secrets?.values(runId) ?? [];
+
+              void (async () => {
+                try {
+                  const execution = await runAgentWithStall(
+                    (signal) =>
+                      executeAgent(
+                        registry.get(m.provider),
+                        {
+                          key: m.key,
+                          provider: m.provider,
+                          prompt: m.prompt,
+                          ...(m.model ? { model: m.model } : {}),
+                          toolPolicy: m.toolPolicy,
+                          allowTools: m.allowTools,
+                          denyTools: m.denyTools,
+                          ...(m.reasoning ? { reasoning: m.reasoning } : {}),
+                          ...(caps ? { capabilities: caps } : {}),
+                          ...(worktree ? { cwd: worktree.path } : {}),
+                          ...(secretRefs.length > 0 ? { env: secretEnv } : {}),
+                          ...(begun.resumeToken ? { resumeToken: begun.resumeToken } : {}),
+                          abortSignal: signal,
+                        },
+                        {
+                          onSessionToken: (tok) =>
+                            engine.recordSessionToken(m.key, begun.attempt, tok),
+                          // §11.2: redact secrets from STREAMED events too — a
+                          // provider may stream a secret (thinking/tool output)
+                          // before the final output is redacted; the event log is
+                          // forever, so scrub at the boundary.
+                          onEvent: (ev) => {
+                            let event = ev as unknown as Json;
+                            if (allSecrets.length > 0) {
+                              const r = redact(JSON.stringify(event), allSecrets);
+                              if (r.redacted) event = JSON.parse(r.text) as Json;
+                            }
+                            engine.emit("agent.event", { key: m.key, event });
+                          },
+                        },
+                        {
+                          ...(m.jsonSchema != null ? { jsonSchema: m.jsonSchema } : {}),
+                          maxRetries: m.maxRetries,
+                          ...(m.lenient ? { coerce: true } : {}),
+                        },
+                      ),
+                    {
+                      ...(m.timeoutMs != null ? { timeoutMs: m.timeoutMs } : {}),
+                      ...(m.stallRetries != null ? { stallRetries: m.stallRetries } : {}),
+                      onStall: (a) => engine.emit("agent.stalled", { key: m.key, attempt: a }),
+                    },
+                  );
+                  // §11.2: redact exact secret values from the output before it
+                  // ever reaches the journal (defense-in-depth over the side channel).
+                  let output = execution.output;
+                  if (allSecrets.length > 0) {
+                    const r = redact(JSON.stringify(output ?? null), allSecrets);
+                    if (r.redacted) {
+                      output = JSON.parse(r.text);
+                      engine.emit("agent.redacted", { key: m.key });
+                    }
+                  }
+                  // §11.3: capture the isolated agent's changes as a reviewable diff
+                  // — including the full unified patch (contentDiff) so the diff
+                  // gate has durable content to approve. Removal happens in the
+                  // finally below so the worktree is gone on every exit path.
+                  if (worktree) {
+                    const bundle = worktree.diff();
+                    // §11.2: an isolated agent may have written an injected secret into
+                    // a file — redact the patch before it reaches the journal.
+                    const contentDiff =
+                      allSecrets.length > 0
+                        ? redact(bundle.contentDiff, allSecrets).text
+                        : bundle.contentDiff;
+                    engine.emit("agent.diff", {
+                      key: m.key,
+                      modified: bundle.modified,
+                      added: bundle.added,
+                      deleted: bundle.deleted,
+                      contentDiff,
+                    });
+                  }
+                  try {
+                    engine.completeStep(
+                      m.key,
+                      begun.attempt,
+                      m.version,
+                      begun.inputHash,
+                      begun.startedAtMs,
+                      output,
+                      m.deps,
+                      "effectful",
+                    );
+                  } catch (faultErr) {
+                    abort(faultErr); // crash fault inside completeStep: leave pending
+                    return;
+                  }
+                  reply(m.id, {
+                    ok: true,
+                    output,
+                    contentHash: hashJson(output),
+                  });
+                } catch (agentErr) {
+                  // onFailure:'null' (D7) tolerates a terminal failure: journal a
+                  // COMPLETED null (with failure metadata as an event) so resume
+                  // replays null instead of re-calling the agent.
+                  if (m.onFailure === "null") {
+                    // redact secrets that may surface in a provider error message
+                    let errJson = serializeError(agentErr) as unknown as Json;
+                    if (allSecrets.length > 0) {
+                      const r = redact(JSON.stringify(errJson), allSecrets);
+                      if (r.redacted) errJson = JSON.parse(r.text) as Json;
+                    }
+                    engine.emit("agent.tolerated_failure", { key: m.key, error: errJson });
+                    try {
+                      engine.completeStep(
+                        m.key,
+                        begun.attempt,
+                        m.version,
+                        begun.inputHash,
+                        begun.startedAtMs,
+                        null,
+                        m.deps,
+                        "effectful",
+                      );
+                    } catch (faultErr) {
+                      abort(faultErr);
+                      return;
+                    }
+                    reply(m.id, { ok: true, output: null, contentHash: hashJson(null) });
+                    return;
+                  }
+                  engine.failStep(
+                    m.key,
+                    begun.attempt,
+                    m.version,
+                    begun.inputHash,
+                    begun.startedAtMs,
+                    agentErr,
+                    "effectful",
+                  );
+                  reply(m.id, {
+                    ok: false,
+                    error: serializeError(agentErr),
+                    failure: agentErr instanceof AgentFailure,
+                  });
+                } finally {
+                  // §11.3: a worktree is per-agent-step — remove it on EVERY exit
+                  // (success, agent error, timeout, tolerated failure, fault).
+                  if (worktree) {
+                    try {
+                      worktree.remove();
+                    } catch {
+                      // best effort
+                    }
+                  }
+                }
+              })();
+              break;
+            }
+            case "ambient": {
+              const v = m.kind === "now" ? engine.now() : engine.random();
+              valueView[0] = v;
+              Atomics.store(control, 0, 1);
+              Atomics.notify(control, 0);
+              break;
+            }
+            case "park-check": {
+              // §16: durable timer. Record (idempotent) the fire time and report
+              // whether it has elapsed. Resolved against the REAL clock so a
+              // resumed run wakes once due; the fireAt itself is journaled.
+              if (m.kind === "timer") {
+                const fireAt = this.host.clock() + (m.durationMs ?? 0);
+                const t = this.store.upsertTimer(runId, m.key, fireAt);
+                const ready = this.host.clock() >= t.fireAtMs;
+                if (ready) this.store.markTimerFired(runId, m.key);
+                reply(m.id, { ready, until: t.fireAtMs });
+              } else if (m.kind === "human") {
+                // §17: record a pending approval (incl. the prompt + requested caps
+                // the worker sent) so a UI can render it; ready once decided.
+                const ask = (m.payload ?? {}) as { prompt?: string; requestedCaps?: unknown };
+                this.store.requestApproval(
+                  runId,
+                  m.key,
+                  { prompt: ask.prompt ?? "", requestedCaps: ask.requestedCaps },
+                  this.host.clock(),
+                );
+                const appr = this.store.getApproval(runId, m.key);
+                if (appr && appr.status !== "pending") {
+                  reply(m.id, {
+                    ready: true,
+                    value: { status: appr.status, note: appr.note, grantedCaps: appr.grantedCaps },
+                  });
+                } else {
+                  reply(m.id, { ready: false });
+                }
+              } else {
+                // §17 signal: replay the already-consumed payload, else consume the
+                // oldest pending signal of this name; park if none has arrived.
+                const name = (m.payload as { name: string }).name;
+                const replayed = this.store.signalConsumedBy(runId, m.key);
+                const got = replayed ?? this.store.consumeSignal(runId, name, m.key);
+                if (got) reply(m.id, { ready: true, value: got.payload });
+                else reply(m.id, { ready: false });
+              }
+              break;
+            }
+            case "parked": {
+              const status: RunStatus =
+                m.kind === "timer"
+                  ? "waiting-timer"
+                  : m.kind === "human"
+                    ? "waiting-human"
+                    : "waiting-signal";
+              this.store.updateRun(runId, { status });
+              this.store.appendEvent(
+                runId,
+                "run.parked",
+                { kind: m.kind, key: m.key, until: m.until },
+                this.host.clock(),
+              );
+              finish(() => resolve({ runId, status }));
+              break;
+            }
+            case "log":
+              engine.emit("log", { message: m.message, data: (m.data ?? null) as Json });
+              break;
+            case "phase":
+              engine.emit("phase", { title: m.title });
+              break;
+            case "result":
+              this.store.updateRun(runId, {
+                status: "finished",
+                outputRef: JSON.stringify(m.output ?? null),
+                finishedAtMs: this.host.clock(),
+              });
+              this.store.appendEvent(runId, "run.finished", {}, this.host.clock());
+              this.secrets?.wipe(runId); // §11.2: secrets live per-run; wipe on terminal
+              finish(() => resolve({ runId, status: "finished", output: m.output as O }));
+              break;
+            case "continue": {
+              // §19: end this run (status 'continued') and chain a fresh run of
+              // the same workflow with the new input — bounded journal growth.
+              const run = this.store.getRun(runId);
+              const name = run?.workflowName ?? "workflow";
+              const nextId = this.idgen();
+              const at = this.host.clock();
+              // ATOMIC handoff: create the successor AND mark this run 'continued'
+              // in one transaction. A crash between cannot leave a resumable
+              // original next to an orphan successor (which would re-launch a
+              // duplicate on resume — the original is now terminal 'continued').
+              this.store.transaction(() => {
+                this.store.insertRun({
+                  runId: nextId,
+                  workflowName: name,
+                  definitionVersion: "v0",
+                  workflowRef: workflowUrl,
+                  status: "running",
+                  parentRunId: runId, // lineage
+                  tenantId: null,
+                  inputRef: JSON.stringify(m.input ?? null),
+                  outputRef: null,
+                  errorJson: null,
+                  heartbeatAtMs: null,
+                  runtimeOwnerId: null,
+                  createdAtMs: at,
+                });
+                this.store.appendEvent(nextId, "run.started", { name, continuedFrom: runId }, at);
+                this.store.updateRun(runId, {
+                  status: "continued",
+                  outputRef: JSON.stringify({ continuedTo: nextId }),
+                  finishedAtMs: at,
+                });
+                this.store.appendEvent(runId, "run.continued", { continuedTo: nextId }, at);
+              });
+              this.secrets?.wipe(runId);
+              // start the successor's execution OUTSIDE the transaction
+              void this.execute(nextId, workflowUrl, m.input);
+              finish(() =>
+                resolve({ runId, status: "continued", output: { continuedTo: nextId } as O }),
+              );
+              break;
+            }
+            case "error": {
+              if (m.aborted) {
+                // resumable: leave run 'running'
+                this.store.appendEvent(runId, "run.aborted", m.error, this.host.clock());
+              } else {
+                this.store.updateRun(runId, {
+                  status: "failed",
+                  errorJson: JSON.stringify(m.error),
+                  finishedAtMs: this.host.clock(),
+                });
+                this.store.appendEvent(runId, "run.failed", m.error, this.host.clock());
+                this.secrets?.wipe(runId); // terminal failure: wipe secrets
+              }
+              finish(() => reject(rebuildError(m.error)));
+              break;
+            }
+          }
+        } catch (hostErr) {
+          // A host-side fault (e.g. injected crash) — leave the run resumable and
+          // tear down; the pending row written before the fault drives re-execution.
+          this.store.appendEvent(
+            runId,
+            "run.aborted",
+            { name: "HostFault", message: String(hostErr) },
+            this.host.clock(),
+          );
+          finish(() => reject(hostErr));
+        }
+      };
+
+      worker.onerror = (e: ErrorEvent) => {
+        finish(() => reject(new Error(`realm worker error: ${e.message}`)));
+      };
+    });
+  }
+}
+
+function rebuildError(e: { name: string; message: string }): Error {
+  const err = new Error(e.message);
+  err.name = e.name;
+  return err;
+}
+
+function serializeError(err: unknown): { name: string; message: string } {
+  if (err instanceof Error) return { name: err.name, message: err.message };
+  return { name: "Error", message: String(err) };
+}
+
+function readSourceSafe(workflowUrl: string): string | null {
+  try {
+    const path = workflowUrl.startsWith("file:") ? new URL(workflowUrl).pathname : workflowUrl;
+    return readFileSync(path, "utf8");
+  } catch {
+    return null; // not a readable file (e.g. a bare module id) — skip the lint
+  }
+}

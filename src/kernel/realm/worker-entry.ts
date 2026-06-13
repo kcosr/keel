@@ -1,0 +1,473 @@
+// Realm worker entry (DESIGN.md §6) — runs in a Bun Worker thread.
+//
+// Before importing any workflow code it installs throwing shims for the ambient
+// globals (Date.now, argless new Date(), Math.random, crypto.randomUUID,
+// fetch, performance.now) so that workflow code physically cannot read
+// non-determinism — the only time/entropy is ctx.now()/ctx.random(). Module
+// imports of fs/child_process/http are rejected by the static lint (Phase 5);
+// this layer seals the globals (§6 layer 2).
+//
+// The bridge `ctx` is sealed: only whitelisted methods exist, each journaled by
+// the host. Step results are tagged (worker-side WeakMap) so that when one
+// flows into a later step's inputs, the dependency edge is detected and sent to
+// the host — the "tagged envelope" of §5.4, proven across the JSON boundary.
+
+/// <reference lib="webworker" />
+
+import { type ToolPolicy, resolveToolPolicy } from "../../agents/capabilities.ts";
+import {
+  DEFAULT_AGENT_LENIENT,
+  DEFAULT_AGENT_ON_FAILURE,
+  DEFAULT_AGENT_PROVIDER,
+  DEFAULT_SCHEMA_MAX_RETRIES,
+} from "../../agents/defaults.ts";
+import { type AgentProfiles, resolveProfile } from "../../agents/profiles.ts";
+import type { Schema } from "../schema.ts";
+import { closureOfHelpers, computeVersion } from "../version.ts";
+import {
+  CONTROL_WORDS,
+  type HostReply,
+  type StepBeginReply,
+  VALUE_OFFSET,
+  type WorkerRequest,
+} from "./protocol.ts";
+
+// ---- determinism shims (install first) ------------------------------------
+
+function realmError(what: string, instead: string): Error {
+  return new Error(
+    `${what} is not allowed in workflow code: it is non-deterministic and would ` +
+      `break resume. Use ${instead}.`,
+  );
+}
+
+function installShims(): void {
+  const RealDate = Date;
+  // A Proxy over Date traps construction and `.now` while passing everything else
+  // through (parse/UTC, instanceof). new Date() with no args throws guidance;
+  // new Date(ms) is deterministic and allowed.
+  globalThis.Date = new Proxy(RealDate, {
+    construct(target, args) {
+      if (args.length === 0) {
+        throw realmError("new Date()", "ctx.now()");
+      }
+      return Reflect.construct(target, args);
+    },
+    get(target, prop, receiver) {
+      if (prop === "now") {
+        return () => {
+          throw realmError("Date.now()", "ctx.now()");
+        };
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+  });
+
+  Math.random = () => {
+    throw realmError("Math.random()", "ctx.random()");
+  };
+
+  globalThis.fetch = (() => {
+    throw realmError("fetch()", "ctx.agent() or pass data in as a journaled step input");
+  }) as unknown as typeof fetch;
+
+  const g = globalThis as unknown as {
+    crypto?: { randomUUID?: unknown; getRandomValues?: unknown };
+    performance?: { now?: unknown };
+  };
+  if (g.crypto) {
+    g.crypto.randomUUID = () => {
+      throw realmError("crypto.randomUUID()", "ctx.random() or a content-derived key");
+    };
+    g.crypto.getRandomValues = () => {
+      throw realmError("crypto.getRandomValues()", "ctx.random()");
+    };
+  }
+  if (g.performance) {
+    g.performance.now = () => {
+      throw realmError("performance.now()", "ctx.now()");
+    };
+  }
+}
+
+installShims();
+
+// ---- bridge plumbing ------------------------------------------------------
+
+declare const self: {
+  onmessage: ((e: { data: HostReply }) => void) | null;
+  postMessage: (msg: WorkerRequest) => void;
+};
+
+let control: Int32Array;
+let value: Float64Array;
+let moduleHelpers: Record<string, string> = {};
+let agentProfiles: AgentProfiles = {};
+let nextId = 1;
+const pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: unknown) => void }>();
+
+function post(msg: WorkerRequest): void {
+  self.postMessage(msg);
+}
+
+function rpc<T>(msg: Record<string, unknown>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const id = nextId++;
+    pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
+    post({ ...msg, id } as unknown as WorkerRequest);
+  });
+}
+
+function ambient(kind: "now" | "random"): number {
+  Atomics.store(control, 0, 0);
+  post({ type: "ambient", kind });
+  Atomics.wait(control, 0, 0);
+  return value[0] as number;
+}
+
+/** A durable wait that should suspend the run (not an error). Tagged so start()
+ * distinguishes it from a real failure. */
+class KeelPark extends Error {
+  constructor(
+    readonly parkKind: "timer" | "signal" | "human",
+    readonly key: string,
+    readonly until: number | null,
+  ) {
+    super(`park:${parkKind}`);
+    this.name = "KeelPark";
+  }
+}
+
+/** Terminal continuation: end this run and chain a fresh one (§19). */
+class ContinueAsNew extends Error {
+  constructor(readonly input: unknown) {
+    super("continueAsNew");
+    this.name = "ContinueAsNew";
+  }
+}
+
+// Per-name occurrence counter for ctx.signal stable keys (recomputed
+// deterministically each execution, so resume maps to the same wait site).
+const signalOccurrences = new Map<string, number>();
+
+// ---- tagged-envelope edge detection ---------------------------------------
+
+const provenance = new WeakMap<object, { stepKey: string; contentHash: string }>();
+
+function tag<T>(result: T, stepKey: string, contentHash: string): T {
+  if (result !== null && typeof result === "object") {
+    provenance.set(result as object, { stepKey, contentHash });
+  }
+  return result;
+}
+
+function collectDeps(inputs: unknown): { stepKey: string; contentHash: string }[] | null {
+  const found = new Map<string, { stepKey: string; contentHash: string }>();
+  const seen = new Set<object>();
+  const walk = (v: unknown): void => {
+    if (v === null || typeof v !== "object") return;
+    if (seen.has(v)) return;
+    seen.add(v);
+    const tagged = provenance.get(v);
+    if (tagged) found.set(`${tagged.stepKey}\u0000${tagged.contentHash}`, tagged);
+    if (Array.isArray(v)) {
+      for (const item of v) walk(item);
+    } else {
+      for (const k of Object.keys(v)) walk((v as Record<string, unknown>)[k]);
+    }
+  };
+  walk(inputs);
+  return found.size > 0 ? [...found.values()] : null;
+}
+
+// ---- the sealed ctx -------------------------------------------------------
+
+interface Schemaish<T> {
+  parse(value: unknown): T;
+}
+
+const ctx = Object.freeze({
+  async step<T>(
+    key: string,
+    schema: Schemaish<T>,
+    inputs: unknown,
+    fn: (inputs: unknown) => T | Promise<T>,
+    opts?: { version?: string; bump?: string | number; deps?: string[] },
+  ): Promise<T> {
+    const version =
+      opts?.version ??
+      computeVersion({
+        fn: fn as (...a: never[]) => unknown,
+        schema: schema as Schema<unknown>,
+        // fold in the transitive closure of module helpers this fn references so
+        // an edit to a helper re-runs the step (§5.2).
+        helpers: closureOfHelpers(fn.toString(), moduleHelpers),
+        ...(opts?.bump !== undefined ? { bump: opts.bump } : {}),
+      });
+    // Auto-detected edges (tagged envelopes) plus any author-declared deps (§5.4
+    // escape hatch). Declared deps are advisory graph edges; correctness comes
+    // from value hashing.
+    const auto = collectDeps(inputs) ?? [];
+    const declared = (opts?.deps ?? []).map((stepKey) => ({ stepKey, contentHash: "declared" }));
+    const merged = [...auto, ...declared];
+    const deps = merged.length > 0 ? merged : null;
+    const begun = await rpc<StepBeginReply>({
+      type: "step-begin",
+      key,
+      inputs,
+      version,
+      deps,
+    });
+    if (begun.action === "replay") {
+      return tag(begun.value as T, key, begun.contentHash);
+    }
+    try {
+      const raw = await fn(inputs);
+      const result = schema.parse(raw);
+      const reply = await rpc<{ contentHash: string }>({
+        type: "step-commit",
+        key,
+        attempt: begun.attempt,
+        version,
+        inputHash: begun.inputHash,
+        startedAtMs: begun.startedAtMs,
+        value: result,
+        deps,
+      });
+      return tag(result, key, reply.contentHash);
+    } catch (err) {
+      if (err instanceof Error && err.name === "KeelAbort") throw err;
+      await rpc({
+        type: "step-fail",
+        key,
+        attempt: begun.attempt,
+        version,
+        inputHash: begun.inputHash,
+        startedAtMs: begun.startedAtMs,
+        error: serializeError(err),
+      });
+      throw err;
+    }
+  },
+  async agent<T>(rawSpec: {
+    key: string;
+    prompt: string;
+    profile?: string;
+    provider?: string;
+    schema?: Schemaish<T>;
+    model?: string;
+    reasoning?: string;
+    toolPolicy?: ToolPolicy;
+    allowTools?: string[];
+    denyTools?: string[];
+    workspaceIsolation?: boolean;
+    capabilities?: Record<string, unknown>;
+    secrets?: string[];
+    onFailure?: "throw" | "null";
+    maxRetries?: number;
+    lenient?: boolean;
+    timeoutMs?: number;
+    stallRetries?: number;
+    bump?: string | number;
+    version?: string;
+  }): Promise<T> {
+    // Resolve a named profile into concrete fields BEFORE versioning, so the
+    // RESOLVED settings (not the profile name) enter the version/input hash.
+    const spec = resolveProfile(rawSpec, agentProfiles) as Omit<typeof rawSpec, "profile">;
+    const provider = spec.provider ?? DEFAULT_AGENT_PROVIDER;
+    const schema = spec.schema as Schema<unknown> | undefined;
+    const tools = resolveToolPolicy({
+      ...(spec.capabilities ? { capabilities: spec.capabilities } : {}),
+      ...(spec.toolPolicy ? { toolPolicy: spec.toolPolicy } : {}),
+      ...(spec.allowTools ? { allowTools: spec.allowTools } : {}),
+      ...(spec.denyTools ? { denyTools: spec.denyTools } : {}),
+    });
+    const caps = tools.capabilities;
+    const version =
+      spec.version ??
+      computeVersion({
+        spec: {
+          prompt: spec.prompt,
+          provider,
+          model: spec.model ?? null,
+          reasoning: spec.reasoning ?? null,
+          toolPolicy: tools.toolPolicy,
+          allowTools: tools.allowTools,
+          denyTools: tools.denyTools,
+          workspaceIsolation: spec.workspaceIsolation === true,
+          capabilities: caps,
+          secrets: spec.secrets ?? [],
+        },
+        schema,
+        ...(spec.bump !== undefined ? { bump: spec.bump } : {}),
+      });
+    // Inputs are the COMPLETE identity: every field that participates in the
+    // version must also appear here (caps/secrets included — §11).
+    const inputs = {
+      prompt: spec.prompt,
+      provider,
+      model: spec.model ?? null,
+      reasoning: spec.reasoning ?? null,
+      toolPolicy: tools.toolPolicy,
+      allowTools: tools.allowTools,
+      denyTools: tools.denyTools,
+      workspaceIsolation: spec.workspaceIsolation === true,
+      capabilities: caps,
+      secrets: spec.secrets ?? [],
+    };
+    const reply = await rpc<{
+      ok: boolean;
+      output?: unknown;
+      contentHash?: string;
+      error?: { name: string; message: string };
+      failure?: boolean;
+    }>({
+      type: "agent",
+      key: spec.key,
+      prompt: spec.prompt,
+      provider,
+      model: spec.model ?? null,
+      reasoning: spec.reasoning ?? null,
+      toolPolicy: tools.toolPolicy,
+      allowTools: tools.allowTools,
+      denyTools: tools.denyTools,
+      workspaceIsolation: spec.workspaceIsolation === true,
+      capabilities: caps,
+      secrets: spec.secrets ?? [],
+      version,
+      inputs,
+      jsonSchema: schema?.structural?.() ?? null,
+      maxRetries: spec.maxRetries ?? DEFAULT_SCHEMA_MAX_RETRIES,
+      lenient: spec.lenient ?? DEFAULT_AGENT_LENIENT,
+      onFailure: spec.onFailure ?? DEFAULT_AGENT_ON_FAILURE,
+      timeoutMs: spec.timeoutMs ?? null,
+      stallRetries: spec.stallRetries ?? null,
+      deps: null,
+    });
+    // The host applies onFailure: an accepted failure is journaled as a
+    // completed null and replayed as null on resume (no re-call). The worker
+    // just returns the host's result or throws on a non-tolerated failure.
+    if (reply.ok) {
+      return tag(reply.output as T, spec.key, reply.contentHash ?? "");
+    }
+    const err = new Error(reply.error?.message ?? "agent failed");
+    err.name = reply.error?.name ?? "AgentFailure";
+    throw err;
+  },
+  now(): number {
+    return ambient("now");
+  },
+  random(): number {
+    return ambient("random");
+  },
+  async sleep(key: string, ms: number): Promise<void> {
+    // Author key + duration form the identity (like ctx.step's versioning): a
+    // changed duration is a new timer, and unrelated reorders don't shift keys.
+    const timerKey = `${key}#${ms}`;
+    const reply = await rpc<{ ready: boolean; until?: number | null }>({
+      type: "park-check",
+      kind: "timer",
+      key: timerKey,
+      durationMs: ms,
+      payload: null,
+    });
+    if (reply.ready) return;
+    throw new KeelPark("timer", timerKey, reply.until ?? null);
+  },
+  async human(spec: { key: string; prompt: string; requestedCaps?: unknown }): Promise<unknown> {
+    const reply = await rpc<{ ready: boolean; value?: unknown }>({
+      type: "park-check",
+      kind: "human",
+      key: spec.key,
+      durationMs: null,
+      payload: { prompt: spec.prompt, requestedCaps: spec.requestedCaps ?? null },
+    });
+    if (reply.ready) return reply.value;
+    throw new KeelPark("human", spec.key, null);
+  },
+  async signal<T>(name: string): Promise<T> {
+    // Key by name + per-name occurrence: the Nth ctx.signal(name) consumes the
+    // Nth such signal, and an unrelated wait inserted elsewhere doesn't reshuffle.
+    const n = signalOccurrences.get(name) ?? 0;
+    signalOccurrences.set(name, n + 1);
+    const key = `${name}:${n}`;
+    const reply = await rpc<{ ready: boolean; value?: unknown }>({
+      type: "park-check",
+      kind: "signal",
+      key,
+      durationMs: null,
+      payload: { name },
+    });
+    if (reply.ready) return reply.value as T;
+    throw new KeelPark("signal", key, null);
+  },
+  async continueAsNew(input: unknown): Promise<never> {
+    throw new ContinueAsNew(input);
+  },
+  stepKey(semanticName: string, stableId: string): string {
+    return `${semanticName}:${stableId}`;
+  },
+  log(message: string, data?: unknown): void {
+    post({ type: "log", message, data: data ?? null });
+  },
+  phase(title: string): void {
+    post({ type: "phase", title });
+  },
+});
+
+function serializeError(err: unknown): { name: string; message: string } {
+  if (err instanceof Error) return { name: err.name, message: err.message };
+  return { name: "Error", message: String(err) };
+}
+
+// ---- run loop -------------------------------------------------------------
+
+self.onmessage = (e: { data: HostReply }) => {
+  const m = e.data;
+  if (m.type === "init") {
+    control = new Int32Array(m.sab, 0, CONTROL_WORDS);
+    value = new Float64Array(m.sab, VALUE_OFFSET, 1);
+    moduleHelpers = m.moduleHelpers;
+    agentProfiles = m.agentProfiles as AgentProfiles;
+    void start(m.workflowUrl, m.input);
+    return;
+  }
+  if (m.type === "rpc-reply") {
+    const p = pending.get(m.id);
+    if (p) {
+      pending.delete(m.id);
+      p.resolve(m.payload);
+    }
+    return;
+  }
+  if (m.type === "rpc-error") {
+    const p = pending.get(m.id);
+    if (p) {
+      pending.delete(m.id);
+      p.reject(Object.assign(new Error(m.error.message), { name: m.error.name }));
+    }
+  }
+};
+
+async function start(workflowUrl: string, input: unknown): Promise<void> {
+  try {
+    const mod = (await import(workflowUrl)) as {
+      default: (c: typeof ctx, i: unknown) => Promise<unknown>;
+    };
+    const output = await mod.default(ctx, input);
+    post({ type: "result", output });
+  } catch (err) {
+    if (err instanceof ContinueAsNew) {
+      post({ type: "continue", input: err.input });
+      return;
+    }
+    if (err instanceof KeelPark) {
+      post({ type: "parked", kind: err.parkKind, key: err.key, until: err.until });
+      return;
+    }
+    const aborted = err instanceof Error && err.name === "KeelAbort";
+    post({ type: "error", error: serializeError(err), aborted });
+  }
+}
+
+post({ type: "ready" });

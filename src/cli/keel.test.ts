@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MockProvider } from "../agents/mock.ts";
@@ -8,6 +16,7 @@ import { KeelDaemon } from "../daemon/server.ts";
 import {
   formatRunHeader,
   formatWatchEvent,
+  parseExecuteArgs,
   parseLaunchArgs,
   parseLaunchInput,
   parseLifecycleArgs,
@@ -161,6 +170,32 @@ describe("keel CLI", () => {
     });
   });
 
+  test("execute args parse source, state, cap file, entry, and script args", () => {
+    expect(
+      parseExecuteArgs([
+        "--entry",
+        "resume",
+        "--state",
+        "state.json",
+        "--cap-file",
+        "run.cap",
+        "--emit-capability",
+        "control.ts",
+        "--",
+        "a",
+        "b",
+      ]),
+    ).toEqual({
+      stdin: false,
+      file: "control.ts",
+      entry: "resume",
+      stateFile: "state.json",
+      capFile: "run.cap",
+      emitCapability: true,
+      args: ["a", "b"],
+    });
+  });
+
   test("attached lifecycle commands print the run id before streaming events", () => {
     expect(formatRunHeader("run_123")).toBe("run run_123\n");
   });
@@ -238,7 +273,64 @@ describe("keel CLI", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  test("execute runs a stateless TypeScript control script over the daemon", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-execute-"));
+    const socketPath = join(dir, "keel.sock");
+    const dbPath = join(dir, "keel.db");
+    const capDir = join(dir, "caps");
+    const script = join(dir, "control.ts");
+    writeControlScript(script, chainUrl);
+    const daemon = new KeelDaemon({
+      socketPath,
+      dbPath,
+      agents: new AgentProviderRegistry().register(new MockProvider()),
+    });
+    await daemon.start();
+    try {
+      const env = {
+        KEEL_SOCKET: socketPath,
+        KEEL_DB: dbPath,
+        KEEL_DIR: dir,
+        KEEL_CAP_DIR: capDir,
+      };
+      const out = await runCli(["execute", script], dir, env);
+      expect(out.code).toBe(0);
+      const result = JSON.parse(out.stdout) as {
+        runId: string;
+        status: string;
+        output: number;
+        capabilityRef: string;
+      };
+      expect(result.status).toBe("finished");
+      expect(result.output).toBe(2);
+      expect(result.capabilityRef).toBe(join(capDir, `${result.runId}.cap`));
+      expect(readFileSync(result.capabilityRef, "utf8")).toContain("kc_run_");
+    } finally {
+      daemon.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
+
+function writeControlScript(path: string, workflowUrl: string): void {
+  writeFileSync(
+    path,
+    `
+      const run = await keel.launch({
+        workflow: ${JSON.stringify(workflowUrl)},
+        input: { n: 2 },
+      });
+      const settled = await keel.wait(run.runId);
+      return {
+        runId: run.runId,
+        capabilityRef: run.capabilityRef,
+        status: settled.status,
+        output: settled.output,
+      };
+    `,
+  );
+}
 
 async function waitForCliStatus(
   runId: string,

@@ -46,6 +46,7 @@ const FORBIDDEN_MODULES = new Set([
   "worker_threads",
   "node:worker_threads",
   "bun",
+  "@kcosr/keel/execute",
 ]);
 
 // Globals every workflow may rely on (pure/deterministic or provided by ctx).

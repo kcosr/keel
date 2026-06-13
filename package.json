@@ -6,7 +6,8 @@
   "private": true,
   "module": "src/index.ts",
   "exports": {
-    ".": "./src/sdk.ts"
+    ".": "./src/sdk.ts",
+    "./execute": "./src/execute/index.ts"
   },
   "bin": {
     "keel": "src/cli/keel.ts"

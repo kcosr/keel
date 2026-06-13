@@ -27,6 +27,7 @@ import { PiProvider } from "../agents/pi.ts";
 import { AgentProviderRegistry } from "../agents/types.ts";
 import { DaemonClient } from "../daemon/client.ts";
 import { KeelDaemon } from "../daemon/server.ts";
+import { runExecuteScript } from "../execute/runtime.ts";
 import type { EventEnvelope } from "../rpc/contract.ts";
 
 const KEEL_DIR = process.env.KEEL_DIR ?? join(homedir(), ".keel");
@@ -35,9 +36,8 @@ const DB = process.env.KEEL_DB ?? join(KEEL_DIR, "keel.db");
 const CAP_DIR = process.env.KEEL_CAP_DIR ?? join(KEEL_DIR, "caps");
 
 /** Connect a client, authenticating with the caller's presented capability. */
-async function openClient(): Promise<DaemonClient> {
+async function openClient(credential = loadCredential()): Promise<DaemonClient> {
   const c = await DaemonClient.connect(SOCKET);
-  const credential = loadCredential();
   if (credential) await c.authenticate(credential);
   return c;
 }
@@ -58,6 +58,11 @@ const COMMANDS: [string, string, string][] = [
   ["retry", "[--detach] <runId>", "re-run a failed run from its failed step"],
   ["rewind", "[--detach] <runId> <stepKey>", "discard everything after a step and re-run"],
   ["fork", "<runId> [atStepKey]", "copy a run into a new independent run"],
+  [
+    "execute",
+    "[--stdin|file] [--entry name] [--state file] [--cap-file file] [--emit-capability] [-- args...]",
+    "run a stateless TypeScript control script",
+  ],
   ["approve", "<runId> <key> [note]", "approve a ctx.human gate"],
   ["deny", "<runId> <key> [note]", "deny a ctx.human gate"],
   ["signal", "<runId> <name> [json]", "deliver a ctx.signal payload"],
@@ -279,6 +284,32 @@ async function main(argv: string[]): Promise<number> {
       client.close();
       return 0;
     }
+    case "execute": {
+      const parsed = parseExecuteArgs(rest);
+      const credential = parsed.capFile ? loadCredentialFromFile(parsed.capFile) : loadCredential();
+      const client = await openClient(credential);
+      try {
+        const source = parsed.stdin
+          ? await new Response(Bun.stdin.stream()).text()
+          : readFileSync(parsed.file as string, "utf8");
+        const state = parsed.stateFile ? JSON.parse(readFileSync(parsed.stateFile, "utf8")) : null;
+        const result = await runExecuteScript({
+          client,
+          cwd: process.cwd(),
+          source,
+          ...(parsed.entry ? { entry: parsed.entry } : {}),
+          args: parsed.args,
+          state,
+          env: process.env,
+          emitCapability: parsed.emitCapability,
+          writeCapability: writeCapabilityFile,
+        });
+        process.stdout.write(`${JSON.stringify(result ?? null)}\n`);
+        return 0;
+      } finally {
+        client.close();
+      }
+    }
     default:
       process.stderr.write(`keel: unknown command "${cmd}"\n\n${topHelp()}`);
       return 2;
@@ -295,6 +326,58 @@ export function parseLaunchArgs(args: string[]): { emitCapability: boolean; args
     emitCapability: args.includes("--emit-capability"),
     args: args.filter((arg) => arg !== "--emit-capability"),
   };
+}
+
+export interface ExecuteArgs {
+  stdin: boolean;
+  file?: string;
+  entry?: string;
+  stateFile?: string;
+  capFile?: string;
+  emitCapability: boolean;
+  args: string[];
+}
+
+export function parseExecuteArgs(args: string[]): ExecuteArgs {
+  const out: ExecuteArgs = { stdin: false, emitCapability: false, args: [] };
+  const script: string[] = [];
+  let i = 0;
+  while (i < args.length) {
+    const arg = args[i] as string;
+    if (arg === "--") {
+      out.args = args.slice(i + 1);
+      break;
+    }
+    if (arg === "--stdin") {
+      out.stdin = true;
+      i += 1;
+    } else if (arg === "--entry") {
+      out.entry = requireFlagValue(args, i, "--entry");
+      i += 2;
+    } else if (arg === "--state") {
+      out.stateFile = requireFlagValue(args, i, "--state");
+      i += 2;
+    } else if (arg === "--cap-file") {
+      out.capFile = requireFlagValue(args, i, "--cap-file");
+      i += 2;
+    } else if (arg === "--emit-capability") {
+      out.emitCapability = true;
+      i += 1;
+    } else if (arg.startsWith("--")) {
+      throw new Error(`unknown execute flag ${arg}`);
+    } else {
+      script.push(arg);
+      i += 1;
+    }
+  }
+  if (out.stdin && script.length > 0)
+    throw new Error("execute accepts --stdin or a file, not both");
+  if (!out.stdin) {
+    if (script.length !== 1)
+      throw new Error("execute needs exactly one TypeScript file or --stdin");
+    out.file = script[0];
+  }
+  return out;
 }
 
 export function parseLaunchInput(inputJson: string | undefined): unknown {
@@ -437,16 +520,24 @@ function usage(message: string): number {
 function loadCredential(): string | null {
   if (process.env.KEEL_ADMIN_TOKEN) return process.env.KEEL_ADMIN_TOKEN;
   if (process.env.KEEL_RUN_CAP) return process.env.KEEL_RUN_CAP;
-  if (process.env.KEEL_CAP_FILE) {
-    const parsed = JSON.parse(readFileSync(process.env.KEEL_CAP_FILE, "utf8")) as {
-      capability?: unknown;
-    };
-    if (typeof parsed.capability !== "string") {
-      throw new Error(`capability file ${process.env.KEEL_CAP_FILE} is missing capability`);
-    }
-    return parsed.capability;
-  }
+  if (process.env.KEEL_CAP_FILE) return loadCredentialFromFile(process.env.KEEL_CAP_FILE);
   return null;
+}
+
+function loadCredentialFromFile(path: string): string {
+  const parsed = JSON.parse(readFileSync(path, "utf8")) as {
+    capability?: unknown;
+  };
+  if (typeof parsed.capability !== "string") {
+    throw new Error(`capability file ${path} is missing capability`);
+  }
+  return parsed.capability;
+}
+
+function requireFlagValue(args: string[], index: number, flag: string): string {
+  const value = args[index + 1];
+  if (!value || value.startsWith("--")) throw new Error(`${flag} needs a value`);
+  return value;
 }
 
 function writeCapabilityFile(runId: string, capability: string): string {

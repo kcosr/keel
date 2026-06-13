@@ -45,7 +45,7 @@ describe("determinism lint — dynamic code & network", () => {
 });
 
 describe("determinism lint — forbidden imports", () => {
-  test("fs / child_process / http / bun", () => {
+  test("fs / child_process / http / bun / execute control surface", () => {
     expect(
       rules('import { readFileSync } from "node:fs";\nexport default async () => 1;'),
     ).toContain("no-forbidden-import");
@@ -56,6 +56,9 @@ describe("determinism lint — forbidden imports", () => {
       "no-forbidden-import",
     );
     expect(rules('import "bun";\nexport default async () => 1;')).toContain("no-forbidden-import");
+    expect(
+      rules('import { keel } from "@kcosr/keel/execute";\nexport default async () => 1;'),
+    ).toContain("no-forbidden-import");
   });
 
   test("allowed imports (zod, local modules) are clean", () => {

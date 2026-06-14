@@ -197,11 +197,13 @@ function migrateWorkflowDefinitionManifestsToV12(db: Database): void {
       newHash,
       row.hash,
     );
+    db.query("UPDATE runs SET workflow_ref = ? WHERE workflow_ref = ?").run(newHash, row.hash);
     db.query("UPDATE schedules SET workflow_ref = ? WHERE workflow_ref = ?").run(newHash, row.hash);
     db.query(
       `DELETE FROM workflow_definitions
        WHERE hash = ?
          AND hash NOT IN (SELECT definition_version FROM runs)
+         AND hash NOT IN (SELECT workflow_ref FROM runs WHERE workflow_ref IS NOT NULL)
          AND hash NOT IN (SELECT workflow_ref FROM schedules)`,
     ).run(row.hash);
   }

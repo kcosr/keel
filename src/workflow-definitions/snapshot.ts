@@ -139,8 +139,8 @@ export function resolveKeelPackageRoot(inputs: KeelPackageRootInputs = {}): stri
 let cachedKeelPackageRoot: string | null = null;
 
 /**
- * On-disk root of the @kcosr/keel SDK package, used to integrity-hash and link
- * the SDK into snapshotted workflows. Resolved lazily (never at import) and
+ * On-disk root of the @kcosr/keel SDK package, used to link the daemon-provided
+ * SDK into snapshotted workflows. Resolved lazily (never at import) and
  * memoized, so `keel --help` and read-only commands neither pay for nor crash on
  * resolution. The daemon asserts it explicitly at startup so a misconfigured
  * root fails fast with a clear message instead of a transitive import crash.
@@ -249,8 +249,7 @@ function isMaterializationComplete(root: string, manifest: WorkflowDefinitionMan
 function validateExternalPackagePins(packagePins: CapturedExternalPackage[]): void {
   for (const pinned of packagePins) {
     if (pinned.name === "@kcosr/keel") continue;
-    const root = pinned.name === "@kcosr/keel" ? keelPackageRoot() : pinned.root;
-    validatePackageIntegrity(pinned.name, root, pinned);
+    validatePackageIntegrity(pinned.name, pinned.root, pinned);
   }
 }
 
@@ -499,10 +498,7 @@ function collectExternalPackages(
     if (packageName && packageName !== "@kcosr/keel") names.add(packageName);
   }
   return [...names].sort().map((name) => {
-    const root =
-      name === "@kcosr/keel"
-        ? keelPackageRoot()
-        : join(sourceRoot, "node_modules", ...name.split("/"));
+    const root = join(sourceRoot, "node_modules", ...name.split("/"));
     if (!existsSync(root)) {
       throw new Error(`workflow external package "${name}" is missing at ${root}`);
     }

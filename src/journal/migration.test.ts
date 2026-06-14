@@ -332,6 +332,18 @@ describe("schema migrations", () => {
         ) VALUES ('r_active', 'wf', ?, 'stdin', 'waiting-timer', 'null', 1)`,
       ).run(oldHash);
       db.query(
+        `INSERT INTO runs (
+          run_id, workflow_name, definition_version, workflow_ref, status,
+          input_ref, created_at_ms
+        ) VALUES ('r_scheduled', 'wf', ?, ?, 'finished', 'null', 2)`,
+      ).run(oldHash, oldHash);
+      db.query(
+        `INSERT INTO runs (
+          run_id, workflow_name, definition_version, workflow_ref, status,
+          input_ref, created_at_ms
+        ) VALUES ('r_null_ref', 'wf', ?, NULL, 'finished', 'null', 3)`,
+      ).run(oldHash);
+      db.query(
         `INSERT INTO schedules (
           name, workflow_ref, input_json, interval_ms, next_fire_ms, enabled
         ) VALUES ('hourly', ?, 'null', 60000, 1, 1)`,
@@ -341,6 +353,14 @@ describe("schema migrations", () => {
       const cacheRoot = join(dir, "definitions");
       const store = JournalStore.open(path);
       expect(store.getRun("r_active")?.definitionVersion).toBe(newHash);
+      expect(store.getRun("r_scheduled")).toMatchObject({
+        definitionVersion: newHash,
+        workflowRef: newHash,
+      });
+      expect(store.getRun("r_null_ref")).toMatchObject({
+        definitionVersion: newHash,
+        workflowRef: null,
+      });
       const schedule = store.db
         .query<{ workflow_ref: string; last_error_json: string | null }, []>(
           "SELECT workflow_ref, last_error_json FROM schedules WHERE name = 'hourly'",
@@ -443,7 +463,7 @@ describe("schema migrations", () => {
         `INSERT INTO runs (
           run_id, workflow_name, definition_version, workflow_ref, status,
           input_ref, created_at_ms
-        ) VALUES ('r_a', 'wf', 'wf_sha256_old_a', 'stdin', 'running', 'null', 1)`,
+        ) VALUES ('r_a', 'wf', 'wf_sha256_old_a', 'wf_sha256_old_a', 'running', 'null', 1)`,
       ).run();
       db.query(
         `INSERT INTO schedules (
@@ -453,7 +473,10 @@ describe("schema migrations", () => {
       db.close();
 
       const store = JournalStore.open(path);
-      expect(store.getRun("r_a")?.definitionVersion).toBe(newHash);
+      expect(store.getRun("r_a")).toMatchObject({
+        definitionVersion: newHash,
+        workflowRef: newHash,
+      });
       expect(
         store.db.query<{ workflow_ref: string }, []>("SELECT workflow_ref FROM schedules").get()
           ?.workflow_ref,

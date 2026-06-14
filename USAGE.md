@@ -131,17 +131,17 @@ bun src/cli/keel.ts <command> [args]
 |---|---|
 | `daemon` | Start the daemon in the foreground. |
 | `link [dir]` | Symlink this repo's SDK into `<dir>/node_modules`; defaults to the current directory. |
-| `launch [workflow.ts] [--name n] [--input json] [--output json\|text\|ndjson] [--detach] [--emit-capability]` | Start a run from client-captured workflow source. Attached launch streams NDJSON by default; detached launch prints JSON. |
-| `run [workflow.ts] [--name n] [--input json] [--output json\|text\|ndjson]` | Launch a run and print a JSON envelope, text transcript, or NDJSON events. |
-| `watch <runId> [--output ndjson\|text]` | Stream run events until terminal. |
+| `launch [workflow.ts] [--name n] [--input json] [--output json\|text\|ndjson] [--tools] [--detach] [--emit-capability]` | Start a run from client-captured workflow source. Attached launch streams NDJSON by default; detached launch prints JSON. |
+| `run [workflow.ts] [--name n] [--input json] [--output json\|text\|ndjson] [--tools]` | Launch a run and print a JSON envelope, text transcript, or NDJSON events. |
+| `watch <runId> [--output ndjson\|text] [--tools]` | Stream run events until terminal. |
 | `get <runId>` | Print the canonical run projection as JSON. |
 | `output <runId> [--output json\|text]` | Print the terminal workflow output. |
 | `report <runId> [--output json\|text]` | Print a journaled per-node result digest. |
 | `list` | List run id, status, and workflow name. |
 | `gc` | Prune unreferenced workflow definition rows and cache entries. Requires admin. |
-| `resume [--detach] <runId>` | Resume a parked or incomplete run. Watches by default. |
-| `retry [--detach] <runId>` | Re-run a failed run from its failed step. Watches by default. |
-| `rewind [--detach] <runId> <stepKey>` | Discard everything after a step and re-run. Watches by default. |
+| `resume [--detach] [--tools] <runId>` | Resume a parked or incomplete run. Watches by default. |
+| `retry [--detach] [--tools] <runId>` | Re-run a failed run from its failed step. Watches by default. |
+| `rewind [--detach] [--tools] <runId> <stepKey>` | Discard everything after a step and re-run. Watches by default. |
 | `fork <runId> [atStepKey]` | Copy a terminal run into a new independent run. |
 | `execute [file] [--entry name] [--state file] [--cap-file file] [--output json] [--emit-capability] [-- args...]` | Run a stateless TypeScript control script over the daemon API. Omit `file` to read stdin. |
 | `approve <runId> <key> [note]` | Approve a `ctx.human` gate. |
@@ -207,11 +207,18 @@ Use `--output text` for human-oriented compact output:
 [5] run.finished
 ```
 
+Text mode hides agent tool calls and tool results by default. Add `--tools` to an
+attached text command when you want those details:
+
+```bash
+keel watch run_... --output text --tools
+keel run --output text --tools ./workflow.ts --input '{"n":3}'
+```
+
 Durable history is message-granular. Live token deltas are not backfilled and
 are not stored in SQLite; a watcher that connects mid-message receives live
 deltas from that point forward and then the full finalized `agent.message` row
-when the turn completes. Old runs may still contain historical durable
-`agent.event` rows, and `watch` continues to render them.
+when the turn completes.
 
 ### Run, Output, And Report Formats
 
@@ -221,8 +228,9 @@ present.
 
 Use `keel run --output ndjson` to render the same attached execution as event
 envelopes while it runs, or `keel run --output text` for the compact transcript.
-`--output` changes rendering only; it does not change whether `run` starts and
-attaches to the workflow.
+Use `--tools` with text output to include agent tool call/result lines.
+`--output` and `--tools` change rendering only; they do not change whether `run`
+starts and attaches to the workflow.
 
 ```bash
 keel run --output text ./workflow.ts --input '{"n":3}'

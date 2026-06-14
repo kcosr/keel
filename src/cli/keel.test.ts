@@ -145,6 +145,37 @@ describe("keel CLI", () => {
     expect(formatWatchEvent(event, { output: "ndjson" })).toBe(`${JSON.stringify(event)}\n`);
   });
 
+  test("watch formatter hides tool events in text mode unless requested", () => {
+    const call = {
+      kind: "durable" as const,
+      seq: 239,
+      type: "agent.tool_call",
+      payload: { key: "review", data: { name: "Read", args: { file: "a.ts" } } },
+      atMs: 456,
+    };
+    const result = {
+      kind: "durable" as const,
+      seq: 240,
+      type: "agent.tool_result",
+      payload: { key: "review", data: { output: "ok" } },
+      atMs: 457,
+    };
+    const liveTool = {
+      kind: "ephemeral" as const,
+      type: "agent.event",
+      payload: { key: "review", event: { type: "tool_call", data: { name: "Read" } } },
+      atMs: 458,
+    };
+
+    expect(formatWatchEvent(call)).toBe("");
+    expect(formatWatchEvent(result)).toBe("");
+    expect(formatWatchEvent(liveTool)).toBe("");
+    expect(formatWatchEvent(call, { tools: true })).toContain("agent review tool_call");
+    expect(formatWatchEvent(result, { tools: true })).toContain("agent review tool_result");
+    expect(formatWatchEvent(liveTool, { tools: true })).toContain("agent review tool_call");
+    expect(formatWatchEvent(call, { output: "ndjson" })).toBe(`${JSON.stringify(call)}\n`);
+  });
+
   test("watch formatter keeps unexpected agent event payloads visible", () => {
     expect(
       formatWatchEvent({
@@ -182,11 +213,22 @@ describe("keel CLI", () => {
   });
 
   test("watch args default to ndjson and parse --output", () => {
-    expect(parseWatchArgs(["run_123"])).toEqual({ runId: "run_123", output: "ndjson" });
+    expect(parseWatchArgs(["run_123"])).toEqual({
+      runId: "run_123",
+      output: "ndjson",
+      tools: false,
+    });
     expect(parseWatchArgs(["run_123", "--output", "text"])).toEqual({
       runId: "run_123",
       output: "text",
+      tools: false,
     });
+    expect(parseWatchArgs(["run_123", "--output", "text", "--tools"])).toEqual({
+      runId: "run_123",
+      output: "text",
+      tools: true,
+    });
+    expect(() => parseWatchArgs(["run_123", "--tools"])).toThrow("attached watch --output text");
     expect(parseOutputFormat("json")).toBe("json");
     expect(() => parseOutputFormat("events")).toThrow("expected json, text, or ndjson");
   });
@@ -194,12 +236,22 @@ describe("keel CLI", () => {
   test("lifecycle args default to attached mode and support --detach", () => {
     expect(parseLifecycleArgs(["wf.ts", '{"n":1}'])).toEqual({
       detach: false,
+      tools: false,
       args: ["wf.ts", '{"n":1}'],
     });
     expect(parseLifecycleArgs(["--detach", "run_123"])).toEqual({
       detach: true,
+      tools: false,
       args: ["run_123"],
     });
+    expect(parseLifecycleArgs(["--tools", "run_123"])).toEqual({
+      detach: false,
+      tools: true,
+      args: ["run_123"],
+    });
+    expect(() => parseLifecycleArgs(["--detach", "--tools", "run_123"])).toThrow(
+      "attached lifecycle --output text",
+    );
   });
 
   test("launch args parse source path, input, name, detach, and capability emission", () => {
@@ -216,6 +268,7 @@ describe("keel CLI", () => {
     ).toEqual({
       detach: true,
       emitCapability: true,
+      tools: false,
       file: "wf.ts",
       name: "review",
       input: { n: 1 },
@@ -223,6 +276,15 @@ describe("keel CLI", () => {
     expect(parseLaunchArgs(["--detach", "--output", "text", "wf.ts"])).toEqual({
       detach: true,
       emitCapability: false,
+      tools: false,
+      output: "text",
+      file: "wf.ts",
+      input: {},
+    });
+    expect(parseLaunchArgs(["--output", "text", "--tools", "wf.ts"])).toEqual({
+      detach: false,
+      emitCapability: false,
+      tools: true,
       output: "text",
       file: "wf.ts",
       input: {},
@@ -230,6 +292,7 @@ describe("keel CLI", () => {
     expect(parseLaunchArgs(["--detach", "wf.ts"])).toEqual({
       detach: true,
       emitCapability: false,
+      tools: false,
       file: "wf.ts",
       input: {},
     });
@@ -239,8 +302,14 @@ describe("keel CLI", () => {
 
   test("run args parse output mode with optional source path", () => {
     expect(parseRunArgs(["--output", "ndjson", "--input", "null"])).toEqual({
+      tools: false,
       output: "ndjson",
       input: null,
+    });
+    expect(parseRunArgs(["--output", "text", "--tools"])).toEqual({
+      tools: true,
+      output: "text",
+      input: {},
     });
     expect(() => parseRunArgs(["--json"])).toThrow("unknown flag --json");
     expect(() => parseRunArgs(['{"n":1}'])).toThrow("workflow input must use --input");
@@ -883,9 +952,29 @@ describe("keel CLI", () => {
       expect(watch.code).toBe(1);
       expect(watch.stderr).toContain("--output json is not available for watch");
 
+      const watchTools = await runCli(["watch", "run_123", "--tools"], dir, env);
+      expect(watchTools.code).toBe(1);
+      expect(watchTools.stderr).toContain(
+        "--tools is only available for attached watch --output text",
+      );
+
+      const runTools = await runCli(["run", "--tools", "wf.ts"], dir, env);
+      expect(runTools.code).toBe(1);
+      expect(runTools.stderr).toContain("--tools is only available for attached run --output text");
+
       const attached = await runCli(["launch", "--output", "json", "wf.ts"], dir, env);
       expect(attached.code).toBe(1);
       expect(attached.stderr).toContain("--output json is not available for attached launch");
+
+      const detachedTextTools = await runCli(
+        ["launch", "--detach", "--output", "text", "--tools", "wf.ts"],
+        dir,
+        env,
+      );
+      expect(detachedTextTools.code).toBe(1);
+      expect(detachedTextTools.stderr).toContain(
+        "--tools is only available for attached launch --output text",
+      );
 
       const detached = await runCli(
         ["launch", "--detach", "--output", "ndjson", "wf.ts"],

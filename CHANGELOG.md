@@ -53,6 +53,8 @@
 - CLI output selection now uses shared `--output json|text|ndjson` rendering
   flags. `--json` has been removed, `watch` and attached `launch` default to
   NDJSON event streams, and human transcripts require `--output text`.
+- Compact text transcripts hide agent tool calls/results by default. Add
+  `--tools` to attached text commands to include them.
 - Run lifecycle operations are capability-gated by the daemon. Run id alone is
   no longer authority to inspect or mutate a run.
 - Resume/retry/rewind/fork execute the run's stored workflow definition snapshot;

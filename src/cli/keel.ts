@@ -68,23 +68,27 @@ const COMMANDS: [string, string, string][] = [
   ["link", "[dir]", "make <dir> (default: cwd) able to import the @kcosr/keel SDK"],
   [
     "launch",
-    "[workflow.ts] [--name n] [--input json] [--output json|text|ndjson] [--detach] [--emit-capability]",
+    "[workflow.ts] [--name n] [--input json] [--output json|text|ndjson] [--tools] [--detach] [--emit-capability]",
     "start a run from client-captured workflow source",
   ],
   [
     "run",
-    "[workflow.ts] [--name n] [--input json] [--output json|text|ndjson]",
+    "[workflow.ts] [--name n] [--input json] [--output json|text|ndjson] [--tools]",
     "launch and print the result",
   ],
-  ["watch", "<runId> [--output ndjson|text]", "stream a run's events until it finishes"],
+  ["watch", "<runId> [--output ndjson|text] [--tools]", "stream a run's events until it finishes"],
   ["get", "<runId>", "print a run's projection as JSON"],
   ["output", "<runId> [--output json|text]", "print a run's terminal output"],
   ["report", "<runId> [--output json|text]", "print a run's per-node result digest"],
   ["list", "", "list runs"],
   ["gc", "", "prune unreferenced workflow definitions and cache entries"],
-  ["resume", "[--detach] <runId>", "resume a parked or incomplete run"],
-  ["retry", "[--detach] <runId>", "re-run a failed run from its failed step"],
-  ["rewind", "[--detach] <runId> <stepKey>", "discard everything after a step and re-run"],
+  ["resume", "[--detach] [--tools] <runId>", "resume a parked or incomplete run"],
+  ["retry", "[--detach] [--tools] <runId>", "re-run a failed run from its failed step"],
+  [
+    "rewind",
+    "[--detach] [--tools] <runId> <stepKey>",
+    "discard everything after a step and re-run",
+  ],
   ["fork", "<runId> [atStepKey]", "copy a run into a new independent run"],
   [
     "execute",
@@ -192,6 +196,7 @@ async function dispatch(argv: string[]): Promise<number> {
     case "launch": {
       const launchOpts = parseLaunchArgs(rest);
       const output = launchOpts.output ?? (launchOpts.detach ? "json" : "ndjson");
+      assertToolsAllowed("launch", launchOpts.tools, output, launchOpts.detach);
       if (launchOpts.detach && output === "ndjson") {
         throw new Error("--output ndjson is not available for launch --detach");
       }
@@ -239,12 +244,13 @@ async function dispatch(argv: string[]): Promise<number> {
           })}\n`,
         );
       }
-      const terminal = await watchRun(client, runId, { output });
+      const terminal = await watchRun(client, runId, { output, tools: launchOpts.tools });
       return statusExitCode(terminal);
     }
     case "run": {
       const runOpts = parseRunArgs(rest);
       const output = runOpts.output ?? "json";
+      assertToolsAllowed("run", runOpts.tools, output, false);
       const captured = await readCommandSource(runOpts.file, "workflow");
       const client = await openClient();
       const launched = await client.launchRun({
@@ -266,18 +272,18 @@ async function dispatch(argv: string[]): Promise<number> {
       if (output === "text") {
         process.stdout.write(`run ${launched.runId}\n`);
       }
-      const terminal = await watchRun(client, launched.runId, { output });
+      const terminal = await watchRun(client, launched.runId, { output, tools: runOpts.tools });
       return statusExitCode(terminal);
     }
     case "watch": {
       const parsed = parseWatchArgs(rest);
-      if (parsed.output === "json") {
-        throw new Error("--output json is not available for watch");
-      }
       const { runId } = parsed;
       if (!runId) return usage("watch needs a runId");
       const client = await openClient();
-      const terminal = await watchRun(client, runId, { output: parsed.output ?? "ndjson" });
+      const terminal = await watchRun(client, runId, {
+        output: parsed.output ?? "ndjson",
+        tools: parsed.tools,
+      });
       return statusExitCode(terminal);
     }
     case "get": {
@@ -326,7 +332,9 @@ async function dispatch(argv: string[]): Promise<number> {
       const client = await openClient();
       const out = await client.resumeRun(runId);
       if (!parsed.detach) process.stdout.write(formatRunHeader(out.runId));
-      const terminal = parsed.detach ? null : await watchRun(client, out.runId, { output: "text" });
+      const terminal = parsed.detach
+        ? null
+        : await watchRun(client, out.runId, { output: "text", tools: parsed.tools });
       if (parsed.detach) process.stdout.write(`${out.runId}\t${out.status}\n`);
       return parsed.detach ? 0 : statusExitCode(terminal ?? out.status);
     }
@@ -374,7 +382,9 @@ async function dispatch(argv: string[]): Promise<number> {
       const client = await openClient();
       const out = await client.retryRun(runId);
       if (!parsed.detach) process.stdout.write(formatRunHeader(out.runId));
-      const terminal = parsed.detach ? null : await watchRun(client, out.runId, { output: "text" });
+      const terminal = parsed.detach
+        ? null
+        : await watchRun(client, out.runId, { output: "text", tools: parsed.tools });
       if (parsed.detach) process.stdout.write(`${out.runId}\t${out.status}\n`);
       return parsed.detach ? 0 : statusExitCode(terminal ?? out.status);
     }
@@ -385,7 +395,9 @@ async function dispatch(argv: string[]): Promise<number> {
       const client = await openClient();
       const out = await client.rewindRun(runId, step);
       if (!parsed.detach) process.stdout.write(formatRunHeader(out.runId));
-      const terminal = parsed.detach ? null : await watchRun(client, out.runId, { output: "text" });
+      const terminal = parsed.detach
+        ? null
+        : await watchRun(client, out.runId, { output: "text", tools: parsed.tools });
       if (parsed.detach) process.stdout.write(`${out.runId}\t${out.status}\n`);
       return parsed.detach ? 0 : statusExitCode(terminal ?? out.status);
     }
@@ -436,9 +448,24 @@ async function dispatch(argv: string[]): Promise<number> {
   }
 }
 
-export function parseLifecycleArgs(args: string[]): { detach: boolean; args: string[] } {
-  if (args[0] === "--detach") return { detach: true, args: args.slice(1) };
-  return { detach: false, args };
+export function parseLifecycleArgs(args: string[]): {
+  detach: boolean;
+  tools: boolean;
+  args: string[];
+} {
+  let detach = false;
+  let tools = false;
+  const positional: string[] = [];
+  for (const arg of args) {
+    if (arg === "--detach") detach = true;
+    else if (arg === "--tools") tools = true;
+    else if (arg.startsWith("--")) throw new Error(`unknown lifecycle flag ${arg}`);
+    else positional.push(arg);
+  }
+  if (detach && tools) {
+    throw new Error("--tools is only available for attached lifecycle --output text");
+  }
+  return { detach, tools, args: positional };
 }
 
 export function parseOutputFormat(value: string): OutputFormat {
@@ -449,6 +476,7 @@ export function parseOutputFormat(value: string): OutputFormat {
 export interface LaunchArgs {
   detach: boolean;
   emitCapability: boolean;
+  tools: boolean;
   output?: OutputFormat;
   file?: string;
   name?: string | null;
@@ -456,6 +484,7 @@ export interface LaunchArgs {
 }
 
 export interface RunArgs {
+  tools: boolean;
   output?: OutputFormat;
   file?: string;
   name?: string | null;
@@ -473,14 +502,14 @@ export interface ExecuteArgs {
 }
 
 export function parseLaunchArgs(args: string[]): LaunchArgs {
-  const out: LaunchArgs = { detach: false, emitCapability: false, input: {} };
-  parseSourceArgs(args, out, { detach: true, emitCapability: true, output: true });
+  const out: LaunchArgs = { detach: false, emitCapability: false, tools: false, input: {} };
+  parseSourceArgs(args, out, { detach: true, emitCapability: true, output: true, tools: true });
   return out;
 }
 
 export function parseRunArgs(args: string[]): RunArgs {
-  const out: RunArgs = { input: {} };
-  parseSourceArgs(args, out, { detach: false, emitCapability: false, output: true });
+  const out: RunArgs = { tools: false, input: {} };
+  parseSourceArgs(args, out, { detach: false, emitCapability: false, output: true, tools: true });
   return out;
 }
 
@@ -531,9 +560,10 @@ function parseSourceArgs(
     input: unknown;
     detach?: boolean;
     emitCapability?: boolean;
+    tools?: boolean;
     output?: OutputFormat;
   },
-  flags: { detach: boolean; emitCapability: boolean; output: boolean },
+  flags: { detach: boolean; emitCapability: boolean; output: boolean; tools: boolean },
 ): void {
   const positional: string[] = [];
   let i = 0;
@@ -544,6 +574,9 @@ function parseSourceArgs(
       i += 1;
     } else if (arg === "--emit-capability" && flags.emitCapability) {
       out.emitCapability = true;
+      i += 1;
+    } else if (arg === "--tools" && flags.tools) {
+      out.tools = true;
       i += 1;
     } else if (arg === "--output" && flags.output) {
       out.output = parseOutputFormat(requireFlagValue(args, i, "--output"));
@@ -620,6 +653,18 @@ export function parseRunIdOutputArgs(
     throw new Error(`unexpected argument ${positional[1]} for ${command}`);
   }
   return { runId: positional[0], output };
+}
+
+function assertToolsAllowed(
+  command: string,
+  tools: boolean,
+  output: OutputFormat,
+  detached: boolean,
+): void {
+  if (!tools) return;
+  if (detached || output !== "text") {
+    throw new Error(`--tools is only available for attached ${command} --output text`);
+  }
 }
 
 export function resolveWorkflowPath(workflow: string, cwd = process.cwd()): string {
@@ -746,16 +791,51 @@ export function formatRunHeader(runId: string): string {
   return `run ${runId}\n`;
 }
 
-export function parseWatchArgs(args: string[]): { runId?: string; output: OutputFormat } {
-  return parseRunIdOutputArgs(args, "watch", "ndjson", ["json", "text", "ndjson"]);
+export function parseWatchArgs(args: string[]): {
+  runId?: string;
+  output: OutputFormat;
+  tools: boolean;
+} {
+  let output: OutputFormat = "ndjson";
+  let tools = false;
+  const positional: string[] = [];
+  let i = 0;
+  while (i < args.length) {
+    const arg = args[i] as string;
+    if (arg === "--output") {
+      output = parseOutputFormat(requireFlagValue(args, i, "--output"));
+      i += 2;
+    } else if (arg === "--tools") {
+      tools = true;
+      i += 1;
+    } else if (arg.startsWith("--")) {
+      throw new Error(`unknown watch flag ${arg}`);
+    } else {
+      positional.push(arg);
+      i += 1;
+    }
+  }
+  if (output === "json") throw new Error("--output json is not available for watch");
+  if (tools && output !== "text") {
+    throw new Error("--tools is only available for attached watch --output text");
+  }
+  if (positional.length > 1) {
+    throw new Error(`unexpected argument ${positional[1]} for watch`);
+  }
+  return { runId: positional[0], output, tools };
 }
 
 type WatchStatus = RunOutcome["status"];
 
+interface WatchFormatOptions {
+  output?: OutputFormat;
+  tools?: boolean;
+}
+
 async function watchRun(
   client: DaemonClient,
   runId: string,
-  opts: { output: OutputFormat },
+  opts: WatchFormatOptions,
 ): Promise<WatchStatus> {
   return new Promise<WatchStatus>((resolve) => {
     client.subscribeEvents(
@@ -777,10 +857,7 @@ async function watchRun(
   });
 }
 
-export function formatWatchEvent(
-  event: EventEnvelope,
-  opts: { output?: OutputFormat } = {},
-): string {
+export function formatWatchEvent(event: EventEnvelope, opts: WatchFormatOptions = {}): string {
   const safeEvent = redactCapabilityTokensInValue(event);
   if ((opts.output ?? "text") === "ndjson") return `${JSON.stringify(safeEvent)}\n`;
 
@@ -788,12 +865,15 @@ export function formatWatchEvent(
   const payload = safeEvent.payload;
   switch (safeEvent.type) {
     case "agent.event":
+      if (!opts.tools && isToolTracePayload(payload)) return "";
       return `${prefix} ${formatAgentEvent(payload)}\n`;
     case "agent.message":
       return `${prefix} ${formatAgentMessage(payload)}\n`;
     case "agent.tool_call":
+      if (!opts.tools) return "";
       return `${prefix} ${formatAgentTranscriptEvent(payload, "tool_call")}\n`;
     case "agent.tool_result":
+      if (!opts.tools) return "";
       return `${prefix} ${formatAgentTranscriptEvent(payload, "tool_result")}\n`;
     case "phase": {
       const title = prop(payload, "title");
@@ -827,6 +907,11 @@ export function formatWatchEvent(
     default:
       return `${prefix} ${safeEvent.type}${formatPayload(payload)}\n`;
   }
+}
+
+function isToolTracePayload(payload: unknown): boolean {
+  const traceType = prop(prop(payload, "event"), "type");
+  return traceType === "tool_call" || traceType === "tool_result";
 }
 
 function formatAgentMessage(payload: unknown): string {

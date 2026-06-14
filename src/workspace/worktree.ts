@@ -6,14 +6,40 @@
 // is removed after the call.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readSync,
+  realpathSync,
+  rmSync,
+  statSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
+
+export const AGENT_DIFF_CONTENT_MAX_BYTES = 512 * 1024;
+export const AGENT_DIFF_PATH_MAX_ENTRIES = 1_000;
+export const GIT_DIFF_MAX_BUFFER_BYTES = 2 * 1024 * 1024;
+export const GIT_STATUS_MAX_BUFFER_BYTES = 512 * 1024;
+export const AGENT_DIFF_TRUNCATION_NOTICE = `[keel: contentDiff truncated at ${AGENT_DIFF_CONTENT_MAX_BYTES} bytes; inspect the retained workspace or run git diff locally for the full patch]`;
+
+export interface DiffPathCounts {
+  modified: number;
+  added: number;
+  deleted: number;
+}
 
 export interface DiffBundle {
   modified: string[];
   added: string[];
   deleted: string[];
+  /** Number of changed paths not included after applying AGENT_DIFF_PATH_MAX_ENTRIES. */
+  omittedPathCounts: DiffPathCounts;
+  /** Maximum total modified/added/deleted paths retained in this bundle. */
+  pathLimit: number;
   /** Unified/binary-capable diff of tracked changes plus readable untracked text. */
   contentDiff: string;
 }
@@ -35,13 +61,45 @@ export interface Worktree {
   remove(): void;
 }
 
-function git(cwd: string, args: string[], input?: string): string {
+function git(
+  cwd: string,
+  args: string[],
+  input?: string,
+  options: { maxBuffer?: number } = {},
+): string {
   return execFileSync("git", args, {
     cwd,
     input,
     encoding: "utf8",
+    ...(options.maxBuffer !== undefined ? { maxBuffer: options.maxBuffer } : {}),
     stdio: input === undefined ? ["ignore", "pipe", "pipe"] : ["pipe", "pipe", "pipe"],
   });
+}
+
+function gitDiff(cwd: string, args: string[]): string {
+  return gitBounded(cwd, args, GIT_DIFF_MAX_BUFFER_BYTES, "git diff");
+}
+
+function gitStatus(cwd: string, args: string[]): string {
+  return gitBounded(cwd, args, GIT_STATUS_MAX_BUFFER_BYTES, "git status");
+}
+
+function gitBounded(cwd: string, args: string[], maxBuffer: number, label: string): string {
+  try {
+    return git(cwd, args, undefined, { maxBuffer });
+  } catch (err) {
+    if (isMaxBufferError(err)) {
+      throw new Error(`${label} output exceeded explicit ${maxBuffer} byte buffer limit`);
+    }
+    throw err;
+  }
+}
+
+function isMaxBufferError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const code = "code" in err ? String((err as { code?: unknown }).code ?? "") : "";
+  const message = err instanceof Error ? err.message : String(err);
+  return code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" || message.includes("maxBuffer");
 }
 
 function gitErrorMessage(err: unknown): string {
@@ -139,39 +197,159 @@ export function removeRetainedWorkspace(
   }
 }
 
+class DiffContentBuilder {
+  private chunks: string[] = [];
+  private byteLength = 0;
+  truncated = false;
+
+  get value(): string {
+    return this.chunks.join("");
+  }
+
+  append(chunk: string): void {
+    if (this.truncated || chunk.length === 0) return;
+    const chunkBytes = Buffer.byteLength(chunk, "utf8");
+    if (this.byteLength + chunkBytes <= AGENT_DIFF_CONTENT_MAX_BYTES) {
+      this.chunks.push(chunk);
+      this.byteLength += chunkBytes;
+      return;
+    }
+    this.appendPrefixAndNotice(chunk);
+  }
+
+  markTruncated(): void {
+    if (this.truncated) return;
+    const notice = this.notice();
+    const noticeBytes = Buffer.byteLength(notice, "utf8");
+    const remaining = AGENT_DIFF_CONTENT_MAX_BYTES - this.byteLength;
+    if (remaining >= noticeBytes) {
+      this.chunks.push(notice);
+      this.byteLength += noticeBytes;
+    } else {
+      this.trimToByteLength(Math.max(0, AGENT_DIFF_CONTENT_MAX_BYTES - noticeBytes));
+      this.chunks.push(notice);
+      this.byteLength += noticeBytes;
+    }
+    this.truncated = true;
+  }
+
+  private appendPrefixAndNotice(chunk: string): void {
+    const notice = this.notice();
+    const noticeBytes = Buffer.byteLength(notice, "utf8");
+    if (this.byteLength + noticeBytes > AGENT_DIFF_CONTENT_MAX_BYTES) {
+      this.trimToByteLength(Math.max(0, AGENT_DIFF_CONTENT_MAX_BYTES - noticeBytes));
+    }
+    const prefixBytes = Math.max(0, AGENT_DIFF_CONTENT_MAX_BYTES - this.byteLength - noticeBytes);
+    if (prefixBytes > 0) {
+      const prefix = utf8Prefix(chunk, prefixBytes);
+      this.chunks.push(prefix);
+      this.byteLength += Buffer.byteLength(prefix, "utf8");
+    }
+    this.chunks.push(notice);
+    this.byteLength += noticeBytes;
+    this.truncated = true;
+  }
+
+  private trimToByteLength(targetBytes: number): void {
+    const current = this.value;
+    const trimmed = utf8Prefix(current, targetBytes);
+    this.chunks = trimmed.length > 0 ? [trimmed] : [];
+    this.byteLength = Buffer.byteLength(trimmed, "utf8");
+  }
+
+  private notice(): string {
+    return `\n${AGENT_DIFF_TRUNCATION_NOTICE}\n`;
+  }
+}
+
+function utf8Prefix(value: string, maxBytes: number): string {
+  if (maxBytes <= 0) return "";
+  let used = 0;
+  const chars: string[] = [];
+  for (const ch of value) {
+    const bytes = Buffer.byteLength(ch, "utf8");
+    if (used + bytes > maxBytes) break;
+    chars.push(ch);
+    used += bytes;
+  }
+  return chars.join("");
+}
+
+function readTextFilePrefix(path: string, maxBytes: number): { text: string; truncated: boolean } {
+  const stat = statSync(path);
+  if (!stat.isFile()) throw new Error(`${path} is not a file`);
+  const readBytes = Math.min(stat.size, maxBytes + 1);
+  const buffer = Buffer.alloc(readBytes);
+  const fd = openSync(path, "r");
+  try {
+    const bytesRead = readSync(fd, buffer, 0, readBytes, 0);
+    const keptBytes = Math.min(bytesRead, maxBytes);
+    return {
+      text: buffer.subarray(0, keptBytes).toString("utf8"),
+      truncated: stat.size > maxBytes || bytesRead > maxBytes,
+    };
+  } finally {
+    closeSync(fd);
+  }
+}
+
 export function diffWorkspace(workspacePath: string): DiffBundle {
   // include untracked files so added files show up
-  const status = git(workspacePath, ["status", "--porcelain", "--untracked-files=all"]);
+  const status = gitStatus(workspacePath, ["status", "--porcelain", "--untracked-files=all"]);
   const modified: string[] = [];
   const added: string[] = [];
   const deleted: string[] = [];
+  const omittedPathCounts: DiffPathCounts = { modified: 0, added: 0, deleted: 0 };
+  let retainedPathCount = 0;
   for (const line of status.split("\n")) {
     if (!line.trim()) continue;
     const code = line.slice(0, 2);
     const file = line.slice(3);
-    if (code.includes("?") || code.includes("A")) added.push(file);
-    else if (code.includes("D")) deleted.push(file);
-    else modified.push(file);
+    const bucket =
+      code.includes("?") || code.includes("A") ? added : code.includes("D") ? deleted : modified;
+    const omittedKey = bucket === added ? "added" : bucket === deleted ? "deleted" : "modified";
+    if (retainedPathCount < AGENT_DIFF_PATH_MAX_ENTRIES) {
+      bucket.push(file);
+      retainedPathCount += 1;
+    } else {
+      omittedPathCounts[omittedKey] += 1;
+    }
   }
   // `git diff --binary HEAD` preserves tracked binary/mode/symlink deltas for
   // review and merge. Add readable untracked file bodies for convenient text
   // review; unreadable/binary untracked files remain represented by path and are
-  // preserved by merge after staging.
-  let contentDiff = git(workspacePath, ["diff", "--binary", "HEAD"]);
+  // preserved by merge after staging. The durable contentDiff is intentionally
+  // capped; the retained workspace remains the source of truth for full review.
+  const content = new DiffContentBuilder();
+  content.append(gitDiff(workspacePath, ["diff", "--binary", "HEAD"]));
   for (const f of added) {
+    if (content.truncated) break;
     try {
-      const body = readFileSync(join(workspacePath, f), "utf8");
-      const lines = body.split("\n");
+      const { text, truncated } = readTextFilePrefix(
+        join(workspacePath, f),
+        AGENT_DIFF_CONTENT_MAX_BYTES,
+      );
+      const lines = text.split("\n");
       if (lines.at(-1) === "") lines.pop();
-      contentDiff += `\ndiff --git a/${f} b/${f}\nnew file\n--- /dev/null\n+++ b/${f}\n${lines
-        .map((l) => `+${l}`)
-        .join("\n")}\n`;
+      content.append(
+        `\ndiff --git a/${f} b/${f}\nnew file\n--- /dev/null\n+++ b/${f}\n${lines
+          .map((l) => `+${l}`)
+          .join("\n")}\n`,
+      );
+      if (truncated) content.markTruncated();
     } catch {
       // unreadable (binary/directory/etc.) — path remains in `added`; merge uses
       // `git diff --binary --cached` after staging, not this text append.
     }
   }
-  return { modified, added, deleted, contentDiff };
+  return {
+    modified,
+    added,
+    deleted,
+    omittedPathCounts,
+    pathLimit: AGENT_DIFF_PATH_MAX_ENTRIES,
+    contentDiff: content.value,
+  };
 }
 
 export function mergeWorkspaceIntoTarget(workspacePath: string, target: string): void {
@@ -180,7 +358,7 @@ export function mergeWorkspaceIntoTarget(workspacePath: string, target: string):
   // and symlinks enter the binary patch. This mutates only the retained
   // workspace index, not the target.
   git(workspacePath, ["add", "-A"]);
-  const patch = git(workspacePath, ["diff", "--binary", "--cached", "HEAD"]);
+  const patch = gitDiff(workspacePath, ["diff", "--binary", "--cached", "HEAD"]);
   if (!patch.trim()) return;
   try {
     git(target, ["apply", "--check", "--3way", "--whitespace=nowarn", "-"], patch);

@@ -801,6 +801,8 @@ export class RealmKernel {
               modified: bundle.modified,
               added: bundle.added,
               deleted: bundle.deleted,
+              omittedPathCounts: { ...bundle.omittedPathCounts },
+              pathLimit: bundle.pathLimit,
               contentDiff: bundle.contentDiff,
             },
           },
@@ -1232,20 +1234,31 @@ export class RealmKernel {
                   );
                   if (settled || this.isRunInterrupted(runId)) return;
                   const output = execution.output;
-                  // §11.3: capture the isolated agent's changes as a reviewable diff
-                  // — including the full unified patch (contentDiff) so the diff
-                  // gate has durable content to approve. Removal happens in the
-                  // finally below so the worktree is gone on every exit path.
+                  // §11.3: capture the isolated agent's changes as a reviewable,
+                  // bounded durable diff (contentDiff). The retained worktree is
+                  // the source of truth when the durable diff is truncated. Removal
+                  // happens in the finally below so the worktree is gone on every
+                  // exit path.
                   if (worktree) {
-                    const bundle = worktree.diff();
-                    const contentDiff = bundle.contentDiff;
-                    engine.emit("agent.diff", {
-                      key: m.key,
-                      modified: bundle.modified,
-                      added: bundle.added,
-                      deleted: bundle.deleted,
-                      contentDiff,
-                    });
+                    try {
+                      const bundle = worktree.diff();
+                      const contentDiff = bundle.contentDiff;
+                      engine.emit("agent.diff", {
+                        key: m.key,
+                        modified: bundle.modified,
+                        added: bundle.added,
+                        deleted: bundle.deleted,
+                        omittedPathCounts: { ...bundle.omittedPathCounts },
+                        pathLimit: bundle.pathLimit,
+                        contentDiff,
+                      });
+                    } catch (err) {
+                      engine.emit("workspace.diff_error", {
+                        key: m.key,
+                        workspacePath: worktree.path,
+                        error: serializeError(err),
+                      });
+                    }
                   }
                   const text = execution.text;
                   try {

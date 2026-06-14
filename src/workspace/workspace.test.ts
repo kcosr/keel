@@ -23,7 +23,14 @@ import {
   resolvedToolPolicyToPiArgs,
 } from "../agents/capabilities.ts";
 import { SecretStore } from "../agents/secrets.ts";
-import { createWorktree } from "./worktree.ts";
+import {
+  AGENT_DIFF_CONTENT_MAX_BYTES,
+  AGENT_DIFF_PATH_MAX_ENTRIES,
+  AGENT_DIFF_TRUNCATION_NOTICE,
+  GIT_DIFF_MAX_BUFFER_BYTES,
+  GIT_STATUS_MAX_BUFFER_BYTES,
+  createWorktree,
+} from "./worktree.ts";
 
 describe("capabilities → Pi tool flags", () => {
   test("omitted tool policy defaults to read-only tools", () => {
@@ -253,6 +260,79 @@ describe("git-worktree isolation + diff gate", () => {
       expect(lstatSync(join(repo, "script.sh")).mode & 0o111).not.toBe(0);
       expect(lstatSync(join(repo, "app-link")).isSymbolicLink()).toBe(true);
       expect(readlinkSync(join(repo, "app-link"))).toBe("app.js");
+    } finally {
+      wt.remove();
+    }
+  });
+
+  test("contentDiff is capped with an explicit retained-workspace notice", () => {
+    const wt = createWorktree(repo, "large-untracked");
+    try {
+      writeFileSync(
+        join(wt.path, "large.txt"),
+        `start\n${"x".repeat(AGENT_DIFF_CONTENT_MAX_BYTES)}\nend\n`,
+      );
+
+      const bundle = wt.diff();
+
+      expect(bundle.added).toContain("large.txt");
+      expect(Buffer.byteLength(bundle.contentDiff, "utf8")).toBeLessThanOrEqual(
+        AGENT_DIFF_CONTENT_MAX_BYTES,
+      );
+      expect(bundle.contentDiff).toContain("+++ b/large.txt");
+      expect(bundle.contentDiff).toContain(AGENT_DIFF_TRUNCATION_NOTICE);
+      expect(bundle.contentDiff).not.toContain("end");
+    } finally {
+      wt.remove();
+    }
+  });
+
+  test("path arrays are capped with omitted counts", () => {
+    const wt = createWorktree(repo, "many-paths");
+    try {
+      for (let i = 0; i < AGENT_DIFF_PATH_MAX_ENTRIES + 3; i += 1) {
+        writeFileSync(join(wt.path, `generated-${i}.txt`), "ok\n");
+      }
+
+      const bundle = wt.diff();
+
+      expect(bundle.added).toHaveLength(AGENT_DIFF_PATH_MAX_ENTRIES);
+      expect(bundle.modified).toHaveLength(0);
+      expect(bundle.deleted).toHaveLength(0);
+      expect(bundle.omittedPathCounts).toEqual({ modified: 0, added: 3, deleted: 0 });
+      expect(bundle.pathLimit).toBe(AGENT_DIFF_PATH_MAX_ENTRIES);
+    } finally {
+      wt.remove();
+    }
+  });
+
+  test("tracked git diffs over the explicit buffer fail clearly", () => {
+    const wt = createWorktree(repo, "huge-tracked");
+    try {
+      writeFileSync(
+        join(wt.path, "app.js"),
+        `${"z".repeat(GIT_DIFF_MAX_BUFFER_BYTES + 64 * 1024)}\n`,
+      );
+
+      expect(() => wt.diff()).toThrow(/git diff output exceeded explicit .* byte buffer limit/);
+    } finally {
+      wt.remove();
+    }
+  });
+
+  test("git status over the explicit buffer fails clearly", () => {
+    const wt = createWorktree(repo, "huge-status");
+    try {
+      const filenameBytes = 200;
+      const fileCount = Math.ceil((GIT_STATUS_MAX_BUFFER_BYTES + 64 * 1024) / filenameBytes);
+      for (let i = 0; i < fileCount; i += 1) {
+        writeFileSync(
+          join(wt.path, `status-${String(i).padStart(5, "0")}-${"s".repeat(180)}.txt`),
+          "",
+        );
+      }
+
+      expect(() => wt.diff()).toThrow(/git status output exceeded explicit .* byte buffer limit/);
     } finally {
       wt.remove();
     }

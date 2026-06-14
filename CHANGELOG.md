@@ -60,6 +60,10 @@
   schedule break a tick.
 - Workflow SDK ABI bumped to 2 because agent target resolution participates in agent/session identity.
 - Workspace startup/GC reconciliation now clears stale `creating` rows, reconciles terminal `active`/`creating` rows, makes workspace GC idempotent, and rejects invalid workspace merge/discard transitions after terminal workspace statuses.
+- Durable workspace diff payloads now cap `agent.diff.contentDiff` and changed
+  path arrays with retained-workspace truncation/omission metadata, and
+  oversized `git status`/`git diff` output crosses explicit buffer limits into
+  `workspace.diff_error` instead of relying on Node's default `maxBuffer`.
 - Agent secrets are now trusted-local env injection only: secrets no longer
   require `workspaceIsolation`, and exact secret values emitted by agents are no
   longer redacted from outputs, events, tolerated failures, or isolated diffs.

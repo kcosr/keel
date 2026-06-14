@@ -919,7 +919,7 @@ describe("keel CLI", () => {
             runTarget?: string | null;
           }>;
         };
-        expect(payload.runs.map((run) => run.runId)).toEqual([firstRun.runId, secondRun.runId]);
+        expect(payload.runs.map((run) => run.runId)).toEqual([secondRun.runId, firstRun.runId]);
         expect(Object.keys(payload.runs[0] ?? {}).sort()).toEqual([
           "createdAtMs",
           "finishedAtMs",
@@ -930,9 +930,9 @@ describe("keel CLI", () => {
           "workflowName",
         ]);
         expect(payload.runs[0]).toMatchObject({
-          runId: firstRun.runId,
+          runId: secondRun.runId,
           status: "finished",
-          workflowName: "older",
+          workflowName: "newer",
           parentRunId: null,
         });
         expect(typeof payload.runs[0]?.createdAtMs).toBe("number");
@@ -948,12 +948,12 @@ describe("keel CLI", () => {
         expect(lines[0]).toContain("DURATION");
         expect(lines[1]).toMatch(
           new RegExp(
-            `^${escapeRegExp(firstRun.runId)}\\s{2,}finished\\s{2,}older\\s{2,}\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z\\s{2,}\\d+(?:ms|s|m|h|d)$`,
+            `^${escapeRegExp(secondRun.runId)}\\s{2,}finished\\s{2,}newer\\s{2,}\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z\\s{2,}\\d+(?:ms|s|m|h|d)$`,
           ),
         );
         expect(lines[2]).toMatch(
           new RegExp(
-            `^${escapeRegExp(secondRun.runId)}\\s{2,}finished\\s{2,}newer\\s{2,}\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z\\s{2,}\\d+(?:ms|s|m|h|d)$`,
+            `^${escapeRegExp(firstRun.runId)}\\s{2,}finished\\s{2,}older\\s{2,}\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z\\s{2,}\\d+(?:ms|s|m|h|d)$`,
           ),
         );
       } finally {

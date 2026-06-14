@@ -1,4 +1,5 @@
 import { displayName, formatDuration, formatUtcTimestamp } from "../cli/run-display.ts";
+import { sanitizeTerminalLineText } from "../cli/terminal-text.ts";
 import type { RunProjection, RunReport, RunSummary } from "../rpc/projection.ts";
 import type { TuiState, WatchLine } from "./state.ts";
 
@@ -226,7 +227,7 @@ function pad(value: string, width: number): string {
 
 function clip(value: string, width: number): string {
   if (width <= 0) return "";
-  const cleaned = value.replaceAll("\r", " ").replaceAll("\n", " ");
+  const cleaned = sanitizeTerminalLineText(value);
   if (cleaned.length <= width) return cleaned;
   if (width === 1) return "…";
   return `${cleaned.slice(0, width - 1)}…`;

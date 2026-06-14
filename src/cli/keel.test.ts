@@ -17,6 +17,7 @@ import { KeelDaemon } from "../daemon/server.ts";
 import {
   formatListRuns,
   formatRunHeader,
+  formatRunReportText,
   parseExecuteArgs,
   parseLaunchArgs,
   parseLaunchInput,
@@ -172,6 +173,37 @@ describe("keel CLI", () => {
         "",
       ].join("\n"),
     );
+  });
+
+  test("report formatter sanitizes terminal-bound text", () => {
+    const text = formatRunReportText({
+      runId: "run_1\u001b[31m",
+      workflowName: "wf\nname",
+      status: "failed",
+      createdAtMs: 1,
+      finishedAtMs: 2,
+      output: "out\u001b[2J\nnext kc_run_secretValue",
+      error: { name: "Error\u001b[31m", message: "bad\rthing" },
+      stats: { steps: 1, agents: 0, artifacts: 0 },
+      nodes: [
+        {
+          stableKey: "step\u001b[31m.one\nkey",
+          status: "failed",
+          effectType: "effectful",
+          attempt: 1,
+          dependsOn: [],
+          artifactBacked: false,
+          result: "result\u0000value",
+        },
+      ],
+    });
+
+    expect(text).not.toContain("\u001b");
+    expect(text).not.toContain("kc_run_secretValue");
+    expect(text).toContain("workflow wf\\nname");
+    expect(text).toContain("output out\\nnext «redacted-capability»");
+    expect(text).toContain("error Error: bad\\rthing");
+    expect(text).toContain("step.one\\nkey failed effectful attempt=1 result resultvalue");
   });
 
   test("tui args parse direct run, filters, and reject non-text output", () => {

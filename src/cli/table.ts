@@ -1,3 +1,5 @@
+import { sanitizeTerminalTableText, truncateEnd } from "./terminal-text.ts";
+
 export interface TableCellOptions {
   maxWidth?: number;
 }
@@ -33,25 +35,23 @@ export function formatTable(
     }
     return row.map(normalizeCell);
   });
-  const widths = normalizedHeaders.map((header, column) =>
-    Math.max(header.length, ...normalizedRows.map((row) => row[column]?.length ?? 0)),
-  );
-  const lines = [normalizedHeaders, ...normalizedRows].map((row) => formatTableRow(row, widths));
+  const widths = normalizedHeaders.map((header) => header.length);
+  for (const row of normalizedRows) {
+    for (let column = 0; column < row.length; column += 1) {
+      widths[column] = Math.max(widths[column] ?? 0, row[column]?.length ?? 0);
+    }
+  }
+  const lines = [formatTableRow(normalizedHeaders, widths)];
+  for (const row of normalizedRows) lines.push(formatTableRow(row, widths));
   return `${lines.join("\n")}\n`;
 }
 
 export function sanitizeTableText(value: unknown): string {
-  if (value === null || value === undefined) return "";
-  return String(value).replace(/\s+/g, " ").trim();
+  return sanitizeTerminalTableText(value);
 }
 
 export function truncateText(value: string, maxWidth: number): string {
-  if (maxWidth < 0) throw new Error("maxWidth must be non-negative");
-  const chars = Array.from(value);
-  if (chars.length <= maxWidth) return value;
-  if (maxWidth === 0) return "";
-  if (maxWidth === 1) return "…";
-  return `${chars.slice(0, maxWidth - 1).join("")}…`;
+  return truncateEnd(value, maxWidth);
 }
 
 function normalizeCell(cell: TableCellInput): string {

@@ -21,8 +21,11 @@ describe("CLI table formatting", () => {
     );
   });
 
-  test("sanitizes embedded whitespace in cells", () => {
+  test("sanitizes embedded whitespace and terminal controls in cells", () => {
     expect(sanitizeTableText(" one\n two\tthree   four ")).toBe("one two three four");
+    expect(sanitizeTableText("\u001b[31mred\u001b[0m\u0000 kc_run_secretValue")).toBe(
+      "red «redacted-capability»",
+    );
     expect(formatTable(["A", "B"], [["one\n two", "three\t\tfour"]])).toBe(
       "A        B\none two  three four\n",
     );
@@ -36,6 +39,13 @@ describe("CLI table formatting", () => {
         [[tableCell("abcdefghijklmnopqrstuvwxyz", { maxWidth: 10 }), "not capped at all"]],
       ),
     ).toBe("NAME        DETAIL\nabcdefghi…  not capped at all\n");
+  });
+
+  test("formats large row sets without an unbounded Math.max argument spread", () => {
+    const rows = Array.from({ length: 150_000 }, (_, index) => [`run_${index}`, "ok"]);
+    const out = formatTable(["RUN", "STATUS"], rows);
+
+    expect(out).toContain("run_149999  ok\n");
   });
 
   test("leaves the final column unpadded", () => {

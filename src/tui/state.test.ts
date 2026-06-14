@@ -132,6 +132,24 @@ describe("tui state", () => {
     expect(lastSeqForRun(state, "run_a")).toBe(5);
   });
 
+  test("windows long coalesced stream rows to a bounded trailing display state", () => {
+    let state = createTuiState({ runId: "run_a", maxWatchLineChars: 40 });
+    state = startWatchState(state, "run_a");
+    const formatter = createTuiWatchFormatter();
+
+    const first = liveAgentText("abcdef");
+    state = appendWatchLines(state, first, formatter.push(first));
+    expect(state.watch.lines[0]?.text).toBe("[live] agent review text: abcdef");
+
+    const second = liveAgentText("ghijklmnopqrstuvwxyz");
+    state = appendWatchLines(state, second, formatter.push(second));
+
+    const text = state.watch.lines[0]?.text ?? "";
+    expect(Array.from(text).length).toBeLessThanOrEqual(40);
+    expect(text.startsWith("…")).toBe(true);
+    expect(text.endsWith("abcdefghijklmnopqrstuvwxyz")).toBe(true);
+  });
+
   test("applies stream continuations to the active watch display row", () => {
     let state = createTuiState({ runId: "run_a" });
     state = startWatchState(state, "run_a");

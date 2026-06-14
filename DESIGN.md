@@ -60,8 +60,8 @@ Postgres-dialect discipline).
 - **Capability *enforcement* landed (§11):** provider tool policies map to vendor
   flags; worktree isolation is an explicit `workspaceIsolation` opt-in that fails
   closed without a configured `workspaceRoot`; the diff gate persists the full
-  patch, secrets are redacted from output/streamed-events/diff, `continueAsNew`
-  is an atomic transactional handoff with lineage, and fork is fenced to terminal
+  patch, secrets are injected as trusted-local provider env, `continueAsNew` is
+  an atomic transactional handoff with lineage, and fork is fenced to terminal
   runs. The OS-sandbox capability backstop remains the one unimplemented
   hardening.
 - **Run authorization is object-capability based.** Launch is open to local
@@ -303,9 +303,10 @@ Every effectful step:
 On resume: `completed` → replay (*exactly-once result*); `pending` → the process
 died mid-effect → re-execute (*at-least-once*). Contract, stated plainly: **pure
 steps must be deterministic; agent calls must be idempotent or carry an external
-dedup key.** Re-asking a model is harmless; agents with real side effects write
-into isolated workspaces (§11.3), so a re-run lands in a fresh workspace, not a
-doubled mutation. Mid-call recovery for long agent calls: §10.4.
+dedup key.** Re-asking a model is harmless; agents that opt into workspace
+isolation write into fresh worktrees (§11.3), while non-isolated side effects
+must be safe to re-drive or externally deduped. Mid-call recovery for long agent
+calls: §10.4.
 
 User-requested `interrupt` is a durable crash-like boundary with a visible parked
 status. Keel first commits `runs.status = 'interrupted'` plus `run.interrupted`,
@@ -875,10 +876,12 @@ builds it **before** the first real adapter (Phase 7 vs 10).
 ## 11. Capability & security model
 
 Trust boundary: orchestration code is **untrusted for side effects** (it runs in
-the realm and physically can't reach fs/net); vendor agent CLIs are trusted to
-run but supply-chain-suspect (capability-gated, isolated workspaces); the daemon
-is trusted (owns journal, secrets, capability resolution). This paragraph is the
-de-facto threat model; a standalone threat-model document is not yet written.
+the realm and physically can't reach fs/net); vendor agent CLIs run in the
+trusted local development environment with the capabilities the workflow grants;
+`workspaceIsolation` is an optional worktree/diff-review mode, not a secret or
+network-exfiltration boundary; the daemon is trusted (owns journal, secret env
+injection, capability resolution). This paragraph is the de-facto threat model;
+a standalone threat-model document is not yet written.
 
 ### 11.1 Declaration and enforcement
 
@@ -887,12 +890,12 @@ de-facto threat model; a standalone threat-model document is not yet written.
 > normalized tool policies map to per-vendor tool flags in one place
 > (`resolvedToolPolicyToPiArgs`, `resolvedToolPolicyToClaudeArgs`);
 > `workspaceIsolation` is an explicit opt-in and fails closed with no configured
-> `workspaceRoot`; agents with secrets and write or shell capabilities must opt
-> into `workspaceIsolation`; the diff gate journals the full patch; secrets are
-> injected sealed and redacted from output, streamed events, the diff, and
-> tolerated-failure errors; and **capabilities + secrets fold into both the agent
-> version AND the input hash, identically on the realm and in-process paths**. The
-> one remaining hardening is the **OS-sandbox backstop** (still unimplemented).
+> `workspaceRoot`; the diff gate journals the full patch; secrets are resolved
+> from the side channel and injected as provider env without requiring workspace
+> isolation or redacting agent-visible output; and **capabilities + secrets fold
+> into both the agent version AND the input hash, identically on the realm and
+> in-process paths**. The one remaining hardening is the **OS-sandbox backstop**
+> (still unimplemented).
 >
 > Original text follows for context.
 
@@ -919,34 +922,34 @@ Codex `sandbox`, Pi `--tools`/`--no-tools`, …) **plus an OS-sandbox backstop**
 for vendors that can't self-enforce. Family-specific enforcement knowledge lives
 in one place.
 
-### 11.2 Secrets never enter the journal
+### 11.2 Secrets side-channel and trusted-local outputs
 
-The journal is forever, so: secrets travel via an **encrypted side-channel**
-keyed `runId + stableKey`, injected sealed-env/stdin at agent invocation, wiped
-on completion. As **defense-in-depth** (not the primary guarantee), agent
-outputs are scanned at the journal boundary for exact secret values and
-redacted; the redaction event is logged, never the value. *(v1 overstated this
-scan as a guarantee — it cannot catch transformed/encoded secrets; the
-by-construction side-channel is the guarantee.)*
+The journal is forever, so raw secret values do not belong in workflow source,
+step inputs, or agent configuration. Secrets travel via a side channel keyed by
+run id, are resolved by name, injected as provider environment variables at
+agent invocation, and wiped on terminal cleanup. Agent outputs, streamed events,
+tool events, diffs, and tolerated-failure errors are trusted-local workflow data:
+if an agent emits a secret value, Keel records it as-is. The side channel keeps
+secret values out of workflow source and agent options; it is not an output
+redaction system.
 
 ### 11.3 Workspace isolation & the diff gate (plain git — jj dropped)
 
-`fs:'workspace-write'` agents run with `cwd` in an **isolated git worktree**
-checked out at the run's base commit, seeing their own writes (v1's jj/CoW
-"union read" semantics don't exist in plain git and are dropped as a claim).
-Changes merge to the real tree only through a **diff-review gate**:
+Agents that set `workspaceIsolation: true` run with `cwd` in an **isolated git
+worktree** checked out at the run's base commit, seeing their own writes (v1's
+jj/CoW "union read" semantics don't exist in plain git and are dropped as a
+claim). Changes merge to the real tree only through a **diff-review gate**:
 `{modifiedFiles, addedFiles, deletedFiles, contentDiff}` exported as JSON,
 merged on approval (human or webhook). The VCS lives behind an interface — git
 worktrees now; jj or container overlays swappable later (§17 L9).
 
 ### 11.4 Approval as a first-class dataflow node
 
-A step declaring `workspace-write` or `shell` parks `waiting-approval`; **the
-subprocess is not spawned until an approval row is journaled.** The approval
-carries the *granted* capability delta (which may narrow the declared one —
-e.g. write only under `src/`); the subprocess receives the approved delta.
-Journaled approvals replay deterministically on resume; stale/revoked ones are
-re-requested.
+Approval is explicit workflow control (`ctx.human`) and future diff-review merge
+control, not an automatic preflight for every write/shell-capable agent in the
+trusted-local model. When a workflow asks for approval, the run parks
+`waiting-approval` and the journaled decision replays deterministically on
+resume; stale/revoked decisions are re-requested.
 
 ## 12. Observability & liveness
 
@@ -1037,7 +1040,7 @@ daemon's single write path, in Phase 18:
 | Authoring | the `ctx` API · Zod + JSON-Schema + structural hashing · definition pinning + a source override |
 | Daemon & clients | single-writer daemon · embedded mode · frozen RPC contract (Phase 11) · thin CLI · crash recovery + CAS fence · daemon-owned agent subprocesses |
 | Adapters | `AgentLike` contract · **Pi adapter** · structured-output enforcement · session capture & mid-call resume · stream/transcript capture |
-| Capability | declaration enum (in `version` + input hash) AND enforcement — fail-closed write-isolation, diff gate, secret redaction (Phase 15). OS-sandbox backstop still deferred. |
+| Capability | declaration enum (in `version` + input hash) AND enforcement — provider tool-policy mapping, fail-closed explicit workspace isolation, diff gate, trusted-local secret env injection (Phase 15). OS-sandbox backstop still deferred. |
 | Observability | canonical projection + golden tests · heartbeats/timeouts · stall-retry |
 | Testing | deterministic mock provider · kill-and-resume / fault-injection / contract suites · the large fan-out workload regression |
 | Cross-cutting | JSON-only `ctx` seam (kernel language swappability) |
@@ -1112,14 +1115,13 @@ live gate (Phase 14). Every phase ends green and is one reviewable commit.
 **Stage D — breadth, ordered by the near-term workload mix (Phases 15–19)**
 
 Sequenced per L22: write-capable pipelines and scheduled runs are near-term;
-approval-gated human flows are not. The diff gate's approvals in Phase 15 are
-satisfied by the approvals table + an RPC/CLI `submit_approval` (the step parks
-`waiting-approval`); the full durable `ctx.human` effect family follows in
+approval-gated human flows are not. Phase 15 captures reviewable diffs for
+workspace-isolated agents; the full durable `ctx.human` effect family follows in
 Phase 17.
 
 | # | Phase | Exit criteria |
 |---|---|---|
-| 15 | Write-capable agents: capability enforcement, worktree isolation, diff gate, secrets | `fs:none` agent cannot write; a write agent's changes stay confined to its worktree until a journaled approval (via RPC/CLI) merges them; secret-scan finds no secret in journal/artifacts/logs. |
+| 15 | Write-capable agents: capability enforcement, worktree isolation, diff gate, secrets | `fs:none` agent cannot write; an agent that opts into workspace isolation has changes confined to its worktree until a journaled approval (via RPC/CLI) merges them; secrets are injected through the side channel and wiped at terminal cleanup. |
 | 16 | Scheduling & supervision: `ctx.sleep`, durable timers, supervisor, cron | A cron-scheduled mock workflow fires on time; a due timer fires correctly after a daemon restart (journal-rebuilt); orphaned runs are reclaimed via the heartbeat fence. |
 | 17 | Full HITL: `ctx.human`, `ctx.signal`, park/wake | A run parked `waiting-human` with the daemon stopped survives restart and resumes when approved from a second client; `ctx.signal` with timeout parks and wakes correctly. |
 | 18 | Time travel | Prompt edit mid-pipeline re-executes only the affected step + descendants with workspace restored; fork diverges with recorded lineage. |
@@ -1142,8 +1144,8 @@ Phase 17.
   measure).
 - **Projection contract** (11+): golden byte-identical projections across
   surfaces; schema JSON round-trip → same structural hash.
-- **Capability confinement + secret-scan** (15) and **HITL durability** (17): as
-  phase exit criteria above.
+- **Capability confinement + secret injection lifecycle** (15) and **HITL
+  durability** (17): as phase exit criteria above.
 
 ## 17. Decision register
 
@@ -1169,7 +1171,9 @@ Phase 17.
 - **L11 SQLite-WAL is the journal backend** (solo and team-internal); schema
   kept Postgres-compatible as discipline; Postgres is an on-demand future swap,
   not pipeline work. *(Updated by L17.)*
-- **L12 Two-tier storage;** secrets never in the journal.
+- **L12 Two-tier storage;** large values use inline/CAS artifact tiers, while
+  secrets use a separate env-injection side channel instead of workflow inputs or
+  configuration.
 - **L13 Default-deny capabilities,** one normalized adapter layer + OS backstop.
 - **L14 Pi is the first agent backend;** Claude second. (v1-internal conflict
   resolved in Pi's favor — the later, deliberate decision.)
@@ -1230,7 +1234,7 @@ recommendation attached.
 | `continueAsNew` carry cap + pending-approval/timer transfer semantics | 19 |
 | Workspace snapshot mechanism in plain git (per-step snapshot commits) | 15, 18 |
 | Heartbeat/timeout defaults validated against genuinely long agent calls | 13 |
-| Secrets-redaction scope statement (exact-value only; defense-in-depth) | 15 |
+| Optional output-redaction policy, if teams need one separate from trusted-local defaults | future |
 
 ---
 

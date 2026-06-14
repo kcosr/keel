@@ -1,18 +1,19 @@
-// Secrets side-channel + journal-boundary redaction (DESIGN.md §11.2).
+// Secrets side-channel for trusted-local agent env injection (DESIGN.md §11.2).
 //
-// The journal is forever, so secrets NEVER enter it. They travel via an
-// encrypted-at-rest side channel keyed runId+stableKey, are injected sealed at
-// agent invocation, and wiped on completion. As defense-in-depth, agent outputs
-// are scanned for exact secret values and redacted at the journal boundary —
-// this is NOT the guarantee (it catches only exact values; the by-construction
-// side channel is the guarantee).
+// Secret values are kept out of workflow source, step inputs, and provider
+// configuration by storing them in-memory by run id and resolving named refs at
+// invocation time. The realm host injects resolved refs as environment variables
+// for the provider call and wipes the per-run entries when the run reaches a
+// terminal cleanup path. Agent outputs/events/diffs/errors are journaled as-is;
+// workflow authors should avoid prompting agents to print or persist secrets
+// when they do not want those values recorded.
 
 export interface SecretRef {
   name: string;
   value: string;
 }
 
-/** In-process side-channel store (never persisted to the journal). */
+/** In-process side-channel store (never persisted by this store). */
 export class SecretStore {
   private readonly byRun = new Map<string, Map<string, string>>();
 
@@ -25,7 +26,7 @@ export class SecretStore {
     m.set(name, value);
   }
 
-  /** Resolve named secret refs for a step (injected at invocation). */
+  /** Resolve named secret refs for env injection at invocation. */
   resolve(runId: string, names: string[]): SecretRef[] {
     const m = this.byRun.get(runId);
     if (!m) return [];
@@ -34,33 +35,8 @@ export class SecretStore {
       .filter((r): r is SecretRef => r.value !== undefined);
   }
 
-  /** All secret values for a run (for redaction scanning). */
-  values(runId: string): string[] {
-    return [...(this.byRun.get(runId)?.values() ?? [])];
-  }
-
-  /** Wipe a run's secrets (on completion). */
+  /** Wipe a run's secrets on terminal cleanup. */
   wipe(runId: string): void {
     this.byRun.delete(runId);
   }
-}
-
-/** Replace any exact secret value occurrence with a redaction marker. */
-export function redact(text: string, secrets: string[]): { text: string; redacted: boolean } {
-  let out = text;
-  let redacted = false;
-  for (const s of secrets) {
-    if (!s) continue;
-    // Also match the JSON-escaped form: callers redact a JSON.stringify'd blob,
-    // and a secret containing a quote/backslash appears there escaped (e.g. " →
-    // \"), so the raw substring would miss it.
-    const escaped = JSON.stringify(s).slice(1, -1);
-    for (const variant of escaped === s ? [s] : [s, escaped]) {
-      if (out.includes(variant)) {
-        out = out.split(variant).join("«redacted»");
-        redacted = true;
-      }
-    }
-  }
-  return { text: out, redacted };
 }

@@ -38,6 +38,9 @@
   `run.interrupted` audit events and best-effort active worker/provider abort.
 
 ### Changed
+- Agent secrets are now trusted-local env injection only: secrets no longer
+  require `workspaceIsolation`, and exact secret values emitted by agents are no
+  longer redacted from outputs, events, tolerated failures, or isolated diffs.
 - Attached CLI text transcripts now coalesce adjacent live agent text/reasoning
   chunks under one header for human-readable streaming output, while NDJSON
   event streams remain full-fidelity envelopes.

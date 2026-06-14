@@ -1,9 +1,9 @@
-// Commit 3: realm-host Phase 15 hardening — fail-closed isolation, durable diff,
-// streamed-event redaction, worktree + secret lifecycle cleanup.
+// Realm-host Phase 15 hardening: fail-closed explicit isolation, durable diffs,
+// trusted-local secret env injection, worktree cleanup, and secret lifecycle.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SecretStore } from "../../agents/secrets.ts";
@@ -43,7 +43,7 @@ const writerProvider: AgentProvider = {
   },
 };
 
-describe("fail-closed isolation", () => {
+describe("trusted-local agent isolation controls", () => {
   test("an agent requesting workspace isolation refuses to run when no workspaceRoot is configured", async () => {
     const store = JournalStore.memory();
     let called = false;
@@ -84,16 +84,16 @@ describe("fail-closed isolation", () => {
     expect(called).toBe(true);
   });
 
-  test("secrets with write capability require workspace isolation", async () => {
+  test("secrets with write capability run without workspace isolation and receive env", async () => {
     const store = JournalStore.memory();
     const secrets = new SecretStore();
     secrets.put("r", "TOKEN", "file-secret-abc");
-    let called = false;
+    let invocation: AgentInvocation | undefined;
     const provider: AgentProvider = {
       name: "writer",
-      async generate(): Promise<AgentResult> {
-        called = true;
-        return { text: "x", transcript: [] };
+      async generate(inv: AgentInvocation): Promise<AgentResult> {
+        invocation = inv;
+        return { text: `saw ${inv.env?.TOKEN}`, transcript: [] };
       },
     };
     const kernel = new RealmKernel(store, {
@@ -101,23 +101,24 @@ describe("fail-closed isolation", () => {
       agents: new AgentProviderRegistry().register(provider),
       secrets,
     });
-    await expect(kernel.run(writeSecretLooseUrl, null, { name: "ws" })).rejects.toThrow(
-      /secrets.*workspaceIsolation/,
-    );
-    expect(called).toBe(false);
-    expect(store.getRun("r")?.status).toBe("failed");
+    const handle = await kernel.run<string>(writeSecretLooseUrl, null, { name: "ws" });
+    expect(handle.status).toBe("finished");
+    expect(handle.output).toBe("saw file-secret-abc");
+    expect(invocation?.cwd).toBeUndefined();
+    expect(invocation?.capabilities?.fs).toBe("workspace-write");
+    expect(invocation?.env?.TOKEN).toBe("file-secret-abc");
   });
 
-  test("secrets with provider-native tool additions require workspace isolation", async () => {
+  test("secrets with provider-native tool additions run without workspace isolation and receive env", async () => {
     const store = JournalStore.memory();
     const secrets = new SecretStore();
-    secrets.put("r", "TOKEN", "file-secret-abc");
-    let called = false;
+    secrets.put("r", "TOKEN", "tool-secret-abc");
+    let invocation: AgentInvocation | undefined;
     const provider: AgentProvider = {
       name: "writer",
-      async generate(): Promise<AgentResult> {
-        called = true;
-        return { text: "x", transcript: [] };
+      async generate(inv: AgentInvocation): Promise<AgentResult> {
+        invocation = inv;
+        return { text: `tool saw ${inv.env?.TOKEN}`, transcript: [] };
       },
     };
     const kernel = new RealmKernel(store, {
@@ -125,11 +126,11 @@ describe("fail-closed isolation", () => {
       agents: new AgentProviderRegistry().register(provider),
       secrets,
     });
-    await expect(kernel.run(readPlusBashSecretUrl, null, { name: "ws" })).rejects.toThrow(
-      /secrets.*workspaceIsolation/,
-    );
-    expect(called).toBe(false);
-    expect(store.getRun("r")?.status).toBe("failed");
+    const handle = await kernel.run<string>(readPlusBashSecretUrl, null, { name: "ws" });
+    expect(handle.status).toBe("finished");
+    expect(handle.output).toBe("tool saw tool-secret-abc");
+    expect(invocation?.allowTools).toContain("bash");
+    expect(invocation?.env?.TOKEN).toBe("tool-secret-abc");
   });
 });
 
@@ -166,7 +167,7 @@ describe("durable diff + worktree cleanup", () => {
     expect(existsSync(join(repo, "added-by-agent.txt"))).toBe(false);
   });
 
-  test("a secret a write agent writes into a file is redacted in the durable diff", async () => {
+  test("a secret a write agent writes into a file is journaled in the durable diff", async () => {
     const store = JournalStore.memory();
     const secrets = new SecretStore();
     secrets.put("r", "TOKEN", "file-secret-abc");
@@ -190,7 +191,7 @@ describe("durable diff + worktree cleanup", () => {
     await kernel.run(writeSecretUrl, null, { name: "ws" });
     const diff = store.listEvents("r").find((e) => e.type === "agent.diff");
     expect(diff?.payloadJson).toContain("config.ini"); // the file is in the diff
-    expect(diff?.payloadJson).not.toContain("file-secret-abc"); // but its value is redacted
+    expect(diff?.payloadJson).toContain("file-secret-abc"); // exact values are not redacted
   });
 
   test("the worktree is removed even when the agent fails", async () => {
@@ -214,7 +215,7 @@ describe("durable diff + worktree cleanup", () => {
 });
 
 describe("secret lifecycle", () => {
-  test("a secret streamed in an agent.event is redacted, and secrets are wiped on terminal", async () => {
+  test("a secret streamed in an agent.event is emitted without redaction, and secrets are wiped on terminal", async () => {
     const store = JournalStore.memory();
     const secrets = new SecretStore();
     secrets.put("r", "TOKEN", "leaky-secret-xyz");
@@ -222,7 +223,7 @@ describe("secret lifecycle", () => {
     const streamer: AgentProvider = {
       name: "streamer",
       async generate(inv: AgentInvocation, hooks: AgentHooks): Promise<AgentResult> {
-        // stream the secret BEFORE returning (the dangerous case)
+        // stream the secret before returning; trusted-local mode records it as-is.
         hooks.onEvent?.({ type: "text", data: `thinking about ${inv.env?.TOKEN}` });
         return { text: "all done", transcript: [] };
       },
@@ -236,16 +237,14 @@ describe("secret lifecycle", () => {
     const handle = await kernel.run<string>(streamUrl, null, { name: "s" });
     expect(handle.status).toBe("finished");
 
-    // the secret value appears nowhere in the journal (events included)
-    const all = JSON.stringify(store.listEvents("r")) + JSON.stringify(store.listJournalRows("r"));
-    expect(all).not.toContain("leaky-secret-xyz");
-    expect(JSON.stringify(liveFrames)).toContain("«redacted»");
-    expect(JSON.stringify(liveFrames)).not.toContain("leaky-secret-xyz");
+    expect(JSON.stringify(liveFrames)).toContain("leaky-secret-xyz");
+    expect(JSON.stringify(liveFrames)).not.toContain("«redacted»");
+    expect(store.listEvents("r").some((e) => e.type === "agent.redacted")).toBe(false);
     // secrets wiped on run completion (per-run lifetime)
-    expect(secrets.values("r")).toEqual([]);
+    expect(secrets.resolve("r", ["TOKEN"])).toEqual([]);
   });
 
-  test("secret values in finalized transcript rows are redacted before persistence", async () => {
+  test("secret values in finalized agent event rows are persisted without redaction", async () => {
     const store = JournalStore.memory();
     const secrets = new SecretStore();
     secrets.put("r", "TOKEN", "persisted-secret-xyz");
@@ -270,12 +269,13 @@ describe("secret lifecycle", () => {
     const handle = await kernel.run<string>(streamUrl, null, { name: "s" });
     expect(handle.status).toBe("finished");
 
-    const agentEvents = store
-      .listEvents("r")
-      .filter((event) => event.type.startsWith("agent."))
-      .map((event) => JSON.parse(event.payloadJson));
-    const serialized = JSON.stringify(agentEvents);
-    expect(serialized).toContain("«redacted»");
-    expect(serialized).not.toContain("persisted-secret-xyz");
+    const agentEvents = store.listEvents("r").filter((event) => event.type.startsWith("agent."));
+    const eventTypes = agentEvents.map((event) => event.type);
+    expect(eventTypes).toContain("agent.tool_call");
+    expect(eventTypes).toContain("agent.tool_result");
+    expect(eventTypes).toContain("agent.message");
+    const serialized = JSON.stringify(agentEvents.map((event) => JSON.parse(event.payloadJson)));
+    expect(serialized).toContain("persisted-secret-xyz");
+    expect(serialized).not.toContain("«redacted»");
   });
 });

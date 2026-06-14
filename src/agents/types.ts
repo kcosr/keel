@@ -43,7 +43,7 @@ export interface AgentInvocation {
   capabilities?: Capabilities;
   /** Working directory (an isolated worktree when workspaceIsolation is enabled). */
   cwd?: string;
-  /** Sealed secret env injected at invocation (§11.2), wiped after. */
+  /** Secret env injected at invocation (§11.2), wiped from the side channel after terminal cleanup. */
   env?: Record<string, string>;
   /** Fires when the kernel abandons a stalled attempt — kill the subprocess. */
   abortSignal?: AbortSignal;

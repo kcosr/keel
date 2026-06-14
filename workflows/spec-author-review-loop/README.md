@@ -52,7 +52,8 @@ No round label is required; the timestamp and identity preserve history.
 - `ctx.agentSession` does not support `workspaceIsolation: true` yet, so this
   workflow edits the target spec directly.
 - Keep `maxRounds` small. The workflow caps it at `10`.
-- Do not pass secrets to this workflow.
+- This workflow does not request Keel secret refs. Do not put raw secret values in
+  prompts or input; agent outputs are journaled as-is.
 
 ## Input
 

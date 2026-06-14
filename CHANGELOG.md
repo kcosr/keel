@@ -33,6 +33,9 @@
   run capabilities, admin capabilities, and client-side capability files.
 
 ### Changed
+- Attached CLI text transcripts now coalesce adjacent live agent text/reasoning
+  chunks under one header for human-readable streaming output, while NDJSON
+  event streams remain full-fidelity envelopes.
 - `keel watch` no longer uses durable per-token `agent.event` rows as its live
   stream. Agent deltas are pushed as ephemeral live frames, finalized tool
   calls/results are persisted immediately as `agent.tool_call`/`agent.tool_result`

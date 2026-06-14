@@ -12,10 +12,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MockProvider } from "../agents/mock.ts";
 import { AgentProviderRegistry } from "../agents/types.ts";
+import type { DaemonClient } from "../daemon/client.ts";
 import { KeelDaemon } from "../daemon/server.ts";
 import {
   formatRunHeader,
-  formatWatchEvent,
   parseExecuteArgs,
   parseLaunchArgs,
   parseLaunchInput,
@@ -24,6 +24,7 @@ import {
   parseRunArgs,
   parseWatchArgs,
   resolveWorkflowPath,
+  watchRun,
   workflowName,
 } from "./keel.ts";
 
@@ -121,96 +122,6 @@ describe("keel CLI", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  });
-
-  test("watch formatter renders agent event payloads", () => {
-    expect(
-      formatWatchEvent({
-        kind: "durable",
-        seq: 234,
-        type: "agent.event",
-        payload: { key: "run-date", event: { type: "text", data: "RESULT 50\n" } },
-        atMs: 123,
-      }),
-    ).toBe("[234] agent run-date text: RESULT 50\\n\n");
-  });
-
-  test("watch formatter supports NDJSON event lines", () => {
-    const event = {
-      kind: "durable" as const,
-      seq: 235,
-      type: "agent.event",
-      payload: { key: "run-date", event: { type: "tool_call", data: { command: "date" } } },
-      atMs: 456,
-    };
-    expect(formatWatchEvent(event, { output: "ndjson" })).toBe(`${JSON.stringify(event)}\n`);
-  });
-
-  test("watch formatter hides tool events in text mode unless requested", () => {
-    const call = {
-      kind: "durable" as const,
-      seq: 239,
-      type: "agent.tool_call",
-      payload: { key: "review", data: { name: "Read", args: { file: "a.ts" } } },
-      atMs: 456,
-    };
-    const result = {
-      kind: "durable" as const,
-      seq: 240,
-      type: "agent.tool_result",
-      payload: { key: "review", data: { output: "ok" } },
-      atMs: 457,
-    };
-    const liveTool = {
-      kind: "ephemeral" as const,
-      type: "agent.event",
-      payload: { key: "review", event: { type: "tool_call", data: { name: "Read" } } },
-      atMs: 458,
-    };
-
-    expect(formatWatchEvent(call)).toBe("");
-    expect(formatWatchEvent(result)).toBe("");
-    expect(formatWatchEvent(liveTool)).toBe("");
-    expect(formatWatchEvent(call, { tools: true })).toContain("agent review tool_call");
-    expect(formatWatchEvent(result, { tools: true })).toContain("agent review tool_result");
-    expect(formatWatchEvent(liveTool, { tools: true })).toContain("agent review tool_call");
-    expect(formatWatchEvent(call, { output: "ndjson" })).toBe(`${JSON.stringify(call)}\n`);
-  });
-
-  test("watch formatter keeps unexpected agent event payloads visible", () => {
-    expect(
-      formatWatchEvent({
-        kind: "durable",
-        seq: 236,
-        type: "agent.event",
-        payload: { provider: "future", detail: "new shape" },
-        atMs: 789,
-      }),
-    ).toBe('[236] agent: {"provider":"future","detail":"new shape"}\n');
-  });
-
-  test("watch formatter redacts capability-looking strings", () => {
-    const event = {
-      kind: "durable" as const,
-      seq: 238,
-      type: "log",
-      payload: { message: "cap kc_run_secretValue and kc_admin_secretValue" },
-      atMs: 891,
-    };
-    expect(formatWatchEvent(event)).toContain("«redacted-capability»");
-    expect(formatWatchEvent(event, { output: "ndjson" })).not.toContain("kc_run_secretValue");
-  });
-
-  test("watch formatter tolerates missing agent event payloads", () => {
-    expect(
-      formatWatchEvent({
-        kind: "durable",
-        seq: 237,
-        type: "agent.event",
-        payload: undefined,
-        atMs: 890,
-      }),
-    ).toBe("[237] agent: undefined\n");
   });
 
   test("watch args default to ndjson and parse --output", () => {
@@ -349,6 +260,55 @@ describe("keel CLI", () => {
 
   test("attached lifecycle commands print the run id before streaming events", () => {
     expect(formatRunHeader("run_123")).toBe("run run_123\n");
+  });
+
+  test("watchRun flushes partial text streams before terminal events", async () => {
+    const client = fakeWatchClient(({ onEvent, onCaughtUp }) => {
+      onEvent({
+        kind: "ephemeral",
+        type: "agent.event",
+        payload: { key: "review", event: { type: "text", data: "partial" } },
+        atMs: 1,
+      });
+      onEvent({ kind: "durable", seq: 2, type: "run.finished", payload: {}, atMs: 2 });
+      onCaughtUp?.();
+    });
+
+    const captured = await captureProcessWrites(() =>
+      watchRun(client, "run_terminal_flush", { output: "text" }),
+    );
+
+    expect(captured.result).toBe("finished");
+    expect(captured.writes).toEqual([
+      { stream: "stdout", text: "[live] agent review text: " },
+      { stream: "stdout", text: "partial" },
+      { stream: "stdout", text: "\n" },
+      { stream: "stdout", text: "[2] run.finished\n" },
+    ]);
+  });
+
+  test("watchRun flushes partial text streams before subscription errors", async () => {
+    const client = fakeWatchClient(({ onEvent, onError }) => {
+      onEvent({
+        kind: "ephemeral",
+        type: "agent.event",
+        payload: { key: "review", event: { type: "text", data: "partial" } },
+        atMs: 1,
+      });
+      onError?.(new Error("subscribe failed"));
+    });
+
+    const captured = await captureProcessWrites(() =>
+      watchRun(client, "run_error_flush", { output: "text" }),
+    );
+
+    expect(captured.result).toBe("failed");
+    expect(captured.writes).toEqual([
+      { stream: "stdout", text: "[live] agent review text: " },
+      { stream: "stdout", text: "partial" },
+      { stream: "stdout", text: "\n" },
+      { stream: "stderr", text: "subscribe failed\n" },
+    ]);
   });
 
   test("launch input defaults to an object and rejects empty --input values", () => {
@@ -1052,6 +1012,53 @@ describe("keel CLI", () => {
     }
   });
 });
+
+type FakeWatchSubscription = {
+  onEvent: Parameters<DaemonClient["subscribeEvents"]>[2];
+  onError: Parameters<DaemonClient["subscribeEvents"]>[3];
+  onCaughtUp: Parameters<DaemonClient["subscribeEvents"]>[4];
+};
+
+function fakeWatchClient(run: (subscription: FakeWatchSubscription) => void): DaemonClient {
+  return {
+    subscribeEvents(
+      _runId: string,
+      _afterSeq: number,
+      onEvent: FakeWatchSubscription["onEvent"],
+      onError?: FakeWatchSubscription["onError"],
+      onCaughtUp?: FakeWatchSubscription["onCaughtUp"],
+    ) {
+      queueMicrotask(() => run({ onEvent, onError, onCaughtUp }));
+      return () => {};
+    },
+  } as DaemonClient;
+}
+
+async function captureProcessWrites<T>(
+  fn: () => Promise<T>,
+): Promise<{ result: T; writes: Array<{ stream: "stdout" | "stderr"; text: string }> }> {
+  const writes: Array<{ stream: "stdout" | "stderr"; text: string }> = [];
+  const originalStdoutWrite = process.stdout.write;
+  const originalStderrWrite = process.stderr.write;
+  const decoder = new TextDecoder();
+  const text = (chunk: string | Uint8Array): string =>
+    typeof chunk === "string" ? chunk : decoder.decode(chunk);
+  process.stdout.write = ((chunk: string | Uint8Array) => {
+    writes.push({ stream: "stdout", text: text(chunk) });
+    return true;
+  }) as typeof process.stdout.write;
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    writes.push({ stream: "stderr", text: text(chunk) });
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    const result = await fn();
+    return { result, writes };
+  } finally {
+    process.stdout.write = originalStdoutWrite;
+    process.stderr.write = originalStderrWrite;
+  }
+}
 
 function writeControlScript(path: string, workflowUrl: string): void {
   writeFileSync(

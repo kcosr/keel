@@ -31,6 +31,8 @@ export interface RunProjection {
   status: RunStatus;
   definitionVersion: string;
   parentRunId: string | null;
+  createdAtMs: number;
+  finishedAtMs: number | null;
   nodes: NodeView[];
   /** The current phase (last ctx.phase narration), if any. */
   phase: string | null;
@@ -48,6 +50,8 @@ export interface RunReport {
   runId: string;
   workflowName: string | null;
   status: RunStatus;
+  createdAtMs: number;
+  finishedAtMs: number | null;
   output?: unknown;
   outputOmitted?: true;
   outputByteLength?: number;
@@ -105,6 +109,8 @@ export function buildProjection(store: JournalStore, runId: string): RunProjecti
     status: run.status,
     definitionVersion: run.definitionVersion,
     parentRunId: run.parentRunId,
+    createdAtMs: run.createdAtMs,
+    finishedAtMs: run.finishedAtMs,
     nodes,
     phase,
     error: run.errorJson ? (JSON.parse(run.errorJson) as { name: string; message: string }) : null,
@@ -151,6 +157,8 @@ export function buildRunReport(store: JournalStore, runId: string): RunReport | 
     runId: run.runId,
     workflowName: run.workflowName,
     status: run.status,
+    createdAtMs: run.createdAtMs,
+    finishedAtMs: run.finishedAtMs,
     ...(output.kind === "inline" ? { output: JSON.parse(output.json) } : {}),
     ...(output.kind === "omitted"
       ? { outputOmitted: true as const, outputByteLength: output.byteLength }

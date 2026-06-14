@@ -15,11 +15,13 @@ import { AgentProviderRegistry } from "../agents/types.ts";
 import type { DaemonClient } from "../daemon/client.ts";
 import { KeelDaemon } from "../daemon/server.ts";
 import {
+  formatListRuns,
   formatRunHeader,
   parseExecuteArgs,
   parseLaunchArgs,
   parseLaunchInput,
   parseLifecycleArgs,
+  parseListArgs,
   parseOutputFormat,
   parseRunArgs,
   parseWatchArgs,
@@ -79,6 +81,7 @@ describe("keel CLI", () => {
       const out = await runCli(["help"], dir);
       expect(out.code).toBe(0);
       expect(out.stdout).toContain("Usage: keel <command>");
+      expect(out.stdout).toContain("list [--output text|json]");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -122,6 +125,50 @@ describe("keel CLI", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  test("list args default to text and reject unsupported output modes", () => {
+    expect(parseListArgs([])).toEqual({ output: "text" });
+    expect(parseListArgs(["--output", "text"])).toEqual({ output: "text" });
+    expect(parseListArgs(["--output", "json"])).toEqual({ output: "json" });
+    expect(() => parseListArgs(["--output", "ndjson"])).toThrow(
+      "--output ndjson is not available for list",
+    );
+    expect(() => parseListArgs(["--output", "xml"])).toThrow("invalid --output xml for list");
+    expect(() => parseListArgs(["run_123"])).toThrow("unexpected argument run_123 for list");
+  });
+
+  test("list formatter renders deterministic UTC timestamps and durations", () => {
+    expect(
+      formatListRuns(
+        [
+          {
+            runId: "run_older",
+            status: "finished",
+            workflowName: "chain",
+            createdAtMs: Date.UTC(2026, 5, 14, 1, 2, 3, 4),
+            finishedAtMs: Date.UTC(2026, 5, 14, 1, 14, 3, 4),
+            parentRunId: null,
+          },
+          {
+            runId: "run_active",
+            status: "waiting-signal",
+            workflowName: "very long workflow name that is truncated for humans only",
+            createdAtMs: Date.UTC(2026, 5, 14, 2, 0, 0, 0),
+            finishedAtMs: null,
+            parentRunId: "run_older",
+          },
+        ],
+        Date.UTC(2026, 5, 14, 2, 0, 5, 0),
+      ),
+    ).toBe(
+      [
+        "RUN ID      STATUS          WORKFLOW                                  CREATED                   DURATION",
+        "run_older   finished        chain                                     2026-06-14T01:02:03.004Z  12m",
+        "run_active  waiting-signal  very long workflow name that is truncat…  2026-06-14T02:00:00.000Z  5s",
+        "",
+      ].join("\n"),
+    );
   });
 
   test("watch args default to ndjson and parse --output", () => {
@@ -737,6 +784,107 @@ describe("keel CLI", () => {
   );
 
   test(
+    "list renders a table by default and JSON envelope on request",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "keel-list-output-"));
+      const socketPath = join(dir, "keel.sock");
+      const dbPath = join(dir, "keel.db");
+      const daemon = new KeelDaemon({
+        socketPath,
+        dbPath,
+        agents: new AgentProviderRegistry().register(new MockProvider()),
+        adminToken: "kc_admin_list_test",
+      });
+      await daemon.start();
+      try {
+        const env = {
+          KEEL_SOCKET: socketPath,
+          KEEL_DB: dbPath,
+          KEEL_DIR: dir,
+          KEEL_ADMIN_TOKEN: "kc_admin_list_test",
+        };
+
+        const emptyText = await runCli(["list"], dir, env);
+        expect(emptyText.code).toBe(0);
+        expect(emptyText.stdout).toBe("RUN ID  STATUS  WORKFLOW  CREATED  DURATION\n");
+
+        const emptyJson = await runCli(["list", "--output", "json"], dir, env);
+        expect(emptyJson.code).toBe(0);
+        expect(JSON.parse(emptyJson.stdout)).toEqual({ runs: [] });
+
+        const first = await runCli(
+          ["run", "--name", "older", chainUrl, "--input", '{"n":1}'],
+          dir,
+          env,
+        );
+        expect(first.code).toBe(0);
+        const firstRun = JSON.parse(first.stdout) as { runId: string };
+
+        const second = await runCli(
+          ["run", "--name", "newer", chainUrl, "--input", '{"n":2}'],
+          dir,
+          env,
+        );
+        expect(second.code).toBe(0);
+        const secondRun = JSON.parse(second.stdout) as { runId: string };
+
+        const listedJson = await runCli(["list", "--output", "json"], dir, env);
+        expect(listedJson.code).toBe(0);
+        const payload = JSON.parse(listedJson.stdout) as {
+          runs: Array<{
+            runId: string;
+            status: string;
+            workflowName: string | null;
+            createdAtMs: number;
+            finishedAtMs: number | null;
+            parentRunId: string | null;
+          }>;
+        };
+        expect(payload.runs.map((run) => run.runId)).toEqual([firstRun.runId, secondRun.runId]);
+        expect(Object.keys(payload.runs[0] ?? {}).sort()).toEqual([
+          "createdAtMs",
+          "finishedAtMs",
+          "parentRunId",
+          "runId",
+          "status",
+          "workflowName",
+        ]);
+        expect(payload.runs[0]).toMatchObject({
+          runId: firstRun.runId,
+          status: "finished",
+          workflowName: "older",
+          parentRunId: null,
+        });
+        expect(typeof payload.runs[0]?.createdAtMs).toBe("number");
+        expect(typeof payload.runs[0]?.finishedAtMs).toBe("number");
+
+        const listedText = await runCli(["list"], dir, env);
+        expect(listedText.code).toBe(0);
+        const lines = listedText.stdout.trimEnd().split("\n");
+        expect(lines[0]).toContain("RUN ID");
+        expect(lines[0]).toContain("STATUS");
+        expect(lines[0]).toContain("WORKFLOW");
+        expect(lines[0]).toContain("CREATED");
+        expect(lines[0]).toContain("DURATION");
+        expect(lines[1]).toMatch(
+          new RegExp(
+            `^${escapeRegExp(firstRun.runId)}\\s{2,}finished\\s{2,}older\\s{2,}\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z\\s{2,}\\d+(?:ms|s|m|h|d)$`,
+          ),
+        );
+        expect(lines[2]).toMatch(
+          new RegExp(
+            `^${escapeRegExp(secondRun.runId)}\\s{2,}finished\\s{2,}newer\\s{2,}\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z\\s{2,}\\d+(?:ms|s|m|h|d)$`,
+          ),
+        );
+      } finally {
+        daemon.stop();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    DAEMON_TEST_TIMEOUT_MS,
+  );
+
+  test(
     "gc runs as an admin daemon operation",
     async () => {
       const dir = mkdtempSync(join(tmpdir(), "keel-gc-"));
@@ -972,6 +1120,14 @@ describe("keel CLI", () => {
     const dir = mkdtempSync(join(tmpdir(), "keel-output-combos-"));
     try {
       const env = { KEEL_SOCKET: join(dir, "missing.sock") };
+      const listNdjson = await runCli(["list", "--output", "ndjson"], dir, env);
+      expect(listNdjson.code).toBe(1);
+      expect(listNdjson.stderr).toContain("--output ndjson is not available for list");
+
+      const listInvalid = await runCli(["list", "--output", "xml"], dir, env);
+      expect(listInvalid.code).toBe(1);
+      expect(listInvalid.stderr).toContain("invalid --output xml for list");
+
       const watch = await runCli(["watch", "run_123", "--output", "json"], dir, env);
       expect(watch.code).toBe(1);
       expect(watch.stderr).toContain("--output json is not available for watch");
@@ -1058,6 +1214,10 @@ async function captureProcessWrites<T>(
     process.stdout.write = originalStdoutWrite;
     process.stderr.write = originalStderrWrite;
   }
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function writeControlScript(path: string, workflowUrl: string): void {

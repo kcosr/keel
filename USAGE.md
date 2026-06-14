@@ -269,7 +269,8 @@ wait metadata when available. `--output ndjson` is invalid for `report`.
 ### List Output
 
 `keel list` defaults to `--output text` and prints an aligned, human-oriented
-UTC table in `createdAtMs` ascending order (oldest first):
+UTC table in `createdAtMs` descending order (newest first, with `runId`
+descending as the tiebreaker):
 
 ```text
 RUN ID     STATUS    WORKFLOW  CREATED                   DURATION

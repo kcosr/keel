@@ -178,7 +178,7 @@ describe("RPC contract drives a workflow end-to-end", () => {
   );
 
   test(
-    "listRuns returns a bare array with run summary metadata in created order",
+    "listRuns returns a bare array with run summary metadata in newest-first order",
     async () => {
       const store = JournalStore.memory();
       let id = 0;
@@ -202,13 +202,13 @@ describe("RPC contract drives a workflow end-to-end", () => {
       expect(Array.isArray(runs)).toBe(true);
       expect(runs).toEqual([
         {
-          runId: "run_0",
+          runId: "run_0_fork",
           workflowName: "c1",
-          status: "finished",
+          status: "running",
           runTarget: process.cwd(),
-          createdAtMs: 1_000,
-          finishedAtMs: 1_000,
-          parentRunId: null,
+          createdAtMs: 3_000,
+          finishedAtMs: null,
+          parentRunId: "run_0",
         },
         {
           runId: "run_1",
@@ -220,13 +220,13 @@ describe("RPC contract drives a workflow end-to-end", () => {
           parentRunId: null,
         },
         {
-          runId: "run_0_fork",
+          runId: "run_0",
           workflowName: "c1",
-          status: "running",
+          status: "finished",
           runTarget: process.cwd(),
-          createdAtMs: 3_000,
-          finishedAtMs: null,
-          parentRunId: "run_0",
+          createdAtMs: 1_000,
+          finishedAtMs: 1_000,
+          parentRunId: null,
         },
       ]);
     },

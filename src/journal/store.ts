@@ -207,7 +207,7 @@ export class JournalStore {
 
   listRuns(): RunRow[] {
     return this.db
-      .query<RawRunRow, []>("SELECT * FROM runs ORDER BY created_at_ms ASC")
+      .query<RawRunRow, []>("SELECT * FROM runs ORDER BY created_at_ms DESC, run_id DESC")
       .all()
       .map(mapRun);
   }

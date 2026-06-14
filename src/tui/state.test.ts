@@ -113,6 +113,25 @@ describe("tui state", () => {
     expect(state.watch.lines).toEqual([]);
   });
 
+  test("retains newest watch lines when the display history is bounded", () => {
+    let state = createTuiState({ runId: "run_a", maxWatchLines: 3 });
+    state = startWatchState(state, "run_a");
+    for (let seq = 1; seq <= 5; seq += 1) {
+      state = appendWatchLines(
+        state,
+        { kind: "durable", seq, type: "phase", payload: { title: `event ${seq}` }, atMs: seq },
+        [`[${seq}] phase: event ${seq}`],
+      );
+    }
+
+    expect(state.watch.lines.map((line) => line.text)).toEqual([
+      "[3] phase: event 3",
+      "[4] phase: event 4",
+      "[5] phase: event 5",
+    ]);
+    expect(lastSeqForRun(state, "run_a")).toBe(5);
+  });
+
   test("applies stream continuations to the active watch display row", () => {
     let state = createTuiState({ runId: "run_a" });
     state = startWatchState(state, "run_a");

@@ -56,8 +56,42 @@ export interface TuiInputResult {
   commands: TuiCommand[];
 }
 
+export interface TuiKeyParseState {
+  pending: string;
+}
+
+export interface TuiKeyParseResult {
+  keys: TuiKey[];
+  state: TuiKeyParseState;
+}
+
 export function parseTuiKeys(input: string | Uint8Array): TuiKey[] {
-  const text = typeof input === "string" ? input : Buffer.from(input).toString("utf8");
+  return parseTuiKeyText(inputText(input), false).keys;
+}
+
+export function parseTuiKeyChunk(
+  input: string | Uint8Array,
+  state: TuiKeyParseState = { pending: "" },
+): TuiKeyParseResult {
+  const chunk = inputText(input);
+  if (
+    state.pending === "\u001b" &&
+    chunk[0] !== undefined &&
+    !isEscapeContinuationStarter(chunk[0])
+  ) {
+    const parsed = parseTuiKeyText(chunk, true);
+    return { keys: [{ type: "escape" }, ...parsed.keys], state: parsed.state };
+  }
+  const text = `${state.pending}${chunk}`;
+  const parsed = parseTuiKeyText(text, true);
+  return { keys: parsed.keys, state: { pending: parsed.state.pending } };
+}
+
+function inputText(input: string | Uint8Array): string {
+  return typeof input === "string" ? input : Buffer.from(input).toString("utf8");
+}
+
+function parseTuiKeyText(text: string, keepTrailingIncomplete: boolean): TuiKeyParseResult {
   const keys: TuiKey[] = [];
   for (let i = 0; i < text.length; i += 1) {
     const ch = text[i];
@@ -68,21 +102,114 @@ export function parseTuiKeys(input: string | Uint8Array): TuiKey[] {
     } else if (ch === "\u007f" || ch === "\b") {
       keys.push({ type: "backspace" });
     } else if (ch === "\u001b") {
-      const seq = text.slice(i, i + 3);
-      if (seq === "\u001b[A") {
-        keys.push({ type: "arrow-up" });
-        i += 2;
-      } else if (seq === "\u001b[B") {
-        keys.push({ type: "arrow-down" });
-        i += 2;
-      } else {
-        keys.push({ type: "escape" });
+      const parsed = parseEscapeSequence(text, i, keepTrailingIncomplete);
+      if (parsed.pendingFrom !== undefined) {
+        return { keys, state: { pending: text.slice(parsed.pendingFrom) } };
       }
+      keys.push(...parsed.keys);
+      i = parsed.nextIndex;
     } else if (ch && ch >= " ") {
       keys.push({ type: "char", value: ch });
     }
   }
-  return keys;
+  return { keys, state: { pending: "" } };
+}
+
+type EscapeParse =
+  | { keys: TuiKey[]; nextIndex: number; pendingFrom?: never }
+  | { keys: []; pendingFrom: number; nextIndex?: never };
+
+function parseEscapeSequence(
+  text: string,
+  index: number,
+  keepTrailingIncomplete: boolean,
+): EscapeParse {
+  const next = text[index + 1];
+  if (next === undefined) {
+    return keepTrailingIncomplete
+      ? { keys: [], pendingFrom: index }
+      : { keys: [{ type: "escape" }], nextIndex: index };
+  }
+  if (next === "[") return parseCsiSequence(text, index, keepTrailingIncomplete);
+  if (next === "O") return parseSs3Sequence(text, index, keepTrailingIncomplete);
+  if (isStringControlStarter(next)) {
+    const consumed = consumeStringControl(text, index);
+    if (!consumed.complete && keepTrailingIncomplete) return { keys: [], pendingFrom: index };
+    return { keys: [], nextIndex: consumed.nextIndex };
+  }
+  if (next >= " ") return { keys: [], nextIndex: index + 1 };
+  return { keys: [{ type: "escape" }], nextIndex: index };
+}
+
+function parseCsiSequence(
+  text: string,
+  index: number,
+  keepTrailingIncomplete: boolean,
+): EscapeParse {
+  const finalIndex = findCsiFinal(text, index + 2);
+  if (finalIndex === CSI_INCOMPLETE) {
+    return keepTrailingIncomplete
+      ? { keys: [], pendingFrom: index }
+      : { keys: [], nextIndex: text.length - 1 };
+  }
+  if (finalIndex < CSI_INCOMPLETE)
+    return { keys: [], nextIndex: interruptedCsiNextIndex(finalIndex) };
+  const seq = text.slice(index, finalIndex + 1);
+  if (seq === "\u001b[A") return { keys: [{ type: "arrow-up" }], nextIndex: finalIndex };
+  if (seq === "\u001b[B") return { keys: [{ type: "arrow-down" }], nextIndex: finalIndex };
+  return { keys: [], nextIndex: finalIndex };
+}
+
+function parseSs3Sequence(
+  text: string,
+  index: number,
+  keepTrailingIncomplete: boolean,
+): EscapeParse {
+  const final = text[index + 2];
+  if (final === undefined) {
+    return keepTrailingIncomplete
+      ? { keys: [], pendingFrom: index }
+      : { keys: [], nextIndex: text.length - 1 };
+  }
+  if (final === "A") return { keys: [{ type: "arrow-up" }], nextIndex: index + 2 };
+  if (final === "B") return { keys: [{ type: "arrow-down" }], nextIndex: index + 2 };
+  return { keys: [], nextIndex: index + 2 };
+}
+
+const CSI_INCOMPLETE = -1;
+
+function interruptedCsiNextIndex(finalIndex: number): number {
+  return -finalIndex - 2;
+}
+
+function findCsiFinal(text: string, start: number): number {
+  for (let i = start; i < text.length; i += 1) {
+    const code = text.charCodeAt(i);
+    if (code >= 0x40 && code <= 0x7e) return i;
+    if (code < 0x20) return -(i + 1);
+  }
+  return CSI_INCOMPLETE;
+}
+
+function isEscapeContinuationStarter(ch: string): boolean {
+  return ch === "[" || ch === "O" || isStringControlStarter(ch);
+}
+
+function isStringControlStarter(ch: string): boolean {
+  return ch === "]" || ch === "P" || ch === "_" || ch === "^";
+}
+
+function consumeStringControl(
+  text: string,
+  index: number,
+): { complete: boolean; nextIndex: number } {
+  for (let i = index + 2; i < text.length; i += 1) {
+    if (text[i] === "\u0007") return { complete: true, nextIndex: i };
+    if (text[i] === "\u001b" && text[i + 1] === "\\") {
+      return { complete: true, nextIndex: i + 1 };
+    }
+  }
+  return { complete: false, nextIndex: text.length - 1 };
 }
 
 export function reduceTuiKey(state: TuiState, key: TuiKey): TuiInputResult {

@@ -19,7 +19,7 @@ export function renderTuiLines(state: TuiState, dims: TuiDimensions): string[] {
   const body =
     state.view === "browser"
       ? renderBrowserBody(state, dims.width, bodyHeight)
-      : renderDetailBody(state, dims.width);
+      : renderDetailBody(state, dims.width, bodyHeight);
   const status = renderStatusLine(state, dims.width);
   const help = state.view === "browser" ? browserHelp() : detailHelp(state);
   return fitLines([...body], bodyHeight, dims.width).concat([
@@ -61,7 +61,31 @@ function visibleBrowserStart(selectedIndex: number, rowCount: number, maxRows: n
   return Math.min(Math.max(0, selectedIndex - maxRows + 1), rowCount - maxRows);
 }
 
-function renderDetailBody(state: TuiState, width: number): string[] {
+function detailViewportLines(
+  detailLines: readonly string[],
+  watchLines: readonly string[],
+  bodyHeight: number,
+): string[] {
+  if (bodyHeight <= 0) return [];
+  const fullBody = [...detailLines, ...watchLines];
+  if (fullBody.length <= bodyHeight) return fullBody;
+  const visibleWatchLines = tailWatchLines(watchLines, bodyHeight);
+  const detailBudget = Math.max(0, bodyHeight - visibleWatchLines.length);
+  return [...detailLines.slice(0, detailBudget), ...visibleWatchLines];
+}
+
+function tailWatchLines(watchLines: readonly string[], bodyHeight: number): string[] {
+  if (bodyHeight <= 0) return [];
+  if (watchLines.length <= bodyHeight) return [...watchLines];
+  if (bodyHeight === 1) return [watchLines.at(-1) ?? ""];
+  const [header, eventsHeader, ...eventLines] = watchLines;
+  if (bodyHeight === 2 || eventsHeader === undefined) {
+    return [header ?? "", watchLines.at(-1) ?? ""];
+  }
+  return [header ?? "", eventsHeader, ...eventLines.slice(-(bodyHeight - 2))];
+}
+
+function renderDetailBody(state: TuiState, width: number, bodyHeight: number): string[] {
   const detail = state.detail;
   const projection = detail.projection;
   const report = detail.report;
@@ -95,9 +119,8 @@ function renderDetailBody(state: TuiState, width: number): string[] {
       for (const line of detail.outputText.split("\n").slice(0, 6)) lines.push(`  ${line}`);
     }
   }
-  lines.push(formatWatchHeader(state));
-  lines.push(...renderWatchLines(state.watch.lines, width));
-  return lines;
+  const watchLines = detailWatchLines(state, width);
+  return detailViewportLines(lines, watchLines, bodyHeight);
 }
 
 function formatBrowserHeader(width: number): string {
@@ -156,6 +179,11 @@ function formatDetailHeader(
       ? "duration ?"
       : `duration ${formatDuration(createdAtMs, finishedAtMs ?? nowMs)}`;
   return `run ${id}  ${status}  ${workflow}  ${created}  ${duration}`;
+}
+
+function detailWatchLines(state: TuiState, width: number): string[] {
+  if (!state.watch.attached && state.watch.lines.length === 0) return [];
+  return [formatWatchHeader(state), ...renderWatchLines(state.watch.lines, width)];
 }
 
 function formatWatchHeader(state: TuiState): string {

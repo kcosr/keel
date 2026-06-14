@@ -3,7 +3,13 @@ import type { DaemonClient } from "../daemon/client.ts";
 import type { EventEnvelope, RunOutcome, RunStart } from "../rpc/contract.ts";
 import type { Blockage, RunProjection, RunReport, RunSummary } from "../rpc/projection.ts";
 import { createTuiWatchFormatter } from "./events.ts";
-import { type TuiCommand, parseTuiKeys, reduceTuiKey } from "./input.ts";
+import {
+  type TuiCommand,
+  type TuiKey,
+  type TuiKeyParseState,
+  parseTuiKeyChunk,
+  reduceTuiKey,
+} from "./input.ts";
 import {
   type TuiState,
   appendWatchLines,
@@ -61,6 +67,10 @@ export interface RunTuiOptions extends TerminalIo {
   knownAdmin?: boolean;
 }
 
+// Match common terminal escape-timeout behavior closely enough to reassemble
+// split arrow/CSI reads without making a literal Escape key feel stuck.
+const LONE_ESCAPE_FLUSH_MS = 100;
+
 export async function runTui(options: RunTuiOptions): Promise<number> {
   assertInteractiveTerminal(options);
   const client = await options.clientFactory();
@@ -78,15 +88,23 @@ export async function runTui(options: RunTuiOptions): Promise<number> {
       let closed = false;
       let commandQueue = Promise.resolve();
       let interval: ReturnType<typeof setInterval> | null = null;
+      let keyParseState: TuiKeyParseState = { pending: "" };
+      let loneEscapeTimer: ReturnType<typeof setTimeout> | null = null;
 
       const render = () => {
         if (closed) return;
         options.stdout.write(renderAnsiFrame(state, terminalDimensions(options.stdout)));
       };
+      const clearLoneEscapeTimer = () => {
+        if (!loneEscapeTimer) return;
+        clearTimeout(loneEscapeTimer);
+        loneEscapeTimer = null;
+      };
       const close = () => {
         if (closed) return;
         closed = true;
         if (interval) clearInterval(interval);
+        clearLoneEscapeTimer();
         options.stdin.off?.("data", onData);
         cleanupGuards();
         if (unsubscribeWatch) {
@@ -109,18 +127,39 @@ export async function runTui(options: RunTuiOptions): Promise<number> {
             render();
           });
       };
+      const reduceParsedKey = (key: TuiKey): boolean => {
+        const result = reduceTuiKey(state, key);
+        state = result.state;
+        render();
+        enqueue(result.commands);
+        if (state.quit) {
+          close();
+          return true;
+        }
+        return false;
+      };
+      const flushPendingEscape = () => {
+        loneEscapeTimer = null;
+        if (closed || !keyParseState.pending) return;
+        const pending = keyParseState.pending;
+        keyParseState = { pending: "" };
+        if (pending === "\u001b") reduceParsedKey({ type: "escape" });
+      };
+      const schedulePendingEscapeFlush = () => {
+        clearLoneEscapeTimer();
+        if (keyParseState.pending === "\u001b") {
+          loneEscapeTimer = setTimeout(flushPendingEscape, LONE_ESCAPE_FLUSH_MS);
+        }
+      };
       const onData = (data: Buffer) => {
         try {
-          for (const key of parseTuiKeys(data)) {
-            const result = reduceTuiKey(state, key);
-            state = result.state;
-            render();
-            enqueue(result.commands);
-            if (state.quit) {
-              close();
-              return;
-            }
+          clearLoneEscapeTimer();
+          const parsed = parseTuiKeyChunk(data, keyParseState);
+          keyParseState = parsed.state;
+          for (const key of parsed.keys) {
+            if (reduceParsedKey(key)) return;
           }
+          schedulePendingEscapeFlush();
         } catch (err) {
           state = setStatusMessage(state, errorMessage(err));
           render();

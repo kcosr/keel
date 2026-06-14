@@ -12,6 +12,7 @@ import { type AgentProfiles, resolveProfile } from "../agents/profiles.ts";
 import type { AgentProviderRegistry } from "../agents/types.ts";
 import type { Json } from "../hash.ts";
 import type { JournalStore } from "../journal/store.ts";
+import { consolidatedAgentEvents } from "./agent-events.ts";
 import type { Schema } from "./schema.ts";
 import { StepEngine } from "./step-engine.ts";
 import { computeVersion } from "./version.ts";
@@ -183,6 +184,8 @@ export interface CtxHost {
   rng: () => number;
   /** Optional crash/fault hook; a no-op in production. */
   fault?: (point: FaultPoint, key: string) => void;
+  /** Push a live, non-durable event frame to current watchers. */
+  liveEvent?: (runId: string, type: string, payload: Json, atMs: number) => void;
 }
 
 /** In-process `ctx`: runs step fns locally, journals via StepEngine. */
@@ -330,7 +333,10 @@ export class WorkflowCtx implements Ctx {
               onEvent: (e) =>
                 e.type === "session"
                   ? undefined
-                  : this.engine.emit("agent.event", { key: spec.key, event: e as unknown as Json }),
+                  : this.engine.emitLive("agent.event", {
+                      key: spec.key,
+                      event: e as unknown as Json,
+                    }),
             },
             {
               ...(jsonSchema !== undefined ? { jsonSchema } : {}),
@@ -353,6 +359,7 @@ export class WorkflowCtx implements Ctx {
         execution.output,
         null,
         "effectful",
+        consolidatedAgentEvents(spec.key, execution.text, execution.transcript),
       );
       return execution.output as T;
     } catch (err) {

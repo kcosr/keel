@@ -21,6 +21,7 @@ import { JournalStore } from "../journal/store.ts";
 import { RealmKernel } from "../kernel/realm/realm-host.ts";
 import { Supervisor } from "../kernel/supervisor.ts";
 import type { EventEnvelope, WorkflowProvenance } from "../rpc/contract.ts";
+import { EventHub } from "../rpc/event-hub.ts";
 import { InProcessKeel } from "../rpc/in-process.ts";
 import {
   DEFAULT_WORKFLOW_DEFINITION_TTL_MS,
@@ -74,6 +75,7 @@ export class KeelDaemon {
   private readonly owned = new Set<string>();
   private readonly supervisor: Supervisor;
   private readonly superviseMs: number;
+  private readonly eventHub = new EventHub();
 
   constructor(private readonly opts: DaemonOptions) {
     this.ownerId = opts.ownerId ?? `daemon_${randomUUID()}`;
@@ -91,7 +93,7 @@ export class KeelDaemon {
       definitionCacheRoot: opts.definitionCacheRoot ?? join(dirname(opts.dbPath), "definitions"),
       clock: this.clock,
     });
-    this.api = new InProcessKeel(this.kernel, this.store);
+    this.api = new InProcessKeel(this.kernel, this.store, this.eventHub);
     this.supervisor = new Supervisor({
       store: this.store,
       kernel: this.kernel,
@@ -160,6 +162,8 @@ export class KeelDaemon {
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     if (this.superviseTimer) clearInterval(this.superviseTimer);
     this.server?.stop(true);
+    this.kernel.shutdown();
+    this.api.close();
     this.store.close();
   }
 
@@ -305,18 +309,20 @@ export class KeelDaemon {
         const subId = randomUUID();
         let unsub = () => {};
         let stopped = false;
+        let unsubAssigned = false;
         const stop = () => {
           if (stopped) return;
           stopped = true;
           clearInterval(recheck);
-          unsub();
+          if (unsubAssigned) unsub();
           conn.subs.delete(subId);
         };
-        const sendAuthFailure = (err: unknown, seq = 0) => {
+        conn.subs.set(subId, stop);
+        const sendAuthFailure = (err: unknown) => {
           this.send(conn, {
             event: {
               subId,
-              seq,
+              kind: "ephemeral",
               type: "authorization.failed",
               payload: {
                 message: redactCapabilityTokensInValue(
@@ -335,7 +341,7 @@ export class KeelDaemon {
             stop();
           }
         }, AUTH_RECHECK_MS);
-        unsub = this.api.subscribeEvents(
+        const subscribed = this.api.subscribeEvents(
           p.runId as string,
           (p.afterSeq as number) ?? 0,
           (event: EventEnvelope) => {
@@ -344,12 +350,17 @@ export class KeelDaemon {
               this.authorizeRunCredential(credential, p.runId as string, "run:events");
               this.send(conn, { event: { subId, ...redactCapabilityTokensInValue(event) } });
             } catch (err) {
-              sendAuthFailure(err, event.seq);
+              sendAuthFailure(err);
               stop();
             }
           },
         );
-        conn.subs.set(subId, stop);
+        unsub = subscribed;
+        unsubAssigned = true;
+        if (stopped) {
+          unsub();
+          conn.subs.delete(subId);
+        }
         return { subId };
       }
       case "retryRun": {

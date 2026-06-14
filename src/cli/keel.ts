@@ -784,11 +784,17 @@ export function formatWatchEvent(
   const safeEvent = redactCapabilityTokensInValue(event);
   if ((opts.output ?? "text") === "ndjson") return `${JSON.stringify(safeEvent)}\n`;
 
-  const prefix = `[${safeEvent.seq}]`;
+  const prefix = safeEvent.kind === "durable" ? `[${safeEvent.seq}]` : "[live]";
   const payload = safeEvent.payload;
   switch (safeEvent.type) {
     case "agent.event":
       return `${prefix} ${formatAgentEvent(payload)}\n`;
+    case "agent.message":
+      return `${prefix} ${formatAgentMessage(payload)}\n`;
+    case "agent.tool_call":
+      return `${prefix} ${formatAgentTranscriptEvent(payload, "tool_call")}\n`;
+    case "agent.tool_result":
+      return `${prefix} ${formatAgentTranscriptEvent(payload, "tool_result")}\n`;
     case "phase": {
       const title = prop(payload, "title");
       return `${prefix} phase${title ? `: ${compact(title)}` : ""}\n`;
@@ -821,6 +827,26 @@ export function formatWatchEvent(
     default:
       return `${prefix} ${safeEvent.type}${formatPayload(payload)}\n`;
   }
+}
+
+function formatAgentMessage(payload: unknown): string {
+  const key = prop(payload, "key");
+  const text = prop(payload, "text");
+  const omitted = prop(payload, "omitted");
+  const byteLength = prop(payload, "byteLength");
+  const label = key ? `agent ${compact(key)} message` : "agent message";
+  if (omitted) return `${label}: omitted ${compact(byteLength ?? 0)} bytes`;
+  return hasContent(text) ? `${label}: ${compact(text)}` : `${label}${formatPayload(payload)}`;
+}
+
+function formatAgentTranscriptEvent(payload: unknown, kind: "tool_call" | "tool_result"): string {
+  const key = prop(payload, "key");
+  const data = prop(payload, "data");
+  const omitted = prop(payload, "omitted");
+  const byteLength = prop(payload, "byteLength");
+  const label = key ? `agent ${compact(key)} ${kind}` : `agent ${kind}`;
+  if (omitted) return `${label}: omitted ${compact(byteLength ?? 0)} bytes`;
+  return hasContent(data) ? `${label}: ${compact(data)}` : `${label}${formatPayload(payload)}`;
 }
 
 function formatAgentEvent(payload: unknown): string {

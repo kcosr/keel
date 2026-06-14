@@ -61,6 +61,7 @@ export async function runAgentWithStall(
 
 export interface AgentExecution {
   output: unknown;
+  text: string;
   transcript: import("./types.ts").TraceEvent[];
   sessionToken?: string;
   attempts: number;
@@ -113,6 +114,7 @@ export async function executeAgent(
     if (!opts.jsonSchema) {
       return {
         output: result.text,
+        text: result.text,
         transcript: result.transcript,
         ...(result.sessionToken ? { sessionToken: result.sessionToken } : {}),
         attempts: attempt + 1,
@@ -132,6 +134,7 @@ export async function executeAgent(
     if (validated.ok) {
       return {
         output: candidate,
+        text: result.text,
         transcript: result.transcript,
         ...(result.sessionToken ? { sessionToken: result.sessionToken } : {}),
         attempts: attempt + 1,

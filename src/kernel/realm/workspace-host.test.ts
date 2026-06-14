@@ -218,6 +218,7 @@ describe("secret lifecycle", () => {
     const store = JournalStore.memory();
     const secrets = new SecretStore();
     secrets.put("r", "TOKEN", "leaky-secret-xyz");
+    const liveFrames: unknown[] = [];
     const streamer: AgentProvider = {
       name: "streamer",
       async generate(inv: AgentInvocation, hooks: AgentHooks): Promise<AgentResult> {
@@ -230,6 +231,7 @@ describe("secret lifecycle", () => {
       idgen: () => "r",
       agents: new AgentProviderRegistry().register(streamer),
       secrets,
+      liveEvent: (_runId, type, payload) => liveFrames.push({ type, payload }),
     });
     const handle = await kernel.run<string>(streamUrl, null, { name: "s" });
     expect(handle.status).toBe("finished");
@@ -237,8 +239,44 @@ describe("secret lifecycle", () => {
     // the secret value appears nowhere in the journal (events included)
     const all = JSON.stringify(store.listEvents("r")) + JSON.stringify(store.listJournalRows("r"));
     expect(all).not.toContain("leaky-secret-xyz");
-    expect(all).toContain("«redacted»");
+    expect(JSON.stringify(liveFrames)).toContain("«redacted»");
+    expect(JSON.stringify(liveFrames)).not.toContain("leaky-secret-xyz");
     // secrets wiped on run completion (per-run lifetime)
     expect(secrets.values("r")).toEqual([]);
+  });
+
+  test("secret values in finalized transcript rows are redacted before persistence", async () => {
+    const store = JournalStore.memory();
+    const secrets = new SecretStore();
+    secrets.put("r", "TOKEN", "persisted-secret-xyz");
+    const streamer: AgentProvider = {
+      name: "streamer",
+      async generate(inv: AgentInvocation): Promise<AgentResult> {
+        const secret = inv.env?.TOKEN ?? "";
+        return {
+          text: `final ${secret}`,
+          transcript: [
+            { type: "tool_call", data: { input: secret } },
+            { type: "tool_result", data: { output: secret } },
+            { type: "text", data: `final ${secret}` },
+          ],
+        };
+      },
+    };
+    const kernel = new RealmKernel(store, {
+      idgen: () => "r",
+      agents: new AgentProviderRegistry().register(streamer),
+      secrets,
+    });
+    const handle = await kernel.run<string>(streamUrl, null, { name: "s" });
+    expect(handle.status).toBe("finished");
+
+    const agentEvents = store
+      .listEvents("r")
+      .filter((event) => event.type.startsWith("agent."))
+      .map((event) => JSON.parse(event.payloadJson));
+    const serialized = JSON.stringify(agentEvents);
+    expect(serialized).toContain("«redacted»");
+    expect(serialized).not.toContain("persisted-secret-xyz");
   });
 });

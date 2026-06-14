@@ -22,6 +22,8 @@ export class DaemonClient {
     { resolve: (v: unknown) => void; reject: (e: unknown) => void }
   >();
   private readonly subs = new Map<string, (event: EventEnvelope) => void>();
+  private readonly pendingSubEvents = new Map<string, EventEnvelope[]>();
+  private readonly closedSubIds = new Set<string>();
 
   static async connect(socketPath: string): Promise<DaemonClient> {
     const c = new DaemonClient();
@@ -67,7 +69,16 @@ export class DaemonClient {
     };
     if (msg.event) {
       const { subId, ...event } = msg.event;
-      this.subs.get(subId)?.(event);
+      const sub = this.subs.get(subId);
+      if (sub) {
+        sub(event);
+      } else if (this.closedSubIds.has(subId)) {
+        return;
+      } else {
+        const buffered = this.pendingSubEvents.get(subId) ?? [];
+        buffered.push(event);
+        this.pendingSubEvents.set(subId, buffered);
+      }
       return;
     }
     if (typeof msg.id === "number") {
@@ -82,6 +93,8 @@ export class DaemonClient {
   private failAll(err: unknown): void {
     for (const p of this.pending.values()) p.reject(err);
     this.pending.clear();
+    this.pendingSubEvents.clear();
+    this.closedSubIds.clear();
   }
 
   private rpc<T>(method: string, params: unknown): Promise<T> {
@@ -178,17 +191,32 @@ export class DaemonClient {
     onError?: (err: unknown) => void,
   ): () => void {
     let subId: string | null = null;
+    let active = true;
     void this.rpc<{ subId: string }>("subscribeEvents", { runId, afterSeq }).then(
       (r) => {
         subId = r.subId;
+        if (!active) {
+          this.closedSubIds.add(r.subId);
+          this.pendingSubEvents.delete(r.subId);
+          return;
+        }
+        this.closedSubIds.delete(r.subId);
         this.subs.set(r.subId, onEvent);
+        const buffered = this.pendingSubEvents.get(r.subId) ?? [];
+        this.pendingSubEvents.delete(r.subId);
+        for (const event of buffered) onEvent(event);
       },
       (err) => {
         onError?.(err);
       },
     );
     return () => {
-      if (subId) this.subs.delete(subId);
+      active = false;
+      if (subId) {
+        this.subs.delete(subId);
+        this.pendingSubEvents.delete(subId);
+        this.closedSubIds.add(subId);
+      }
     };
   }
 }

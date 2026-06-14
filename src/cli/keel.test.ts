@@ -125,6 +125,7 @@ describe("keel CLI", () => {
   test("watch formatter renders agent event payloads", () => {
     expect(
       formatWatchEvent({
+        kind: "durable",
         seq: 234,
         type: "agent.event",
         payload: { key: "run-date", event: { type: "text", data: "RESULT 50\n" } },
@@ -135,6 +136,7 @@ describe("keel CLI", () => {
 
   test("watch formatter supports NDJSON event lines", () => {
     const event = {
+      kind: "durable" as const,
       seq: 235,
       type: "agent.event",
       payload: { key: "run-date", event: { type: "tool_call", data: { command: "date" } } },
@@ -146,6 +148,7 @@ describe("keel CLI", () => {
   test("watch formatter keeps unexpected agent event payloads visible", () => {
     expect(
       formatWatchEvent({
+        kind: "durable",
         seq: 236,
         type: "agent.event",
         payload: { provider: "future", detail: "new shape" },
@@ -156,6 +159,7 @@ describe("keel CLI", () => {
 
   test("watch formatter redacts capability-looking strings", () => {
     const event = {
+      kind: "durable" as const,
       seq: 238,
       type: "log",
       payload: { message: "cap kc_run_secretValue and kc_admin_secretValue" },
@@ -168,6 +172,7 @@ describe("keel CLI", () => {
   test("watch formatter tolerates missing agent event payloads", () => {
     expect(
       formatWatchEvent({
+        kind: "durable",
         seq: 237,
         type: "agent.event",
         payload: undefined,

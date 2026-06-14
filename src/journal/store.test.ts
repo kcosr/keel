@@ -143,6 +143,45 @@ describe("JournalStore (in-memory)", () => {
     expect(store.listEvents("r1", 1).map((e) => e.type)).toEqual(["step"]);
   });
 
+  test("event listener failures do not affect committed journal writes", () => {
+    store.insertRun(newRun("r1"));
+    store.onEventAppended(() => {
+      throw new Error("subscriber failed");
+    });
+
+    expect(() => store.appendEvent("r1", "one", {}, 1)).not.toThrow();
+    expect(store.listEvents("r1").map((e) => e.type)).toEqual(["one"]);
+
+    expect(() =>
+      store.transaction(() => {
+        store.appendEvent("r1", "two", {}, 2);
+      }),
+    ).not.toThrow();
+    expect(store.listEvents("r1").map((e) => e.type)).toEqual(["one", "two"]);
+  });
+
+  test("event notifications from rolled-back nested transactions are not delivered", () => {
+    store.insertRun(newRun("r1"));
+    const delivered: string[] = [];
+    store.onEventAppended((event) => delivered.push(event.type));
+
+    store.transaction(() => {
+      store.appendEvent("r1", "outer", {}, 1);
+      try {
+        store.transaction(() => {
+          store.appendEvent("r1", "inner-rolled-back", {}, 2);
+          throw new Error("rollback savepoint");
+        });
+      } catch {
+        // outer transaction intentionally continues
+      }
+      store.appendEvent("r1", "outer-after", {}, 3);
+    });
+
+    expect(store.listEvents("r1").map((e) => e.type)).toEqual(["outer", "outer-after"]);
+    expect(delivered).toEqual(["outer", "outer-after"]);
+  });
+
   test("workflow definitions round-trip by hash", () => {
     store.putWorkflowDefinition({
       hash: "wf_sha256_abc",

@@ -4,13 +4,21 @@
 
 import { describe, expect, test } from "bun:test";
 import { MockProvider } from "../agents/mock.ts";
-import { AgentProviderRegistry } from "../agents/types.ts";
+import {
+  type AgentHooks,
+  type AgentInvocation,
+  type AgentProvider,
+  AgentProviderRegistry,
+  type AgentResult,
+} from "../agents/types.ts";
 import { JournalStore } from "../journal/store.ts";
 import { RealmKernel } from "../kernel/realm/realm-host.ts";
 import { captureWorkflowFile } from "../workflow-definitions/capture.ts";
+import { EventHub } from "./event-hub.ts";
 import { InProcessKeel } from "./in-process.ts";
 
 const FIX = new URL("../kernel/realm/fixtures/", import.meta.url);
+const onceUrl = captureWorkflowFile(new URL("agent-once.workflow.ts", FIX).pathname);
 const reviewUrl = captureWorkflowFile(new URL("agent-review.workflow.ts", FIX).pathname);
 const chainUrl = captureWorkflowFile(new URL("chain.workflow.ts", FIX).pathname);
 const flakyUrl = captureWorkflowFile(new URL("flaky.workflow.ts", FIX).pathname);
@@ -25,6 +33,18 @@ function keel(store: JournalStore, mock?: MockProvider): InProcessKeel {
     ...(mock ? { agents: new AgentProviderRegistry().register(mock) } : {}),
   });
   return new InProcessKeel(kernel, store);
+}
+
+function streamingKeel(store: JournalStore, provider: AgentProvider): InProcessKeel {
+  const hub = new EventHub();
+  const kernel = new RealmKernel(store, {
+    idgen: () => "run_stream",
+    clock: () => 1,
+    rng: () => 0.5,
+    agents: new AgentProviderRegistry().register(provider),
+    liveEvent: (runId, type, payload, atMs) => hub.publishEphemeral(runId, type, payload, atMs),
+  });
+  return new InProcessKeel(kernel, store, hub);
 }
 
 describe("RPC contract drives a workflow end-to-end", () => {
@@ -169,7 +189,240 @@ describe("event subscription", () => {
     },
     WORKFLOW_TEST_TIMEOUT_MS,
   );
+
+  test(
+    "agent deltas are live frames and finalized messages are durable rows",
+    async () => {
+      const store = JournalStore.memory();
+      const provider = new ControlledStreamingProvider([
+        { type: "text", data: '{"value":' },
+        { type: "text", data: "1}" },
+        { type: "tool_call", data: { name: "read", args: { file: "a.ts" } } },
+      ]);
+      const api = streamingKeel(store, provider);
+      const frames: { kind: string; type: string; payload: unknown }[] = [];
+
+      const { runId } = await api.launchRun({ ...onceUrl, input: null, name: "once" });
+      const unsub = api.subscribeEvents(runId, 0, (e) =>
+        frames.push({ kind: e.kind, type: e.type, payload: e.payload }),
+      );
+      provider.release();
+      await api.waitForRun(runId);
+      unsub();
+
+      expect(frames).toContainEqual({
+        kind: "ephemeral",
+        type: "agent.event",
+        payload: { key: "ask", event: { type: "text", data: '{"value":' } },
+      });
+      expect(frames).toContainEqual({
+        kind: "durable",
+        type: "agent.message",
+        payload: { key: "ask", text: '{"value":1}' },
+      });
+      expect(frames).toContainEqual({
+        kind: "durable",
+        type: "agent.tool_call",
+        payload: { key: "ask", data: { name: "read", args: { file: "a.ts" } } },
+      });
+
+      const durable = store.listEvents(runId).map((e) => ({
+        type: e.type,
+        payload: JSON.parse(e.payloadJson),
+      }));
+      expect(durable.some((e) => e.type === "agent.event")).toBe(false);
+      expect(durable).toContainEqual({
+        type: "agent.message",
+        payload: { key: "ask", text: '{"value":1}' },
+      });
+    },
+    WORKFLOW_TEST_TIMEOUT_MS,
+  );
+
+  test("subscribeEvents has no gap between durable backfill and live tail", () => {
+    const store = JournalStore.memory();
+    const hub = new EventHub();
+    store.onEventAppended((event) => hub.publishDurable(event));
+    store.appendEvent("r", "one", {}, 1);
+    store.appendEvent("r", "two", {}, 2);
+
+    const seen: string[] = [];
+    const unsub = hub.subscribe(store, "r", 0, (event) => {
+      seen.push(event.type);
+      if (event.kind === "durable" && event.type === "one") {
+        store.appendEvent("r", "three", {}, 3);
+      }
+    });
+    unsub();
+
+    expect(seen).toEqual(["one", "two", "three"]);
+  });
+
+  test(
+    "default in-process construction wires live agent frames",
+    async () => {
+      const store = JournalStore.memory();
+      const provider = new ControlledStreamingProvider([{ type: "text", data: '{"value":4}' }]);
+      const kernel = new RealmKernel(store, {
+        idgen: () => "run_default_stream",
+        clock: () => 1,
+        rng: () => 0.5,
+        agents: new AgentProviderRegistry().register(provider),
+      });
+      const api = new InProcessKeel(kernel, store);
+      const frames: { kind: string; type: string; payload: unknown }[] = [];
+
+      const { runId } = await api.launchRun({ ...onceUrl, input: null, name: "once" });
+      const unsub = api.subscribeEvents(runId, 0, (e) =>
+        frames.push({ kind: e.kind, type: e.type, payload: e.payload }),
+      );
+      provider.release();
+      await api.waitForRun(runId);
+      unsub();
+
+      expect(frames).toContainEqual({
+        kind: "ephemeral",
+        type: "agent.event",
+        payload: { key: "ask", event: { type: "text", data: '{"value":4}' } },
+      });
+    },
+    WORKFLOW_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "durable transcript preserves tool event order before final text",
+    async () => {
+      const store = JournalStore.memory();
+      const provider = new ControlledStreamingProvider([
+        { type: "tool_call", data: { name: "read", args: { file: "a.ts" } } },
+        { type: "tool_result", data: { output: "ok" } },
+        { type: "text", data: '{"value":3}' },
+      ]);
+      const api = streamingKeel(store, provider);
+
+      const { runId } = await api.launchRun({ ...onceUrl, input: null, name: "once" });
+      provider.release();
+      await api.waitForRun(runId);
+
+      expect(
+        store
+          .listEvents(runId)
+          .filter((e) => e.type.startsWith("agent."))
+          .map((e) => e.type),
+      ).toEqual(["agent.tool_call", "agent.tool_result", "agent.message"]);
+    },
+    WORKFLOW_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "durable transcript falls back to final text after empty text deltas",
+    async () => {
+      const store = JournalStore.memory();
+      const provider = new ControlledStreamingProvider([{ type: "text", data: "" }], '{"value":5}');
+      const api = streamingKeel(store, provider);
+
+      const { runId } = await api.launchRun({ ...onceUrl, input: null, name: "once" });
+      provider.release();
+      await api.waitForRun(runId);
+
+      expect(
+        store
+          .listEvents(runId)
+          .filter((e) => e.type === "agent.message")
+          .map((e) => JSON.parse(e.payloadJson)),
+      ).toEqual([{ key: "ask", text: '{"value":5}' }]);
+    },
+    WORKFLOW_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "late subscribers see only tail live deltas plus the full finalized message",
+    async () => {
+      const store = JournalStore.memory();
+      const provider = new ControlledStreamingProvider([
+        { type: "text", data: '{"value":' },
+        { type: "text", data: "2}" },
+      ]);
+      const api = streamingKeel(store, provider);
+
+      const { runId } = await api.launchRun({ ...onceUrl, input: null, name: "once" });
+      await provider.waitForFirstEvent();
+
+      const frames: { kind: string; type: string; payload: unknown }[] = [];
+      const unsub = api.subscribeEvents(runId, 0, (e) =>
+        frames.push({ kind: e.kind, type: e.type, payload: e.payload }),
+      );
+      provider.release();
+      await api.waitForRun(runId);
+      unsub();
+
+      expect(frames).not.toContainEqual({
+        kind: "ephemeral",
+        type: "agent.event",
+        payload: { key: "ask", event: { type: "text", data: '{"value":' } },
+      });
+      expect(frames).toContainEqual({
+        kind: "ephemeral",
+        type: "agent.event",
+        payload: { key: "ask", event: { type: "text", data: "2}" } },
+      });
+      expect(frames).toContainEqual({
+        kind: "durable",
+        type: "agent.message",
+        payload: { key: "ask", text: '{"value":2}' },
+      });
+    },
+    WORKFLOW_TEST_TIMEOUT_MS,
+  );
 });
+
+class ControlledStreamingProvider implements AgentProvider {
+  readonly name = "pi";
+  readonly supportsSessions = true;
+  private firstEvent: Promise<void>;
+  private resolveFirstEvent!: () => void;
+  private releaseStream: Promise<void>;
+  private resolveRelease!: () => void;
+
+  constructor(
+    private readonly events: AgentResult["transcript"],
+    private readonly finalText?: string,
+  ) {
+    this.firstEvent = new Promise((resolve) => {
+      this.resolveFirstEvent = resolve;
+    });
+    this.releaseStream = new Promise((resolve) => {
+      this.resolveRelease = resolve;
+    });
+  }
+
+  async generate(_invocation: AgentInvocation, hooks: AgentHooks): Promise<AgentResult> {
+    const [first, ...rest] = this.events;
+    if (first) {
+      hooks.onEvent?.(first);
+      this.resolveFirstEvent();
+    }
+    await this.releaseStream;
+    for (const event of rest) hooks.onEvent?.(event);
+    return {
+      text:
+        this.finalText ??
+        this.events
+          .filter((event) => event.type === "text" && typeof event.data === "string")
+          .map((event) => event.data)
+          .join(""),
+      transcript: this.events,
+    };
+  }
+
+  waitForFirstEvent(): Promise<void> {
+    return this.firstEvent;
+  }
+
+  release(): void {
+    this.resolveRelease();
+  }
+}
 
 describe("run report result policy", () => {
   test("includes small artifacts and omits large outputs/results", () => {

@@ -5,6 +5,12 @@ loop. A write-capable implementer edits the target repository, a read-only
 reviewer checks the work, and remaining findings are sent back to the
 implementer.
 
+Use this workflow when Keel should drive the implementation loop itself. If a
+human or external agent owns the fixes and you want the same reviewer
+conversation to park for manual re-invocation, use
+[`../iterative-review/`](../iterative-review/) with `stopWhenClean: false` and a
+higher `maxRounds` such as `10`.
+
 Launch:
 
 ```bash

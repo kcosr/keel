@@ -23,7 +23,7 @@ describe("capabilities → Pi tool flags", () => {
     expect(resolved.capabilities).toEqual({ ...DENY_ALL, fs: "read" });
     expect(resolvedToolPolicyToPiArgs(resolved)).toEqual(["--tools", "read,grep,ls"]);
     expect(resolvedToolPolicyToClaudeArgs(resolved)).toEqual([
-      "--tools",
+      "--allowed-tools",
       "Read",
       "Grep",
       "Glob",
@@ -44,7 +44,7 @@ describe("capabilities → Pi tool flags", () => {
     });
     expect(resolved.capabilities).toEqual(DENY_ALL);
     expect(resolvedToolPolicyToPiArgs(resolved)).toEqual(["--no-tools"]);
-    expect(resolvedToolPolicyToClaudeArgs(resolved)).toEqual(["--tools", ""]);
+    expect(resolvedToolPolicyToClaudeArgs(resolved)).toEqual(["--allowed-tools", ""]);
   });
 
   test("resolved default capabilities are not shared mutable policy objects", () => {
@@ -68,7 +68,7 @@ describe("capabilities → Pi tool flags", () => {
     });
     expect(resolvedToolPolicyToPiArgs(providerResolved)).toEqual(["--tools", "read,grep,ls"]);
     expect(resolvedToolPolicyToClaudeArgs(providerResolved)).toEqual([
-      "--tools",
+      "--allowed-tools",
       "Read",
       "Grep",
       "Glob",
@@ -83,7 +83,7 @@ describe("capabilities → Pi tool flags", () => {
     expect(kernelResolved.toolPolicy).toBe("workspace-write");
     const providerResolved = resolveInvocationToolPolicy(kernelResolved);
     expect(resolvedToolPolicyToPiArgs(providerResolved)).toEqual(["--tools", "bash"]);
-    expect(resolvedToolPolicyToClaudeArgs(providerResolved)).toEqual(["--tools", "Bash"]);
+    expect(resolvedToolPolicyToClaudeArgs(providerResolved)).toEqual(["--allowed-tools", "Bash"]);
   });
 
   test("fs:read → read/grep/ls only (no write)", () => {
@@ -119,7 +119,7 @@ describe("capabilities → Pi tool flags", () => {
     expect(resolved.capabilities).toEqual({ ...DENY_ALL, fs: "read" });
     expect(resolvedToolPolicyToPiArgs(resolved)).toEqual(["--tools", "read,grep,ls,mcp__foo__bar"]);
     expect(resolvedToolPolicyToClaudeArgs(resolved)).toEqual([
-      "--tools",
+      "--allowed-tools",
       "Read",
       "Grep",
       "Glob",
@@ -135,7 +135,7 @@ describe("capabilities → Pi tool flags", () => {
       denyTools: ["glob"],
     });
     expect(resolvedToolPolicyToClaudeArgs(resolved)).toEqual([
-      "--tools",
+      "--allowed-tools",
       "Read",
       "Grep",
       "LS",

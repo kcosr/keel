@@ -25,6 +25,7 @@ import {
   snapshotWorkflowSource,
 } from "../../workflow-definitions/snapshot.ts";
 import { createWorktree } from "../../workspace/worktree.ts";
+import { consolidatedAgentEvents, redactTranscript } from "../agent-events.ts";
 import type { CtxHost, FaultPoint } from "../ctx.ts";
 import { extractModuleHelpers } from "../module-helpers.ts";
 import { RUN_FINISHED_INLINE_OUTPUT_BYTES } from "../output.ts";
@@ -62,6 +63,8 @@ export interface RealmKernelOptions {
   agentProfiles?: Record<string, unknown>;
   /** Daemon-owned workflow definition materialization cache. */
   definitionCacheRoot?: string;
+  /** Push a live, non-durable event frame to current watchers. */
+  liveEvent?: CtxHost["liveEvent"];
 }
 
 const TERMINAL: ReadonlySet<RunStatus> = new Set<RunStatus>([
@@ -130,6 +133,7 @@ export class RealmKernel {
   private readonly registry?: AgentProviderRegistry;
   private readonly definitionCacheRoot: string;
   private readonly activeSessionRuns = new Set<string>();
+  private readonly activeWorkers = new Set<Worker>();
 
   constructor(store: JournalStore, opts: RealmKernelOptions = {}) {
     this.store = store;
@@ -137,6 +141,7 @@ export class RealmKernel {
       clock: opts.clock ?? (() => Date.now()),
       rng: opts.rng ?? Math.random,
       ...(opts.fault ? { fault: opts.fault } : {}),
+      ...(opts.liveEvent ? { liveEvent: opts.liveEvent } : {}),
     };
     this.idgen = opts.idgen ?? (() => `run_${randomUUID()}`);
     if (opts.onStepExecute) this.onStepExecute = opts.onStepExecute;
@@ -146,6 +151,16 @@ export class RealmKernel {
     if (opts.secrets) this.secrets = opts.secrets;
     if (opts.workspaceRoot) this.workspaceRoot = opts.workspaceRoot;
     if (opts.agentProfiles) this.agentProfiles = opts.agentProfiles;
+  }
+
+  shutdown(): void {
+    for (const worker of this.activeWorkers) worker.terminate();
+    this.activeWorkers.clear();
+    this.activeSessionRuns.clear();
+  }
+
+  setLiveEventSink(liveEvent: CtxHost["liveEvent"]): void {
+    this.host.liveEvent = liveEvent;
   }
 
   private readonly secrets?: SecretStore;
@@ -578,6 +593,7 @@ export class RealmKernel {
     begun: { attempt: number; inputHash: string; startedAtMs: number; resumeToken?: string },
     value: unknown,
     providerSessionToken: string | undefined,
+    events: ReturnType<typeof consolidatedAgentEvents> = [],
   ): void {
     const journalRow = this.store.getJournalRow(runId, m.stableKey, begun.attempt);
     const turn = this.store.getLatestAgentSessionTurn(runId, m.agentKey, m.turnKey);
@@ -599,6 +615,9 @@ export class RealmKernel {
     this.store.transaction(() => {
       if (stored.artifact) {
         this.store.putArtifact(stored.artifact.hash, stored.artifact.bytes, finishedAtMs);
+      }
+      for (const event of events) {
+        this.store.appendEvent(runId, event.type, event.payload, finishedAtMs);
       }
       this.store.putJournalRow({
         runId,
@@ -691,12 +710,14 @@ export class RealmKernel {
       const control = new Int32Array(sab, 0, CONTROL_WORDS);
       const valueView = new Float64Array(sab, VALUE_OFFSET, 1);
       const worker = new Worker(WORKER_URL, { type: "module" });
+      this.activeWorkers.add(worker);
 
       let settled = false;
       const finish = (fn: () => void): void => {
         if (settled) return;
         settled = true;
         if (sessionRunGuarded) this.activeSessionRuns.delete(runId);
+        this.activeWorkers.delete(worker);
         worker.terminate();
         fn();
       };
@@ -893,7 +914,7 @@ export class RealmKernel {
                               const r = redact(JSON.stringify(event), allSecrets);
                               if (r.redacted) event = JSON.parse(r.text) as Json;
                             }
-                            engine.emit("agent.event", { key: m.key, event });
+                            engine.emitLive("agent.event", { key: m.key, event });
                           },
                         },
                         {
@@ -938,6 +959,17 @@ export class RealmKernel {
                       contentDiff,
                     });
                   }
+                  const transcript =
+                    allSecrets.length > 0
+                      ? redactTranscript(
+                          execution.transcript,
+                          (json) => redact(json, allSecrets).text,
+                        )
+                      : execution.transcript;
+                  const text =
+                    allSecrets.length > 0
+                      ? redact(execution.text, allSecrets).text
+                      : execution.text;
                   try {
                     engine.completeStep(
                       m.key,
@@ -948,6 +980,7 @@ export class RealmKernel {
                       output,
                       m.deps,
                       "effectful",
+                      consolidatedAgentEvents(m.key, text, transcript),
                     );
                   } catch (faultErr) {
                     abort(faultErr); // crash fault inside completeStep: leave pending
@@ -1122,7 +1155,7 @@ export class RealmKernel {
                               const r = redact(JSON.stringify(event), allSecrets);
                               if (r.redacted) event = JSON.parse(r.text) as Json;
                             }
-                            engine.emit("agent.event", { key: m.stableKey, event });
+                            engine.emitLive("agent.event", { key: m.stableKey, event });
                           },
                         },
                         {
@@ -1147,8 +1180,26 @@ export class RealmKernel {
                       engine.emit("agent.redacted", { key: m.stableKey });
                     }
                   }
+                  const transcript =
+                    allSecrets.length > 0
+                      ? redactTranscript(
+                          execution.transcript,
+                          (json) => redact(json, allSecrets).text,
+                        )
+                      : execution.transcript;
+                  const text =
+                    allSecrets.length > 0
+                      ? redact(execution.text, allSecrets).text
+                      : execution.text;
                   try {
-                    this.completeAgentSessionTurn(runId, m, begun, output, execution.sessionToken);
+                    this.completeAgentSessionTurn(
+                      runId,
+                      m,
+                      begun,
+                      output,
+                      execution.sessionToken,
+                      consolidatedAgentEvents(m.stableKey, text, transcript),
+                    );
                   } catch (err) {
                     if (!(err instanceof AgentSessionContinuityError)) {
                       abort(err);

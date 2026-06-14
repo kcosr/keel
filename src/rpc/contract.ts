@@ -37,12 +37,22 @@ export interface RunLaunchResult {
   capabilityId?: string;
 }
 
-export interface EventEnvelope {
+export interface DurableEventEnvelope {
+  kind: "durable";
   seq: number;
   type: string;
   payload: unknown;
   atMs: number;
 }
+
+export interface EphemeralEventEnvelope {
+  kind: "ephemeral";
+  type: string;
+  payload: unknown;
+  atMs: number;
+}
+
+export type EventEnvelope = DurableEventEnvelope | EphemeralEventEnvelope;
 
 export interface KeelApi {
   /** Start a run; returns its id immediately (the run executes in the background). */

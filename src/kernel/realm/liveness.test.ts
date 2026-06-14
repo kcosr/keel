@@ -49,7 +49,12 @@ describe("runAgentWithStall", () => {
         // attempt 0 stalls (never resolves within timeout); attempt 1 is instant
         return a === 0
           ? new Promise(() => {})
-          : Promise.resolve({ output: { value: 1 }, transcript: [], attempts: 1 });
+          : Promise.resolve({
+              output: { value: 1 },
+              text: '{"value":1}',
+              transcript: [],
+              attempts: 1,
+            });
       },
       { timeoutMs: 50, stallRetries: 2, onStall: (n) => stalls.push(n) },
     );

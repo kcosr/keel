@@ -9,6 +9,7 @@
 import { type Json, hashJson, sha256Hex } from "../hash.ts";
 import type { JournalStore } from "../journal/store.ts";
 import type { EffectType, InputDep, JournalRow } from "../journal/types.ts";
+import type { DurableAgentEvent } from "./agent-events.ts";
 import type { CtxHost } from "./ctx.ts";
 
 /** Results larger than this are stored content-addressed, not inline (§8.2). */
@@ -104,6 +105,7 @@ export class StepEngine {
     value: unknown,
     deps: InputDep[] | null,
     effectType: EffectType = "pure",
+    events: DurableAgentEvent[] = [],
   ): void {
     this.host.fault?.("before-commit", key);
     const existing = this.store.getJournalRow(this.runId, key, attempt);
@@ -114,6 +116,9 @@ export class StepEngine {
     this.store.transaction(() => {
       if (stored.artifact) {
         this.store.putArtifact(stored.artifact.hash, stored.artifact.bytes, this.host.clock());
+      }
+      for (const event of events) {
+        this.store.appendEvent(this.runId, event.type, event.payload, this.host.clock());
       }
       this.store.putJournalRow({
         runId: this.runId,
@@ -185,6 +190,10 @@ export class StepEngine {
 
   emit(type: string, payload: Json): void {
     this.store.appendEvent(this.runId, type, payload, this.host.clock());
+  }
+
+  emitLive(type: string, payload: Json): void {
+    this.host.liveEvent?.(this.runId, type, payload, this.host.clock());
   }
 
   now(): number {

@@ -26,6 +26,9 @@ import type {
 
 export class JournalStore {
   readonly db: Database;
+  private readonly eventListeners = new Set<(event: EventRow) => void>();
+  private transactionDepth = 0;
+  private pendingEventNotifications: EventRow[] = [];
 
   private constructor(db: Database) {
     this.db = db;
@@ -94,7 +97,31 @@ export class JournalStore {
    * transaction rolls back and no partial rows persist (Phase 1 exit criterion).
    */
   transaction<T>(fn: () => T): T {
-    return this.db.transaction(fn)();
+    const outermost = this.transactionDepth === 0;
+    const notificationStart = this.pendingEventNotifications.length;
+    this.transactionDepth += 1;
+    let committed = false;
+    try {
+      const result = this.db.transaction(fn)();
+      committed = true;
+      return result;
+    } finally {
+      this.transactionDepth -= 1;
+      if (!committed) {
+        this.pendingEventNotifications.length = notificationStart;
+      }
+      if (outermost) {
+        if (committed) this.flushPendingEventNotifications();
+        else this.pendingEventNotifications = [];
+      }
+    }
+  }
+
+  onEventAppended(listener: (event: EventRow) => void): () => void {
+    this.eventListeners.add(listener);
+    return () => {
+      this.eventListeners.delete(listener);
+    };
   }
 
   // ---- runs ---------------------------------------------------------------
@@ -491,6 +518,7 @@ export class JournalStore {
 
   /** Append an event; returns the assigned per-run sequence number. */
   appendEvent(runId: string, type: string, payload: unknown, atMs: number): number {
+    const payloadJson = JSON.stringify(payload ?? null);
     const next = this.db
       .query<{ next: number }, [string]>(
         "SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM events WHERE run_id = ?",
@@ -502,7 +530,8 @@ export class JournalStore {
         `INSERT INTO events (run_id, seq, type, payload_json, emitted_at_ms)
          VALUES (?, ?, ?, ?, ?)`,
       )
-      .run(runId, seq, type, JSON.stringify(payload ?? null), atMs);
+      .run(runId, seq, type, payloadJson, atMs);
+    this.notifyEventAppended({ runId, seq, type, payloadJson, emittedAtMs: atMs });
     return seq;
   }
 
@@ -513,6 +542,30 @@ export class JournalStore {
       )
       .all(runId, afterSeq)
       .map(mapEvent);
+  }
+
+  private notifyEventAppended(event: EventRow): void {
+    if (this.transactionDepth > 0) {
+      this.pendingEventNotifications.push(event);
+      return;
+    }
+    this.deliverEventNotification(event);
+  }
+
+  private flushPendingEventNotifications(): void {
+    const events = this.pendingEventNotifications;
+    this.pendingEventNotifications = [];
+    for (const event of events) this.deliverEventNotification(event);
+  }
+
+  private deliverEventNotification(event: EventRow): void {
+    for (const listener of this.eventListeners) {
+      try {
+        listener(event);
+      } catch {
+        // Event delivery is best-effort and must not alter committed journal state.
+      }
+    }
   }
 
   // ---- artifacts (two-tier store, Phase 8) --------------------------------

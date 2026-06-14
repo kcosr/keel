@@ -68,10 +68,10 @@ cat ./path/to/workflow.ts | keel run --input '{"n":3}'
 ```
 
 Lifecycle commands watch by default. Attached `launch` streams newline-delimited
-JSON events by default until the run reaches a terminal state:
+JSON frame envelopes by default until the run reaches a terminal state:
 
 ```json
-{"seq":1,"type":"run.started","payload":{"name":"workflow.ts"},"atMs":...}
+{"kind":"durable","seq":1,"type":"run.started","payload":{"name":"workflow.ts"},"atMs":...}
 ...
 ```
 
@@ -181,15 +181,19 @@ is also rejected because detached launch returns a snapshot handle, not a stream
 
 ### Watch Output
 
-Default watch output is newline-delimited JSON event envelopes:
+Default watch output is newline-delimited JSON frame envelopes. Durable frames
+have `kind:"durable"` plus a per-run `seq`; live agent delta frames have
+`kind:"ephemeral"` and no sequence because they are delivered only to currently
+connected watchers.
 
 ```bash
 keel watch run_...
 ```
 
 ```json
-{"seq":1,"type":"run.started","payload":{"name":"review.workflow.ts"},"atMs":...}
-{"seq":2,"type":"phase","payload":{"title":"Find"},"atMs":...}
+{"kind":"durable","seq":1,"type":"run.started","payload":{"name":"review.workflow.ts"},"atMs":...}
+{"kind":"ephemeral","type":"agent.event","payload":{"key":"review:auth","event":{"type":"text","data":"..."}},"atMs":...}
+{"kind":"durable","seq":3,"type":"agent.message","payload":{"key":"review:auth","text":"..."},"atMs":...}
 ```
 
 Use `--output text` for human-oriented compact output:
@@ -197,12 +201,17 @@ Use `--output text` for human-oriented compact output:
 ```text
 [1] run.started {"name":"review.workflow.ts"}
 [2] phase: Find
-[3] agent review:auth session: 019...
+[live] agent review:auth text: ...
+[3] agent review:auth message: ...
 [4] step.completed review:auth (effectful)
 [5] run.finished
 ```
 
-Raw events include `seq`, `type`, `payload`, and `atMs`.
+Durable history is message-granular. Live token deltas are not backfilled and
+are not stored in SQLite; a watcher that connects mid-message receives live
+deltas from that point forward and then the full finalized `agent.message` row
+when the turn completes. Old runs may still contain historical durable
+`agent.event` rows, and `watch` continues to render them.
 
 ### Run, Output, And Report Formats
 
@@ -739,16 +748,27 @@ local cap file by default and only prints raw tokens with `--emit-capability`.
 ### EventEnvelope
 
 ```ts
-interface EventEnvelope {
+type EventEnvelope = DurableEventEnvelope | EphemeralEventEnvelope;
+
+interface DurableEventEnvelope {
+  kind: "durable";
   seq: number;
+  type: string;
+  payload: unknown;
+  atMs: number;
+}
+
+interface EphemeralEventEnvelope {
+  kind: "ephemeral";
   type: string;
   payload: unknown;
   atMs: number;
 }
 ```
 
-`seq` is monotonically increasing per run. CLI `watch` default output prints these
-envelopes exactly.
+Durable `seq` is monotonically increasing per run. `subscribeEvents(runId,
+afterSeq, ...)` first backfills durable rows with `seq > afterSeq`, then tails
+new durable rows and live ephemeral agent frames pushed by the daemon.
 
 ## Development And Operations
 

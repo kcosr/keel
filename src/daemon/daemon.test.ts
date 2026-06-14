@@ -174,6 +174,39 @@ describe("capability auth", () => {
     }
   }, 8000);
 
+  test("subscriptions backfill existing durable events over the socket", async () => {
+    const socketPath = join(dir, "backfill.sock");
+    const daemon = new KeelDaemon({
+      socketPath,
+      dbPath: join(dir, "backfill.db"),
+      agents: new AgentProviderRegistry().register(new MockProvider()),
+      adminToken: ADMIN_TOKEN,
+    });
+    await daemon.start();
+    try {
+      const client = await DaemonClient.connect(socketPath);
+      const { runId, capability } = await client.launchRun({
+        ...chainUrl,
+        input: { n: 2 },
+        name: "chain",
+      });
+      await client.authenticate(capability as string);
+      await client.waitForRun(runId);
+
+      const events: string[] = [];
+      const unsubscribe = client.subscribeEvents(runId, 0, (event) => events.push(event.type));
+      await until(() => Promise.resolve(events.includes("run.finished")), 2000);
+      unsubscribe();
+
+      expect(events[0]).toBe("run.started");
+      expect(events).toContain("step.completed");
+      expect(events).toContain("run.finished");
+      client.close();
+    } finally {
+      daemon.stop();
+    }
+  });
+
   test("long-lived subscriptions keep their original credential after re-authentication", async () => {
     const socketPath = join(dir, "credential-race.sock");
     const daemon = new KeelDaemon({

@@ -33,6 +33,10 @@
   run capabilities, admin capabilities, and client-side capability files.
 
 ### Changed
+- `keel watch` no longer uses durable per-token `agent.event` rows as its live
+  stream. Agent deltas are pushed as ephemeral live frames, while finalized
+  assistant messages and tool calls/results are persisted as message-granular
+  `agent.message`, `agent.tool_call`, and `agent.tool_result` rows.
 - Workflow launch is now client-captured source only. `keel launch ./wf.ts`,
   `keel run ./wf.ts`, and `keel execute ./control.ts` read files in the client;
   omitting the file reads source from stdin. The daemon no longer reads client

@@ -21,9 +21,15 @@ keel launch --detach workflows/spec-review-loop/spec-review-loop.workflow.ts \
     "reviewerProvider": "pi",
     "reviewerReasoning": "xhigh",
     "reviewerToolPolicy": "workspace-write",
-    "maxReviews": 3
+    "maxReviews": 10,
+    "stopWhenClean": false
   }'
 ```
+
+For iterative spec work, prefer `stopWhenClean: false` with a higher
+`maxReviews` such as `10`. That keeps the durable reviewer session parked after a
+clean review so the creator can make follow-up changes and re-invoke the same
+reviewer conversation. Stop the run explicitly when no further review is needed.
 
 Signal after the creator updates the spec:
 
@@ -62,7 +68,8 @@ No round label is required; the timestamp and identity preserve history.
   appending to the file.
 - Keel does not currently enforce append-only writes to a section; this is prompt
   discipline, not a sandbox boundary.
-- Keep `maxReviews` small. The workflow caps it at `20`.
+- Keep `maxReviews` bounded. For manual back-and-forth spec work, `10` is a good
+  default; the workflow caps it at `20`.
 
 ## Input
 

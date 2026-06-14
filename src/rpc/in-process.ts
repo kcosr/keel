@@ -17,6 +17,7 @@ import type {
   RunStart,
   WorkflowProvenance,
 } from "./contract.ts";
+import { EventHub } from "./event-hub.ts";
 import {
   type Blockage,
   type RunProjection,
@@ -30,11 +31,20 @@ import {
 
 export class InProcessKeel implements KeelApi {
   private readonly running = new Map<string, Promise<RunHandle<unknown>>>();
+  private readonly unsubscribeStoreEvents: () => void;
 
   constructor(
     private readonly kernel: RealmKernel,
     private readonly store: JournalStore,
-  ) {}
+    private readonly eventHub: EventHub = new EventHub(),
+  ) {
+    this.kernel.setLiveEventSink((runId, type, payload, atMs) =>
+      this.eventHub.publishEphemeral(runId, type, payload, atMs),
+    );
+    this.unsubscribeStoreEvents = this.store.onEventAppended((event) =>
+      this.eventHub.publishDurable(event),
+    );
+  }
 
   async launchRun(req: LaunchRequest): Promise<{ runId: string }> {
     const { runId, done } = this.kernel.launch(
@@ -149,26 +159,11 @@ export class InProcessKeel implements KeelApi {
     afterSeq: number,
     onEvent: (event: EventEnvelope) => void,
   ): () => void {
-    let cursor = afterSeq;
-    let stopped = false;
-    const poll = () => {
-      if (stopped) return;
-      for (const ev of this.store.listEvents(runId, cursor)) {
-        cursor = ev.seq;
-        onEvent({
-          seq: ev.seq,
-          type: ev.type,
-          payload: JSON.parse(ev.payloadJson),
-          atMs: ev.emittedAtMs,
-        });
-      }
-      if (!stopped) timer = setTimeout(poll, 25);
-    };
-    let timer = setTimeout(poll, 0);
-    return () => {
-      stopped = true;
-      clearTimeout(timer);
-    };
+    return this.eventHub.subscribe(this.store, runId, afterSeq, onEvent);
+  }
+
+  close(): void {
+    this.unsubscribeStoreEvents();
   }
 
   private start(handle: { runId: string; done: Promise<RunHandle<unknown>> }): void {

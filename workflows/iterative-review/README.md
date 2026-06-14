@@ -19,9 +19,16 @@ keel launch --detach workflows/iterative-review/iterative-review.workflow.ts \
     "model": "claude-opus-4-8",
     "reasoning": "xhigh",
     "toolPolicy": "read-only",
-    "maxRounds": 3
+    "maxRounds": 10,
+    "stopWhenClean": false
   }'
 ```
+
+For manual code review cycles, prefer `stopWhenClean: false` with a higher
+`maxRounds` such as `10`. That keeps the durable reviewer session parked after a
+clean review so a human or implementing agent can make more changes and
+re-invoke the same reviewer conversation. Stop the run explicitly when review is
+complete.
 
 Signal after applying fixes:
 

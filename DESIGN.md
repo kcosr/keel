@@ -450,6 +450,8 @@ pipeline (L17). Direct multi-process file access is forbidden.
 
 Core tables (DDL in Appendix A): `runs`, `journal`, `artifacts`, `events`
 (append-only audit + projection source), `approvals`, `signals`, `timers`.
+The `events` table stores durable lifecycle, narration, and message-granular
+agent transcript rows; it is not the live token bus.
 Optional typed per-schema output tables (`step_outputs_*`, registered by
 structural hash) are a **deferred** feature (§14) — the DDL reserves the naming
 convention only. `runs.tenant_id` stays as one nullable reserved column (cheap
@@ -753,6 +755,15 @@ Native structured output for SDK agents; prompt-injected JSON extraction with
 **bounded schema-retry** for CLI agents. Validation gates step completion — an
 output that fails its schema never enters the journal, so it can never poison a
 downstream hash.
+
+Agent stream delivery splits liveness from durability. Provider deltas are
+pushed from daemon memory to currently connected `subscribeEvents` watchers as
+ephemeral `agent.event` frames and are not persisted. When an agent attempt
+successfully finalizes, the daemon persists consolidated transcript rows:
+`agent.message` for the completed assistant text plus `agent.tool_call` and
+`agent.tool_result` for completed tool activity. `subscribeEvents` therefore
+backfills durable rows once on connect, then tails pushed durable rows and live
+ephemeral frames; it does not poll SQLite as the live stream.
 
 ### 10.4 Session capture & mid-call crash recovery
 

@@ -41,6 +41,7 @@ export interface KernelOptions {
   idgen?: () => string;
   /** Crash/fault hook for the kill harness; a no-op in production. */
   fault?: (point: FaultPoint, key: string) => void;
+  liveEvent?: CtxHost["liveEvent"];
 }
 
 const TERMINAL: ReadonlySet<RunStatus> = new Set<RunStatus>([
@@ -61,6 +62,7 @@ export class Kernel {
       clock: opts.clock ?? (() => Date.now()),
       rng: opts.rng ?? Math.random,
       ...(opts.fault ? { fault: opts.fault } : {}),
+      ...(opts.liveEvent ? { liveEvent: opts.liveEvent } : {}),
     };
     this.idgen = opts.idgen ?? (() => `run_${randomUUID()}`);
   }

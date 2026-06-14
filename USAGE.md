@@ -134,13 +134,14 @@ bun src/cli/keel.ts <command> [args]
 | `link [dir]` | Symlink this repo's SDK into `<dir>/node_modules`; defaults to the current directory. |
 | `launch [workflow.ts] [--name n] [--input json] [--output json\|text\|ndjson] [--tools] [--detach] [--emit-capability]` | Start a run from client-captured workflow source. Attached launch streams NDJSON by default; detached launch prints JSON. |
 | `run [workflow.ts] [--name n] [--input json] [--output json\|text\|ndjson] [--tools]` | Launch a run and print a JSON envelope, text transcript, or NDJSON events. |
-| `watch <runId> [--output ndjson\|text] [--tools]` | Stream run events until terminal. |
+| `watch <runId> [--output ndjson\|text] [--tools]` | Stream run events until terminal or parked. |
 | `get <runId>` | Print the canonical run projection as JSON. |
 | `output <runId> [--output json\|text]` | Print the terminal workflow output. |
 | `report <runId> [--output json\|text]` | Print a journaled per-node result digest. |
 | `list [--output text\|json]` | List runs as an aligned table or JSON envelope. Requires admin. |
 | `gc` | Prune unreferenced workflow definition rows and cache entries. Requires admin. |
-| `resume [--detach] [--tools] <runId>` | Resume a parked or incomplete run. Watches by default. |
+| `resume [--detach] [--tools] <runId>` | Resume a parked, interrupted, or incomplete run. Watches by default. |
+| `interrupt <runId> [reason]` | Stop active work and park a non-terminal run until explicit `resume`. |
 | `retry [--detach] [--tools] <runId>` | Re-run a failed run from its failed step. Watches by default. |
 | `rewind [--detach] [--tools] <runId> <stepKey>` | Discard everything after a step and re-run. Watches by default. |
 | `fork <runId> [atStepKey]` | Copy a terminal run into a new independent run. |
@@ -174,7 +175,8 @@ Attached `launch` defaults to `--output ndjson`; use `--output text` for a human
 transcript. Detached `launch` defaults to `--output json` and prints `runId` plus
 `capabilityRef`. The capability file contains the bearer token needed for
 follow-up control of that run. Detached `resume`, `retry`, and `rewind` print the
-run id and status separated by a tab.
+run id and status separated by a tab. `interrupt` is always a single lifecycle
+mutation and prints `<runId>\tinterrupted`.
 
 `launch --output json` is only valid with `--detach`; attached launch streams
 events, so `--output json` is rejected there. `launch --detach --output ndjson`
@@ -182,8 +184,9 @@ is also rejected because detached launch returns a snapshot handle, not a stream
 
 ### Watch Output
 
-Default watch output is newline-delimited JSON frame envelopes. Durable frames
-have `kind:"durable"` plus a per-run `seq`; live agent delta frames have
+Default watch output is newline-delimited JSON frame envelopes. Watch exits when
+the run finishes, fails, continues, parks on a durable wait, or is interrupted.
+Durable frames have `kind:"durable"` plus a per-run `seq`; live agent delta frames have
 `kind:"ephemeral"` and no sequence because they are delivered only to currently
 connected watchers. Finalized tool calls/results are durable immediately as
 `agent.tool_call`/`agent.tool_result` rows; live text/reasoning remains
@@ -256,8 +259,9 @@ other JSON values compactly.
 
 `keel report <runId>` defaults to JSON and prints a post-run digest derived from
 journaled node results, not raw event transcripts. `--output text` prints a
-compact per-node status/result summary. `--output ndjson` is invalid for
-`report`.
+compact per-node status/result summary. Interrupted runs include an `interrupted`
+blockage with the redacted reason, previous status, last phase, and last known
+wait metadata when available. `--output ndjson` is invalid for `report`.
 
 ### List Output
 
@@ -291,7 +295,8 @@ RPC method remains a bare `RunSummary[]`:
 - `1`: attached run reached `failed`, JSON parsing failed, provider execution
   failed, or another runtime error occurred.
 - `2`: command usage error.
-- `3`: `keel run` reached a parked/non-terminal status such as `waiting-human`.
+- `3`: `keel run` or `keel watch` reached a parked/non-terminal status such as
+  `waiting-human` or `interrupted`.
 
 ## Paths, State, And Workspaces
 
@@ -375,6 +380,7 @@ Use the cap file for follow-up commands:
 
 ```bash
 KEEL_CAP_FILE=/home/me/.keel/caps/run_....cap keel get run_...
+KEEL_CAP_FILE=/home/me/.keel/caps/run_....cap keel interrupt run_... "inspect"
 KEEL_CAP_FILE=/home/me/.keel/caps/run_....cap keel resume run_...
 ```
 
@@ -718,6 +724,23 @@ keel signal "$RUN" proceed '{"go":true}'
 Signals are ordered. The Nth `ctx.signal(name)` consumes the Nth delivered signal
 with that name.
 
+### Run Interruption
+
+```bash
+keel interrupt "$RUN" "operator requested inspection"
+keel resume "$RUN"
+```
+
+`interrupt` changes a non-terminal run to public status `interrupted`, appends a
+durable `run.interrupted` event, and best-effort aborts active worker/provider
+work. The optional reason is redacted for capability-looking tokens before it is
+persisted. Completed journal rows remain committed; incomplete rows stay pending
+and re-execute or recover using the same crash semantics on explicit `resume`.
+Signals, approvals, timer ticks, daemon restart recovery, `retry`, `rewind`, and
+`rerun` do not continue an interrupted run. Delivering a signal or approval while
+interrupted records the input but returns `interrupted`; a later `resume` observes
+that durable input.
+
 ### Time Travel
 
 `retry`, `rewind`, and `fork` operate on durable journal state:
@@ -761,6 +784,7 @@ display-only; the daemon never opens or parses it for execution.
 interface KeelApi {
   launchRun(req: LaunchRequest): Promise<RunLaunchResult>;
   resumeRun(runId: string): Promise<RunStart>;
+  interruptRun(runId: string, reason?: string): Promise<{ runId: string; status: "interrupted" }>;
   rerunRun(
     runId: string,
     opts?: { source?: string; input?: unknown; name?: string | null; provenance?: LaunchRequest["provenance"] },
@@ -801,6 +825,8 @@ interface RunSummary {
 ```
 
 Lifecycle methods start work in the background and return a `RunStart` or run id.
+`interruptRun` persists `status: "interrupted"`, appends `run.interrupted`, and
+aborts active in-process work best-effort; only `resumeRun` leaves that status.
 Use `waitForRun` to wait for terminal status or `subscribeEvents` to stream
 events. The daemon returns a raw run capability on launch/fork so clients can
 establish authority for follow-up operations. The CLI writes that capability to a
@@ -875,7 +901,8 @@ the default row TTL of 30 days.
 The daemon is the single writer. A run can be launched by one client, watched by
 another, and resumed by a third. A heartbeat-based ownership fence prevents two
 daemons from driving the same run; after restart, the daemon reclaims orphaned
-runs.
+`running` runs and deliberately skips `interrupted` runs until an explicit
+`resume`.
 
 ## Known Limitations
 

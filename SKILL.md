@@ -110,10 +110,12 @@ Do not use session turns for independent fan-out. A participant is a single
 forward-only backend thread, so concurrent turns on the same participant fail.
 Use separate participant keys for independent conversations.
 
-Session runs can resume and retry, but not rerun, rewind, or fork. Changing a
-participant's resolved provider/model/tool/capability identity or changing a
-completed/pending turn's prompt/schema/options for the same turn key fails
-closed. `workspaceIsolation: true` is not supported for `ctx.agentSession` yet.
+Session runs can resume and retry, but not rerun, rewind, or fork. If a session
+turn is interrupted after a backend token is observed, explicit resume continues
+from that token rather than starting a fresh session. Changing a participant's
+resolved provider/model/tool/capability identity or changing a completed/pending
+turn's prompt/schema/options for the same turn key fails closed.
+`workspaceIsolation: true` is not supported for `ctx.agentSession` yet.
 
 ## 5. Schemas
 
@@ -265,8 +267,12 @@ await keel.get(runId);
 await keel.report(runId);
 await keel.output(runId);
 await keel.retry(runId);
+await keel.interrupt(runId, "operator inspection");
 await keel.resume(runId);
 ```
+
+`interrupt` is resumable, not terminal cancellation: it stops active work
+best-effort and parks the run as `interrupted`; only `resume` continues it.
 
 `execute` is stateless. Return the small JSON result the caller needs: usually
 `runId`, `capabilityRef`, `status`, `output`, and any next-step context. Use
@@ -282,6 +288,7 @@ workflow itself, not in `execute`.
   true`**, and **`onFailure: "null"`** so one flaky branch doesn't sink the run.
   For required agents, omit `onFailure` so failures can be retried.
 - A run resumes from its immutable start-time workflow snapshot. To change code,
-  run again or rerun with new inline source.
+  run again or rerun with new inline source. Do not use retry/rewind/rerun to
+  continue an interrupted run; resume it first.
 - Use `run` for a single workflow; use `execute` only for mechanical
   follow-up across one or more runs.

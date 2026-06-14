@@ -31,6 +31,11 @@ export interface RunStart {
   status: RunProjection["status"];
 }
 
+export interface InterruptRunResult {
+  runId: string;
+  status: "interrupted";
+}
+
 export interface RunLaunchResult {
   runId: string;
   capability?: string;
@@ -59,6 +64,8 @@ export interface KeelApi {
   launchRun(req: LaunchRequest): Promise<RunLaunchResult>;
   /** Resume a non-terminal run in the background. */
   resumeRun(runId: string): Promise<RunStart>;
+  /** Park a non-terminal run until an explicit resume. */
+  interruptRun(runId: string, reason?: string): Promise<InterruptRunResult>;
   /** Re-execute a run against its stored definition or a new client-captured source. */
   rerunRun(
     runId: string,
@@ -83,7 +90,7 @@ export interface KeelApi {
   getBlockage(runId: string): Blockage;
   /** Summaries of all runs. */
   listRuns(): RunSummary[];
-  /** Await a run's completion (terminal status) and return its outcome. */
+  /** Await a run's next terminal or parked status and return its outcome. */
   waitForRun(runId: string): Promise<RunOutcome>;
   /** Return a run's terminal output without subscribing to events. */
   getRunOutput(runId: string): Promise<RunOutcome>;

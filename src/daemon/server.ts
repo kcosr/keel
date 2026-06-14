@@ -285,6 +285,11 @@ export class KeelDaemon {
         this.claimOrReject(p.runId as string);
         return this.api.resumeRun(p.runId as string);
       }
+      case "interruptRun": {
+        this.authorizeRun(conn, p.runId as string, "run:interrupt");
+        this.claimOrReject(p.runId as string);
+        return this.api.interruptRun(p.runId as string, p.reason as string | undefined);
+      }
       case "rerunRun": {
         this.authorizeRun(conn, p.runId as string, "run:retry");
         this.claimOrReject(p.runId as string);

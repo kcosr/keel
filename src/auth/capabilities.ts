@@ -15,6 +15,7 @@ export type CapabilityAction =
   | "run:events"
   | "run:output"
   | "run:resume"
+  | "run:interrupt"
   | "run:retry"
   | "run:rewind"
   | "run:fork"
@@ -48,6 +49,7 @@ export const DEFAULT_RUN_CAPABILITY_ACTIONS: readonly CapabilityAction[] = [
   "run:events",
   "run:output",
   "run:resume",
+  "run:interrupt",
   "run:retry",
   "run:rewind",
   "run:fork",

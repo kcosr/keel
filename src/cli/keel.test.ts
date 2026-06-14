@@ -82,6 +82,7 @@ describe("keel CLI", () => {
       expect(out.code).toBe(0);
       expect(out.stdout).toContain("Usage: keel <command>");
       expect(out.stdout).toContain("list [--output text|json]");
+      expect(out.stdout).toContain("interrupt <runId> [reason]");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -680,6 +681,67 @@ describe("keel CLI", () => {
         expect(watched.stdout.indexOf("run.resumed")).toBeLessThan(
           watched.stdout.indexOf("run.finished"),
         );
+      } finally {
+        daemon.stop();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    DAEMON_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "interrupt command parks a run, reports redacted reason, and resume is explicit",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "keel-interrupt-"));
+      const socketPath = join(dir, "keel.sock");
+      const dbPath = join(dir, "keel.db");
+      const daemon = new KeelDaemon({
+        socketPath,
+        dbPath,
+        agents: new AgentProviderRegistry().register(new MockProvider()),
+        adminToken: "kc_admin_interrupt_test",
+      });
+      await daemon.start();
+      try {
+        const env = {
+          KEEL_SOCKET: socketPath,
+          KEEL_DB: dbPath,
+          KEEL_DIR: dir,
+          KEEL_ADMIN_TOKEN: "kc_admin_interrupt_test",
+        };
+        const launched = await runCli(["launch", "--detach", gateUrl], dir, env);
+        expect(launched.code).toBe(0);
+        const payload = JSON.parse(launched.stdout) as { runId: string };
+        await waitForCliStatus(payload.runId, dir, env, "waiting-human");
+
+        const interrupted = await runCli(
+          ["interrupt", payload.runId, "inspect", "kc_run_secretValue"],
+          dir,
+          env,
+        );
+        expect(interrupted.code).toBe(0);
+        expect(interrupted.stdout).toBe(`${payload.runId}\tinterrupted\n`);
+        await waitForCliStatus(payload.runId, dir, env, "interrupted");
+
+        const watched = await runCli(["watch", payload.runId, "--output", "text"], dir, env);
+        expect(watched.code).toBe(3);
+        expect(watched.stdout).toContain("run.interrupted: inspect «redacted-capability»");
+        expect(watched.stdout).not.toContain("kc_run_secretValue");
+
+        const report = await runCli(["report", payload.runId, "--output", "text"], dir, env);
+        expect(report.code).toBe(3);
+        expect(report.stdout).toContain("blockage interrupted");
+        expect(report.stdout).toContain("inspect «redacted-capability»");
+
+        const approved = await runCli(["approve", payload.runId, "approve-deploy"], dir, env);
+        expect(approved.code).toBe(0);
+        expect(approved.stdout).toBe("interrupted\n");
+        await waitForCliStatus(payload.runId, dir, env, "interrupted");
+
+        const resumed = await runCli(["resume", payload.runId], dir, env);
+        expect(resumed.code).toBe(0);
+        expect(resumed.stdout).toContain("run.resumed");
+        expect(resumed.stdout).toContain("run.finished");
       } finally {
         daemon.stop();
         rmSync(dir, { recursive: true, force: true });

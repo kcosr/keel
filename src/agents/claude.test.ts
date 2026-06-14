@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { chmodSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { JournalStore } from "../journal/store.ts";
@@ -37,6 +37,15 @@ function kernel(store: JournalStore, vendor: AgentProvider, extra: Record<string
     agents: new AgentProviderRegistry().register(vendor),
     ...extra,
   });
+}
+
+async function until(cond: () => boolean, timeoutMs = 2000): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (cond()) return;
+    await Bun.sleep(20);
+  }
+  throw new Error("condition not met in time");
 }
 
 describe("Claude session-resume four-branch table (through the realm)", () => {
@@ -100,6 +109,42 @@ describe("Claude session-resume four-branch table (through the realm)", () => {
 });
 
 describe("ClaudeProvider", () => {
+  test("abortSignal kills an active Claude subprocess", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-claude-abort-"));
+    try {
+      const bin = join(dir, "fake-claude");
+      const spawned = join(dir, "spawned");
+      const aborted = join(dir, "aborted");
+      await Bun.write(
+        bin,
+        `#!/bin/sh
+printf 1 > ${spawned}
+trap 'printf 1 > ${aborted}; exit 0' TERM
+while true; do sleep 0.1; done
+`,
+      );
+      chmodSync(bin, 0o755);
+      const provider = new ClaudeProvider({ bin, timeoutMs: 10_000 });
+      const controller = new AbortController();
+      const running = provider.generate(
+        {
+          key: "claude-abort",
+          provider: "claude",
+          prompt: "hello",
+          toolPolicy: "none",
+          abortSignal: controller.signal,
+        },
+        {},
+      );
+      await until(() => existsSync(spawned));
+      controller.abort();
+      await expect(running).rejects.toThrow(/aborted/);
+      await until(() => existsSync(aborted));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("uses KEEL_CLAUDE_BIN when bin is not passed", async () => {
     const dir = mkdtempSync(join(tmpdir(), "keel-claude-env-bin-"));
     const previous = process.env.KEEL_CLAUDE_BIN;

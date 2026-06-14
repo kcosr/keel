@@ -14,6 +14,7 @@ export type RunStatus =
   | "waiting-signal"
   | "waiting-timer"
   | "waiting-approval"
+  | "interrupted"
   | "finished"
   | "failed"
   | "cancelled"

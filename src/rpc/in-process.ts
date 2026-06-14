@@ -67,6 +67,15 @@ export class InProcessKeel implements KeelApi {
     return this.started(runId);
   }
 
+  async interruptRun(
+    runId: string,
+    reason?: string,
+  ): Promise<{ runId: string; status: "interrupted" }> {
+    const result = this.kernel.interruptRun(runId, reason);
+    this.running.set(runId, Promise.resolve({ runId, status: "interrupted" }));
+    return result;
+  }
+
   async rerunRun(
     runId: string,
     opts?: {

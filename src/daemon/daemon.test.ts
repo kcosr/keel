@@ -28,6 +28,9 @@ const napUrl = captureWorkflowFile(
 const signalUrl = captureWorkflowFile(
   new URL("../kernel/realm/fixtures/await-signal.workflow.ts", import.meta.url).pathname,
 );
+const gateUrl = captureWorkflowFile(
+  new URL("../kernel/realm/fixtures/gate.workflow.ts", import.meta.url).pathname,
+);
 const ADMIN_TOKEN = "kc_admin_test";
 
 let dir: string;
@@ -125,6 +128,7 @@ describe("capability auth", () => {
       await expect(scoped.getBlockage(second.runId)).rejects.toThrow(/different resource/);
       await expect(scoped.waitForRun(second.runId)).rejects.toThrow(/different resource/);
       await expect(scoped.resumeRun(second.runId)).rejects.toThrow(/different resource/);
+      await expect(scoped.interruptRun(second.runId)).rejects.toThrow(/different resource/);
       await expect(scoped.retryRun(second.runId)).rejects.toThrow(/different resource/);
       await expect(scoped.rewindRun(second.runId, "compute")).rejects.toThrow(/different resource/);
       await expect(scoped.forkRun(second.runId)).rejects.toThrow(/different resource/);
@@ -356,6 +360,143 @@ describe("CAS ownership fence", () => {
     a.stop();
     b.stop();
   });
+});
+
+describe("daemon interruptRun over the socket", () => {
+  test("signal delivery does not wake an interrupted waiting-signal run until resume", async () => {
+    const socketPath = join(dir, "interrupt-signal.sock");
+    const daemon = new KeelDaemon({
+      socketPath,
+      dbPath: join(dir, "interrupt-signal.db"),
+      agents: new AgentProviderRegistry().register(new MockProvider()),
+      superviseMs: 100_000,
+    });
+    await daemon.start();
+    try {
+      const c = await DaemonClient.connect(socketPath);
+      const { runId, capability } = await c.launchRun({
+        ...signalUrl,
+        input: null,
+        name: "signal",
+      });
+      await c.authenticate(capability as string);
+      await c.waitForRun(runId);
+      expect((await c.getRun(runId))?.status).toBe("waiting-signal");
+
+      await expect(c.interruptRun(runId, "inspect kc_run_secret")).resolves.toEqual({
+        runId,
+        status: "interrupted",
+      });
+      expect((await c.getRun(runId))?.status).toBe("interrupted");
+      expect((await c.getBlockage(runId)).reason).toBe("interrupted");
+
+      await expect(c.sendSignal(runId, "proceed", { go: true })).resolves.toEqual({
+        status: "interrupted",
+      });
+      expect((await c.getRun(runId))?.status).toBe("interrupted");
+      const report = await c.getRunReport(runId);
+      expect(report?.blockage?.interrupted?.reason).toBe("inspect «redacted-capability»");
+
+      await c.resumeRun(runId);
+      expect((await c.waitForRun(runId)).status).toBe("finished");
+      c.close();
+    } finally {
+      daemon.stop();
+    }
+  }, 10000);
+
+  test("approval delivery does not wake an interrupted waiting-human run until resume", async () => {
+    const socketPath = join(dir, "interrupt-human.sock");
+    const daemon = new KeelDaemon({
+      socketPath,
+      dbPath: join(dir, "interrupt-human.db"),
+      agents: new AgentProviderRegistry().register(new MockProvider()),
+      superviseMs: 100_000,
+      adminToken: ADMIN_TOKEN,
+    });
+    await daemon.start();
+    try {
+      const c = await DaemonClient.connect(socketPath);
+      const { runId, capability } = await c.launchRun({
+        ...gateUrl,
+        input: null,
+        name: "gate",
+      });
+      await c.authenticate(capability as string);
+      await c.waitForRun(runId);
+      expect((await c.getRun(runId))?.status).toBe("waiting-human");
+
+      await c.interruptRun(runId, "pause for review");
+      await c.authenticate(ADMIN_TOKEN);
+      const decided = await c.decideApproval(runId, "approve-deploy", { status: "denied" });
+      expect(decided.status).toBe("interrupted");
+      expect((await c.getRun(runId))?.status).toBe("interrupted");
+
+      await c.resumeRun(runId);
+      expect((await c.waitForRun(runId)).status).toBe("finished");
+      c.close();
+    } finally {
+      daemon.stop();
+    }
+  }, 10000);
+
+  test("timer supervisor and restart recovery skip interrupted runs", async () => {
+    const socketPath = join(dir, "interrupt-timer.sock");
+    const dbPath = join(dir, "interrupt-timer.db");
+    const daemon = new KeelDaemon({
+      socketPath,
+      dbPath,
+      agents: new AgentProviderRegistry().register(new MockProvider()),
+      superviseMs: 100,
+    });
+    let interruptedRunId = "";
+    let interruptedCapability = "";
+    await daemon.start();
+    try {
+      const c = await DaemonClient.connect(socketPath);
+      const { runId, capability } = await c.launchRun({
+        ...napUrl,
+        input: null,
+        name: "nap",
+      });
+      interruptedRunId = runId;
+      interruptedCapability = capability as string;
+      await c.authenticate(capability as string);
+      await c.waitForRun(runId);
+      expect((await c.getRun(runId))?.status).toBe("waiting-timer");
+
+      await c.interruptRun(runId, "timer pause");
+      await Bun.sleep(1300);
+      expect((await c.getRun(runId))?.status).toBe("interrupted");
+      c.close();
+    } finally {
+      daemon.stop();
+    }
+
+    const restarted = new KeelDaemon({
+      socketPath: join(dir, "interrupt-timer-restarted.sock"),
+      dbPath,
+      agents: new AgentProviderRegistry().register(new MockProvider()),
+      superviseMs: 100,
+    });
+    await restarted.start();
+    try {
+      await Bun.sleep(300);
+      const store = JournalStore.open(dbPath);
+      try {
+        expect(store.getRun(interruptedRunId)?.status).toBe("interrupted");
+      } finally {
+        store.close();
+      }
+      const c = await DaemonClient.connect(join(dir, "interrupt-timer-restarted.sock"));
+      await c.authenticate(interruptedCapability);
+      await c.resumeRun(interruptedRunId);
+      expect((await c.waitForRun(interruptedRunId)).status).toBe("finished");
+      c.close();
+    } finally {
+      restarted.stop();
+    }
+  }, 10000);
 });
 
 describe("daemon supervisor tick over the socket", () => {

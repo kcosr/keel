@@ -201,12 +201,66 @@ export type BlockageReason =
   | "waiting_human"
   | "waiting_signal"
   | "waiting_timer"
-  | "waiting_child";
+  | "waiting_child"
+  | "interrupted";
+
+export interface InterruptionBlockageDetails {
+  reason?: string;
+  previousStatus: string;
+  phase: string | null;
+  wait: { kind?: string; key?: string; until?: number } | null;
+}
 
 export interface Blockage {
   reason: BlockageReason;
   blockedOn: { stableKey: string; since: number } | null;
   context: string;
+  interrupted?: InterruptionBlockageDetails;
+}
+
+function latestInterruptionDetails(
+  store: JournalStore,
+  runId: string,
+): InterruptionBlockageDetails & { interruptedAtMs: number } {
+  let reason: string | undefined;
+  let previousStatus = "unknown";
+  let interruptedAtMs = 0;
+  let phase: string | null = null;
+  let wait: { kind?: string; key?: string; until?: number } | null = null;
+  for (const ev of store.listEvents(runId)) {
+    let payload: Record<string, unknown> | null = null;
+    try {
+      payload = JSON.parse(ev.payloadJson) as Record<string, unknown>;
+    } catch {
+      payload = null;
+    }
+    if (ev.type === "phase") {
+      phase = typeof payload?.title === "string" ? payload.title : phase;
+    } else if (ev.type === "run.parked") {
+      const parked: { kind?: string; key?: string; until?: number } = {};
+      if (typeof payload?.kind === "string") parked.kind = payload.kind;
+      if (typeof payload?.key === "string") parked.key = payload.key;
+      if (typeof payload?.until === "number") parked.until = payload.until;
+      wait = Object.keys(parked).length > 0 ? parked : wait;
+    } else if (ev.type === "run.interrupted") {
+      previousStatus =
+        typeof payload?.previousStatus === "string" ? payload.previousStatus : previousStatus;
+      reason = typeof payload?.reason === "string" ? payload.reason : undefined;
+      interruptedAtMs = ev.emittedAtMs;
+    }
+  }
+  return { ...(reason ? { reason } : {}), previousStatus, phase, wait, interruptedAtMs };
+}
+
+function interruptedContext(details: InterruptionBlockageDetails): string {
+  const parts = [`interrupted from ${details.previousStatus}`];
+  if (details.reason) parts.push(`reason: ${details.reason}`);
+  if (details.phase) parts.push(`last phase: ${details.phase}`);
+  if (details.wait) {
+    const wait = [details.wait.kind, details.wait.key].filter(Boolean).join(" ");
+    if (wait.length > 0) parts.push(`last wait: ${wait}`);
+  }
+  return parts.join("; ");
 }
 
 /**
@@ -223,6 +277,22 @@ export function getBlockage(
   const run = store.getRun(runId);
   if (!run) return { reason: "none", blockedOn: null, context: "run not found" };
   switch (run.status) {
+    case "interrupted": {
+      const details = latestInterruptionDetails(store, runId);
+      return {
+        reason: "interrupted",
+        blockedOn: details.wait?.key
+          ? { stableKey: details.wait.key, since: details.interruptedAtMs }
+          : null,
+        context: interruptedContext(details),
+        interrupted: {
+          ...(details.reason ? { reason: details.reason } : {}),
+          previousStatus: details.previousStatus,
+          phase: details.phase,
+          wait: details.wait,
+        },
+      };
+    }
     case "waiting-human": {
       // surface WHAT is being asked, from the persisted approval (§17)
       const pending = store.listPendingApprovals(runId)[0];

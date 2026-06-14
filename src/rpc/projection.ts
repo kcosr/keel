@@ -30,6 +30,7 @@ export interface RunProjection {
   workflowName: string | null;
   status: RunStatus;
   definitionVersion: string;
+  runTarget?: string | null;
   parentRunId: string | null;
   createdAtMs: number;
   finishedAtMs: number | null;
@@ -108,6 +109,7 @@ export function buildProjection(store: JournalStore, runId: string): RunProjecti
     workflowName: run.workflowName,
     status: run.status,
     definitionVersion: run.definitionVersion,
+    runTarget: run.runTarget,
     parentRunId: run.parentRunId,
     createdAtMs: run.createdAtMs,
     finishedAtMs: run.finishedAtMs,
@@ -344,6 +346,7 @@ export interface RunSummary {
   runId: string;
   workflowName: string | null;
   status: RunStatus;
+  runTarget?: string | null;
   createdAtMs: number;
   finishedAtMs: number | null;
   parentRunId: string | null;
@@ -354,6 +357,7 @@ export function listRunSummaries(store: JournalStore): RunSummary[] {
     runId: r.runId,
     workflowName: r.workflowName,
     status: r.status,
+    runTarget: r.runTarget,
     createdAtMs: r.createdAtMs,
     finishedAtMs: r.finishedAtMs,
     parentRunId: r.parentRunId,

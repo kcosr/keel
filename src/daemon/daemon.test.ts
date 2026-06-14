@@ -4,7 +4,7 @@
 // - kill -9 the daemon mid-run, restart, and the run recovers and finishes.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MockProvider } from "../agents/mock.ts";
@@ -40,6 +40,139 @@ beforeEach(() => {
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
 describe("daemon multi-client over the socket", () => {
+  test("startup reconciles stale retained workspace rows", async () => {
+    const socketPath = join(dir, "reconcile.sock");
+    const dbPath = join(dir, "reconcile.db");
+    const workspaceStore = join(dir, "workspaces");
+    mkdirSync(join(workspaceStore, "r-active"), { recursive: true });
+    const activePath = join(workspaceStore, "r-active", "agent");
+    mkdirSync(activePath, { recursive: true });
+
+    const store = JournalStore.open(dbPath);
+    store.insertRun({
+      runId: "r-creating",
+      workflowName: "wf",
+      definitionVersion: "wf_sha256_fixture",
+      workflowRef: null,
+      runTarget: dir,
+      status: "waiting-timer",
+      parentRunId: null,
+      tenantId: null,
+      inputRef: "null",
+      outputRef: null,
+      errorJson: null,
+      heartbeatAtMs: 0,
+      runtimeOwnerId: "dead-daemon",
+      createdAtMs: 1,
+      finishedAtMs: null,
+    });
+    store.insertAgentSessionWorkspace({
+      runId: "r-creating",
+      agentKey: "agent",
+      workspacePath: join(workspaceStore, "r-creating", "agent"),
+      target: dir,
+      baseCommit: "base",
+      status: "creating",
+      lastTurnKey: null,
+      lastTurnAttempt: null,
+      lastDiffEventSeq: null,
+      lastErrorEventSeq: null,
+      createdAtMs: 1,
+      updatedAtMs: 1,
+      mergedAtMs: null,
+      discardedAtMs: null,
+    });
+    store.insertRun({
+      runId: "r-active",
+      workflowName: "wf",
+      definitionVersion: "wf_sha256_fixture",
+      workflowRef: null,
+      runTarget: dir,
+      status: "finished",
+      parentRunId: null,
+      tenantId: null,
+      inputRef: "null",
+      outputRef: null,
+      errorJson: null,
+      heartbeatAtMs: null,
+      runtimeOwnerId: null,
+      createdAtMs: 1,
+      finishedAtMs: 2,
+    });
+    store.insertAgentSessionWorkspace({
+      runId: "r-active",
+      agentKey: "agent",
+      workspacePath: activePath,
+      target: dir,
+      baseCommit: "base",
+      status: "active",
+      lastTurnKey: "turn",
+      lastTurnAttempt: 1,
+      lastDiffEventSeq: null,
+      lastErrorEventSeq: null,
+      createdAtMs: 1,
+      updatedAtMs: 1,
+      mergedAtMs: null,
+      discardedAtMs: null,
+    });
+    store.insertRun({
+      runId: "r-terminal-missing",
+      workflowName: "wf",
+      definitionVersion: "wf_sha256_fixture",
+      workflowRef: null,
+      runTarget: dir,
+      status: "failed",
+      parentRunId: null,
+      tenantId: null,
+      inputRef: "null",
+      outputRef: null,
+      errorJson: null,
+      heartbeatAtMs: null,
+      runtimeOwnerId: null,
+      createdAtMs: 1,
+      finishedAtMs: 2,
+    });
+    store.insertAgentSessionWorkspace({
+      runId: "r-terminal-missing",
+      agentKey: "agent",
+      workspacePath: join(workspaceStore, "missing", "agent"),
+      target: dir,
+      baseCommit: "base",
+      status: "creating",
+      lastTurnKey: null,
+      lastTurnAttempt: null,
+      lastDiffEventSeq: null,
+      lastErrorEventSeq: null,
+      createdAtMs: 1,
+      updatedAtMs: 1,
+      mergedAtMs: null,
+      discardedAtMs: null,
+    });
+    store.close();
+
+    const daemon = new KeelDaemon({
+      socketPath,
+      dbPath,
+      workspaceStore,
+      adminToken: ADMIN_TOKEN,
+      clock: () => 100_000,
+      superviseMs: 100_000,
+    });
+    await daemon.start();
+    daemon.stop();
+
+    const reopened = JournalStore.open(dbPath);
+    try {
+      expect(reopened.getAgentSessionWorkspace("r-creating", "agent")).toBeNull();
+      expect(reopened.getAgentSessionWorkspace("r-active", "agent")?.status).toBe("pending_review");
+      expect(reopened.getAgentSessionWorkspace("r-terminal-missing", "agent")?.status).toBe(
+        "abandoned",
+      );
+    } finally {
+      reopened.close();
+    }
+  });
+
   test("launch from one client, observe + result from a second", async () => {
     const socketPath = join(dir, "k.sock");
     const daemon = new KeelDaemon({
@@ -637,11 +770,11 @@ describe("HITL over the socket", () => {
       await c.authenticate(ADMIN_TOKEN);
       await expect(
         c.decideApproval(runId, "approve-deploy", { status: "approved" }),
-      ).rejects.toThrow(/requires workflow SDK ABI 2, but this daemon supports ABI 1/);
+      ).rejects.toThrow(/requires workflow SDK ABI 3, but this daemon supports ABI 2/);
       const failed = await c.getRun(runId);
       expect(failed?.status).toBe("failed");
       expect(failed?.error?.message).toContain(
-        "requires workflow SDK ABI 2, but this daemon supports ABI 1",
+        "requires workflow SDK ABI 3, but this daemon supports ABI 2",
       );
       c.close();
     } finally {
@@ -673,12 +806,12 @@ describe("HITL over the socket", () => {
       requireUnsupportedSdkAbiForRun(dbPath, runId);
 
       await expect(c.sendSignal(runId, "proceed", { go: true, by: "test" })).rejects.toThrow(
-        /requires workflow SDK ABI 2, but this daemon supports ABI 1/,
+        /requires workflow SDK ABI 3, but this daemon supports ABI 2/,
       );
       const failed = await c.getRun(runId);
       expect(failed?.status).toBe("failed");
       expect(failed?.error?.message).toContain(
-        "requires workflow SDK ABI 2, but this daemon supports ABI 1",
+        "requires workflow SDK ABI 3, but this daemon supports ABI 2",
       );
       c.close();
     } finally {
@@ -808,7 +941,7 @@ describe("kill -9 daemon recovery", () => {
         const failed = probe.getRun("orphan");
         expect(failed?.runtimeOwnerId).toBe("orphan-reclaimer");
         expect(JSON.parse(failed?.errorJson ?? "{}").message).toContain(
-          "requires workflow SDK ABI 2, but this daemon supports ABI 1",
+          "requires workflow SDK ABI 3, but this daemon supports ABI 2",
         );
       } finally {
         probe.close();
@@ -853,7 +986,7 @@ function requireUnsupportedSdkAbi(store: JournalStore, hash: string): void {
   const row = store.getWorkflowDefinition(hash);
   if (!row?.manifestJson) throw new Error(`missing manifest for ${hash}`);
   const manifest = JSON.parse(row.manifestJson) as { runtime: { workflowSdkAbi: number } };
-  manifest.runtime.workflowSdkAbi = 2;
+  manifest.runtime.workflowSdkAbi = 3;
   store.db
     .query("UPDATE workflow_definitions SET manifest_json = ? WHERE hash = ?")
     .run(JSON.stringify(manifest), hash);

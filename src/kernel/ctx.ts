@@ -54,6 +54,8 @@ export interface AgentSpec<T> {
   denyTools?: string[];
   /** Run the provider in an isolated git worktree and journal its diff. Realm-only. */
   workspaceIsolation?: boolean;
+  /** Daemon-resolvable working target; defaults to the run target. */
+  target?: string;
   /** Explicit capabilities; overrides the default read-only policy (§11). */
   capabilities?: Partial<Capabilities>;
   /** Named secret refs to inject as env at invocation (§11.2). */
@@ -269,6 +271,7 @@ export class WorkflowCtx implements Ctx {
       ...(spec.denyTools ? { denyTools: spec.denyTools } : {}),
     });
     const caps = tools.capabilities;
+    const target = spec.target ?? process.cwd();
     const version =
       spec.version ??
       computeVersion({
@@ -281,6 +284,7 @@ export class WorkflowCtx implements Ctx {
           allowTools: tools.allowTools,
           denyTools: tools.denyTools,
           workspaceIsolation: false,
+          target,
           capabilities: caps,
           secrets: spec.secrets ?? [],
         },
@@ -296,6 +300,7 @@ export class WorkflowCtx implements Ctx {
       allowTools: tools.allowTools,
       denyTools: tools.denyTools,
       workspaceIsolation: false,
+      target,
       capabilities: caps,
       secrets: spec.secrets ?? [],
     };
@@ -325,6 +330,7 @@ export class WorkflowCtx implements Ctx {
               allowTools: tools.allowTools,
               denyTools: tools.denyTools,
               capabilities: caps,
+              cwd: target,
               ...(begun.resumeToken ? { resumeToken: begun.resumeToken } : {}),
               abortSignal: signal,
             },

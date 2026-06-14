@@ -43,8 +43,8 @@ export interface DaemonOptions {
   superviseMs?: number;
   /** Optional bootstrap admin bearer token. Stored only as a daemon-side hash. */
   adminToken?: string;
-  /** Git repo root for agents that explicitly request workspaceIsolation (§11.3). */
-  workspaceRoot?: string;
+  /** Keel-owned store for retained isolated session workspaces. */
+  workspaceStore?: string;
   /** Named agent profiles, resolved into each ctx.agent before versioning. */
   agentProfiles?: Record<string, unknown>;
   definitionCacheRoot?: string;
@@ -90,7 +90,7 @@ export class KeelDaemon {
     }
     this.kernel = new RealmKernel(this.store, {
       ...(opts.agents ? { agents: opts.agents } : {}),
-      ...(opts.workspaceRoot ? { workspaceRoot: opts.workspaceRoot } : {}),
+      workspaceStore: opts.workspaceStore ?? join(dirname(opts.dbPath), "workspaces"),
       ...(opts.agentProfiles ? { agentProfiles: opts.agentProfiles } : {}),
       definitionCacheRoot: opts.definitionCacheRoot ?? join(dirname(opts.dbPath), "definitions"),
       clock: this.clock,
@@ -133,6 +133,10 @@ export class KeelDaemon {
     } catch {
       // best effort
     }
+    this.api.reconcileWorkspaces({
+      staleBeforeMs: this.clock() - OWNER_STALE_HEARTBEATS * this.heartbeatMs,
+      nowMs: this.clock(),
+    });
     this.recoverOrphans();
     this.heartbeatTimer = setInterval(() => {
       for (const runId of this.owned) this.store.heartbeat(runId, this.ownerId, this.clock());
@@ -269,9 +273,11 @@ export class KeelDaemon {
     }
     switch (method) {
       case "launchRun": {
+        if (typeof p.target !== "string") throw new Error("launchRun requires target");
         const res = await this.api.launchRun({
           source: p.source as string,
           input: p.input,
+          target: p.target,
           name: (p.name as string | null | undefined) ?? null,
           provenance: p.provenance as WorkflowProvenance | undefined,
         });
@@ -422,15 +428,38 @@ export class KeelDaemon {
           cacheRoot:
             this.opts.definitionCacheRoot ?? join(dirname(this.opts.dbPath), "definitions"),
         }).snapshot;
+        if (typeof p.target !== "string") throw new Error("putSchedule requires target");
         this.store.putSchedule({
           name: p.name as string,
           workflowRef: snapshot.hash,
           inputJson: p.input != null ? JSON.stringify(p.input) : null,
+          scheduleTarget: p.target,
           intervalMs: p.intervalMs as number,
           nextFireMs: (p.firstFireMs as number) ?? this.clock(),
         });
         return { ok: true };
       }
+      case "listRunWorkspaces":
+        this.authorizeRun(conn, p.runId as string, "run:read");
+        return this.api.listRunWorkspaces(p.runId as string);
+      case "getRunWorkspace":
+        this.authorizeRun(conn, p.runId as string, "run:read");
+        return this.api.getRunWorkspace(p.runId as string, p.agentKey as string);
+      case "getRunWorkspaceDiff":
+        this.authorizeRun(conn, p.runId as string, "run:read");
+        return this.api.getRunWorkspaceDiff(p.runId as string, p.agentKey as string);
+      case "mergeRunWorkspace":
+        this.authorizeAdmin(conn);
+        return this.api.mergeRunWorkspace(p.runId as string, p.agentKey as string);
+      case "discardRunWorkspace":
+        this.authorizeAdmin(conn);
+        return this.api.discardRunWorkspace(p.runId as string, p.agentKey as string);
+      case "gcWorkspaces":
+        this.authorizeAdmin(conn);
+        return this.api.gcWorkspaces({
+          ...(typeof p.olderThanMs === "number" ? { olderThanMs: p.olderThanMs } : {}),
+          ...(p.includePending === true ? { includePending: true } : {}),
+        });
       case "gcDefinitions": {
         this.authorizeAdmin(conn);
         const ttlMs = typeof p.ttlMs === "number" ? p.ttlMs : definitionTtlMsFromEnv();

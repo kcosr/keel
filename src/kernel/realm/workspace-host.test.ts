@@ -44,8 +44,9 @@ const writerProvider: AgentProvider = {
 };
 
 describe("trusted-local agent isolation controls", () => {
-  test("an agent requesting workspace isolation refuses to run when no workspaceRoot is configured", async () => {
+  test("an agent requesting workspace isolation refuses a non-git target", async () => {
     const store = JournalStore.memory();
+    const target = mkdtempSync(join(tmpdir(), "keel-non-git-target-"));
     let called = false;
     const provider: AgentProvider = {
       name: "writer",
@@ -57,9 +58,11 @@ describe("trusted-local agent isolation controls", () => {
     const kernel = new RealmKernel(store, {
       idgen: () => "r",
       agents: new AgentProviderRegistry().register(provider),
-      // NOTE: no workspaceRoot
     });
-    await expect(kernel.run(writeUrl, null, { name: "w" })).rejects.toThrow(/workspaceRoot/);
+    await expect(kernel.run(writeUrl, null, { name: "w", target })).rejects.toThrow(
+      /git repository root/,
+    );
+    rmSync(target, { recursive: true, force: true });
     expect(called).toBe(false); // provider never invoked — failed closed
     expect(store.getRun("r")?.status).toBe("failed");
   });
@@ -104,7 +107,7 @@ describe("trusted-local agent isolation controls", () => {
     const handle = await kernel.run<string>(writeSecretLooseUrl, null, { name: "ws" });
     expect(handle.status).toBe("finished");
     expect(handle.output).toBe("saw file-secret-abc");
-    expect(invocation?.cwd).toBeUndefined();
+    expect(invocation?.cwd).toBe(process.cwd());
     expect(invocation?.capabilities?.fs).toBe("workspace-write");
     expect(invocation?.env?.TOKEN).toBe("file-secret-abc");
   });
@@ -153,9 +156,8 @@ describe("durable diff + worktree cleanup", () => {
     const kernel = new RealmKernel(store, {
       idgen: () => "r",
       agents: new AgentProviderRegistry().register(writerProvider),
-      workspaceRoot: repo,
     });
-    const handle = await kernel.run<string>(writeUrl, null, { name: "w" });
+    const handle = await kernel.run<string>(writeUrl, null, { name: "w", target: repo });
     expect(handle.status).toBe("finished");
 
     const diffEvent = store.listEvents("r").find((e) => e.type === "agent.diff");
@@ -182,13 +184,12 @@ describe("durable diff + worktree cleanup", () => {
     const kernel = new RealmKernel(store, {
       idgen: () => "r",
       agents: new AgentProviderRegistry().register(writer),
-      workspaceRoot: repo,
       secrets,
     });
     const writeSecretUrl = captureWorkflowFile(
       new URL("./fixtures/write-secret.workflow.ts", import.meta.url).pathname,
     );
-    await kernel.run(writeSecretUrl, null, { name: "ws" });
+    await kernel.run(writeSecretUrl, null, { name: "ws", target: repo });
     const diff = store.listEvents("r").find((e) => e.type === "agent.diff");
     expect(diff?.payloadJson).toContain("config.ini"); // the file is in the diff
     expect(diff?.payloadJson).toContain("file-secret-abc"); // exact values are not redacted
@@ -205,9 +206,8 @@ describe("durable diff + worktree cleanup", () => {
     const kernel = new RealmKernel(store, {
       idgen: () => "r",
       agents: new AgentProviderRegistry().register(failing),
-      workspaceRoot: repo,
     });
-    await kernel.run(writeUrl, null, { name: "w" }).catch(() => null);
+    await kernel.run(writeUrl, null, { name: "w", target: repo }).catch(() => null);
     // git worktree list should show only the main worktree (no leaked temp ones)
     const list = execFileSync("git", ["worktree", "list"], { cwd: repo, encoding: "utf8" });
     expect(list.trim().split("\n").length).toBe(1);

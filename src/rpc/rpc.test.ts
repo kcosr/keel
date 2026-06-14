@@ -3,6 +3,10 @@
 // golden-locked; events stream through subscribeEvents.
 
 import { describe, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { MockProvider } from "../agents/mock.ts";
 import {
   type AgentHooks,
@@ -12,9 +16,11 @@ import {
   type AgentResult,
 } from "../agents/types.ts";
 import { JournalStore } from "../journal/store.ts";
+import type { AgentSessionWorkspaceStatus, RunStatus } from "../journal/types.ts";
 import { RUN_FINISHED_INLINE_OUTPUT_BYTES } from "../kernel/output.ts";
 import { RealmKernel } from "../kernel/realm/realm-host.ts";
 import { captureWorkflowFile } from "../workflow-definitions/capture.ts";
+import { createRetainedWorktree, retainedWorkspacePath } from "../workspace/worktree.ts";
 import { EventHub } from "./event-hub.ts";
 import { InProcessKeel } from "./in-process.ts";
 
@@ -47,6 +53,81 @@ function streamingKeel(store: JournalStore, provider: AgentProvider): InProcessK
     liveEvent: (runId, type, payload, atMs) => hub.publishEphemeral(runId, type, payload, atMs),
   });
   return new InProcessKeel(kernel, store, hub);
+}
+
+function initGitRepo(repo: string): string {
+  const g = (args: string[]) => execFileSync("git", args, { cwd: repo });
+  g(["init", "-q"]);
+  g(["config", "user.email", "t@t"]);
+  g(["config", "user.name", "t"]);
+  writeFileSync(join(repo, "app.js"), "const x = 1;\n");
+  g(["add", "-A"]);
+  g(["commit", "-q", "-m", "init"]);
+  return execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
+}
+
+function insertWorkspaceFixture(
+  store: JournalStore,
+  opts: {
+    runId: string;
+    agentKey: string;
+    repo: string;
+    baseCommit: string;
+    workspacePath: string;
+    runStatus: RunStatus;
+    workspaceStatus: AgentSessionWorkspaceStatus;
+    activeTurn?: boolean;
+    updatedAtMs?: number;
+  },
+): void {
+  store.insertRun({
+    runId: opts.runId,
+    workflowName: "wf",
+    definitionVersion: "wf_sha256_fixture",
+    workflowRef: null,
+    runTarget: opts.repo,
+    status: opts.runStatus,
+    parentRunId: null,
+    tenantId: null,
+    inputRef: "null",
+    outputRef: null,
+    errorJson: null,
+    heartbeatAtMs: null,
+    runtimeOwnerId: null,
+    createdAtMs: 1,
+    finishedAtMs: ["finished", "failed", "cancelled", "continued"].includes(opts.runStatus)
+      ? 2
+      : null,
+  });
+  store.insertAgentSession({
+    runId: opts.runId,
+    agentKey: opts.agentKey,
+    identityHash: "identity",
+    identityJson: "{}",
+    currentSessionToken: null,
+    latestCompletedTurnKey: null,
+    latestCompletedAttempt: null,
+    activeTurnKey: opts.activeTurn ? "turn" : null,
+    activeTurnAttempt: opts.activeTurn ? 1 : null,
+    createdAtMs: 1,
+    updatedAtMs: 1,
+  });
+  store.insertAgentSessionWorkspace({
+    runId: opts.runId,
+    agentKey: opts.agentKey,
+    workspacePath: opts.workspacePath,
+    target: opts.repo,
+    baseCommit: opts.baseCommit,
+    status: opts.workspaceStatus,
+    lastTurnKey: opts.activeTurn ? "turn" : null,
+    lastTurnAttempt: opts.activeTurn ? 1 : null,
+    lastDiffEventSeq: null,
+    lastErrorEventSeq: null,
+    createdAtMs: 1,
+    updatedAtMs: opts.updatedAtMs ?? 1,
+    mergedAtMs: null,
+    discardedAtMs: null,
+  });
 }
 
 describe("RPC contract drives a workflow end-to-end", () => {
@@ -124,6 +205,7 @@ describe("RPC contract drives a workflow end-to-end", () => {
           runId: "run_0",
           workflowName: "c1",
           status: "finished",
+          runTarget: process.cwd(),
           createdAtMs: 1_000,
           finishedAtMs: 1_000,
           parentRunId: null,
@@ -132,6 +214,7 @@ describe("RPC contract drives a workflow end-to-end", () => {
           runId: "run_1",
           workflowName: "c2",
           status: "finished",
+          runTarget: process.cwd(),
           createdAtMs: 2_000,
           finishedAtMs: 2_000,
           parentRunId: null,
@@ -140,6 +223,7 @@ describe("RPC contract drives a workflow end-to-end", () => {
           runId: "run_0_fork",
           workflowName: "c1",
           status: "running",
+          runTarget: process.cwd(),
           createdAtMs: 3_000,
           finishedAtMs: null,
           parentRunId: "run_0",
@@ -166,6 +250,7 @@ describe("projection is golden-locked", () => {
         workflowName: "chain",
         status: "finished",
         definitionVersion,
+        runTarget: process.cwd(),
         parentRunId: null,
         createdAtMs: 1,
         finishedAtMs: 1,
@@ -623,6 +708,120 @@ describe("event subscription", () => {
     },
     WORKFLOW_TEST_TIMEOUT_MS,
   );
+});
+
+describe("workspace lifecycle operations", () => {
+  test("merge, discard, and GC enforce lifecycle guards and are idempotent", () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-rpc-workspace-"));
+    const store = JournalStore.memory();
+    try {
+      const repo = join(dir, "repo");
+      const workspaceStore = join(dir, "store");
+      mkdirSync(repo, { recursive: true });
+      mkdirSync(workspaceStore, { recursive: true });
+      const baseCommit = initGitRepo(repo);
+      const api = keel(store);
+
+      const nonTerminalPath = retainedWorkspacePath(workspaceStore, "r-running", "agent");
+      createRetainedWorktree(repo, nonTerminalPath, baseCommit);
+      insertWorkspaceFixture(store, {
+        runId: "r-running",
+        agentKey: "agent",
+        repo,
+        baseCommit,
+        workspacePath: nonTerminalPath,
+        runStatus: "running",
+        workspaceStatus: "pending_review",
+      });
+      expect(() => api.mergeRunWorkspace("r-running", "agent")).toThrow(/while run is running/);
+      expect(() => api.discardRunWorkspace("r-running", "agent")).toThrow(/while run is running/);
+      store.deleteAgentSessionWorkspace("r-running", "agent");
+      rmSync(nonTerminalPath, { recursive: true, force: true });
+
+      const activePath = retainedWorkspacePath(workspaceStore, "r-active", "agent");
+      createRetainedWorktree(repo, activePath, baseCommit);
+      insertWorkspaceFixture(store, {
+        runId: "r-active",
+        agentKey: "agent",
+        repo,
+        baseCommit,
+        workspacePath: activePath,
+        runStatus: "finished",
+        workspaceStatus: "pending_review",
+        activeTurn: true,
+      });
+      expect(() => api.discardRunWorkspace("r-active", "agent")).toThrow(/turn is active/);
+      store.deleteAgentSessionWorkspace("r-active", "agent");
+      rmSync(activePath, { recursive: true, force: true });
+
+      const mergePath = retainedWorkspacePath(workspaceStore, "r-merge", "agent");
+      createRetainedWorktree(repo, mergePath, baseCommit);
+      writeFileSync(join(mergePath, "merged.txt"), "merged\n");
+      insertWorkspaceFixture(store, {
+        runId: "r-merge",
+        agentKey: "agent",
+        repo,
+        baseCommit,
+        workspacePath: mergePath,
+        runStatus: "finished",
+        workspaceStatus: "pending_review",
+      });
+      expect(api.mergeRunWorkspace("r-merge", "agent").status).toBe("merged");
+      expect(readFileSync(join(repo, "merged.txt"), "utf8")).toBe("merged\n");
+
+      const discardPath = retainedWorkspacePath(workspaceStore, "r-discard", "agent");
+      createRetainedWorktree(repo, discardPath, baseCommit);
+      insertWorkspaceFixture(store, {
+        runId: "r-discard",
+        agentKey: "agent",
+        repo,
+        baseCommit,
+        workspacePath: discardPath,
+        runStatus: "finished",
+        workspaceStatus: "pending_review",
+      });
+      expect(api.discardRunWorkspace("r-discard", "agent").status).toBe("discarded");
+      expect(existsSync(discardPath)).toBe(false);
+
+      const pendingPath = retainedWorkspacePath(workspaceStore, "r-pending", "agent");
+      createRetainedWorktree(repo, pendingPath, baseCommit);
+      insertWorkspaceFixture(store, {
+        runId: "r-pending",
+        agentKey: "agent",
+        repo,
+        baseCommit,
+        workspacePath: pendingPath,
+        runStatus: "finished",
+        workspaceStatus: "pending_review",
+      });
+      const diffErrorPath = retainedWorkspacePath(workspaceStore, "r-diff-error", "agent");
+      createRetainedWorktree(repo, diffErrorPath, baseCommit);
+      insertWorkspaceFixture(store, {
+        runId: "r-diff-error",
+        agentKey: "agent",
+        repo,
+        baseCommit,
+        workspacePath: diffErrorPath,
+        runStatus: "finished",
+        workspaceStatus: "diff_error",
+      });
+
+      const firstGc = api.gcWorkspaces({ olderThanMs: 0 });
+      expect(firstGc.removed.map((w) => w.runId).sort()).toEqual(["r-merge"]);
+      expect(store.getAgentSessionWorkspace("r-merge", "agent")).toBeNull();
+      expect(store.getAgentSessionWorkspace("r-discard", "agent")).toBeNull();
+      expect(store.getAgentSessionWorkspace("r-pending", "agent")?.status).toBe("pending_review");
+      expect(store.getAgentSessionWorkspace("r-diff-error", "agent")?.status).toBe("diff_error");
+      expect(api.gcWorkspaces({ olderThanMs: 0 }).removed).toEqual([]);
+
+      const pendingGc = api.gcWorkspaces({ olderThanMs: 0, includePending: true });
+      expect(pendingGc.removed.map((w) => w.runId)).toEqual(["r-pending"]);
+      expect(store.getAgentSessionWorkspace("r-pending", "agent")).toBeNull();
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 class ControlledStreamingProvider implements AgentProvider {

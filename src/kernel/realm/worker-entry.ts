@@ -271,6 +271,7 @@ let control: Int32Array;
 let value: Float64Array;
 let moduleHelpers: Record<string, string> = {};
 let agentProfiles: AgentProfiles = {};
+let runTarget: string | null = null;
 let nextId = 1;
 const pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: unknown) => void }>();
 
@@ -338,6 +339,10 @@ function assertSessionKey(key: string, kind: string): void {
 
 function sessionStableKey(agentKey: string, turnKey: string): string {
   return `${SESSION_STABLE_KEY_PREFIX}${agentKey}.${turnKey}`;
+}
+
+function resolvedTarget(specTarget: string | undefined): string | null {
+  return specTarget ?? runTarget;
 }
 
 function tag<T>(result: T, stepKey: string, contentHash: string): T {
@@ -448,6 +453,7 @@ const ctx = Object.freeze({
     allowTools?: string[];
     denyTools?: string[];
     workspaceIsolation?: boolean;
+    target?: string;
     capabilities?: Record<string, unknown>;
     secrets?: string[];
     onFailure?: "throw" | "null";
@@ -471,6 +477,7 @@ const ctx = Object.freeze({
       ...(spec.denyTools ? { denyTools: spec.denyTools } : {}),
     });
     const caps = tools.capabilities;
+    const target = resolvedTarget(spec.target);
     const version =
       spec.version ??
       computeVersion({
@@ -483,6 +490,7 @@ const ctx = Object.freeze({
           allowTools: tools.allowTools,
           denyTools: tools.denyTools,
           workspaceIsolation: spec.workspaceIsolation === true,
+          target,
           capabilities: caps,
           secrets: spec.secrets ?? [],
         },
@@ -500,6 +508,7 @@ const ctx = Object.freeze({
       allowTools: tools.allowTools,
       denyTools: tools.denyTools,
       workspaceIsolation: spec.workspaceIsolation === true,
+      target,
       capabilities: caps,
       secrets: spec.secrets ?? [],
     };
@@ -520,6 +529,7 @@ const ctx = Object.freeze({
       allowTools: tools.allowTools,
       denyTools: tools.denyTools,
       workspaceIsolation: spec.workspaceIsolation === true,
+      target,
       capabilities: caps,
       secrets: spec.secrets ?? [],
       version,
@@ -552,6 +562,7 @@ const ctx = Object.freeze({
     allowTools?: string[];
     denyTools?: string[];
     workspaceIsolation?: boolean;
+    target?: string;
     capabilities?: Record<string, unknown>;
     secrets?: string[];
   }): {
@@ -573,9 +584,6 @@ const ctx = Object.freeze({
       "profile"
     >;
     assertSessionKey(sessionSpec.key, "agentSession");
-    if (sessionSpec.workspaceIsolation === true) {
-      throw new Error("ctx.agentSession({ workspaceIsolation: true }) is not supported");
-    }
     const provider = sessionSpec.provider ?? DEFAULT_AGENT_PROVIDER;
     const tools = resolveToolPolicy({
       ...(sessionSpec.capabilities ? { capabilities: sessionSpec.capabilities } : {}),
@@ -584,6 +592,7 @@ const ctx = Object.freeze({
       ...(sessionSpec.denyTools ? { denyTools: sessionSpec.denyTools } : {}),
     });
     const caps = tools.capabilities;
+    const target = resolvedTarget(sessionSpec.target);
     const identity = {
       agentKey: sessionSpec.key,
       provider,
@@ -592,7 +601,8 @@ const ctx = Object.freeze({
       toolPolicy: tools.toolPolicy,
       allowTools: tools.allowTools,
       denyTools: tools.denyTools,
-      workspaceIsolation: false,
+      workspaceIsolation: sessionSpec.workspaceIsolation === true,
+      target,
       capabilities: caps,
       secrets: sessionSpec.secrets ?? [],
     };
@@ -632,7 +642,8 @@ const ctx = Object.freeze({
               toolPolicy: tools.toolPolicy,
               allowTools: tools.allowTools,
               denyTools: tools.denyTools,
-              workspaceIsolation: false,
+              workspaceIsolation: sessionSpec.workspaceIsolation === true,
+              target,
               capabilities: caps,
               secrets: sessionSpec.secrets ?? [],
               participantIdentityHash: identityHash,
@@ -649,7 +660,8 @@ const ctx = Object.freeze({
           toolPolicy: tools.toolPolicy,
           allowTools: tools.allowTools,
           denyTools: tools.denyTools,
-          workspaceIsolation: false,
+          workspaceIsolation: sessionSpec.workspaceIsolation === true,
+          target,
           capabilities: caps,
           secrets: sessionSpec.secrets ?? [],
           participantIdentityHash: identityHash,
@@ -675,7 +687,8 @@ const ctx = Object.freeze({
           toolPolicy: tools.toolPolicy,
           allowTools: tools.allowTools,
           denyTools: tools.denyTools,
-          workspaceIsolation: false,
+          workspaceIsolation: sessionSpec.workspaceIsolation === true,
+          target,
           capabilities: caps,
           secrets: sessionSpec.secrets ?? [],
           version,
@@ -772,6 +785,7 @@ self.onmessage = (e: { data: HostReply }) => {
     value = new Float64Array(m.sab, VALUE_OFFSET, 1);
     moduleHelpers = m.moduleHelpers;
     agentProfiles = m.agentProfiles as AgentProfiles;
+    runTarget = m.runTarget;
     void start(m.workflowUrl, m.input);
     return;
   }

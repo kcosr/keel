@@ -4,7 +4,7 @@
 // or tricks. Integers are epoch-ms; JSON travels as TEXT. Reserved tables
 // (approvals/signals/timers) are created now though their effects land later.
 
-export const SCHEMA_VERSION = 12;
+export const SCHEMA_VERSION = 13;
 
 export const DDL = /* sql */ `
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS runs (
   workflow_name      TEXT,
   definition_version TEXT NOT NULL,
   workflow_ref       TEXT,
+  run_target         TEXT,
   status             TEXT NOT NULL,
   parent_run_id      TEXT,
   tenant_id          TEXT,
@@ -84,6 +85,24 @@ CREATE TABLE IF NOT EXISTS agent_session_turns (
   UNIQUE (run_id, stable_key, attempt)
 );
 
+CREATE TABLE IF NOT EXISTS agent_session_workspaces (
+  run_id              TEXT NOT NULL,
+  agent_key           TEXT NOT NULL,
+  workspace_path      TEXT NOT NULL,
+  target              TEXT NOT NULL,
+  base_commit         TEXT NOT NULL,
+  status              TEXT NOT NULL,
+  last_turn_key       TEXT,
+  last_turn_attempt   INTEGER,
+  last_diff_event_seq INTEGER,
+  last_error_event_seq INTEGER,
+  created_at_ms       INTEGER NOT NULL,
+  updated_at_ms       INTEGER NOT NULL,
+  merged_at_ms        INTEGER,
+  discarded_at_ms     INTEGER,
+  PRIMARY KEY (run_id, agent_key)
+);
+
 CREATE TABLE IF NOT EXISTS artifacts (
   hash          TEXT PRIMARY KEY,
   byte_len      INTEGER NOT NULL,
@@ -141,6 +160,7 @@ CREATE TABLE IF NOT EXISTS schedules (
   name         TEXT PRIMARY KEY,
   workflow_ref TEXT NOT NULL,
   input_json   TEXT,
+  schedule_target TEXT,
   interval_ms  INTEGER NOT NULL,
   next_fire_ms INTEGER NOT NULL,
   enabled      INTEGER NOT NULL DEFAULT 1,

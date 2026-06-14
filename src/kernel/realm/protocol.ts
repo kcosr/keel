@@ -38,6 +38,7 @@ export type WorkerRequest =
       allowTools: string[];
       denyTools: string[];
       workspaceIsolation: boolean;
+      target: string | null;
       capabilities: Capabilities | null;
       secrets: string[];
       version: string;
@@ -66,6 +67,7 @@ export type WorkerRequest =
       allowTools: string[];
       denyTools: string[];
       workspaceIsolation: boolean;
+      target: string | null;
       capabilities: Capabilities | null;
       secrets: string[];
       version: string;
@@ -146,6 +148,7 @@ export type HostReply =
       sab: SharedArrayBuffer;
       moduleHelpers: Record<string, string>;
       agentProfiles: Record<string, unknown>;
+      runTarget: string | null;
     }
   | { type: "rpc-reply"; id: number; payload: unknown }
   | { type: "rpc-error"; id: number; error: { name: string; message: string } };

@@ -26,6 +26,8 @@ export interface RunRow {
   definitionVersion: string;
   /** Display-only workflow provenance. Execution uses definitionVersion. */
   workflowRef: string | null;
+  /** Default daemon-resolvable target path inherited by agents in this run. */
+  runTarget: string | null;
   status: RunStatus;
   parentRunId: string | null;
   tenantId: string | null;
@@ -38,8 +40,8 @@ export interface RunRow {
   finishedAtMs: number | null;
 }
 
-export type NewRunRow = Omit<RunRow, "finishedAtMs" | "workflowRef"> &
-  Partial<Pick<RunRow, "finishedAtMs" | "workflowRef">>;
+export type NewRunRow = Omit<RunRow, "finishedAtMs" | "workflowRef" | "runTarget"> &
+  Partial<Pick<RunRow, "finishedAtMs" | "workflowRef" | "runTarget">>;
 
 /** A dependency edge: a prior step output this row's inputHash incorporated. */
 export interface InputDep {
@@ -94,6 +96,33 @@ export interface AgentSessionTurnRow {
   completedSessionToken: string | null;
   startedAtMs: number | null;
   finishedAtMs: number | null;
+}
+
+export type AgentSessionWorkspaceStatus =
+  | "creating"
+  | "active"
+  | "idle"
+  | "pending_review"
+  | "merged"
+  | "discarded"
+  | "diff_error"
+  | "abandoned";
+
+export interface AgentSessionWorkspaceRow {
+  runId: string;
+  agentKey: string;
+  workspacePath: string;
+  target: string;
+  baseCommit: string;
+  status: AgentSessionWorkspaceStatus;
+  lastTurnKey: string | null;
+  lastTurnAttempt: number | null;
+  lastDiffEventSeq: number | null;
+  lastErrorEventSeq: number | null;
+  createdAtMs: number;
+  updatedAtMs: number;
+  mergedAtMs: number | null;
+  discardedAtMs: number | null;
 }
 
 export type NewJournalRow = Omit<

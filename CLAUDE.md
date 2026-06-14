@@ -1,8 +1,9 @@
 # Keel Agent Notes
 
-Keel is run locally as a user-level systemd service. The daemon should be
-started from this workspace with `KEEL_ADMIN_TOKEN=kc_admin_local` and
-`KEEL_WORKSPACE_ROOT=/home/kevin/worktrees/keel`.
+Keel is run locally as a user-level systemd service. Normal agent use should rely
+on the already-running daemon and pass an explicit run target (or let the CLI use
+its cwd). Retained isolated session workspaces live in `KEEL_WORKSPACE_STORE`
+(defaulting under `KEEL_DIR/workspaces`), not in the target repository.
 
 ## Project Rules
 

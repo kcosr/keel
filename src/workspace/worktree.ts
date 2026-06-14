@@ -1,26 +1,27 @@
-// Git-worktree isolation + diff-review gate (DESIGN.md §11.3).
+// Git-worktree isolation + retained workspace lifecycle (DESIGN.md §11.3).
 //
-// An agent that opts into workspaceIsolation runs with cwd in an isolated git
-// worktree checked out at the run's base commit. Its changes are captured as a
-// diff bundle and merge to the real tree only through approval — never directly.
-// Plain git (jj dropped, L9); the VCS lives behind this interface so a container
-// backend can swap in.
+// `target` is the user repository an agent is meant to operate in. Retained
+// isolated session workspaces live outside that target in a Keel-owned
+// workspace store; one-shot isolated agents still use a temporary worktree that
+// is removed after the call.
 
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 
 export interface DiffBundle {
   modified: string[];
   added: string[];
   deleted: string[];
-  /** Unified diff of all changes (empty if none). */
+  /** Unified/binary-capable diff of tracked changes plus readable untracked text. */
   contentDiff: string;
 }
 
-function git(cwd: string, args: string[]): string {
-  return execFileSync("git", args, { cwd, encoding: "utf8" });
+export interface GitTarget {
+  target: string;
+  repoRoot: string;
+  baseCommit: string;
 }
 
 export interface Worktree {
@@ -28,81 +29,199 @@ export interface Worktree {
   baseCommit: string;
   /** Capture the agent's changes as a reviewable diff bundle. */
   diff(): DiffBundle;
-  /** Apply this worktree's changes onto the real tree (post-approval merge). */
-  mergeInto(realRoot: string): void;
+  /** Apply this worktree's changes onto the target. */
+  mergeInto(target: string): void;
   /** Remove the worktree. */
   remove(): void;
 }
 
-/** Create an isolated worktree of `repoRoot` at its current HEAD. */
-export function createWorktree(repoRoot: string, label: string): Worktree {
+function git(cwd: string, args: string[], input?: string): string {
+  return execFileSync("git", args, {
+    cwd,
+    input,
+    encoding: "utf8",
+    stdio: input === undefined ? ["ignore", "pipe", "pipe"] : ["pipe", "pipe", "pipe"],
+  });
+}
+
+function gitErrorMessage(err: unknown): string {
+  if (err && typeof err === "object" && "stderr" in err) {
+    const stderr = String((err as { stderr?: unknown }).stderr ?? "").trim();
+    if (stderr) return stderr;
+  }
+  return err instanceof Error ? err.message : String(err);
+}
+
+function canonicalPath(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+}
+
+/** Validate that `target` is exactly a git repository root and return its HEAD. */
+export function resolveGitRootTarget(target: string): GitTarget {
+  if (!isAbsolute(target)) {
+    throw new Error(`agent target must be an absolute daemon-resolvable path, got ${target}`);
+  }
+  let repoRoot: string;
+  try {
+    repoRoot = git(target, ["rev-parse", "--show-toplevel"]).trim();
+  } catch (err) {
+    throw new Error(`target ${target} is not a git repository root: ${gitErrorMessage(err)}`);
+  }
+  const targetReal = canonicalPath(target);
+  const repoReal = canonicalPath(repoRoot);
+  if (targetReal !== repoReal) {
+    throw new Error(
+      `isolated agent target ${target} is inside git repository ${repoRoot}; pass the repository root as --target or set the agent target to ${repoRoot}`,
+    );
+  }
   const baseCommit = git(repoRoot, ["rev-parse", "HEAD"]).trim();
-  const dir = mkdtempSync(join(tmpdir(), `keel-wt-${sanitize(label)}-`));
-  // A detached worktree at HEAD; the agent edits here in isolation.
+  return { target, repoRoot, baseCommit };
+}
+
+export function assertUsableTargetDirectory(target: string): void {
+  if (!isAbsolute(target)) {
+    throw new Error(`agent target must be an absolute daemon-resolvable path, got ${target}`);
+  }
+  try {
+    const real = realpathSync(target);
+    if (!existsSync(real)) throw new Error("missing");
+  } catch (err) {
+    throw new Error(`agent target ${target} is not an existing directory: ${gitErrorMessage(err)}`);
+  }
+}
+
+export function retainedWorkspacePath(
+  workspaceStore: string,
+  runId: string,
+  agentKey: string,
+): string {
+  return join(workspaceStore, safeSegment(runId), safeSegment(agentKey));
+}
+
+export function createRetainedWorktree(
+  repoRoot: string,
+  workspacePath: string,
+  baseCommit: string,
+): void {
+  mkdirSync(dirname(workspacePath), { recursive: true });
+  git(repoRoot, ["worktree", "add", "--detach", workspacePath, baseCommit]);
+}
+
+/** Create a temporary isolated worktree of `repoRoot` at its current HEAD. */
+export function createWorktree(repoRoot: string, label: string): Worktree {
+  const { baseCommit } = resolveGitRootTarget(repoRoot);
+  const dir = mkdtempSync(join(tmpdir(), `keel-wt-${safeSegment(label)}-`));
   git(repoRoot, ["worktree", "add", "--detach", dir, baseCommit]);
+  return worktreeHandle(repoRoot, dir, baseCommit, true);
+}
 
-  const diff = (): DiffBundle => {
-    // include untracked files so added files show up
-    const status = git(dir, ["status", "--porcelain", "--untracked-files=all"]);
-    const modified: string[] = [];
-    const added: string[] = [];
-    const deleted: string[] = [];
-    for (const line of status.split("\n")) {
-      if (!line.trim()) continue;
-      const code = line.slice(0, 2);
-      const file = line.slice(3);
-      if (code.includes("?") || code.includes("A")) added.push(file);
-      else if (code.includes("D")) deleted.push(file);
-      else modified.push(file);
-    }
-    // Unified diff of tracked changes, plus the FULL content of each untracked
-    // added file (read directly — `git diff --no-index` exits nonzero and throws,
-    // which previously dropped added-file content silently). The contentDiff is
-    // the durable reviewable patch the diff gate approves.
-    let contentDiff = git(dir, ["diff", "HEAD"]);
-    for (const f of added) {
-      try {
-        const body = readFileSync(join(dir, f), "utf8");
-        const lines = body.split("\n");
-        if (lines.at(-1) === "") lines.pop(); // drop trailing empty from final newline
-        contentDiff += `\ndiff --git a/${f} b/${f}\nnew file\n--- /dev/null\n+++ b/${f}\n${lines
-          .map((l) => `+${l}`)
-          .join("\n")}\n`;
-      } catch {
-        // unreadable (e.g. a directory entry) — skip; it still shows in `added`
-      }
-    }
-    return { modified, added, deleted, contentDiff };
-  };
+export function openRetainedWorktree(
+  repoRoot: string,
+  workspacePath: string,
+  baseCommit: string,
+): Worktree {
+  return worktreeHandle(repoRoot, workspacePath, baseCommit, false);
+}
 
+export function removeRetainedWorkspace(
+  repoRoot: string,
+  workspacePath: string,
+  baseCommit: string,
+): void {
+  try {
+    openRetainedWorktree(repoRoot, workspacePath, baseCommit).remove();
+  } catch {
+    rmSync(workspacePath, { recursive: true, force: true });
+  }
+}
+
+export function diffWorkspace(workspacePath: string): DiffBundle {
+  // include untracked files so added files show up
+  const status = git(workspacePath, ["status", "--porcelain", "--untracked-files=all"]);
+  const modified: string[] = [];
+  const added: string[] = [];
+  const deleted: string[] = [];
+  for (const line of status.split("\n")) {
+    if (!line.trim()) continue;
+    const code = line.slice(0, 2);
+    const file = line.slice(3);
+    if (code.includes("?") || code.includes("A")) added.push(file);
+    else if (code.includes("D")) deleted.push(file);
+    else modified.push(file);
+  }
+  // `git diff --binary HEAD` preserves tracked binary/mode/symlink deltas for
+  // review and merge. Add readable untracked file bodies for convenient text
+  // review; unreadable/binary untracked files remain represented by path and are
+  // preserved by merge after staging.
+  let contentDiff = git(workspacePath, ["diff", "--binary", "HEAD"]);
+  for (const f of added) {
+    try {
+      const body = readFileSync(join(workspacePath, f), "utf8");
+      const lines = body.split("\n");
+      if (lines.at(-1) === "") lines.pop();
+      contentDiff += `\ndiff --git a/${f} b/${f}\nnew file\n--- /dev/null\n+++ b/${f}\n${lines
+        .map((l) => `+${l}`)
+        .join("\n")}\n`;
+    } catch {
+      // unreadable (binary/directory/etc.) — path remains in `added`; merge uses
+      // `git diff --binary --cached` after staging, not this text append.
+    }
+  }
+  return { modified, added, deleted, contentDiff };
+}
+
+export function mergeWorkspaceIntoTarget(workspacePath: string, target: string): void {
+  assertUsableTargetDirectory(target);
+  // Stage the retained workspace state so untracked files, binary files, modes,
+  // and symlinks enter the binary patch. This mutates only the retained
+  // workspace index, not the target.
+  git(workspacePath, ["add", "-A"]);
+  const patch = git(workspacePath, ["diff", "--binary", "--cached", "HEAD"]);
+  if (!patch.trim()) return;
+  try {
+    git(target, ["apply", "--check", "--3way", "--whitespace=nowarn", "-"], patch);
+  } catch (err) {
+    throw new Error(
+      `workspace merge would conflict; target was not modified: ${gitErrorMessage(err)}`,
+    );
+  }
+  git(target, ["apply", "--3way", "--whitespace=nowarn", "-"], patch);
+}
+
+function worktreeHandle(
+  repoRoot: string,
+  path: string,
+  baseCommit: string,
+  removable: boolean,
+): Worktree {
   return {
-    path: dir,
+    path,
     baseCommit,
-    diff,
-    mergeInto(realRoot: string): void {
-      // Stage everything in the worktree and apply the resulting patch to the
-      // real tree. (A real merge would handle conflicts; this is the approved-
-      // patch apply for the linear case.)
-      git(dir, ["add", "-A"]);
-      const patch = git(dir, ["diff", "--cached", "HEAD"]);
-      if (patch.trim()) {
-        execFileSync("git", ["apply", "--whitespace=nowarn", "-"], {
-          cwd: realRoot,
-          input: patch,
-          encoding: "utf8",
-        });
-      }
-    },
+    diff: () => diffWorkspace(path),
+    mergeInto: (target: string) => mergeWorkspaceIntoTarget(path, target),
     remove(): void {
+      if (!removable) {
+        try {
+          git(repoRoot, ["worktree", "remove", "--force", path]);
+        } catch {
+          rmSync(path, { recursive: true, force: true });
+        }
+        return;
+      }
       try {
-        git(repoRoot, ["worktree", "remove", "--force", dir]);
+        git(repoRoot, ["worktree", "remove", "--force", path]);
       } catch {
-        rmSync(dir, { recursive: true, force: true });
+        rmSync(path, { recursive: true, force: true });
       }
     },
   };
 }
 
-function sanitize(s: string): string {
-  return s.replace(/[^a-zA-Z0-9]/g, "-").slice(0, 24);
+function safeSegment(s: string): string {
+  const cleaned = s.replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 80);
+  return cleaned.length > 0 ? cleaned : "_";
 }

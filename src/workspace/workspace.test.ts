@@ -2,7 +2,16 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  lstatSync,
+  mkdtempSync,
+  readFileSync,
+  readlinkSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -208,6 +217,42 @@ describe("git-worktree isolation + diff gate", () => {
       wt.mergeInto(repo);
       expect(readFileSync(join(repo, "app.js"), "utf8")).toBe("const x = 2;\n");
       expect(readFileSync(join(repo, "new.js"), "utf8")).toBe("export const y = 3;\n");
+    } finally {
+      wt.remove();
+    }
+  });
+
+  test("merge conflicts fail before mutating the target", () => {
+    const wt = createWorktree(repo, "conflict");
+    try {
+      writeFileSync(join(wt.path, "app.js"), "const x = 2;\n");
+      writeFileSync(join(repo, "app.js"), "const x = 99;\n");
+
+      expect(() => wt.mergeInto(repo)).toThrow(
+        /conflict|patch does not apply|target was not modified/,
+      );
+      expect(readFileSync(join(repo, "app.js"), "utf8")).toBe("const x = 99;\n");
+      expect(() => readFileSync(join(repo, "app.js.rej"), "utf8")).toThrow();
+    } finally {
+      wt.remove();
+    }
+  });
+
+  test("merge preserves binary files, executable modes, and symlinks", () => {
+    const wt = createWorktree(repo, "content");
+    try {
+      const binary = Buffer.from([0, 1, 2, 3, 255, 0, 42]);
+      writeFileSync(join(wt.path, "asset.bin"), binary);
+      writeFileSync(join(wt.path, "script.sh"), "#!/bin/sh\necho ok\n");
+      chmodSync(join(wt.path, "script.sh"), 0o755);
+      symlinkSync("app.js", join(wt.path, "app-link"));
+
+      wt.mergeInto(repo);
+
+      expect(Buffer.compare(readFileSync(join(repo, "asset.bin")), binary)).toBe(0);
+      expect(lstatSync(join(repo, "script.sh")).mode & 0o111).not.toBe(0);
+      expect(lstatSync(join(repo, "app-link")).isSymbolicLink()).toBe(true);
+      expect(readlinkSync(join(repo, "app-link"))).toBe("app.js");
     } finally {
       wt.remove();
     }

@@ -8,6 +8,9 @@ import type {
   RunLaunchResult,
   RunOutcome,
   RunStart,
+  RunWorkspaceDiff,
+  RunWorkspaceView,
+  WorkspaceGcResult,
 } from "../rpc/contract.ts";
 import type { RunProjection, RunReport, RunSummary } from "../rpc/projection.ts";
 
@@ -106,7 +109,7 @@ export class DaemonClient {
   }
 
   launchRun(req: LaunchRequest): Promise<RunLaunchResult> {
-    return this.rpc("launchRun", req);
+    return this.rpc("launchRun", { ...req, target: req.target ?? process.cwd() });
   }
   resumeRun(runId: string): Promise<RunStart> {
     return this.rpc("resumeRun", { runId });
@@ -161,10 +164,31 @@ export class DaemonClient {
     source: string;
     workflowName?: string | null;
     input?: unknown;
+    target?: string;
     intervalMs: number;
     firstFireMs?: number;
   }): Promise<{ ok: boolean }> {
-    return this.rpc("putSchedule", req);
+    return this.rpc("putSchedule", { ...req, target: req.target ?? process.cwd() });
+  }
+  listRunWorkspaces(runId: string): Promise<RunWorkspaceView[]> {
+    return this.rpc("listRunWorkspaces", { runId });
+  }
+  getRunWorkspace(runId: string, agentKey: string): Promise<RunWorkspaceView | null> {
+    return this.rpc("getRunWorkspace", { runId, agentKey });
+  }
+  getRunWorkspaceDiff(runId: string, agentKey: string): Promise<RunWorkspaceDiff> {
+    return this.rpc("getRunWorkspaceDiff", { runId, agentKey });
+  }
+  mergeRunWorkspace(runId: string, agentKey: string): Promise<RunWorkspaceView> {
+    return this.rpc("mergeRunWorkspace", { runId, agentKey });
+  }
+  discardRunWorkspace(runId: string, agentKey: string): Promise<RunWorkspaceView> {
+    return this.rpc("discardRunWorkspace", { runId, agentKey });
+  }
+  gcWorkspaces(
+    req: { olderThanMs?: number; includePending?: boolean } = {},
+  ): Promise<WorkspaceGcResult> {
+    return this.rpc("gcWorkspaces", req);
   }
   gcDefinitions(req: { ttlMs?: number; cacheMinAgeMs?: number } = {}): Promise<{
     workflowDefinitionsRemoved: number;

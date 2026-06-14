@@ -13,6 +13,8 @@ export interface LaunchRequest {
   /** Workflow TypeScript captured by the client. The daemon never reads client paths. */
   source: string;
   input: unknown;
+  /** Daemon-resolvable default target inherited by agents in this run. */
+  target?: string;
   /** Optional display label; absent/null is stored as an unnamed run. */
   name?: string | null;
   /** Display-only provenance. It is never opened or parsed for execution. */
@@ -40,6 +42,35 @@ export interface RunLaunchResult {
   runId: string;
   capability?: string;
   capabilityId?: string;
+}
+
+export interface RunWorkspaceView {
+  runId: string;
+  agentKey: string;
+  workspacePath: string;
+  target: string;
+  baseCommit: string;
+  status: string;
+  lastTurnKey: string | null;
+  lastTurnAttempt: number | null;
+  lastDiffEventSeq: number | null;
+  lastErrorEventSeq: number | null;
+  createdAtMs: number;
+  updatedAtMs: number;
+  mergedAtMs: number | null;
+  discardedAtMs: number | null;
+}
+
+export interface RunWorkspaceDiff {
+  workspace: RunWorkspaceView;
+  modified: string[];
+  added: string[];
+  deleted: string[];
+  contentDiff: string;
+}
+
+export interface WorkspaceGcResult {
+  removed: RunWorkspaceView[];
 }
 
 export interface DurableEventEnvelope {
@@ -90,6 +121,24 @@ export interface KeelApi {
   getBlockage(runId: string): Blockage;
   /** Summaries of all runs. */
   listRuns(): RunSummary[];
+  listRunWorkspaces(runId: string): Promise<RunWorkspaceView[]> | RunWorkspaceView[];
+  getRunWorkspace(
+    runId: string,
+    agentKey: string,
+  ): Promise<RunWorkspaceView | null> | RunWorkspaceView | null;
+  getRunWorkspaceDiff(
+    runId: string,
+    agentKey: string,
+  ): Promise<RunWorkspaceDiff> | RunWorkspaceDiff;
+  mergeRunWorkspace(runId: string, agentKey: string): Promise<RunWorkspaceView> | RunWorkspaceView;
+  discardRunWorkspace(
+    runId: string,
+    agentKey: string,
+  ): Promise<RunWorkspaceView> | RunWorkspaceView;
+  gcWorkspaces(opts?: {
+    olderThanMs?: number;
+    includePending?: boolean;
+  }): Promise<WorkspaceGcResult> | WorkspaceGcResult;
   /** Await a run's next terminal or parked status and return its outcome. */
   waitForRun(runId: string): Promise<RunOutcome>;
   /** Return a run's terminal output without subscribing to events. */

@@ -19,5 +19,6 @@ export function failRunWithError(
       finishedAtMs: atMs,
     });
     store.appendEvent(runId, "run.failed", error, atMs);
+    store.markRunWorkspacesPendingReview(runId, atMs);
   });
 }

@@ -79,7 +79,9 @@ Filter tolerated failures out with `.filter(Boolean)`. Do not use `onFailure:
 retried.
 
 `toolPolicy` is only `"none"`, `"read-only"`, `"workspace-write"`, or
-`"unrestricted"`. To let an agent run shell commands, use explicit capabilities:
+`"unrestricted"`. Agents run in the run target by default; use an absolute
+per-agent/profile `target` only when a workflow intentionally operates in a
+different directory. To let an agent run shell commands, use explicit capabilities:
 
 ```ts
 capabilities: { fs: "none", network: "none", shell: true, secrets: [] }
@@ -113,9 +115,15 @@ Use separate participant keys for independent conversations.
 Session runs can resume and retry, but not rerun, rewind, or fork. If a session
 turn is interrupted after a backend token is observed, explicit resume continues
 from that token rather than starting a fresh session. Changing a participant's
-resolved provider/model/tool/capability identity or changing a completed/pending
+resolved provider/model/tool/capability/target identity or changing a completed/pending
 turn's prompt/schema/options for the same turn key fails closed.
-`workspaceIsolation: true` is not supported for `ctx.agentSession` yet.
+
+Use `workspaceIsolation: true` for write-capable session participants whose
+filesystem changes should be staged for review. Keel creates one retained git
+worktree per `(runId, agentKey)`, reuses it for all turns/retries, and leaves it
+for explicit `keel workspace diff|merge|discard` after the run. The target must
+be the git repository root; Keel does not auto-merge or delete retained
+workspaces.
 
 ## 5. Schemas
 

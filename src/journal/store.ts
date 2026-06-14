@@ -11,6 +11,8 @@ import { DDL, SCHEMA_VERSION } from "./schema.ts";
 import type {
   AgentSessionRow,
   AgentSessionTurnRow,
+  AgentSessionWorkspaceRow,
+  AgentSessionWorkspaceStatus,
   ArtifactRow,
   CapabilityRow,
   EventRow,
@@ -130,11 +132,11 @@ export class JournalStore {
     this.db
       .query(
         `INSERT INTO runs (
-           run_id, workflow_name, definition_version, workflow_ref, status, parent_run_id,
+           run_id, workflow_name, definition_version, workflow_ref, run_target, status, parent_run_id,
            tenant_id, input_ref, output_ref, error_json, heartbeat_at_ms,
            runtime_owner_id, created_at_ms, finished_at_ms
          ) VALUES (
-           $runId, $workflowName, $definitionVersion, $workflowRef, $status, $parentRunId,
+           $runId, $workflowName, $definitionVersion, $workflowRef, $runTarget, $status, $parentRunId,
            $tenantId, $inputRef, $outputRef, $errorJson, $heartbeatAtMs,
            $runtimeOwnerId, $createdAtMs, $finishedAtMs
          )`,
@@ -144,6 +146,7 @@ export class JournalStore {
         $workflowName: row.workflowName,
         $definitionVersion: row.definitionVersion,
         $workflowRef: row.workflowRef ?? null,
+        $runTarget: row.runTarget ?? null,
         $status: row.status,
         $parentRunId: row.parentRunId,
         $tenantId: row.tenantId,
@@ -170,6 +173,7 @@ export class JournalStore {
         RunRow,
         | "status"
         | "workflowName"
+        | "runTarget"
         | "inputRef"
         | "outputRef"
         | "errorJson"
@@ -188,6 +192,7 @@ export class JournalStore {
     };
     if ("status" in patch) add("status", "status", patch.status ?? null);
     if ("workflowName" in patch) add("workflow_name", "workflowName", patch.workflowName ?? null);
+    if ("runTarget" in patch) add("run_target", "runTarget", patch.runTarget ?? null);
     if ("inputRef" in patch) add("input_ref", "inputRef", patch.inputRef ?? null);
     if ("outputRef" in patch) add("output_ref", "outputRef", patch.outputRef ?? null);
     if ("errorJson" in patch) add("error_json", "errorJson", patch.errorJson ?? null);
@@ -516,6 +521,157 @@ export class JournalStore {
     this.updateAgentSessionActive(runId, agentKey, null, null, atMs);
   }
 
+  getAgentSessionWorkspace(runId: string, agentKey: string): AgentSessionWorkspaceRow | null {
+    const r = this.db
+      .query<RawAgentSessionWorkspaceRow, [string, string]>(
+        "SELECT * FROM agent_session_workspaces WHERE run_id = ? AND agent_key = ?",
+      )
+      .get(runId, agentKey);
+    return r ? mapAgentSessionWorkspace(r) : null;
+  }
+
+  listAgentSessionWorkspaces(runId: string): AgentSessionWorkspaceRow[] {
+    return this.db
+      .query<RawAgentSessionWorkspaceRow, [string]>(
+        "SELECT * FROM agent_session_workspaces WHERE run_id = ? ORDER BY agent_key ASC",
+      )
+      .all(runId)
+      .map(mapAgentSessionWorkspace);
+  }
+
+  listAllAgentSessionWorkspaces(): AgentSessionWorkspaceRow[] {
+    return this.db
+      .query<RawAgentSessionWorkspaceRow, []>(
+        "SELECT * FROM agent_session_workspaces ORDER BY run_id ASC, agent_key ASC",
+      )
+      .all()
+      .map(mapAgentSessionWorkspace);
+  }
+
+  hasPendingAgentSessionTurn(runId: string, agentKey: string): boolean {
+    const row = this.db
+      .query<{ c: number }, [string, string]>(
+        `SELECT COUNT(*) AS c FROM agent_session_turns
+         WHERE run_id = ? AND agent_key = ? AND status = 'pending'`,
+      )
+      .get(runId, agentKey);
+    return (row?.c ?? 0) > 0;
+  }
+
+  insertAgentSessionWorkspace(row: AgentSessionWorkspaceRow): void {
+    this.db
+      .query(
+        `INSERT INTO agent_session_workspaces (
+          run_id, agent_key, workspace_path, target, base_commit, status,
+          last_turn_key, last_turn_attempt, last_diff_event_seq, last_error_event_seq,
+          created_at_ms, updated_at_ms, merged_at_ms, discarded_at_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        row.runId,
+        row.agentKey,
+        row.workspacePath,
+        row.target,
+        row.baseCommit,
+        row.status,
+        row.lastTurnKey,
+        row.lastTurnAttempt,
+        row.lastDiffEventSeq,
+        row.lastErrorEventSeq,
+        row.createdAtMs,
+        row.updatedAtMs,
+        row.mergedAtMs,
+        row.discardedAtMs,
+      );
+  }
+
+  deleteAgentSessionWorkspace(runId: string, agentKey: string): void {
+    this.db
+      .query("DELETE FROM agent_session_workspaces WHERE run_id = ? AND agent_key = ?")
+      .run(runId, agentKey);
+  }
+
+  updateAgentSessionWorkspace(
+    runId: string,
+    agentKey: string,
+    patch: Partial<
+      Pick<
+        AgentSessionWorkspaceRow,
+        | "status"
+        | "lastTurnKey"
+        | "lastTurnAttempt"
+        | "lastDiffEventSeq"
+        | "lastErrorEventSeq"
+        | "updatedAtMs"
+        | "mergedAtMs"
+        | "discardedAtMs"
+      >
+    >,
+  ): void {
+    const sets: string[] = [];
+    type Bind = string | number | bigint | boolean | null | Uint8Array;
+    const params: Record<string, Bind> = { $runId: runId, $agentKey: agentKey };
+    const add = (col: string, key: string, val: Bind) => {
+      sets.push(`${col} = $${key}`);
+      params[`$${key}`] = val;
+    };
+    if ("status" in patch) add("status", "status", patch.status ?? null);
+    if ("lastTurnKey" in patch) add("last_turn_key", "lastTurnKey", patch.lastTurnKey ?? null);
+    if ("lastTurnAttempt" in patch)
+      add("last_turn_attempt", "lastTurnAttempt", patch.lastTurnAttempt ?? null);
+    if ("lastDiffEventSeq" in patch)
+      add("last_diff_event_seq", "lastDiffEventSeq", patch.lastDiffEventSeq ?? null);
+    if ("lastErrorEventSeq" in patch)
+      add("last_error_event_seq", "lastErrorEventSeq", patch.lastErrorEventSeq ?? null);
+    if ("updatedAtMs" in patch) add("updated_at_ms", "updatedAtMs", patch.updatedAtMs ?? null);
+    if ("mergedAtMs" in patch) add("merged_at_ms", "mergedAtMs", patch.mergedAtMs ?? null);
+    if ("discardedAtMs" in patch)
+      add("discarded_at_ms", "discardedAtMs", patch.discardedAtMs ?? null);
+    if (sets.length === 0) return;
+    this.db
+      .query(
+        `UPDATE agent_session_workspaces SET ${sets.join(", ")} WHERE run_id = $runId AND agent_key = $agentKey`,
+      )
+      .run(params);
+  }
+
+  markRunWorkspacesPendingReview(runId: string, atMs: number): void {
+    this.db
+      .query(
+        `UPDATE agent_session_workspaces
+         SET status = 'pending_review', updated_at_ms = ?
+         WHERE run_id = ? AND status IN ('idle', 'active', 'creating')`,
+      )
+      .run(atMs, runId);
+  }
+
+  reopenPendingReviewWorkspaces(runId: string, atMs: number): void {
+    this.db
+      .query(
+        `UPDATE agent_session_workspaces
+         SET status = 'idle', updated_at_ms = ?
+         WHERE run_id = ? AND status = 'pending_review'`,
+      )
+      .run(atMs, runId);
+  }
+
+  gcWorkspaceRows(
+    statuses: AgentSessionWorkspaceStatus[],
+    olderThanMs: number,
+  ): AgentSessionWorkspaceRow[] {
+    if (statuses.length === 0) return [];
+    const placeholders = statuses.map(() => "?").join(", ");
+    const query = this.db.query<RawAgentSessionWorkspaceRow, never>(
+      `SELECT * FROM agent_session_workspaces
+       WHERE status IN (${placeholders}) AND updated_at_ms <= ?
+       ORDER BY updated_at_ms ASC`,
+    );
+    return (query.all as (...args: unknown[]) => RawAgentSessionWorkspaceRow[])(
+      ...statuses,
+      olderThanMs,
+    ).map(mapAgentSessionWorkspace);
+  }
+
   /** Append an event; returns the assigned per-run sequence number. */
   appendEvent(runId: string, type: string, payload: unknown, atMs: number): number {
     const payloadJson = JSON.stringify(payload ?? null);
@@ -747,18 +903,20 @@ export class JournalStore {
     name: string;
     workflowRef: string;
     inputJson: string | null;
+    scheduleTarget?: string | null;
     intervalMs: number;
     nextFireMs: number;
   }): void {
     this.db
       .query(
         `INSERT INTO schedules (
-           name, workflow_ref, input_json, interval_ms, next_fire_ms, enabled, last_error_json, last_failed_at_ms
+           name, workflow_ref, input_json, schedule_target, interval_ms, next_fire_ms, enabled, last_error_json, last_failed_at_ms
          )
-         VALUES ($name, $ref, $input, $interval, $next, 1, NULL, NULL)
+         VALUES ($name, $ref, $input, $target, $interval, $next, 1, NULL, NULL)
          ON CONFLICT(name) DO UPDATE SET
            workflow_ref = $ref,
            input_json = $input,
+           schedule_target = $target,
            interval_ms = $interval,
            next_fire_ms = $next,
            enabled = 1,
@@ -769,6 +927,7 @@ export class JournalStore {
         $name: s.name,
         $ref: s.workflowRef,
         $input: s.inputJson,
+        $target: s.scheduleTarget ?? null,
         $interval: s.intervalMs,
         $next: s.nextFireMs,
       });
@@ -778,6 +937,7 @@ export class JournalStore {
     name: string;
     workflowRef: string;
     inputJson: string | null;
+    scheduleTarget: string | null;
     intervalMs: number;
     nextFireMs: number;
   }> {
@@ -787,6 +947,7 @@ export class JournalStore {
           name: string;
           workflow_ref: string;
           input_json: string | null;
+          schedule_target: string | null;
           interval_ms: number;
           next_fire_ms: number;
         },
@@ -797,6 +958,7 @@ export class JournalStore {
         name: r.name,
         workflowRef: r.workflow_ref,
         inputJson: r.input_json,
+        scheduleTarget: r.schedule_target,
         intervalMs: r.interval_ms,
         nextFireMs: r.next_fire_ms,
       }));
@@ -886,6 +1048,7 @@ export class JournalStore {
         workflowName: src.workflowName,
         definitionVersion: src.definitionVersion,
         workflowRef: src.workflowRef,
+        runTarget: src.runTarget,
         status: "running",
         parentRunId: srcRunId,
         tenantId: src.tenantId,
@@ -1133,6 +1296,7 @@ interface RawRunRow {
   workflow_name: string | null;
   definition_version: string;
   workflow_ref: string | null;
+  run_target: string | null;
   status: string;
   parent_run_id: string | null;
   tenant_id: string | null;
@@ -1192,6 +1356,23 @@ interface RawAgentSessionTurnRow {
   finished_at_ms: number | null;
 }
 
+interface RawAgentSessionWorkspaceRow {
+  run_id: string;
+  agent_key: string;
+  workspace_path: string;
+  target: string;
+  base_commit: string;
+  status: string;
+  last_turn_key: string | null;
+  last_turn_attempt: number | null;
+  last_diff_event_seq: number | null;
+  last_error_event_seq: number | null;
+  created_at_ms: number;
+  updated_at_ms: number;
+  merged_at_ms: number | null;
+  discarded_at_ms: number | null;
+}
+
 interface RawEventRow {
   run_id: string;
   seq: number;
@@ -1235,6 +1416,7 @@ function mapRun(r: RawRunRow): RunRow {
     workflowName: r.workflow_name,
     definitionVersion: r.definition_version,
     workflowRef: r.workflow_ref,
+    runTarget: r.run_target,
     status: r.status as RunRow["status"],
     parentRunId: r.parent_run_id,
     tenantId: r.tenant_id,
@@ -1297,6 +1479,25 @@ function mapAgentSessionTurn(r: RawAgentSessionTurnRow): AgentSessionTurnRow {
     completedSessionToken: r.completed_session_token,
     startedAtMs: r.started_at_ms,
     finishedAtMs: r.finished_at_ms,
+  };
+}
+
+function mapAgentSessionWorkspace(r: RawAgentSessionWorkspaceRow): AgentSessionWorkspaceRow {
+  return {
+    runId: r.run_id,
+    agentKey: r.agent_key,
+    workspacePath: r.workspace_path,
+    target: r.target,
+    baseCommit: r.base_commit,
+    status: r.status as AgentSessionWorkspaceStatus,
+    lastTurnKey: r.last_turn_key,
+    lastTurnAttempt: r.last_turn_attempt,
+    lastDiffEventSeq: r.last_diff_event_seq,
+    lastErrorEventSeq: r.last_error_event_seq,
+    createdAtMs: r.created_at_ms,
+    updatedAtMs: r.updated_at_ms,
+    mergedAtMs: r.merged_at_ms,
+    discardedAtMs: r.discarded_at_ms,
   };
 }
 

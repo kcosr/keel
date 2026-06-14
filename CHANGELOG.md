@@ -25,6 +25,8 @@
 - `keel output <runId>` prints the terminal workflow output as JSON.
 - `keel report <runId> [--output json|text]` prints a journaled per-node result
   digest, and execute control scripts can call `keel.report(runId)`.
+- `keel list [--output text|json]` now has an explicit JSON envelope for scripts
+  and includes created/finished/parent run metadata in run summaries.
 - `keel gc` prunes old unreferenced workflow definition rows and rebuildable
   materialized definition cache directories.
 - Immutable workflow definition snapshots are stored by content hash and
@@ -57,6 +59,8 @@
 - CLI output selection now uses shared `--output json|text|ndjson` rendering
   flags. `--json` has been removed, `watch` and attached `launch` default to
   NDJSON event streams, and human transcripts require `--output text`.
+- `keel list` now defaults to a headered, aligned text table instead of raw
+  tab-separated rows; scripts should use `keel list --output json`.
 - Compact text transcripts hide agent tool calls/results by default. Add
   `--tools` to attached text commands to include them.
 - Run lifecycle operations are capability-gated by the daemon. Run id alone is

@@ -96,17 +96,54 @@ describe("RPC contract drives a workflow end-to-end", () => {
   );
 
   test(
-    "listRuns summarizes every run",
+    "listRuns returns a bare array with run summary metadata in created order",
     async () => {
       const store = JournalStore.memory();
-      const api = keel(store);
+      let id = 0;
+      let nowMs = 1_000;
+      const kernel = new RealmKernel(store, {
+        idgen: () => `run_${id++}`,
+        clock: () => nowMs,
+        rng: () => 0.5,
+      });
+      const api = new InProcessKeel(kernel, store);
+
       await api.launchRun({ ...chainUrl, input: { n: 3 }, name: "c1" });
-      await api.launchRun({ ...chainUrl, input: { n: 2 }, name: "c2" });
       await api.waitForRun("run_0");
+      nowMs = 2_000;
+      await api.launchRun({ ...chainUrl, input: { n: 2 }, name: "c2" });
       await api.waitForRun("run_1");
+      nowMs = 3_000;
+      api.forkRun("run_0", { newRunId: "run_0_fork" });
+
       const runs = api.listRuns();
-      expect(runs.map((r) => r.workflowName).sort()).toEqual(["c1", "c2"]);
-      expect(runs.every((r) => r.status === "finished")).toBe(true);
+      expect(Array.isArray(runs)).toBe(true);
+      expect(runs).toEqual([
+        {
+          runId: "run_0",
+          workflowName: "c1",
+          status: "finished",
+          createdAtMs: 1_000,
+          finishedAtMs: 1_000,
+          parentRunId: null,
+        },
+        {
+          runId: "run_1",
+          workflowName: "c2",
+          status: "finished",
+          createdAtMs: 2_000,
+          finishedAtMs: 2_000,
+          parentRunId: null,
+        },
+        {
+          runId: "run_0_fork",
+          workflowName: "c1",
+          status: "running",
+          createdAtMs: 3_000,
+          finishedAtMs: null,
+          parentRunId: "run_0",
+        },
+      ]);
     },
     WORKFLOW_TEST_TIMEOUT_MS,
   );

@@ -138,7 +138,7 @@ bun src/cli/keel.ts <command> [args]
 | `get <runId>` | Print the canonical run projection as JSON. |
 | `output <runId> [--output json\|text]` | Print the terminal workflow output. |
 | `report <runId> [--output json\|text]` | Print a journaled per-node result digest. |
-| `list` | List run id, status, and workflow name. |
+| `list [--output text\|json]` | List runs as an aligned table or JSON envelope. Requires admin. |
 | `gc` | Prune unreferenced workflow definition rows and cache entries. Requires admin. |
 | `resume [--detach] [--tools] <runId>` | Resume a parked or incomplete run. Watches by default. |
 | `retry [--detach] [--tools] <runId>` | Re-run a failed run from its failed step. Watches by default. |
@@ -258,6 +258,32 @@ other JSON values compactly.
 journaled node results, not raw event transcripts. `--output text` prints a
 compact per-node status/result summary. `--output ndjson` is invalid for
 `report`.
+
+### List Output
+
+`keel list` defaults to `--output text` and prints an aligned, human-oriented
+UTC table in `createdAtMs` ascending order (oldest first):
+
+```text
+RUN ID     STATUS    WORKFLOW  CREATED                   DURATION
+run_...    finished  review    2026-06-14T01:02:03.004Z  12m
+```
+
+The table columns are `RUN ID`, `STATUS`, `WORKFLOW`, `CREATED`, and `DURATION`.
+`WORKFLOW` shows `(unnamed)` for unnamed runs and may be shortened for terminal
+readability; use JSON for exact values. Durations are compact floor-rounded
+milliseconds/seconds/minutes/hours/days (`ms`, `s`, `m`, `h`, `d`). Terminal runs
+use `finishedAtMs - createdAtMs`; active or waiting runs use the command's
+current time minus `createdAtMs`. Empty lists still print the header row.
+
+Use `keel list --output json` for scripts. It returns a CLI envelope while the
+RPC method remains a bare `RunSummary[]`:
+
+```json
+{"runs":[{"runId":"run_...","status":"finished","workflowName":"review","createdAtMs":1781414349314,"finishedAtMs":1781415069314,"parentRunId":null}]}
+```
+
+`--output ndjson` is invalid for `list`.
 
 ### Exit Codes
 
@@ -762,6 +788,15 @@ interface RunLaunchResult {
   runId: string;
   capability?: string;
   capabilityId?: string;
+}
+
+interface RunSummary {
+  runId: string;
+  workflowName: string | null;
+  status: RunProjection["status"];
+  createdAtMs: number;
+  finishedAtMs: number | null;
+  parentRunId: string | null;
 }
 ```
 

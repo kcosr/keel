@@ -8,7 +8,7 @@
 //   keel watch <runId>                  stream a run's events until terminal
 //   keel get <runId>                    print the run projection
 //   keel resume <runId>                 resume a non-terminal run
-//   keel list                           list runs
+//   keel list [--output text|json]      list runs
 //
 // Socket + db paths default under ~/.keel (override with KEEL_SOCKET / KEEL_DB).
 
@@ -32,7 +32,8 @@ import { DaemonClient } from "../daemon/client.ts";
 import { KeelDaemon } from "../daemon/server.ts";
 import { runExecuteScript } from "../execute/runtime.ts";
 import type { RunOutcome, WorkflowProvenance } from "../rpc/contract.ts";
-import type { RunReport } from "../rpc/projection.ts";
+import type { RunReport, RunSummary } from "../rpc/projection.ts";
+import { formatTable, tableCell } from "./table.ts";
 import { createTextWatchFormatter, formatNdjsonWatchEvent } from "./watch-format.ts";
 import type { WatchFormatOptions } from "./watch-format.ts";
 
@@ -40,6 +41,13 @@ const KEEL_DIR = process.env.KEEL_DIR ?? join(homedir(), ".keel");
 const SOCKET = process.env.KEEL_SOCKET ?? join(KEEL_DIR, "keel.sock");
 const DB = process.env.KEEL_DB ?? join(KEEL_DIR, "keel.db");
 const CAP_DIR = process.env.KEEL_CAP_DIR ?? join(KEEL_DIR, "caps");
+const RUN_LIST_WORKFLOW_MAX_WIDTH = 40;
+const DURATION_UNITS = [
+  { label: "d", ms: 86_400_000 },
+  { label: "h", ms: 3_600_000 },
+  { label: "m", ms: 60_000 },
+  { label: "s", ms: 1_000 },
+] as const;
 
 export const OUTPUT_FORMATS = ["json", "text", "ndjson"] as const;
 export type OutputFormat = (typeof OUTPUT_FORMATS)[number];
@@ -82,7 +90,7 @@ const COMMANDS: [string, string, string][] = [
   ["get", "<runId>", "print a run's projection as JSON"],
   ["output", "<runId> [--output json|text]", "print a run's terminal output"],
   ["report", "<runId> [--output json|text]", "print a run's per-node result digest"],
-  ["list", "", "list runs"],
+  ["list", "[--output text|json]", "list runs"],
   ["gc", "", "prune unreferenced workflow definitions and cache entries"],
   ["resume", "[--detach] [--tools] <runId>", "resume a parked or incomplete run"],
   ["retry", "[--detach] [--tools] <runId>", "re-run a failed run from its failed step"],
@@ -341,10 +349,14 @@ async function dispatch(argv: string[]): Promise<number> {
       return parsed.detach ? 0 : statusExitCode(terminal ?? out.status);
     }
     case "list": {
+      const parsed = parseListArgs(rest);
       const client = await openClient();
-      for (const r of await client.listRuns()) {
-        process.stdout.write(`${r.runId}\t${r.status}\t${displayName(r.workflowName)}\n`);
-      }
+      const runs = await client.listRuns();
+      process.stdout.write(
+        parsed.output === "json"
+          ? `${JSON.stringify({ runs })}\n`
+          : formatListRuns(runs, Date.now()),
+      );
       return 0;
     }
     case "gc": {
@@ -473,6 +485,42 @@ export function parseLifecycleArgs(args: string[]): {
 export function parseOutputFormat(value: string): OutputFormat {
   if ((OUTPUT_FORMATS as readonly string[]).includes(value)) return value as OutputFormat;
   throw new Error(`invalid --output ${value}; expected json, text, or ndjson`);
+}
+
+export type ListOutputFormat = "text" | "json";
+
+export interface ListArgs {
+  output: ListOutputFormat;
+}
+
+export function parseListArgs(args: string[]): ListArgs {
+  let output: ListOutputFormat = "text";
+  const positional: string[] = [];
+  let i = 0;
+  while (i < args.length) {
+    const arg = args[i] as string;
+    if (arg === "--output") {
+      output = parseListOutputFormat(requireFlagValue(args, i, "--output"));
+      i += 2;
+    } else if (arg.startsWith("--")) {
+      throw new Error(`unknown list flag ${arg}`);
+    } else {
+      positional.push(arg);
+      i += 1;
+    }
+  }
+  if (positional.length > 0) {
+    throw new Error(`unexpected argument ${positional[0]} for list`);
+  }
+  return { output };
+}
+
+function parseListOutputFormat(value: string): ListOutputFormat {
+  if (value === "text" || value === "json") return value;
+  if (value === "ndjson") {
+    throw new Error("--output ndjson is not available for list; expected text or json");
+  }
+  throw new Error(`invalid --output ${value} for list; expected text or json`);
 }
 
 export interface LaunchArgs {
@@ -709,6 +757,34 @@ async function readCommandSource(
 
 function displayName(name: string | null | undefined): string {
   return name ?? "(unnamed)";
+}
+
+export function formatListRuns(runs: readonly RunSummary[], nowMs: number): string {
+  return formatTable(
+    ["RUN ID", "STATUS", "WORKFLOW", "CREATED", "DURATION"],
+    runs.map((run) => [
+      run.runId,
+      run.status,
+      tableCell(displayName(run.workflowName), { maxWidth: RUN_LIST_WORKFLOW_MAX_WIDTH }),
+      formatUtcTimestamp(run.createdAtMs),
+      formatDuration(run.createdAtMs, run.finishedAtMs ?? nowMs),
+    ]),
+  );
+}
+
+export function formatUtcTimestamp(epochMs: number): string {
+  if (!Number.isFinite(epochMs)) throw new Error(`invalid timestamp ${epochMs}`);
+  return new Date(epochMs).toISOString();
+}
+
+export function formatDuration(startMs: number, endMs: number): string {
+  if (!Number.isFinite(startMs)) throw new Error(`invalid duration start ${startMs}`);
+  if (!Number.isFinite(endMs)) throw new Error(`invalid duration end ${endMs}`);
+  const elapsedMs = Math.max(0, Math.floor(endMs - startMs));
+  for (const unit of DURATION_UNITS) {
+    if (elapsedMs >= unit.ms) return `${Math.floor(elapsedMs / unit.ms)}${unit.label}`;
+  }
+  return `${elapsedMs}ms`;
 }
 
 function isParked(status: string): boolean {

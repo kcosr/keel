@@ -266,6 +266,9 @@ export interface RunSummary {
   runId: string;
   workflowName: string | null;
   status: RunStatus;
+  createdAtMs: number;
+  finishedAtMs: number | null;
+  parentRunId: string | null;
 }
 
 export function listRunSummaries(store: JournalStore): RunSummary[] {
@@ -273,5 +276,8 @@ export function listRunSummaries(store: JournalStore): RunSummary[] {
     runId: r.runId,
     workflowName: r.workflowName,
     status: r.status,
+    createdAtMs: r.createdAtMs,
+    finishedAtMs: r.finishedAtMs,
+    parentRunId: r.parentRunId,
   }));
 }

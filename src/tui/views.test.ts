@@ -59,6 +59,17 @@ describe("tui views", () => {
     ]);
   });
 
+  test("sanitizes terminal controls in rendered browser rows", () => {
+    const state = setBrowserRuns(createTuiState({ nowMs: Date.UTC(2026, 5, 14, 1, 0, 5, 0) }), [
+      { ...run, workflowName: "\u001b[31mwf\u001b[0m\nname" },
+    ]);
+
+    const text = renderTuiLines(state, { width: 100, height: 5 }).join("\n");
+
+    expect(text).not.toContain("\u001b");
+    expect(text).toContain("wf name");
+  });
+
   test("keeps selected browser row visible after scrolling past the first page", () => {
     const runs = Array.from(
       { length: 8 },

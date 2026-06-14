@@ -1,4 +1,8 @@
-import { createTextWatchFormatter, formatWatchEvent } from "../cli/watch-format.ts";
+import {
+  createTextWatchFormatter,
+  formatWatchEvent,
+  watchStreamIdentity,
+} from "../cli/watch-format.ts";
 import type { EventEnvelope } from "../rpc/contract.ts";
 
 export interface TuiFormattedEvent {
@@ -7,11 +11,9 @@ export interface TuiFormattedEvent {
   authorizationFailedMessage?: string;
 }
 
-type StreamType = "text" | "reasoning";
-
 interface ActiveStream {
   keyId: string;
-  type: StreamType;
+  type: "text" | "reasoning";
   endedWithNewline: boolean;
 }
 
@@ -83,18 +85,8 @@ function stripFormatterFlushChunks(chunks: string[], sameStream: boolean): strin
 }
 
 function streamIdentity(event: EventEnvelope): ActiveStream | null {
-  if (event.type !== "agent.event") return null;
-  const payload = event.payload;
-  const key = prop(payload, "key");
-  const innerEvent = prop(payload, "event");
-  const traceType = prop(innerEvent, "type");
-  if (traceType !== "text" && traceType !== "reasoning") return null;
-  if (typeof prop(innerEvent, "data") !== "string") return null;
-  return {
-    keyId: hasContent(key) ? streamKeyId(key) : "",
-    type: traceType,
-    endedWithNewline: false,
-  };
+  const identity = watchStreamIdentity(event);
+  return identity ? { ...identity, endedWithNewline: false } : null;
 }
 
 function authorizationFailedText(payload: unknown): string {
@@ -107,20 +99,4 @@ function authorizationFailedText(payload: unknown): string {
 function prop(value: unknown, key: string): unknown {
   if (value === null || typeof value !== "object") return undefined;
   return (value as Record<string, unknown>)[key];
-}
-
-function hasContent(value: unknown): boolean {
-  if (value == null) return false;
-  if (typeof value === "string") return value.length > 0;
-  if (typeof value === "object") return Object.keys(value).length > 0;
-  return true;
-}
-
-function streamKeyId(value: unknown): string {
-  if (typeof value === "string") return value;
-  try {
-    return JSON.stringify(value) ?? String(value);
-  } catch {
-    return String(value);
-  }
 }

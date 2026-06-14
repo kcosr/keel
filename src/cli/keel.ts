@@ -37,6 +37,7 @@ import type { RunReport } from "../rpc/projection.ts";
 import { cliTargetPath } from "../target.ts";
 import { runTui } from "../tui/index.ts";
 import { displayName, formatDuration, formatListRuns, formatUtcTimestamp } from "./run-display.ts";
+import { compactTerminalText } from "./terminal-text.ts";
 import { createTextWatchFormatter, formatNdjsonWatchEvent } from "./watch-format.ts";
 import type { WatchFormatOptions } from "./watch-format.ts";
 
@@ -968,22 +969,25 @@ function formatLaunchText(payload: {
 
 export function formatRunReportText(report: RunReport): string {
   const lines = [
-    `run ${report.runId}`,
-    `status ${report.status}`,
-    `workflow ${displayName(report.workflowName)}`,
+    `run ${compact(report.runId)}`,
+    `status ${compact(report.status)}`,
+    `workflow ${compact(displayName(report.workflowName))}`,
   ];
   if (report.outputOmitted) {
     lines.push(`output omitted ${report.outputByteLength ?? 0} bytes`);
   } else if ("output" in report) {
     lines.push(`output ${compact(report.output)}`);
   }
-  if (report.error) lines.push(`error ${report.error.name}: ${report.error.message}`);
-  if (report.blockage) lines.push(`blockage ${report.blockage.reason}: ${report.blockage.context}`);
+  if (report.error)
+    lines.push(`error ${compact(report.error.name)}: ${compact(report.error.message)}`);
+  if (report.blockage) {
+    lines.push(`blockage ${compact(report.blockage.reason)}: ${compact(report.blockage.context)}`);
+  }
   lines.push(
     `stats steps=${report.stats.steps} agents=${report.stats.agents} artifacts=${report.stats.artifacts}`,
   );
   for (const node of report.nodes) {
-    const label = `${node.stableKey} ${node.status} ${node.effectType} attempt=${node.attempt}`;
+    const label = `${compact(node.stableKey)} ${compact(node.status)} ${compact(node.effectType)} attempt=${node.attempt}`;
     if (node.resultOmitted) {
       lines.push(`${label} result omitted ${node.resultByteLength ?? 0} bytes`);
     } else if ("result" in node) {
@@ -1171,18 +1175,7 @@ function prop(value: unknown, key: string): unknown {
 }
 
 function compact(value: unknown, max = 300): string {
-  let text: string;
-  if (typeof value === "string") text = value;
-  else {
-    try {
-      text = JSON.stringify(value) ?? String(value);
-    } catch {
-      text = String(value);
-    }
-  }
-  text = redactCapabilityTokens(text);
-  text = text.replaceAll("\\", "\\\\").replaceAll("\n", "\\n").replaceAll("\r", "\\r");
-  return text.length > max ? `${text.slice(0, max - 1)}...` : text;
+  return compactTerminalText(value, max);
 }
 
 function usage(message: string): number {

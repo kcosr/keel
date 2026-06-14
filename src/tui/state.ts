@@ -1,5 +1,8 @@
+import { trailingTextWindow } from "../cli/terminal-text.ts";
 import type { EventEnvelope } from "../rpc/contract.ts";
 import type { Blockage, RunProjection, RunReport, RunSummary } from "../rpc/projection.ts";
+
+export const DEFAULT_TUI_MAX_WATCH_LINE_CHARS = 8_192;
 
 export interface TuiStateOptions {
   runId?: string;
@@ -8,6 +11,7 @@ export interface TuiStateOptions {
   knownAdmin?: boolean;
   nowMs?: number;
   maxWatchLines?: number;
+  maxWatchLineChars?: number;
 }
 
 export type TuiView = "browser" | "detail";
@@ -50,6 +54,7 @@ export interface WatchState {
   linesRunId: string | null;
   lastSeqByRun: Record<string, number>;
   maxLines: number;
+  maxLineChars: number;
 }
 
 export type PromptKind = "filter" | "signal" | "rewind" | "approval";
@@ -102,6 +107,7 @@ export function createTuiState(opts: TuiStateOptions = {}): TuiState {
       linesRunId: null,
       lastSeqByRun: {},
       maxLines: opts.maxWatchLines ?? 200,
+      maxLineChars: opts.maxWatchLineChars ?? DEFAULT_TUI_MAX_WATCH_LINE_CHARS,
     },
     prompt: null,
     statusMessage: runId ? `opening run ${runId}` : "loading runs",
@@ -282,14 +288,17 @@ export function appendWatchLines(
     const prior = existingLines.slice(0, -1);
     const last = existingLines.at(-1);
     if (last) {
-      existingLines = [...prior, { ...last, text: `${last.text}${update.appendToLastLine}` }];
+      existingLines = [
+        ...prior,
+        { ...last, text: boundWatchLineText(`${last.text}${update.appendToLastLine}`, state) },
+      ];
     }
   }
   const appended = newLines.map((text: string) => ({
     eventType: event.type,
     kind: event.kind,
     seq: event.kind === "durable" ? event.seq : null,
-    text,
+    text: boundWatchLineText(text, state),
   }));
   const merged = [...existingLines, ...appended].slice(-state.watch.maxLines);
   return {
@@ -309,6 +318,10 @@ export function lastSeqForRun(state: TuiState, runId: string): number {
 
 function isWatchLineUpdate(value: readonly string[] | WatchLineUpdate): value is WatchLineUpdate {
   return !Array.isArray(value);
+}
+
+function boundWatchLineText(text: string, state: TuiState): string {
+  return trailingTextWindow(text, state.watch.maxLineChars);
 }
 
 export function setPrompt(state: TuiState, prompt: PromptState | null): TuiState {

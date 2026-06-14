@@ -1,5 +1,6 @@
-import { redactCapabilityTokens, redactCapabilityTokensInValue } from "../auth/redaction.ts";
+import { redactCapabilityTokensInValue } from "../auth/redaction.ts";
 import type { EventEnvelope } from "../rpc/contract.ts";
+import { compactTerminalText, sanitizeTerminalInlineText } from "./terminal-text.ts";
 
 export interface WatchFormatOptions {
   output?: "json" | "text" | "ndjson";
@@ -11,18 +12,21 @@ export interface WatchTextFormatter {
   flush(): string[];
 }
 
-type StreamType = "text" | "reasoning";
+export type WatchStreamType = "text" | "reasoning";
 
-interface StreamChunk {
+export interface WatchStreamIdentity {
   keyId: string;
-  type: StreamType;
+  type: WatchStreamType;
   label: string;
+}
+
+interface StreamChunk extends WatchStreamIdentity {
   text: string;
 }
 
 interface ActiveStream {
   keyId: string;
-  type: StreamType;
+  type: WatchStreamType;
   endedWithNewline: boolean;
 }
 
@@ -74,14 +78,21 @@ export function formatWatchEvent(event: EventEnvelope, opts: WatchFormatOptions 
 }
 
 function streamChunk(event: EventEnvelope): StreamChunk | null {
+  const identity = watchStreamIdentity(event);
+  if (!identity) return null;
+  const data = prop(prop(event.payload, "event"), "data");
+  if (typeof data !== "string") return null;
+  return { ...identity, text: sanitizeInlineText(data) };
+}
+
+export function watchStreamIdentity(event: EventEnvelope): WatchStreamIdentity | null {
   if (event.type !== "agent.event") return null;
   const payload = event.payload;
   const key = prop(payload, "key");
   const innerEvent = prop(payload, "event");
   const traceType = prop(innerEvent, "type");
   if (traceType !== "text" && traceType !== "reasoning") return null;
-  const data = prop(innerEvent, "data");
-  if (typeof data !== "string") return null;
+  if (typeof prop(innerEvent, "data") !== "string") return null;
 
   const parts = ["agent"];
   if (hasContent(key)) parts.push(compact(key));
@@ -90,7 +101,6 @@ function streamChunk(event: EventEnvelope): StreamChunk | null {
     keyId: hasContent(key) ? streamKeyId(key) : "",
     type: traceType,
     label: parts.join(" "),
-    text: sanitizeInlineText(data),
   };
 }
 
@@ -222,92 +232,9 @@ function hasContent(value: unknown): boolean {
 }
 
 function compact(value: unknown, max = 300): string {
-  let text: string;
-  if (typeof value === "string") text = value;
-  else {
-    try {
-      text = JSON.stringify(value) ?? String(value);
-    } catch {
-      text = String(value);
-    }
-  }
-  text = redactCapabilityTokens(text);
-  text = stripAnsiSequences(text);
-  text = text.replaceAll("\\", "\\\\").replaceAll("\n", "\\n").replaceAll("\r", "\\r");
-  text = stripMetadataControlCharacters(text);
-  return text.length > max ? `${text.slice(0, max - 1)}...` : text;
+  return compactTerminalText(value, max);
 }
 
 function sanitizeInlineText(value: string): string {
-  return stripInlineControlCharacters(stripAnsiSequences(redactCapabilityTokens(value)));
-}
-
-function stripAnsiSequences(value: string): string {
-  let out = "";
-  for (let i = 0; i < value.length; ) {
-    const code = value.charCodeAt(i);
-    if (code === 0x1b) {
-      i = skipEscSequence(value, i);
-      continue;
-    }
-    if (code === 0x9b) {
-      i = skipCsiSequence(value, i + 1);
-      continue;
-    }
-    if (code === 0x9d) {
-      i = skipOscSequence(value, i + 1);
-      continue;
-    }
-    out += value[i];
-    i += 1;
-  }
-  return out;
-}
-
-function skipEscSequence(value: string, index: number): number {
-  const next = value.charCodeAt(index + 1);
-  if (Number.isNaN(next)) return index + 1;
-  if (next === 0x5b) return skipCsiSequence(value, index + 2);
-  if (next === 0x5d) return skipOscSequence(value, index + 2);
-  if ((next >= 0x40 && next <= 0x5a) || (next >= 0x5c && next <= 0x5f)) return index + 2;
-  return index + 1;
-}
-
-function skipCsiSequence(value: string, index: number): number {
-  for (let i = index; i < value.length; i += 1) {
-    const code = value.charCodeAt(i);
-    if (code >= 0x40 && code <= 0x7e) return i + 1;
-  }
-  return value.length;
-}
-
-function skipOscSequence(value: string, index: number): number {
-  for (let i = index; i < value.length; i += 1) {
-    const code = value.charCodeAt(i);
-    if (code === 0x07 || code === 0x9c) return i + 1;
-    if (code === 0x1b && value.charCodeAt(i + 1) === 0x5c) return i + 2;
-  }
-  return value.length;
-}
-
-function stripMetadataControlCharacters(value: string): string {
-  return stripControlCharacters(value, false);
-}
-
-function stripInlineControlCharacters(value: string): string {
-  return stripControlCharacters(value, true);
-}
-
-function stripControlCharacters(value: string, preserveInlineWhitespace: boolean): string {
-  let out = "";
-  for (const char of value) {
-    const code = char.codePointAt(0) ?? 0;
-    if (preserveInlineWhitespace && (code === 0x09 || code === 0x0a)) {
-      out += char;
-      continue;
-    }
-    if ((code >= 0x00 && code <= 0x1f) || (code >= 0x7f && code <= 0x9f)) continue;
-    out += char;
-  }
-  return out;
+  return sanitizeTerminalInlineText(value);
 }

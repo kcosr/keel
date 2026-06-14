@@ -48,6 +48,9 @@
 - The TUI detail view keeps live watch output visible in constrained terminals and
   ignores unrecognized escape/CSI input sequences without leaking their bytes into
   prompts or navigation.
+- Terminal text rendering for list/report/watch/TUI now uses shared sanitization,
+  avoids unbounded table width argument spreads, and bounds retained TUI watch row
+  text for long coalesced streams.
 - Agent provider `cwd` is now the resolved run/agent target for non-isolated
   agents; isolated agents require the target to be a git repository root and no
   longer use daemon cwd or `KEEL_WORKSPACE_ROOT` fallback. Raw daemon/RPC launch

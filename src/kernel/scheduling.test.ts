@@ -92,6 +92,7 @@ describe("cron schedules", () => {
       name: "hourly",
       workflowRef: snapshot.hash,
       inputJson: JSON.stringify({ n: 2 }),
+      scheduleTarget: process.cwd(),
       intervalMs: 3_600_000,
       nextFireMs: 500, // already due at t=1000
     });
@@ -109,6 +110,50 @@ describe("cron schedules", () => {
     // advanced ~one interval forward, so not due again immediately
     const after = await new Supervisor({ store, kernel, clock: () => t }).tick();
     expect(after.fired).toEqual([]);
+  });
+
+  test("invalid persisted schedule target disables only the offending due schedule", async () => {
+    const store = JournalStore.memory();
+    const t = 1000;
+    let n = 0;
+    const kernel = new RealmKernel(store, { idgen: () => `cron-${n++}`, clock: () => t });
+    const bad = snapshotWorkflowSource(store, "export default async () => 0;\n", {
+      name: "bad-target",
+      nowMs: t,
+    }).snapshot.hash;
+    const good = snapshotWorkflowSource(store, "export default async () => 1;\n", {
+      name: "good-target",
+      nowMs: t,
+    }).snapshot.hash;
+    store.putSchedule({
+      name: "bad-target",
+      workflowRef: bad,
+      inputJson: "null",
+      scheduleTarget: "   ",
+      intervalMs: 60_000,
+      nextFireMs: 500,
+    });
+    store.putSchedule({
+      name: "good-target",
+      workflowRef: good,
+      inputJson: "null",
+      scheduleTarget: process.cwd(),
+      intervalMs: 60_000,
+      nextFireMs: 500,
+    });
+
+    const res = await new Supervisor({ store, kernel, clock: () => t }).tick();
+    expect(res.fired).toEqual(["good-target"]);
+    const badSchedule = store.db
+      .query<{ enabled: number; last_error_json: string | null }, []>(
+        "SELECT enabled, last_error_json FROM schedules WHERE name = 'bad-target'",
+      )
+      .get();
+    expect(badSchedule?.enabled).toBe(0);
+    expect(JSON.parse(badSchedule?.last_error_json ?? "{}").message).toContain(
+      "requires a non-empty target",
+    );
+    expect(store.listRuns().map((run) => run.workflowName)).toEqual(["good-target"]);
   });
 
   test("unsupported workflow SDK ABI disables only the offending due schedule", async () => {
@@ -129,6 +174,7 @@ describe("cron schedules", () => {
       name: "bad",
       workflowRef: bad,
       inputJson: JSON.stringify({ n: 1 }),
+      scheduleTarget: process.cwd(),
       intervalMs: 60_000,
       nextFireMs: 500,
     });
@@ -136,6 +182,7 @@ describe("cron schedules", () => {
       name: "good",
       workflowRef: good,
       inputJson: "null",
+      scheduleTarget: process.cwd(),
       intervalMs: 60_000,
       nextFireMs: 500,
     });

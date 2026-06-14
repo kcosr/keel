@@ -49,7 +49,9 @@
   agents; isolated agents require the target to be a git repository root and no
   longer use daemon cwd or `KEEL_WORKSPACE_ROOT` fallback. Raw daemon/RPC launch
   and schedule calls now reject missing or blank targets, while CLI/client
-  wrappers still capture their own cwd as the default target.
+  wrappers still capture their own cwd as the default target. The supervisor
+  disables persisted schedules with invalid targets instead of letting one bad
+  schedule break a tick.
 - Workflow SDK ABI bumped to 2 because agent target resolution participates in agent/session identity.
 - Workspace startup/GC reconciliation now clears stale `creating` rows, reconciles terminal `active`/`creating` rows, and makes workspace GC idempotent.
 - Agent secrets are now trusted-local env injection only: secrets no longer

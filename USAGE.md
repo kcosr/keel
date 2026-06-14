@@ -835,8 +835,8 @@ provide a non-empty target. Schedules do not reread a path or automatically
 adopt later source edits. Existing
 path-based schedules from older databases are disabled by migration and should
 be recreated from current source. If a pinned definition requires an unsupported
-workflow SDK ABI, the daemon disables that schedule and persists the ABI error
-instead of retrying it on every supervisor tick.
+workflow SDK ABI or has an invalid persisted target, the daemon disables that
+schedule and persists the error instead of retrying it on every supervisor tick.
 
 ## API Reference
 

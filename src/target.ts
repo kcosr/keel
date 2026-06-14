@@ -4,12 +4,23 @@
 // target. Daemon/server/low-level paths must not invent a daemon cwd when the
 // caller omits a target; they should call requireRunTarget instead.
 
+export class TargetValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TargetValidationError";
+  }
+}
+
+export function isTargetValidationError(err: unknown): err is TargetValidationError {
+  return err instanceof TargetValidationError;
+}
+
 export function requireRunTarget(value: unknown, context: string): string {
   if (typeof value !== "string") {
-    throw new Error(`${context} requires target`);
+    throw new TargetValidationError(`${context} requires target`);
   }
   if (value.trim().length === 0) {
-    throw new Error(`${context} requires a non-empty target`);
+    throw new TargetValidationError(`${context} requires a non-empty target`);
   }
   return value;
 }

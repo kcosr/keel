@@ -12,6 +12,7 @@ import {
   snapshotWorkflowSource,
 } from "../workflow-definitions/snapshot.ts";
 import {
+  applyMigration,
   canonicalWorkflowDefinitionManifestV12,
   workflowDefinitionHashForV12Migration,
 } from "./migrations.ts";
@@ -257,6 +258,57 @@ describe("schema migrations", () => {
       store2.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("v12 migration creates retained workspace metadata when base DDL has not pre-created it", () => {
+    const db = new Database(":memory:");
+    try {
+      db.exec(`
+        CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE runs (
+          run_id             TEXT PRIMARY KEY,
+          workflow_name      TEXT,
+          definition_version TEXT NOT NULL,
+          workflow_ref       TEXT,
+          status             TEXT NOT NULL,
+          parent_run_id      TEXT,
+          tenant_id          TEXT,
+          input_ref          TEXT,
+          output_ref         TEXT,
+          error_json         TEXT,
+          heartbeat_at_ms    INTEGER,
+          runtime_owner_id   TEXT,
+          created_at_ms      INTEGER NOT NULL,
+          finished_at_ms     INTEGER
+        );
+        CREATE TABLE schedules (
+          name              TEXT PRIMARY KEY,
+          workflow_ref      TEXT NOT NULL,
+          input_json        TEXT,
+          interval_ms       INTEGER NOT NULL,
+          next_fire_ms      INTEGER NOT NULL,
+          enabled           INTEGER NOT NULL DEFAULT 1,
+          last_run_id       TEXT,
+          last_error_json   TEXT,
+          last_failed_at_ms INTEGER
+        );
+      `);
+
+      applyMigration(db, 12);
+
+      const runCols = db.query<{ name: string }, []>("PRAGMA table_info(runs)").all();
+      expect(runCols.some((c) => c.name === "run_target")).toBe(true);
+      const scheduleCols = db.query<{ name: string }, []>("PRAGMA table_info(schedules)").all();
+      expect(scheduleCols.some((c) => c.name === "schedule_target")).toBe(true);
+      const workspaceCols = db
+        .query<{ name: string }, []>("PRAGMA table_info(agent_session_workspaces)")
+        .all()
+        .map((c) => c.name);
+      expect(workspaceCols).toContain("workspace_path");
+      expect(workspaceCols).toContain("discarded_at_ms");
+    } finally {
+      db.close();
     }
   });
 

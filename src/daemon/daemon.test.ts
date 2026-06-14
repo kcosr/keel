@@ -3,6 +3,7 @@
 // - CAS ownership fence prevents two daemons double-driving a run.
 // - kill -9 the daemon mid-run, restart, and the run recovers and finishes.
 
+import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { createConnection } from "node:net";
@@ -101,6 +102,89 @@ function rawAdminRpc(
     });
     socket.on("error", fail);
   });
+}
+
+const migratedOldAbiSource =
+  'import { passthrough } from "@kcosr/keel";\nexport default async () => passthrough<number>().parse(1);\n';
+
+function oldAbiWorkflowManifest() {
+  return {
+    format: "keel.workflow-definition.v1",
+    entry: "entry.ts",
+    modules: [{ path: "entry.ts", code: migratedOldAbiSource }],
+    externalImports: ["@kcosr/keel"],
+    externalPackages: [{ name: "@kcosr/keel", root: "/old/keel", integrity: "sha256-old" }],
+    sourceRoot: "client-captured://source",
+    runtime: {
+      bunVersion: Bun.version,
+      keelDefinitionAbi: 1,
+    },
+  };
+}
+
+function makeV11OldAbiDueTimerDb(path: string): void {
+  const db = new Database(path, { create: true });
+  db.exec("PRAGMA journal_mode = WAL;");
+  db.exec(`
+    CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE runs (
+      run_id             TEXT PRIMARY KEY,
+      workflow_name      TEXT,
+      definition_version TEXT NOT NULL,
+      workflow_ref       TEXT,
+      status             TEXT NOT NULL,
+      parent_run_id      TEXT,
+      tenant_id          TEXT,
+      input_ref          TEXT,
+      output_ref         TEXT,
+      error_json         TEXT,
+      heartbeat_at_ms    INTEGER,
+      runtime_owner_id   TEXT,
+      created_at_ms      INTEGER NOT NULL,
+      finished_at_ms     INTEGER
+    );
+    CREATE TABLE schedules (
+      name         TEXT PRIMARY KEY,
+      workflow_ref TEXT NOT NULL,
+      input_json   TEXT,
+      interval_ms  INTEGER NOT NULL,
+      next_fire_ms INTEGER NOT NULL,
+      enabled      INTEGER NOT NULL DEFAULT 1,
+      last_run_id  TEXT
+    );
+    CREATE TABLE timers (
+      run_id     TEXT NOT NULL,
+      stable_key TEXT NOT NULL,
+      fire_at_ms INTEGER NOT NULL,
+      fired      INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (run_id, stable_key)
+    );
+    CREATE TABLE workflow_definitions (
+      hash          TEXT PRIMARY KEY,
+      name          TEXT,
+      kind          TEXT NOT NULL,
+      code          TEXT NOT NULL,
+      source_map    TEXT,
+      manifest_json TEXT,
+      created_at_ms INTEGER NOT NULL
+    );
+  `);
+  db.query("INSERT INTO schema_meta (key, value) VALUES ('schema_version', '11')").run();
+  db.query(
+    `INSERT INTO workflow_definitions (
+      hash, name, kind, code, source_map, manifest_json, created_at_ms
+    ) VALUES ('wf_sha256_old_sdk_daemon', 'old-abi', 'source', ?, NULL, ?, 1)`,
+  ).run(migratedOldAbiSource, JSON.stringify(oldAbiWorkflowManifest()));
+  db.query(
+    `INSERT INTO runs (
+      run_id, workflow_name, definition_version, workflow_ref, status,
+      input_ref, created_at_ms
+    ) VALUES ('old-abi-timer', 'old-abi', 'wf_sha256_old_sdk_daemon', 'stdin', 'waiting-timer', 'null', 1)`,
+  ).run();
+  db.query(
+    "INSERT INTO timers (run_id, stable_key, fire_at_ms, fired) VALUES ('old-abi-timer', 'sleep', 0, 0)",
+  ).run();
+  db.close();
 }
 
 describe("daemon multi-client over the socket", () => {
@@ -818,6 +902,55 @@ describe("daemon supervisor tick over the socket", () => {
         probe.close();
       }
       c.close();
+    } finally {
+      daemon.stop();
+    }
+  }, 10000);
+
+  test("migrated ABI-1 due timer run fails once durably under the daemon supervisor", async () => {
+    const socketPath = join(dir, "old-abi-supervisor.sock");
+    const dbPath = join(dir, "old-abi-supervisor.db");
+    makeV11OldAbiDueTimerDb(dbPath);
+    const daemon = new KeelDaemon({
+      socketPath,
+      dbPath,
+      ownerId: "old-abi-supervisor",
+      agents: new AgentProviderRegistry().register(new MockProvider()),
+      superviseMs: 50,
+      adminToken: ADMIN_TOKEN,
+      clock: () => 1_000,
+    });
+    await daemon.start();
+    try {
+      await until(async () => {
+        const probe = JournalStore.open(dbPath);
+        try {
+          return probe.getRun("old-abi-timer")?.status === "failed";
+        } finally {
+          probe.close();
+        }
+      }, 4000);
+      await Bun.sleep(150);
+      const listed = await rawAdminRpc(socketPath, "listRuns", {});
+      expect(listed.error).toBeUndefined();
+      const probe = JournalStore.open(dbPath);
+      try {
+        const failed = probe.getRun("old-abi-timer");
+        expect(failed?.status).toBe("failed");
+        expect(failed?.runtimeOwnerId).toBe("old-abi-supervisor");
+        expect(failed?.finishedAtMs).toBe(1_000);
+        expect(JSON.parse(failed?.errorJson ?? "{}").message).toContain(
+          "requires workflow SDK ABI 1, but this daemon supports ABI 2",
+        );
+        const failedEvents = probe.db
+          .query<{ count: number }, []>(
+            "SELECT COUNT(*) AS count FROM events WHERE run_id = 'old-abi-timer' AND type = 'run.failed'",
+          )
+          .get();
+        expect(failedEvents?.count).toBe(1);
+      } finally {
+        probe.close();
+      }
     } finally {
       daemon.stop();
     }

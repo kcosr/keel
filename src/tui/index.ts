@@ -2,7 +2,7 @@ import { redactCapabilityTokens } from "../auth/redaction.ts";
 import type { DaemonClient } from "../daemon/client.ts";
 import type { EventEnvelope, RunOutcome, RunStart } from "../rpc/contract.ts";
 import type { Blockage, RunProjection, RunReport, RunSummary } from "../rpc/projection.ts";
-import { formatTuiWatchEvent } from "./events.ts";
+import { createTuiWatchFormatter } from "./events.ts";
 import { type TuiCommand, parseTuiKeys, reduceTuiKey } from "./input.ts";
 import {
   type TuiState,
@@ -195,6 +195,7 @@ export async function runTui(options: RunTuiOptions): Promise<number> {
         const afterSeq = lastSeqForRun(state, runId);
         state = startWatchState(state, runId);
         render();
+        const formatter = createTuiWatchFormatter();
         let localUnsubscribe = () => {};
         const isCurrentSubscription = () =>
           unsubscribeWatch === localUnsubscribe &&
@@ -205,8 +206,8 @@ export async function runTui(options: RunTuiOptions): Promise<number> {
           afterSeq,
           (event) => {
             if (!isCurrentSubscription()) return;
-            const formatted = formatTuiWatchEvent(event);
-            state = appendWatchLines(state, event, formatted.lines);
+            const formatted = formatter.push(event);
+            state = appendWatchLines(state, event, formatted);
             if (formatted.authorizationFailedMessage) {
               state = stopWatchState(state, formatted.authorizationFailedMessage);
               localUnsubscribe();

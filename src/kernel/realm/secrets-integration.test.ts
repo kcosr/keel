@@ -2,6 +2,10 @@
 // agent outputs/events/errors are journaled as ordinary data.
 
 import { describe, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { SecretStore } from "../../agents/secrets.ts";
 import type {
   AgentHooks,
@@ -59,6 +63,33 @@ const TOLERATED_FAILURE_WORKFLOW = {
   name: "tolerated-secret",
 };
 
+const ISOLATED_SESSION_SECRET_WORKFLOW = {
+  source: `
+    import { type Ctx } from "@kcosr/keel";
+    export default async function wf(ctx: Ctx): Promise<string> {
+      const primary = ctx.agentSession({
+        key: "primary",
+        provider: "session",
+        workspaceIsolation: true,
+        capabilities: { fs: "workspace-write" },
+        secrets: ["TOKEN"],
+      });
+      return await primary.turn({ key: "draft", prompt: "draft" });
+    }
+  `,
+  name: "isolated-session-secret",
+};
+
+function initGitRepo(repo: string): void {
+  const g = (args: string[]) => execFileSync("git", args, { cwd: repo });
+  g(["init", "-q"]);
+  g(["config", "user.email", "t@t"]);
+  g(["config", "user.name", "t"]);
+  writeFileSync(join(repo, "seed.txt"), "seed\n");
+  g(["add", "-A"]);
+  g(["commit", "-q", "-m", "init"]);
+}
+
 describe("trusted-local secrets side-channel", () => {
   test("an injected secret can appear in output and journal rows without exact-value redaction", async () => {
     const store = JournalStore.memory();
@@ -114,6 +145,59 @@ describe("trusted-local secrets side-channel", () => {
     expect(invocation?.capabilities?.fs).toBe("workspace-write");
     expect(invocation?.capabilities?.shell).toBe(true);
     expect(invocation?.allowTools).toContain("mcp__local__edit");
+  });
+
+  test("workspace-isolated agent sessions receive secrets and retain secret-bearing diffs", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "keel-secret-isolated-target-"));
+    const workspaceStore = mkdtempSync(join(tmpdir(), "keel-secret-isolated-store-"));
+    const store = JournalStore.memory();
+    const secrets = new SecretStore();
+    secrets.put("r", "TOKEN", "isolated-secret-value");
+    let invocation: AgentInvocation | undefined;
+    const provider: AgentProvider = {
+      name: "session",
+      supportsSessions: true,
+      async generate(inv: AgentInvocation, hooks: AgentHooks): Promise<AgentResult> {
+        invocation = inv;
+        if (!inv.cwd) throw new Error("missing isolated cwd");
+        hooks.onSessionToken?.(inv.resumeToken ?? "sess-1");
+        writeFileSync(join(inv.cwd, "secret.txt"), `secret=${inv.env?.TOKEN}\n`);
+        return { text: `isolated saw ${inv.env?.TOKEN}`, transcript: [], sessionToken: "sess-1" };
+      },
+    };
+
+    try {
+      initGitRepo(repo);
+      const kernel = new RealmKernel(store, {
+        idgen: () => "r",
+        agents: new AgentProviderRegistry().register(provider),
+        secrets,
+        workspaceStore,
+      });
+      const handle = await kernel.run<string>(ISOLATED_SESSION_SECRET_WORKFLOW, null, {
+        target: repo,
+      });
+
+      expect(handle.status).toBe("finished");
+      expect(handle.output).toBe("isolated saw isolated-secret-value");
+      expect(invocation?.env?.TOKEN).toBe("isolated-secret-value");
+      expect(invocation?.cwd?.startsWith(workspaceStore)).toBe(true);
+      const workspace = store.getAgentSessionWorkspace("r", "primary");
+      expect(workspace).toMatchObject({ target: repo, status: "pending_review" });
+      expect(workspace?.workspacePath).toBe(invocation?.cwd);
+      expect(readFileSync(join(workspace?.workspacePath ?? "", "secret.txt"), "utf8")).toBe(
+        "secret=isolated-secret-value\n",
+      );
+      expect(existsSync(join(repo, "secret.txt"))).toBe(false);
+      const diffEvent = store.listEvents("r").find((event) => event.type === "agent.diff");
+      expect(diffEvent?.payloadJson).toContain("isolated-secret-value");
+      expect(diffEvent?.payloadJson).not.toContain("«redacted»");
+      expect(secrets.resolve("r", ["TOKEN"])).toEqual([]);
+    } finally {
+      store.close();
+      rmSync(repo, { recursive: true, force: true });
+      rmSync(workspaceStore, { recursive: true, force: true });
+    }
   });
 
   test("tolerated failure payloads containing a secret are journaled without redaction", async () => {

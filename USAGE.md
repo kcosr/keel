@@ -427,9 +427,12 @@ keel workspace gc [--older-than-ms ms] [--include-pending]
 ```
 
 Merge/discard are explicit operator actions and refuse while the run is
-non-terminal or the participant has an active turn. Merge applies the current
-workspace state back to its recorded target; the retained workspace remains until
-discarded or garbage-collected.
+non-terminal, the participant has an active turn, or the workspace has already
+moved to a terminal lifecycle status such as `merged` or `discarded`. Merge
+applies the current workspace state back to its recorded target; after merge,
+the retained workspace remains until garbage-collected. A still-pending
+workspace can be discarded instead. Stale retained-workspace cleanup beyond
+explicit `gc` is intentionally deferred to the workspace retention policy.
 
 ### Authorization
 

@@ -59,7 +59,7 @@
   disables persisted schedules with invalid targets instead of letting one bad
   schedule break a tick.
 - Workflow SDK ABI bumped to 2 because agent target resolution participates in agent/session identity.
-- Workspace startup/GC reconciliation now clears stale `creating` rows, reconciles terminal `active`/`creating` rows, and makes workspace GC idempotent.
+- Workspace startup/GC reconciliation now clears stale `creating` rows, reconciles terminal `active`/`creating` rows, makes workspace GC idempotent, and rejects invalid workspace merge/discard transitions after terminal workspace statuses.
 - Agent secrets are now trusted-local env injection only: secrets no longer
   require `workspaceIsolation`, and exact secret values emitted by agents are no
   longer redacted from outputs, events, tolerated failures, or isolated diffs.

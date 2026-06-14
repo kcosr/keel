@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { JournalStore } from "./store.ts";
-import type { NewRunRow } from "./types.ts";
+import type { AgentSessionWorkspaceRow, NewRunRow } from "./types.ts";
 
 function newRun(runId: string): NewRunRow {
   return {
@@ -27,6 +27,30 @@ function unnamedRun(runId: string): NewRunRow {
     ...newRun(runId),
     workflowName: null,
     workflowRef: "stdin",
+  };
+}
+
+function workspaceRow(
+  runId: string,
+  agentKey: string,
+  overrides: Partial<AgentSessionWorkspaceRow> = {},
+): AgentSessionWorkspaceRow {
+  return {
+    runId,
+    agentKey,
+    workspacePath: `/tmp/${runId}/${agentKey}`,
+    target: `/repo/${runId}`,
+    baseCommit: `base-${runId}`,
+    status: "idle",
+    lastTurnKey: null,
+    lastTurnAttempt: null,
+    lastDiffEventSeq: null,
+    lastErrorEventSeq: null,
+    createdAtMs: 100,
+    updatedAtMs: 100,
+    mergedAtMs: null,
+    discardedAtMs: null,
+    ...overrides,
   };
 }
 
@@ -273,6 +297,87 @@ describe("JournalStore (in-memory)", () => {
     expect(store.getWorkflowDefinition("wf_sha256_run")).not.toBeNull();
     expect(store.getWorkflowDefinition("wf_sha256_schedule")).not.toBeNull();
     expect(store.getWorkflowDefinition("wf_sha256_fresh")).not.toBeNull();
+  });
+
+  test("agent session workspaces insert, update, and list deterministically", () => {
+    const r1b = workspaceRow("r1", "b", { workspacePath: "/work/r1/b", status: "creating" });
+    const r1a = workspaceRow("r1", "a", { workspacePath: "/work/r1/a", status: "idle" });
+    const r2a = workspaceRow("r2", "a", { workspacePath: "/work/r2/a", status: "pending_review" });
+    store.insertAgentSessionWorkspace(r1b);
+    store.insertAgentSessionWorkspace(r1a);
+    store.insertAgentSessionWorkspace(r2a);
+
+    expect(store.getAgentSessionWorkspace("r1", "a")).toEqual(r1a);
+    expect(store.listAgentSessionWorkspaces("r1").map((w) => w.agentKey)).toEqual(["a", "b"]);
+    expect(store.listAllAgentSessionWorkspaces().map((w) => `${w.runId}/${w.agentKey}`)).toEqual([
+      "r1/a",
+      "r1/b",
+      "r2/a",
+    ]);
+
+    store.updateAgentSessionWorkspace("r1", "a", {
+      status: "diff_error",
+      lastTurnKey: "turn-2",
+      lastTurnAttempt: 2,
+      lastDiffEventSeq: 11,
+      lastErrorEventSeq: 12,
+      updatedAtMs: 250,
+    });
+    expect(store.getAgentSessionWorkspace("r1", "a")).toEqual({
+      ...r1a,
+      status: "diff_error",
+      lastTurnKey: "turn-2",
+      lastTurnAttempt: 2,
+      lastDiffEventSeq: 11,
+      lastErrorEventSeq: 12,
+      updatedAtMs: 250,
+    });
+
+    store.updateAgentSessionWorkspace("r1", "a", { status: "merged", mergedAtMs: 300 });
+    expect(store.getAgentSessionWorkspace("r1", "a")?.mergedAtMs).toBe(300);
+
+    store.deleteAgentSessionWorkspace("r1", "b");
+    expect(store.getAgentSessionWorkspace("r1", "b")).toBeNull();
+  });
+
+  test("agent session workspace status helpers transition only active lifecycle states", () => {
+    for (const status of [
+      "creating",
+      "active",
+      "idle",
+      "pending_review",
+      "merged",
+      "discarded",
+      "diff_error",
+      "abandoned",
+    ] as const) {
+      store.insertAgentSessionWorkspace(workspaceRow("r", status, { status, updatedAtMs: 100 }));
+    }
+
+    store.markRunWorkspacesPendingReview("r", 200);
+    expect(store.getAgentSessionWorkspace("r", "creating")?.status).toBe("pending_review");
+    expect(store.getAgentSessionWorkspace("r", "active")?.status).toBe("pending_review");
+    expect(store.getAgentSessionWorkspace("r", "idle")?.status).toBe("pending_review");
+    expect(store.getAgentSessionWorkspace("r", "creating")?.updatedAtMs).toBe(200);
+    expect(store.getAgentSessionWorkspace("r", "diff_error")?.status).toBe("diff_error");
+    expect(store.getAgentSessionWorkspace("r", "merged")?.status).toBe("merged");
+    expect(store.getAgentSessionWorkspace("r", "discarded")?.status).toBe("discarded");
+    expect(store.getAgentSessionWorkspace("r", "abandoned")?.status).toBe("abandoned");
+
+    store.reopenPendingReviewWorkspaces("r", 300);
+    expect(store.getAgentSessionWorkspace("r", "creating")?.status).toBe("idle");
+    expect(store.getAgentSessionWorkspace("r", "active")?.status).toBe("idle");
+    expect(store.getAgentSessionWorkspace("r", "idle")?.status).toBe("idle");
+    expect(store.getAgentSessionWorkspace("r", "pending_review")?.status).toBe("idle");
+    expect(store.getAgentSessionWorkspace("r", "creating")?.updatedAtMs).toBe(300);
+    expect(store.getAgentSessionWorkspace("r", "diff_error")?.status).toBe("diff_error");
+
+    expect(
+      store
+        .gcWorkspaceRows(["merged", "discarded", "abandoned"], 1000)
+        .map((w) => w.status)
+        .sort(),
+    ).toEqual(["abandoned", "discarded", "merged"]);
   });
 
   test("capabilities round-trip by secret hash without storing raw tokens", () => {

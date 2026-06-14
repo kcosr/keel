@@ -124,7 +124,7 @@ export class PiProvider implements AgentProvider {
             const line = buf.slice(0, nl).trim();
             buf = buf.slice(nl + 1);
             if (line) handleLine(line);
-            if (agentEnd) {
+            if (agentEnd || streamErr) {
               resolve();
               return;
             }
@@ -159,7 +159,13 @@ export class PiProvider implements AgentProvider {
         return;
       }
       // event
-      mapEvent(msg, transcript, hooks);
+      try {
+        mapEvent(msg, transcript, hooks);
+      } catch (err) {
+        streamErr = `pi agent "${invocation.key}" event hook failed: ${String(err)}`;
+        proc.kill();
+        return;
+      }
       if (msg.type === "agent_end") {
         if ((msg as { willRetry?: unknown }).willRetry === true) return;
         agentEnd = { messages: (msg.messages as PiMessage[]) ?? [] };
@@ -196,6 +202,9 @@ export class PiProvider implements AgentProvider {
       // 2) prompt → stream → agent_end
       send({ type: "prompt", id: nextId++, message: invocation.prompt });
       await Promise.race([done, proc.exited.then(() => undefined)]);
+      if (!agentEnd && !streamErr) {
+        await Promise.race([done, Bun.sleep(100)]);
+      }
       clearTimeout(timeout);
 
       if (streamErr) throw new Error(streamErr);
@@ -292,6 +301,22 @@ function tail(text: string, max = 4000): string {
   return text.length > max ? text.slice(text.length - max) : text;
 }
 
+function piToolCallId(msg: PiOut): string | undefined {
+  for (const key of [
+    "toolCallId",
+    "tool_call_id",
+    "toolUseId",
+    "tool_use_id",
+    "executionId",
+    "execution_id",
+    "callId",
+    "call_id",
+  ]) {
+    const value = (msg as Record<string, unknown>)[key];
+    if (typeof value === "string" && value.length > 0) return value;
+  }
+}
+
 /** Map a pi event onto Keel's TraceEvent vocabulary for transcript capture. */
 function mapEvent(msg: PiOut, transcript: TraceEvent[], hooks: AgentHooks): void {
   let ev: TraceEvent | null = null;
@@ -303,12 +328,16 @@ function mapEvent(msg: PiOut, transcript: TraceEvent[], hooks: AgentHooks): void
       else if (inner?.type === "thinking_delta") ev = { type: "reasoning", data: inner.delta };
       break;
     }
-    case "tool_execution_start":
-      ev = { type: "tool_call", data: msg };
+    case "tool_execution_start": {
+      const toolCallId = piToolCallId(msg);
+      ev = { type: "tool_call", data: msg, ...(toolCallId ? { toolCallId } : {}) };
       break;
-    case "tool_execution_end":
-      ev = { type: "tool_result", data: msg };
+    }
+    case "tool_execution_end": {
+      const toolCallId = piToolCallId(msg);
+      ev = { type: "tool_result", data: msg, ...(toolCallId ? { toolCallId } : {}) };
       break;
+    }
     case "auto_retry_start":
       ev = { type: "wait", data: msg };
       break;

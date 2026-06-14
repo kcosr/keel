@@ -50,6 +50,52 @@ class RecordingSessionProvider implements AgentProvider {
   }
 }
 
+class StreamingSessionProvider implements AgentProvider {
+  readonly name = "session";
+  readonly supportsSessions = true;
+  readonly calls: AgentInvocation[] = [];
+  private firstEvent: Promise<void>;
+  private resolveFirstEvent!: () => void;
+  private releaseStream: Promise<void>;
+  private resolveRelease!: () => void;
+
+  constructor() {
+    this.firstEvent = new Promise((resolve) => {
+      this.resolveFirstEvent = resolve;
+    });
+    this.releaseStream = new Promise((resolve) => {
+      this.resolveRelease = resolve;
+    });
+  }
+
+  async generate(invocation: AgentInvocation, hooks: AgentHooks): Promise<AgentResult> {
+    this.calls.push(invocation);
+    const token = invocation.resumeToken ?? "sess-1";
+    hooks.onSessionToken?.(token);
+    hooks.onEvent?.({
+      type: "tool_call",
+      toolCallId: "session-call-1",
+      data: { name: "Read", args: { file: "a.ts" } },
+    });
+    this.resolveFirstEvent();
+    await this.releaseStream;
+    hooks.onEvent?.({
+      type: "tool_result",
+      toolCallId: "session-call-1",
+      data: { output: "ok" },
+    });
+    return { text: '{"value":1}', transcript: [], sessionToken: token };
+  }
+
+  waitForFirstEvent(): Promise<void> {
+    return this.firstEvent;
+  }
+
+  release(): void {
+    this.resolveRelease();
+  }
+}
+
 class FailsOnceOnReviseProvider implements AgentProvider {
   readonly name = "session";
   readonly supportsSessions = true;
@@ -403,6 +449,152 @@ describe("ctx.agentSession", () => {
         (r) => r.status === "rejected" && String(r.reason).includes("already executing"),
       ),
     ).toBe(true);
+  });
+
+  test("session turn tool calls are durable before turn completion", async () => {
+    const store = JournalStore.memory();
+    const provider = new StreamingSessionProvider();
+    const { runId, done } = kernel(store, provider).launch(WORKFLOW, { second: false });
+
+    await provider.waitForFirstEvent();
+    expect(store.getJournalRow(runId, "__session.primary.draft", 1)?.status).toBe("pending");
+    expect(
+      store
+        .listEvents(runId)
+        .filter((e) => e.type === "agent.tool_call")
+        .map((e) => JSON.parse(e.payloadJson)),
+    ).toEqual([
+      {
+        key: "__session.primary.draft",
+        attempt: 1,
+        toolCallId: "session-call-1",
+        data: { name: "Read", args: { file: "a.ts" } },
+      },
+    ]);
+
+    provider.release();
+    const finished = await done;
+    expect(finished.status).toBe("finished");
+    expect(
+      store
+        .listEvents(runId)
+        .filter((e) => e.type.startsWith("agent."))
+        .map((e) => ({ type: e.type, payload: JSON.parse(e.payloadJson) })),
+    ).toEqual([
+      {
+        type: "agent.tool_call",
+        payload: {
+          key: "__session.primary.draft",
+          attempt: 1,
+          toolCallId: "session-call-1",
+          data: { name: "Read", args: { file: "a.ts" } },
+        },
+      },
+      {
+        type: "agent.tool_result",
+        payload: {
+          key: "__session.primary.draft",
+          attempt: 1,
+          toolCallId: "session-call-1",
+          data: { output: "ok" },
+        },
+      },
+      {
+        type: "agent.message",
+        payload: { key: "__session.primary.draft", attempt: 1, text: '{"value":1}' },
+      },
+    ]);
+  });
+
+  test("tool rows survive a pre-completion crash and repeated resume observations", async () => {
+    const store = JournalStore.memory();
+    const provider = new StreamingSessionProvider();
+    let crash = true;
+    const crashing = kernel(store, provider, {
+      fault: (point: string, key: string) => {
+        if (crash && point === "before-commit" && key === "__session.primary.draft") {
+          crash = false;
+          throw new Error("CRASH after tool rows");
+        }
+      },
+    });
+    const { runId, done } = crashing.launch(WORKFLOW, { second: false });
+
+    await provider.waitForFirstEvent();
+    provider.release();
+    await done.catch(() => null);
+    expect(store.getRun(runId)?.status).toBe("running");
+    expect(store.getJournalRow(runId, "__session.primary.draft", 1)?.status).toBe("pending");
+    expect(
+      store
+        .listEvents(runId)
+        .filter((e) => e.type === "agent.tool_call")
+        .map((e) => JSON.parse(e.payloadJson)),
+    ).toEqual([
+      {
+        key: "__session.primary.draft",
+        attempt: 1,
+        toolCallId: "session-call-1",
+        data: { name: "Read", args: { file: "a.ts" } },
+      },
+    ]);
+
+    const resumed = await kernel(store, provider).resume<number>(runId);
+    expect(resumed.status).toBe("finished");
+    expect(resumed.output).toBe(1);
+    expect(provider.calls).toHaveLength(2);
+
+    expect(
+      store
+        .listEvents(runId)
+        .filter((e) => e.type.startsWith("agent."))
+        .map((e) => ({ type: e.type, payload: JSON.parse(e.payloadJson) })),
+    ).toEqual([
+      {
+        type: "agent.tool_call",
+        payload: {
+          key: "__session.primary.draft",
+          attempt: 1,
+          toolCallId: "session-call-1",
+          data: { name: "Read", args: { file: "a.ts" } },
+        },
+      },
+      {
+        type: "agent.tool_result",
+        payload: {
+          key: "__session.primary.draft",
+          attempt: 1,
+          toolCallId: "session-call-1",
+          data: { output: "ok" },
+        },
+      },
+      {
+        type: "agent.tool_call",
+        payload: {
+          key: "__session.primary.draft",
+          attempt: 1,
+          toolCallId: "session-call-1",
+          data: { name: "Read", args: { file: "a.ts" } },
+        },
+      },
+      {
+        type: "agent.tool_result",
+        payload: {
+          key: "__session.primary.draft",
+          attempt: 1,
+          toolCallId: "session-call-1",
+          data: { output: "ok" },
+        },
+      },
+      {
+        type: "agent.message",
+        payload: { key: "__session.primary.draft", attempt: 1, text: '{"value":1}' },
+      },
+    ]);
+
+    const replayed = await kernel(store, provider).resume<number>(runId);
+    expect(replayed.output).toBe(1);
+    expect(provider.calls).toHaveLength(2);
   });
 
   test("session-token events are not journaled", async () => {

@@ -251,16 +251,15 @@ describe("secret lifecycle", () => {
     secrets.put("r", "TOKEN", "persisted-secret-xyz");
     const streamer: AgentProvider = {
       name: "streamer",
-      async generate(inv: AgentInvocation): Promise<AgentResult> {
+      async generate(inv: AgentInvocation, hooks: AgentHooks): Promise<AgentResult> {
         const secret = inv.env?.TOKEN ?? "";
-        return {
-          text: `final ${secret}`,
-          transcript: [
-            { type: "tool_call", data: { input: secret } },
-            { type: "tool_result", data: { output: secret } },
-            { type: "text", data: `final ${secret}` },
-          ],
-        };
+        const transcript: AgentResult["transcript"] = [
+          { type: "tool_call", data: { input: secret } },
+          { type: "tool_result", data: { output: secret } },
+          { type: "text", data: `final ${secret}` },
+        ];
+        for (const event of transcript) hooks.onEvent?.(event);
+        return { text: `final ${secret}`, transcript };
       },
     };
     const kernel = new RealmKernel(store, {

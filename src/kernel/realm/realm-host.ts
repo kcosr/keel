@@ -12,7 +12,7 @@ import { pathToFileURL } from "node:url";
 import type { Capabilities } from "../../agents/capabilities.ts";
 import { AgentFailure, executeAgent, runAgentWithStall } from "../../agents/execute.ts";
 import { type SecretStore, redact } from "../../agents/secrets.ts";
-import type { AgentProvider, AgentProviderRegistry } from "../../agents/types.ts";
+import type { AgentProvider, AgentProviderRegistry, TraceEvent } from "../../agents/types.ts";
 import { type Json, hashJson } from "../../hash.ts";
 import type { JournalStore } from "../../journal/store.ts";
 import type { RunRow, RunStatus } from "../../journal/types.ts";
@@ -25,7 +25,7 @@ import {
   snapshotWorkflowSource,
 } from "../../workflow-definitions/snapshot.ts";
 import { createWorktree } from "../../workspace/worktree.ts";
-import { consolidatedAgentEvents, redactTranscript } from "../agent-events.ts";
+import { type DurableAgentEvent, finalAgentMessageEvents } from "../agent-events.ts";
 import type { CtxHost, FaultPoint } from "../ctx.ts";
 import { extractModuleHelpers } from "../module-helpers.ts";
 import { RUN_FINISHED_INLINE_OUTPUT_BYTES } from "../output.ts";
@@ -587,13 +587,29 @@ export class RealmKernel {
     });
   }
 
+  private emitAgentTrace(
+    engine: StepEngine,
+    key: string,
+    attempt: number,
+    ev: TraceEvent,
+    allSecrets: string[],
+  ): void {
+    if (ev.type === "session") return;
+    let event = ev;
+    if (allSecrets.length > 0) {
+      const r = redact(JSON.stringify(event), allSecrets);
+      if (r.redacted) event = JSON.parse(r.text) as TraceEvent;
+    }
+    engine.emitAgentTrace(key, attempt, event);
+  }
+
   private completeAgentSessionTurn(
     runId: string,
     m: Extract<WorkerRequest, { type: "agent-turn" }>,
     begun: { attempt: number; inputHash: string; startedAtMs: number; resumeToken?: string },
     value: unknown,
     providerSessionToken: string | undefined,
-    events: ReturnType<typeof consolidatedAgentEvents> = [],
+    events: DurableAgentEvent[] = [],
   ): void {
     const journalRow = this.store.getJournalRow(runId, m.stableKey, begun.attempt);
     const turn = this.store.getLatestAgentSessionTurn(runId, m.agentKey, m.turnKey);
@@ -905,17 +921,10 @@ export class RealmKernel {
                             engine.recordSessionToken(m.key, begun.attempt, tok),
                           // §11.2: redact secrets from STREAMED events too — a
                           // provider may stream a secret (thinking/tool output)
-                          // before the final output is redacted; the event log is
-                          // forever, so scrub at the boundary.
-                          onEvent: (ev) => {
-                            if (ev.type === "session") return;
-                            let event = ev as unknown as Json;
-                            if (allSecrets.length > 0) {
-                              const r = redact(JSON.stringify(event), allSecrets);
-                              if (r.redacted) event = JSON.parse(r.text) as Json;
-                            }
-                            engine.emitLive("agent.event", { key: m.key, event });
-                          },
+                          // before the final output is redacted. Tool calls/results
+                          // are durably appended here before returning to the adapter.
+                          onEvent: (ev) =>
+                            this.emitAgentTrace(engine, m.key, begun.attempt, ev, allSecrets),
                         },
                         {
                           ...(m.jsonSchema != null ? { jsonSchema: m.jsonSchema } : {}),
@@ -959,13 +968,6 @@ export class RealmKernel {
                       contentDiff,
                     });
                   }
-                  const transcript =
-                    allSecrets.length > 0
-                      ? redactTranscript(
-                          execution.transcript,
-                          (json) => redact(json, allSecrets).text,
-                        )
-                      : execution.transcript;
                   const text =
                     allSecrets.length > 0
                       ? redact(execution.text, allSecrets).text
@@ -980,7 +982,7 @@ export class RealmKernel {
                       output,
                       m.deps,
                       "effectful",
-                      consolidatedAgentEvents(m.key, text, transcript),
+                      finalAgentMessageEvents(m.key, begun.attempt, text),
                     );
                   } catch (faultErr) {
                     abort(faultErr); // crash fault inside completeStep: leave pending
@@ -1148,15 +1150,8 @@ export class RealmKernel {
                               tok,
                               begun.resumeToken,
                             ),
-                          onEvent: (ev) => {
-                            if (ev.type === "session") return;
-                            let event = ev as unknown as Json;
-                            if (allSecrets.length > 0) {
-                              const r = redact(JSON.stringify(event), allSecrets);
-                              if (r.redacted) event = JSON.parse(r.text) as Json;
-                            }
-                            engine.emitLive("agent.event", { key: m.stableKey, event });
-                          },
+                          onEvent: (ev) =>
+                            this.emitAgentTrace(engine, m.stableKey, begun.attempt, ev, allSecrets),
                         },
                         {
                           ...(m.jsonSchema != null ? { jsonSchema: m.jsonSchema } : {}),
@@ -1180,13 +1175,6 @@ export class RealmKernel {
                       engine.emit("agent.redacted", { key: m.stableKey });
                     }
                   }
-                  const transcript =
-                    allSecrets.length > 0
-                      ? redactTranscript(
-                          execution.transcript,
-                          (json) => redact(json, allSecrets).text,
-                        )
-                      : execution.transcript;
                   const text =
                     allSecrets.length > 0
                       ? redact(execution.text, allSecrets).text
@@ -1198,7 +1186,7 @@ export class RealmKernel {
                       begun,
                       output,
                       execution.sessionToken,
-                      consolidatedAgentEvents(m.stableKey, text, transcript),
+                      finalAgentMessageEvents(m.stableKey, begun.attempt, text),
                     );
                   } catch (err) {
                     if (!(err instanceof AgentSessionContinuityError)) {

@@ -12,6 +12,7 @@ import {
   type AgentResult,
 } from "../agents/types.ts";
 import { JournalStore } from "../journal/store.ts";
+import { RUN_FINISHED_INLINE_OUTPUT_BYTES } from "../kernel/output.ts";
 import { RealmKernel } from "../kernel/realm/realm-host.ts";
 import { captureWorkflowFile } from "../workflow-definitions/capture.ts";
 import { EventHub } from "./event-hub.ts";
@@ -197,7 +198,11 @@ describe("event subscription", () => {
       const provider = new ControlledStreamingProvider([
         { type: "text", data: '{"value":' },
         { type: "text", data: "1}" },
-        { type: "tool_call", data: { name: "read", args: { file: "a.ts" } } },
+        {
+          type: "tool_call",
+          toolCallId: "call-1",
+          data: { name: "read", args: { file: "a.ts" } },
+        },
       ]);
       const api = streamingKeel(store, provider);
       const frames: { kind: string; type: string; payload: unknown }[] = [];
@@ -218,12 +223,29 @@ describe("event subscription", () => {
       expect(frames).toContainEqual({
         kind: "durable",
         type: "agent.message",
-        payload: { key: "ask", text: '{"value":1}' },
+        payload: { key: "ask", attempt: 1, text: '{"value":1}' },
       });
       expect(frames).toContainEqual({
         kind: "durable",
         type: "agent.tool_call",
-        payload: { key: "ask", data: { name: "read", args: { file: "a.ts" } } },
+        payload: {
+          key: "ask",
+          attempt: 1,
+          toolCallId: "call-1",
+          data: { name: "read", args: { file: "a.ts" } },
+        },
+      });
+      expect(frames).not.toContainEqual({
+        kind: "ephemeral",
+        type: "agent.event",
+        payload: {
+          key: "ask",
+          event: {
+            type: "tool_call",
+            toolCallId: "call-1",
+            data: { name: "read", args: { file: "a.ts" } },
+          },
+        },
       });
 
       const durable = store.listEvents(runId).map((e) => ({
@@ -233,8 +255,116 @@ describe("event subscription", () => {
       expect(durable.some((e) => e.type === "agent.event")).toBe(false);
       expect(durable).toContainEqual({
         type: "agent.message",
-        payload: { key: "ask", text: '{"value":1}' },
+        payload: { key: "ask", attempt: 1, text: '{"value":1}' },
       });
+    },
+    WORKFLOW_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "durable tool append failures fail the agent turn without ephemeral replacement",
+    async () => {
+      const store = JournalStore.memory();
+      const appendEvent = store.appendEvent.bind(store);
+      store.appendEvent = ((runId, type, payload, atMs) => {
+        if (type === "agent.tool_call") throw new Error("append failed");
+        return appendEvent(runId, type, payload, atMs);
+      }) as JournalStore["appendEvent"];
+      const provider = new ControlledStreamingProvider([
+        { type: "tool_call", data: { name: "read", args: { file: "a.ts" } } },
+      ]);
+      const api = streamingKeel(store, provider);
+      const frames: { kind: string; type: string; payload: unknown }[] = [];
+
+      const { runId } = await api.launchRun({ ...onceUrl, input: null, name: "once" });
+      const unsub = api.subscribeEvents(runId, 0, (e) =>
+        frames.push({ kind: e.kind, type: e.type, payload: e.payload }),
+      );
+      const outcome = await api.waitForRun(runId);
+      unsub();
+
+      expect(outcome.status).toBe("failed");
+      expect(store.listEvents(runId).some((e) => e.type === "agent.tool_call")).toBe(false);
+      expect(frames).not.toContainEqual({
+        kind: "ephemeral",
+        type: "agent.event",
+        payload: {
+          key: "ask",
+          event: { type: "tool_call", data: { name: "read", args: { file: "a.ts" } } },
+        },
+      });
+    },
+    WORKFLOW_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "finalized tool rows are durable and backfilled while the turn is pending",
+    async () => {
+      const store = JournalStore.memory();
+      const provider = new ControlledStreamingProvider(
+        [
+          {
+            type: "tool_call",
+            toolCallId: "call-pending",
+            data: { name: "read", args: { file: "pending.ts" } },
+          },
+          {
+            type: "tool_result",
+            toolCallId: "call-pending",
+            data: { output: "ok" },
+          },
+        ],
+        '{"value":8}',
+      );
+      const api = streamingKeel(store, provider);
+      const frames: { kind: string; type: string; payload: unknown }[] = [];
+
+      const { runId } = await api.launchRun({ ...onceUrl, input: null, name: "once" });
+      const unsub = api.subscribeEvents(runId, 0, (e) =>
+        frames.push({ kind: e.kind, type: e.type, payload: e.payload }),
+      );
+      await provider.waitForFirstEvent();
+
+      const pendingToolRows = store.listEvents(runId).filter((e) => e.type === "agent.tool_call");
+      expect(store.getJournalRow(runId, "ask", 1)?.status).toBe("pending");
+      expect(pendingToolRows.map((e) => JSON.parse(e.payloadJson))).toEqual([
+        {
+          key: "ask",
+          attempt: 1,
+          toolCallId: "call-pending",
+          data: { name: "read", args: { file: "pending.ts" } },
+        },
+      ]);
+      expect(frames).toContainEqual({
+        kind: "durable",
+        type: "agent.tool_call",
+        payload: {
+          key: "ask",
+          attempt: 1,
+          toolCallId: "call-pending",
+          data: { name: "read", args: { file: "pending.ts" } },
+        },
+      });
+
+      const backfilled: { kind: string; type: string; payload: unknown }[] = [];
+      const lateUnsub = api.subscribeEvents(runId, 0, (e) =>
+        backfilled.push({ kind: e.kind, type: e.type, payload: e.payload }),
+      );
+      lateUnsub();
+      expect(backfilled).toContainEqual({
+        kind: "durable",
+        type: "agent.tool_call",
+        payload: {
+          key: "ask",
+          attempt: 1,
+          toolCallId: "call-pending",
+          data: { name: "read", args: { file: "pending.ts" } },
+        },
+      });
+
+      provider.release();
+      await api.waitForRun(runId);
+      unsub();
     },
     WORKFLOW_TEST_TIMEOUT_MS,
   );
@@ -290,26 +420,105 @@ describe("event subscription", () => {
   );
 
   test(
-    "durable transcript preserves tool event order before final text",
+    "durable transcript preserves immediate tool rows before final text",
     async () => {
       const store = JournalStore.memory();
-      const provider = new ControlledStreamingProvider([
-        { type: "tool_call", data: { name: "read", args: { file: "a.ts" } } },
-        { type: "tool_result", data: { output: "ok" } },
-        { type: "text", data: '{"value":3}' },
-      ]);
+      const provider = new ControlledStreamingProvider(
+        [
+          { type: "text", data: "draft prose " },
+          {
+            type: "tool_call",
+            toolCallId: "call-2",
+            data: { name: "read", args: { file: "a.ts" } },
+          },
+          { type: "tool_result", toolCallId: "call-2", data: { output: "ok" } },
+          { type: "text", data: "ignored live prose" },
+        ],
+        '{"value":3}',
+      );
       const api = streamingKeel(store, provider);
 
       const { runId } = await api.launchRun({ ...onceUrl, input: null, name: "once" });
       provider.release();
       await api.waitForRun(runId);
 
-      expect(
-        store
-          .listEvents(runId)
-          .filter((e) => e.type.startsWith("agent."))
-          .map((e) => e.type),
-      ).toEqual(["agent.tool_call", "agent.tool_result", "agent.message"]);
+      const agentEvents = store
+        .listEvents(runId)
+        .filter((e) => e.type.startsWith("agent."))
+        .map((e) => ({ type: e.type, payload: JSON.parse(e.payloadJson) }));
+      expect(agentEvents.map((e) => e.type)).toEqual([
+        "agent.tool_call",
+        "agent.tool_result",
+        "agent.message",
+      ]);
+      expect(agentEvents).toContainEqual({
+        type: "agent.message",
+        payload: { key: "ask", attempt: 1, text: '{"value":3}' },
+      });
+    },
+    WORKFLOW_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "oversized durable transcript payloads are omitted with byte lengths",
+    async () => {
+      const store = JournalStore.memory();
+      const marker = "OVERSIZED_TRANSCRIPT_CONTENT";
+      const oversized = marker.repeat(
+        Math.ceil((RUN_FINISHED_INLINE_OUTPUT_BYTES + 512) / marker.length),
+      );
+      const callData = { name: "read", args: { content: oversized } };
+      const resultData = { output: oversized };
+      const finalText = `{"value":9}\n${oversized}`;
+      const provider = new ControlledStreamingProvider(
+        [
+          { type: "tool_call", toolCallId: "large-call", data: callData },
+          { type: "tool_result", toolCallId: "large-call", data: resultData },
+        ],
+        finalText,
+      );
+      const api = streamingKeel(store, provider);
+
+      const { runId } = await api.launchRun({ ...onceUrl, input: null, name: "once" });
+      provider.release();
+      await api.waitForRun(runId);
+
+      const events = store
+        .listEvents(runId)
+        .filter((e) => e.type.startsWith("agent."))
+        .map((e) => ({ type: e.type, payload: JSON.parse(e.payloadJson) }));
+      expect(events).toEqual([
+        {
+          type: "agent.tool_call",
+          payload: {
+            key: "ask",
+            attempt: 1,
+            toolCallId: "large-call",
+            omitted: true,
+            byteLength: Buffer.byteLength(JSON.stringify(callData), "utf8"),
+          },
+        },
+        {
+          type: "agent.tool_result",
+          payload: {
+            key: "ask",
+            attempt: 1,
+            toolCallId: "large-call",
+            omitted: true,
+            byteLength: Buffer.byteLength(JSON.stringify(resultData), "utf8"),
+          },
+        },
+        {
+          type: "agent.message",
+          payload: {
+            key: "ask",
+            attempt: 1,
+            omitted: true,
+            byteLength: Buffer.byteLength(JSON.stringify(finalText), "utf8"),
+          },
+        },
+      ]);
+      expect(JSON.stringify(events)).not.toContain(marker);
     },
     WORKFLOW_TEST_TIMEOUT_MS,
   );
@@ -330,7 +539,7 @@ describe("event subscription", () => {
           .listEvents(runId)
           .filter((e) => e.type === "agent.message")
           .map((e) => JSON.parse(e.payloadJson)),
-      ).toEqual([{ key: "ask", text: '{"value":5}' }]);
+      ).toEqual([{ key: "ask", attempt: 1, text: '{"value":5}' }]);
     },
     WORKFLOW_TEST_TIMEOUT_MS,
   );
@@ -369,7 +578,7 @@ describe("event subscription", () => {
       expect(frames).toContainEqual({
         kind: "durable",
         type: "agent.message",
-        payload: { key: "ask", text: '{"value":2}' },
+        payload: { key: "ask", attempt: 1, text: '{"value":2}' },
       });
     },
     WORKFLOW_TEST_TIMEOUT_MS,

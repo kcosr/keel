@@ -37,6 +37,11 @@ export interface WatchLine {
   text: string;
 }
 
+export interface WatchLineUpdate {
+  lines: readonly string[];
+  appendToLastLine?: string;
+}
+
 export interface WatchState {
   attached: boolean;
   runId: string | null;
@@ -258,24 +263,35 @@ export function markWatchCaughtUp(state: TuiState): TuiState {
 export function appendWatchLines(
   state: TuiState,
   event: EventEnvelope,
-  lines: readonly string[],
+  updateOrLines: readonly string[] | WatchLineUpdate,
 ): TuiState {
+  const update: WatchLineUpdate = isWatchLineUpdate(updateOrLines)
+    ? updateOrLines
+    : { lines: updateOrLines };
   const runId = state.watch.runId ?? state.detail.runId;
   const lastSeqByRun = { ...state.watch.lastSeqByRun };
   if (event.kind === "durable" && runId) {
     lastSeqByRun[runId] = Math.max(lastSeqByRun[runId] ?? 0, event.seq);
   }
-  const newLines =
-    lines.length > 0
-      ? lines
-      : [`${event.kind === "durable" ? `[${event.seq}]` : "[live]"} ${event.type}`];
-  const appended = newLines.map((text) => ({
+  const hasFormattedUpdate = update.lines.length > 0 || update.appendToLastLine !== undefined;
+  const newLines = hasFormattedUpdate
+    ? update.lines
+    : [`${event.kind === "durable" ? `[${event.seq}]` : "[live]"} ${event.type}`];
+  let existingLines = state.watch.lines;
+  if (update.appendToLastLine !== undefined && existingLines.length > 0) {
+    const prior = existingLines.slice(0, -1);
+    const last = existingLines.at(-1);
+    if (last) {
+      existingLines = [...prior, { ...last, text: `${last.text}${update.appendToLastLine}` }];
+    }
+  }
+  const appended = newLines.map((text: string) => ({
     eventType: event.type,
     kind: event.kind,
     seq: event.kind === "durable" ? event.seq : null,
     text,
   }));
-  const merged = [...state.watch.lines, ...appended].slice(-state.watch.maxLines);
+  const merged = [...existingLines, ...appended].slice(-state.watch.maxLines);
   return {
     ...state,
     watch: {
@@ -289,6 +305,10 @@ export function appendWatchLines(
 
 export function lastSeqForRun(state: TuiState, runId: string): number {
   return state.watch.lastSeqByRun[runId] ?? 0;
+}
+
+function isWatchLineUpdate(value: readonly string[] | WatchLineUpdate): value is WatchLineUpdate {
+  return !Array.isArray(value);
 }
 
 export function setPrompt(state: TuiState, prompt: PromptState | null): TuiState {

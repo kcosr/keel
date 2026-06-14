@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { EventEnvelope } from "../rpc/contract.ts";
 import type { RunSummary } from "../rpc/projection.ts";
+import { createTuiWatchFormatter } from "./events.ts";
 import {
   appendWatchLines,
   createTuiState,
@@ -39,6 +40,15 @@ const runs: RunSummary[] = [
     parentRunId: null,
   },
 ];
+
+function liveAgentText(data: string): EventEnvelope {
+  return {
+    kind: "ephemeral",
+    type: "agent.event",
+    payload: { key: "review", event: { type: "text", data } },
+    atMs: 1,
+  };
+}
 
 describe("tui state", () => {
   test("filters browser rows by status, query, and limit while clamping selection", () => {
@@ -101,5 +111,36 @@ describe("tui state", () => {
 
     state = startWatchState(state, "run_b");
     expect(state.watch.lines).toEqual([]);
+  });
+
+  test("applies stream continuations to the active watch display row", () => {
+    let state = createTuiState({ runId: "run_a" });
+    state = startWatchState(state, "run_a");
+    const formatter = createTuiWatchFormatter();
+
+    const first = liveAgentText("Hel");
+    state = appendWatchLines(state, first, formatter.push(first));
+    const second = liveAgentText("lo");
+    state = appendWatchLines(state, second, formatter.push(second));
+
+    expect(state.watch.lines.map((line) => line.text)).toEqual(["[live] agent review text: Hello"]);
+
+    const phase: EventEnvelope = {
+      kind: "durable",
+      seq: 2,
+      type: "phase",
+      payload: { title: "Build" },
+      atMs: 2,
+    };
+    state = appendWatchLines(state, phase, formatter.push(phase));
+    const next = liveAgentText("next");
+    state = appendWatchLines(state, next, formatter.push(next));
+
+    expect(state.watch.lines.map((line) => line.text)).toEqual([
+      "[live] agent review text: Hello",
+      "[2] phase: Build",
+      "[live] agent review text: next",
+    ]);
+    expect(lastSeqForRun(state, "run_a")).toBe(2);
   });
 });

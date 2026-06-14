@@ -189,6 +189,7 @@ export class DaemonClient {
     afterSeq: number,
     onEvent: (e: EventEnvelope) => void,
     onError?: (err: unknown) => void,
+    onCaughtUp?: () => void,
   ): () => void {
     let subId: string | null = null;
     let active = true;
@@ -205,6 +206,8 @@ export class DaemonClient {
         const buffered = this.pendingSubEvents.get(r.subId) ?? [];
         this.pendingSubEvents.delete(r.subId);
         for (const event of buffered) onEvent(event);
+        // The daemon backfills before the subscribe RPC returns; after this flush, events are live.
+        onCaughtUp?.();
       },
       (err) => {
         onError?.(err);

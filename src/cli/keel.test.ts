@@ -30,6 +30,7 @@ import {
 const CLI = new URL("./keel.ts", import.meta.url).pathname;
 const FIX = new URL("../kernel/realm/fixtures/", import.meta.url);
 const chainUrl = new URL("chain.workflow.ts", FIX).pathname;
+const flakyUrl = new URL("flaky.workflow.ts", FIX).pathname;
 const gateUrl = new URL("gate.workflow.ts", FIX).pathname;
 const DAEMON_TEST_TIMEOUT_MS = 20_000;
 
@@ -660,6 +661,69 @@ describe("keel CLI", () => {
         const approved = await runCli(["approve", payload.runId, "approve-deploy"], dir, env);
         expect(approved.code).toBe(0);
         await waitForCliStatus(payload.runId, dir, env);
+
+        const watched = await runCli(["watch", payload.runId, "--output", "text"], dir, env);
+        expect(watched.code).toBe(0);
+        expect(watched.stdout).toContain("run.parked human approve-deploy");
+        expect(watched.stdout).toContain("run.resumed");
+        expect(watched.stdout).toContain("run.finished");
+        expect(watched.stdout.indexOf("run.parked human approve-deploy")).toBeLessThan(
+          watched.stdout.indexOf("run.resumed"),
+        );
+        expect(watched.stdout.indexOf("run.resumed")).toBeLessThan(
+          watched.stdout.indexOf("run.finished"),
+        );
+      } finally {
+        daemon.stop();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    DAEMON_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "attached retry ignores stale backfilled failure while the new attempt is running",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "keel-lifecycle-retry-tail-"));
+      const socketPath = join(dir, "keel.sock");
+      const dbPath = join(dir, "keel.db");
+      const daemon = new KeelDaemon({
+        socketPath,
+        dbPath,
+        agents: new AgentProviderRegistry().register(
+          new MockProvider({
+            responses: {
+              flaky: { outputs: ["bad", "bad", "bad", '{"ok":true}'], delayMs: 400 },
+            },
+          }),
+        ),
+        adminToken: "kc_admin_lifecycle_retry_test",
+      });
+      await daemon.start();
+      try {
+        const env = {
+          KEEL_SOCKET: socketPath,
+          KEEL_DB: dbPath,
+          KEEL_DIR: dir,
+          KEEL_ADMIN_TOKEN: "kc_admin_lifecycle_retry_test",
+        };
+        const launched = await runCli(["launch", "--detach", flakyUrl], dir, env);
+        expect(launched.code).toBe(0);
+        const payload = JSON.parse(launched.stdout) as { runId: string };
+        await waitForCliStatus(payload.runId, dir, env, "failed");
+
+        const retried = await runCli(["retry", payload.runId], dir, env);
+        expect(retried.code).toBe(0);
+        expect(retried.stdout).toContain(`run ${payload.runId}`);
+        expect(retried.stdout).toContain("run.failed");
+        expect(retried.stdout).toContain("run.retry");
+        expect(retried.stdout).toContain("run.finished");
+        expect(retried.stdout.indexOf("run.failed")).toBeLessThan(
+          retried.stdout.indexOf("run.retry"),
+        );
+        expect(retried.stdout.indexOf("run.retry")).toBeLessThan(
+          retried.stdout.indexOf("run.finished"),
+        );
       } finally {
         daemon.stop();
         rmSync(dir, { recursive: true, force: true });

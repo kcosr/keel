@@ -838,20 +838,47 @@ async function watchRun(
   opts: WatchFormatOptions,
 ): Promise<WatchStatus> {
   return new Promise<WatchStatus>((resolve) => {
-    client.subscribeEvents(
+    let caughtUp = false;
+    let settled = false;
+    let pendingStatus: WatchStatus | null = null;
+    let unsubscribe = () => {};
+    const finish = (status: WatchStatus): void => {
+      if (settled) return;
+      settled = true;
+      unsubscribe();
+      resolve(status);
+    };
+    const noteStatus = (status: WatchStatus | null): void => {
+      pendingStatus = status;
+      if (caughtUp && status) finish(status);
+    };
+    unsubscribe = client.subscribeEvents(
       runId,
       0,
       (e) => {
         process.stdout.write(formatWatchEvent(e, opts));
-        if (e.type === "run.finished") resolve("finished");
-        if (e.type === "run.failed") resolve("failed");
-        if (e.type === "run.continued") resolve("continued");
-        if (e.type === "run.parked") resolve(parkedStatus(e.payload));
-        if (e.type === "authorization.failed") resolve("failed");
+        if (e.type === "run.finished") noteStatus("finished");
+        else if (e.type === "run.failed") noteStatus("failed");
+        else if (e.type === "run.continued") noteStatus("continued");
+        else if (e.type === "run.parked") noteStatus(parkedStatus(e.payload));
+        else if (e.type === "authorization.failed") noteStatus("failed");
+        else if (
+          e.type === "run.resumed" ||
+          e.type === "run.retry" ||
+          e.type === "run.rewind" ||
+          e.type === "run.rerun"
+        ) {
+          // A lifecycle restart supersedes any earlier terminal/parked status seen in backfill.
+          noteStatus(null);
+        }
       },
       (err) => {
         process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
-        resolve("failed");
+        finish("failed");
+      },
+      () => {
+        caughtUp = true;
+        if (pendingStatus) finish(pendingStatus);
       },
     );
   });

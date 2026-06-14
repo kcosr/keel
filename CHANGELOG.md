@@ -67,6 +67,8 @@
   `KEEL_CAP_DIR`.
 
 ### Fixed
+- `keel watch` and attached lifecycle commands no longer exit on stale
+  historical parked/terminal events when replaying a run that later resumed.
 - Provider session tokens are no longer persisted as `agent.event` payloads.
 - Workflow snapshotting resolves the `@kcosr/keel` SDK package root from the
   repository (env override, source location, then runtime paths) instead of

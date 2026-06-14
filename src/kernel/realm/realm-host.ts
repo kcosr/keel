@@ -9,9 +9,8 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import type { Capabilities } from "../../agents/capabilities.ts";
 import { AgentFailure, executeAgent, runAgentWithStall } from "../../agents/execute.ts";
-import { type SecretStore, redact } from "../../agents/secrets.ts";
+import type { SecretStore } from "../../agents/secrets.ts";
 import type { AgentProvider, AgentProviderRegistry, TraceEvent } from "../../agents/types.ts";
 import { redactCapabilityTokens } from "../../auth/redaction.ts";
 import { type Json, hashJson } from "../../hash.ts";
@@ -65,7 +64,7 @@ export interface RealmKernelOptions {
   lint?: boolean;
   /** Agent provider registry for ctx.agent (the daemon owns providers, L4). */
   agents?: AgentProviderRegistry;
-  /** Side-channel secret store (§11.2); enables injection + output redaction. */
+  /** Side-channel secret store (§11.2); enables env injection + terminal cleanup. */
   secrets?: SecretStore;
   /** Git repo root for agents that explicitly request workspaceIsolation (§11.3). */
   workspaceRoot?: string;
@@ -100,20 +99,6 @@ class RunInterruptedError extends Error {
     super(`run ${runId} interrupted`);
     this.name = "RunInterruptedError";
   }
-}
-
-function canWriteOrRunShell(caps: Capabilities): boolean {
-  return caps.fs === "workspace-write" || caps.shell;
-}
-
-function requiresSecretIsolation(message: {
-  capabilities?: Capabilities;
-  allowTools: string[];
-}): boolean {
-  if (message.capabilities && canWriteOrRunShell(message.capabilities)) return true;
-  // Provider-native additions can include shell/write or exfiltration-capable
-  // tools. Until those tools have typed capabilities, secrets require isolation.
-  return message.allowTools.length > 0;
 }
 
 export interface ClientCapturedWorkflow {
@@ -653,20 +638,9 @@ export class RealmKernel {
     });
   }
 
-  private emitAgentTrace(
-    engine: StepEngine,
-    key: string,
-    attempt: number,
-    ev: TraceEvent,
-    allSecrets: string[],
-  ): void {
+  private emitAgentTrace(engine: StepEngine, key: string, attempt: number, ev: TraceEvent): void {
     if (ev.type === "session") return;
-    let event = ev;
-    if (allSecrets.length > 0) {
-      const r = redact(JSON.stringify(event), allSecrets);
-      if (r.redacted) event = JSON.parse(r.text) as TraceEvent;
-    }
-    engine.emitAgentTrace(key, attempt, event);
+    engine.emitAgentTrace(key, attempt, ev);
   }
 
   private completeAgentSessionTurn(
@@ -954,28 +928,8 @@ export class RealmKernel {
                 break;
               }
               // §11: an explicitly isolated agent edits in a git worktree;
-              // secrets are injected sealed from the side channel.
+              // secrets are injected as invocation env from the side channel.
               const caps = m.capabilities ?? undefined;
-              if (
-                !m.workspaceIsolation &&
-                m.secrets.length > 0 &&
-                requiresSecretIsolation({ capabilities: caps, allowTools: m.allowTools })
-              ) {
-                const err = new Error(
-                  `agent "${m.key}" requests secrets with write, shell, or provider-native tool additions but workspaceIsolation is not enabled`,
-                );
-                engine.failStep(
-                  m.key,
-                  begun.attempt,
-                  m.version,
-                  begun.inputHash,
-                  begun.startedAtMs,
-                  err,
-                  "effectful",
-                );
-                reply(m.id, { ok: false, error: { name: "Error", message: err.message } });
-                break;
-              }
               if (m.workspaceIsolation && !this.workspaceRoot) {
                 const err = new Error(
                   `agent "${m.key}" requests workspaceIsolation but the kernel has no workspaceRoot configured`,
@@ -999,7 +953,6 @@ export class RealmKernel {
               const secretRefs = this.secrets?.resolve(runId, m.secrets) ?? [];
               const secretEnv: Record<string, string> = {};
               for (const r of secretRefs) secretEnv[r.name] = r.value;
-              const allSecrets = this.secrets?.values(runId) ?? [];
 
               void (async () => {
                 try {
@@ -1028,13 +981,11 @@ export class RealmKernel {
                               engine.recordSessionToken(m.key, begun.attempt, tok);
                             }
                           },
-                          // §11.2: redact secrets from STREAMED events too — a
-                          // provider may stream a secret (thinking/tool output)
-                          // before the final output is redacted. Tool calls/results
-                          // are durably appended here before returning to the adapter.
+                          // Tool calls/results are durably appended here before
+                          // returning to the adapter; text/reasoning frames are live-only.
                           onEvent: (ev) => {
                             if (!settled && !this.isRunInterrupted(runId)) {
-                              this.emitAgentTrace(engine, m.key, begun.attempt, ev, allSecrets);
+                              this.emitAgentTrace(engine, m.key, begun.attempt, ev);
                             }
                           },
                         },
@@ -1052,28 +1003,14 @@ export class RealmKernel {
                     },
                   );
                   if (settled || this.isRunInterrupted(runId)) return;
-                  // §11.2: redact exact secret values from the output before it
-                  // ever reaches the journal (defense-in-depth over the side channel).
-                  let output = execution.output;
-                  if (allSecrets.length > 0) {
-                    const r = redact(JSON.stringify(output ?? null), allSecrets);
-                    if (r.redacted) {
-                      output = JSON.parse(r.text);
-                      engine.emit("agent.redacted", { key: m.key });
-                    }
-                  }
+                  const output = execution.output;
                   // §11.3: capture the isolated agent's changes as a reviewable diff
                   // — including the full unified patch (contentDiff) so the diff
                   // gate has durable content to approve. Removal happens in the
                   // finally below so the worktree is gone on every exit path.
                   if (worktree) {
                     const bundle = worktree.diff();
-                    // §11.2: an isolated agent may have written an injected secret into
-                    // a file — redact the patch before it reaches the journal.
-                    const contentDiff =
-                      allSecrets.length > 0
-                        ? redact(bundle.contentDiff, allSecrets).text
-                        : bundle.contentDiff;
+                    const contentDiff = bundle.contentDiff;
                     engine.emit("agent.diff", {
                       key: m.key,
                       modified: bundle.modified,
@@ -1082,10 +1019,7 @@ export class RealmKernel {
                       contentDiff,
                     });
                   }
-                  const text =
-                    allSecrets.length > 0
-                      ? redact(execution.text, allSecrets).text
-                      : execution.text;
+                  const text = execution.text;
                   try {
                     engine.completeStep(
                       m.key,
@@ -1113,12 +1047,7 @@ export class RealmKernel {
                   // COMPLETED null (with failure metadata as an event) so resume
                   // replays null instead of re-calling the agent.
                   if (m.onFailure === "null") {
-                    // redact secrets that may surface in a provider error message
-                    let errJson = serializeError(agentErr) as unknown as Json;
-                    if (allSecrets.length > 0) {
-                      const r = redact(JSON.stringify(errJson), allSecrets);
-                      if (r.redacted) errJson = JSON.parse(r.text) as Json;
-                    }
+                    const errJson = serializeError(agentErr) as unknown as Json;
                     engine.emit("agent.tolerated_failure", { key: m.key, error: errJson });
                     try {
                       engine.completeStep(
@@ -1219,21 +1148,9 @@ export class RealmKernel {
                 reply(m.id, { ok: false, error: serializeError(err) });
                 break;
               }
-              if (
-                m.secrets.length > 0 &&
-                requiresSecretIsolation({ capabilities: caps, allowTools: m.allowTools })
-              ) {
-                const err = new Error(
-                  `agent session "${m.agentKey}" requests secrets with write, shell, or provider-native tool additions, which require workspaceIsolation and are not supported for sessions`,
-                );
-                this.failAgentSessionTurn(runId, m, begun, err);
-                reply(m.id, { ok: false, error: serializeError(err) });
-                break;
-              }
               const secretRefs = this.secrets?.resolve(runId, m.secrets) ?? [];
               const secretEnv: Record<string, string> = {};
               for (const r of secretRefs) secretEnv[r.name] = r.value;
-              const allSecrets = this.secrets?.values(runId) ?? [];
 
               void (async () => {
                 try {
@@ -1270,13 +1187,7 @@ export class RealmKernel {
                           },
                           onEvent: (ev) => {
                             if (!settled && !this.isRunInterrupted(runId)) {
-                              this.emitAgentTrace(
-                                engine,
-                                m.stableKey,
-                                begun.attempt,
-                                ev,
-                                allSecrets,
-                              );
+                              this.emitAgentTrace(engine, m.stableKey, begun.attempt, ev);
                             }
                           },
                         },
@@ -1295,18 +1206,8 @@ export class RealmKernel {
                     },
                   );
                   if (settled || this.isRunInterrupted(runId)) return;
-                  let output = execution.output;
-                  if (allSecrets.length > 0) {
-                    const r = redact(JSON.stringify(output ?? null), allSecrets);
-                    if (r.redacted) {
-                      output = JSON.parse(r.text);
-                      engine.emit("agent.redacted", { key: m.stableKey });
-                    }
-                  }
-                  const text =
-                    allSecrets.length > 0
-                      ? redact(execution.text, allSecrets).text
-                      : execution.text;
+                  const output = execution.output;
+                  const text = execution.text;
                   try {
                     this.completeAgentSessionTurn(
                       runId,
@@ -1329,11 +1230,7 @@ export class RealmKernel {
                 } catch (agentErr) {
                   if (settled || this.isRunInterrupted(runId)) return;
                   if (m.onFailure === "null" && agentErr instanceof AgentFailure) {
-                    let errJson = serializeError(agentErr) as unknown as Json;
-                    if (allSecrets.length > 0) {
-                      const r = redact(JSON.stringify(errJson), allSecrets);
-                      if (r.redacted) errJson = JSON.parse(r.text) as Json;
-                    }
+                    const errJson = serializeError(agentErr) as unknown as Json;
                     engine.emit("agent.tolerated_failure", { key: m.stableKey, error: errJson });
                     try {
                       this.completeAgentSessionTurn(runId, m, begun, null, undefined);

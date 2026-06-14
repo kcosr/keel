@@ -1,4 +1,4 @@
-// Phase 15: capabilities, git-worktree isolation + diff gate, secrets redaction.
+// Phase 15: capabilities, git-worktree isolation + diff gate, and secret env side channel.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
@@ -13,7 +13,7 @@ import {
   resolvedToolPolicyToClaudeArgs,
   resolvedToolPolicyToPiArgs,
 } from "../agents/capabilities.ts";
-import { SecretStore, redact } from "../agents/secrets.ts";
+import { SecretStore } from "../agents/secrets.ts";
 import { createWorktree } from "./worktree.ts";
 
 describe("capabilities → Pi tool flags", () => {
@@ -214,32 +214,12 @@ describe("git-worktree isolation + diff gate", () => {
   });
 });
 
-describe("secrets side-channel + redaction", () => {
+describe("secrets side-channel env injection", () => {
   test("store resolves and wipes; secrets are never returned after wipe", () => {
     const store = new SecretStore();
     store.put("r", "DB_PASS", "s3cr3t");
     expect(store.resolve("r", ["DB_PASS"])).toEqual([{ name: "DB_PASS", value: "s3cr3t" }]);
-    expect(store.values("r")).toEqual(["s3cr3t"]);
     store.wipe("r");
     expect(store.resolve("r", ["DB_PASS"])).toEqual([]);
-    expect(store.values("r")).toEqual([]);
-  });
-
-  test("redact scrubs exact secret values from text", () => {
-    const r = redact("token=s3cr3t and again s3cr3t", ["s3cr3t"]);
-    expect(r.redacted).toBe(true);
-    expect(r.text).not.toContain("s3cr3t");
-    expect(r.text).toContain("«redacted»");
-  });
-
-  test("redact catches a secret even when JSON-escaped (quotes/backslashes)", () => {
-    const secret = 'pa"ss\\word';
-    // how the secret appears inside a JSON.stringify'd event blob
-    const blob = JSON.stringify({ note: `the secret is ${secret}` });
-    expect(blob).toContain('pa\\"ss\\\\word'); // it IS escaped in the blob
-    const r = redact(blob, [secret]);
-    expect(r.redacted).toBe(true);
-    expect(r.text).not.toContain('pa\\"ss\\\\word'); // escaped form scrubbed
-    expect(JSON.parse(r.text).note).toContain("«redacted»");
   });
 });

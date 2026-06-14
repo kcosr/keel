@@ -669,17 +669,19 @@ Filesystem capability levels:
 |---|---|
 | `"none"` | No file tools. |
 | `"read"` | Read, grep, and list. |
-| `"workspace-write"` | Edit/write in an isolated workspace. |
+| `"workspace-write"` | Edit/write through provider tools. Use `workspaceIsolation: true` when those edits should be staged in an isolated worktree and reviewed as a diff. |
 
-Secrets named in `secrets` are injected from a side channel keyed by run. They do
-not enter the journal. Exact secret values are also redacted from final output,
-streamed events, captured diffs, and tolerated-failure errors.
-Agents with secrets and write/shell capabilities or provider-native
-`allowTools` additions must set `workspaceIsolation: true`.
+Secrets named in `secrets` are resolved from a side channel keyed by run and
+injected into the provider invocation environment. Secret names, not raw values,
+belong in workflow source and agent options. If an agent prints, streams,
+returns, writes, diffs, or errors with a secret value, Keel journals that content
+as-is; there is no exact-value agent-secret redaction pass. Secrets do not
+require `workspaceIsolation`, and workspace isolation is only an optional
+worktree/diff-review mode.
 
 The bundled `keel daemon` does not yet construct a `SecretStore`; secret
 injection requires constructing `RealmKernel` or `KeelDaemon` programmatically
-with one. Redaction still runs harmlessly when no values are present.
+with one.
 
 ## Durability Features
 

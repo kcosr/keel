@@ -56,7 +56,7 @@ export interface AgentSpec<T> {
   workspaceIsolation?: boolean;
   /** Explicit capabilities; overrides the default read-only policy (§11). */
   capabilities?: Partial<Capabilities>;
-  /** Named secret refs to inject sealed at invocation (§11.2). */
+  /** Named secret refs to inject as env at invocation (§11.2). */
   secrets?: string[];
   /** Terminal-failure policy after retries (D7): default 'throw'. */
   onFailure?: "throw" | "null";

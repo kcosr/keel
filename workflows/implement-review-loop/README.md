@@ -46,7 +46,8 @@ keel launch --detach workflows/implement-review-loop/implement-review-loop.workf
 - `ctx.agentSession` does not support `workspaceIsolation: true` yet, so do not
   use this workflow when edits must be confined to a disposable worktree.
 - Keep `maxRounds` small. The workflow caps it at `10`.
-- Do not pass secrets to this workflow.
+- This workflow does not request Keel secret refs. Do not put raw secret values in
+  prompts or input; agent outputs are journaled as-is.
 
 ## Input
 

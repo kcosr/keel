@@ -70,13 +70,14 @@ Agent permissions should fail closed.
   they change what an agent can observe or do.
 - Do not let shell/write-capable agents run against the daemon cwd as a fallback.
   They need an explicit workspace root or an intentional, tested equivalent.
-- Agents that request secrets with write/shell capabilities or provider-native
-  tool additions must opt into `workspaceIsolation: true`.
+- Secrets are trusted-local env injection through the side channel. They do not
+  require `workspaceIsolation`, and Keel does not redact exact secret values from
+  agent outputs, events, errors, or diffs.
 - Network capability is advisory until a real network sandbox/backstop exists;
-  do not describe redaction or workspace isolation as preventing network
+  do not describe workspace isolation or output handling as preventing network
   exfiltration.
-- Keep secrets out of journaled records and logs. Use the secret side channel and
-  preserve redaction behavior.
+- Keep raw secret values out of workflow source and persistent configuration.
+  Assume any secret an agent prints, writes, or returns can be journaled.
 
 ## Documentation
 
@@ -152,9 +153,9 @@ not the primary regression suite.
   resolver/provider-arg tests and a cross-boundary path where resolved kernel
   capabilities reach the adapter. This prevents lossy internal labels from
   broadening or dropping capabilities.
-- When changing workspace isolation, secret injection/redaction, session resume,
-  or crash behavior, include realm or daemon tests because those behaviors live
-  at the host/journal boundary.
+- When changing workspace isolation, secret injection, session resume, or crash
+  behavior, include realm or daemon tests because those behaviors live at the
+  host/journal boundary.
 - Keep live tests gated behind `KEEL_LIVE=1`, keep prompts cheap and deterministic
   ("return only this JSON"), and avoid relying on repository-specific state unless
   the test creates that state itself.

@@ -621,10 +621,10 @@ exactly three parameters); `ctx.agent` carries `key` in its option bag.
 `denyTools` are provider-native adjustments when a workflow intentionally needs
 to add or remove a specific backend tool. `workspaceIsolation` is intentionally
 separate: it chooses the isolated worktree/diff-capture execution mode. `target`
-selects the provider cwd and participates in agent identity. If both `toolPolicy`
-and `capabilities` are set, `toolPolicy` controls provider
-tools. `toolPolicy:'unrestricted'` cannot be combined with `allowTools` or
-`denyTools` until provider-native deny semantics are supported.
+selects the provider cwd, must be non-empty when supplied, and participates in
+agent identity. If both `toolPolicy` and `capabilities` are set, `toolPolicy`
+controls provider tools. `toolPolicy:'unrestricted'` cannot be combined with
+`allowTools` or `denyTools` until provider-native deny semantics are supported.
 
 **One step model.** Fan-out is plain `Promise.all(items.map(...))` — exactly how
 the review workload already reads. There are **no** `ctx.parallel` / `ctx.loop`
@@ -941,8 +941,10 @@ redaction system.
 ### 11.3 Workspace isolation & the diff gate (plain git — jj dropped)
 
 Agents resolve a daemon-visible **target** from the agent spec/profile or the
-run target captured at launch. Non-isolated agents run with `cwd = target`.
-Agents that set `workspaceIsolation: true` require the target to be the git repo
+run target captured by the client at launch. Server/low-level launch boundaries
+reject missing or blank targets instead of inventing a daemon-cwd fallback.
+Non-isolated agents run with `cwd = target`. Agents that set
+`workspaceIsolation: true` require the target to be the git repo
 root and run with `cwd` in an **isolated git worktree** checked out at the run's
 base commit, seeing their own writes (v1's jj/CoW "union read" semantics don't exist in plain git and are dropped as a
 claim). One-shot isolated `ctx.agent` worktrees are removed after the call.

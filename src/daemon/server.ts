@@ -24,6 +24,7 @@ import { Supervisor } from "../kernel/supervisor.ts";
 import type { EventEnvelope, WorkflowProvenance } from "../rpc/contract.ts";
 import { EventHub } from "../rpc/event-hub.ts";
 import { InProcessKeel } from "../rpc/in-process.ts";
+import { requireRunTarget } from "../target.ts";
 import {
   DEFAULT_WORKFLOW_DEFINITION_TTL_MS,
   evictWorkflowDefinitionCache,
@@ -273,11 +274,11 @@ export class KeelDaemon {
     }
     switch (method) {
       case "launchRun": {
-        if (typeof p.target !== "string") throw new Error("launchRun requires target");
+        const target = requireRunTarget(p.target, "launchRun");
         const res = await this.api.launchRun({
           source: p.source as string,
           input: p.input,
-          target: p.target,
+          target,
           name: (p.name as string | null | undefined) ?? null,
           provenance: p.provenance as WorkflowProvenance | undefined,
         });
@@ -428,12 +429,12 @@ export class KeelDaemon {
           cacheRoot:
             this.opts.definitionCacheRoot ?? join(dirname(this.opts.dbPath), "definitions"),
         }).snapshot;
-        if (typeof p.target !== "string") throw new Error("putSchedule requires target");
+        const target = requireRunTarget(p.target, "putSchedule");
         this.store.putSchedule({
           name: p.name as string,
           workflowRef: snapshot.hash,
           inputJson: p.input != null ? JSON.stringify(p.input) : null,
-          scheduleTarget: p.target,
+          scheduleTarget: target,
           intervalMs: p.intervalMs as number,
           nextFireMs: (p.firstFireMs as number) ?? this.clock(),
         });

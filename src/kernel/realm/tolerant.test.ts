@@ -28,7 +28,10 @@ describe("onFailure:'null' is journaled as completed null and replays", () => {
     const store = JournalStore.memory();
     // never-valid output → the agent fails schema validation → tolerated as null
     const mock = new MockProvider({ responses: { maybe: { outputs: ["not json"] } } });
-    const handle = await kernel(store, mock).run<number>(url, null, { name: "t" });
+    const handle = await kernel(store, mock).run<number>(url, null, {
+      name: "t",
+      target: process.cwd(),
+    });
     expect(handle.status).toBe("finished");
     expect(handle.output).toBe(1); // null → 0 → +1
     const row = store.getJournalRow("r", "maybe", 1);
@@ -58,7 +61,7 @@ describe("onFailure:'null' is journaled as completed null and replays", () => {
         if (point === "before-commit" && key === "use") throw new Error("CRASH");
       },
     });
-    await k1.run(url, null, { name: "t" }).catch(() => null);
+    await k1.run(url, null, { name: "t", target: process.cwd() }).catch(() => null);
     // the agent was called (schema-retried, then accepted null → completed)
     expect(calls).toBeGreaterThan(0);
     const afterRun = calls;

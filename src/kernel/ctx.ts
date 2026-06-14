@@ -12,6 +12,7 @@ import { type AgentProfiles, resolveProfile } from "../agents/profiles.ts";
 import type { AgentProviderRegistry } from "../agents/types.ts";
 import type { Json } from "../hash.ts";
 import type { JournalStore } from "../journal/store.ts";
+import { resolveAgentTarget } from "../target.ts";
 import { finalAgentMessageEvents } from "./agent-events.ts";
 import type { Schema } from "./schema.ts";
 import { StepEngine } from "./step-engine.ts";
@@ -202,6 +203,7 @@ export class WorkflowCtx implements Ctx {
     host: CtxHost,
     registry?: AgentProviderRegistry,
     agentProfiles?: Record<string, unknown>,
+    private readonly runTarget: string | null = null,
   ) {
     this.engine = new StepEngine(store, runId, host);
     this.registry = registry;
@@ -271,7 +273,7 @@ export class WorkflowCtx implements Ctx {
       ...(spec.denyTools ? { denyTools: spec.denyTools } : {}),
     });
     const caps = tools.capabilities;
-    const target = spec.target ?? process.cwd();
+    const target = resolveAgentTarget(spec.target, this.runTarget, `agent "${spec.key}"`);
     const version =
       spec.version ??
       computeVersion({

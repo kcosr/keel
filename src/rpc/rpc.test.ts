@@ -32,6 +32,12 @@ const flakyUrl = captureWorkflowFile(new URL("flaky.workflow.ts", FIX).pathname)
 const signalUrl = captureWorkflowFile(new URL("await-signal.workflow.ts", FIX).pathname);
 const WORKFLOW_TEST_TIMEOUT_MS = 20_000;
 
+class TestInProcessKeel extends InProcessKeel {
+  override launchRun(req: Parameters<InProcessKeel["launchRun"]>[0]) {
+    return super.launchRun({ ...req, target: req.target ?? process.cwd() });
+  }
+}
+
 function keel(store: JournalStore, mock?: MockProvider): InProcessKeel {
   let id = 0;
   const kernel = new RealmKernel(store, {
@@ -40,7 +46,7 @@ function keel(store: JournalStore, mock?: MockProvider): InProcessKeel {
     rng: () => 0.5,
     ...(mock ? { agents: new AgentProviderRegistry().register(mock) } : {}),
   });
-  return new InProcessKeel(kernel, store);
+  return new TestInProcessKeel(kernel, store);
 }
 
 function streamingKeel(store: JournalStore, provider: AgentProvider): InProcessKeel {
@@ -52,7 +58,7 @@ function streamingKeel(store: JournalStore, provider: AgentProvider): InProcessK
     agents: new AgentProviderRegistry().register(provider),
     liveEvent: (runId, type, payload, atMs) => hub.publishEphemeral(runId, type, payload, atMs),
   });
-  return new InProcessKeel(kernel, store, hub);
+  return new TestInProcessKeel(kernel, store, hub);
 }
 
 function initGitRepo(repo: string): string {
@@ -131,6 +137,19 @@ function insertWorkspaceFixture(
 }
 
 describe("RPC contract drives a workflow end-to-end", () => {
+  test("in-process launchRun rejects missing or blank targets", async () => {
+    const store = JournalStore.memory();
+    const kernel = new RealmKernel(store, { idgen: () => "run_missing_target" });
+    const api = new InProcessKeel(kernel, store);
+
+    await expect(api.launchRun({ ...chainUrl, input: null, name: "missing" })).rejects.toThrow(
+      /launchRun requires target/,
+    );
+    await expect(
+      api.launchRun({ ...chainUrl, input: null, name: "blank", target: "   " }),
+    ).rejects.toThrow(/non-empty target/);
+  });
+
   test(
     "launchRun → waitForRun → getRun returns the canonical projection",
     async () => {
@@ -188,7 +207,7 @@ describe("RPC contract drives a workflow end-to-end", () => {
         clock: () => nowMs,
         rng: () => 0.5,
       });
-      const api = new InProcessKeel(kernel, store);
+      const api = new TestInProcessKeel(kernel, store);
 
       await api.launchRun({ ...chainUrl, input: { n: 3 }, name: "c1" });
       await api.waitForRun("run_0");
@@ -524,7 +543,7 @@ describe("event subscription", () => {
         rng: () => 0.5,
         agents: new AgentProviderRegistry().register(provider),
       });
-      const api = new InProcessKeel(kernel, store);
+      const api = new TestInProcessKeel(kernel, store);
       const frames: { kind: string; type: string; payload: unknown }[] = [];
 
       const { runId } = await api.launchRun({ ...onceUrl, input: null, name: "once" });

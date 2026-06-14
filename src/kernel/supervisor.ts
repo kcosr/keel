@@ -4,6 +4,7 @@
 // (a fresh supervisor reads due timers/schedules and proceeds).
 
 import type { JournalStore } from "../journal/store.ts";
+import { isTargetValidationError, requireRunTarget } from "../target.ts";
 import { isUnsupportedWorkflowSdkAbiError } from "../workflow-definitions/snapshot.ts";
 import type { RealmKernel } from "./realm/realm-host.ts";
 import { failRunWithError, serializedErrorJson } from "./run-errors.ts";
@@ -63,17 +64,18 @@ export class Supervisor {
     for (const s of this.store.dueSchedules(now)) {
       let runId: string;
       try {
+        const target = requireRunTarget(s.scheduleTarget, `schedule "${s.name}" target`);
         runId = this.kernel.launchDefinition(
           s.workflowRef,
           s.inputJson ? JSON.parse(s.inputJson) : null,
           {
             name: s.name,
             workflowRef: s.workflowRef,
-            target: s.scheduleTarget,
+            target,
           },
         ).runId;
       } catch (err) {
-        if (isUnsupportedWorkflowSdkAbiError(err)) {
+        if (isUnsupportedWorkflowSdkAbiError(err) || isTargetValidationError(err)) {
           this.store.disableScheduleWithError(s.name, serializedErrorJson(err), now);
           continue;
         }

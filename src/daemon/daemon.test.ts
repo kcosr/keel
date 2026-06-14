@@ -5,6 +5,7 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MockProvider } from "../agents/mock.ts";
@@ -39,7 +40,128 @@ beforeEach(() => {
 });
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
+function rawRpc(
+  socketPath: string,
+  method: string,
+  params: unknown,
+): Promise<{ result?: unknown; error?: { message: string } }> {
+  return new Promise((resolve, reject) => {
+    const socket = createConnection(socketPath);
+    let buf = "";
+    socket.on("connect", () => socket.write(`${JSON.stringify({ id: 1, method, params })}\n`));
+    socket.on("data", (chunk) => {
+      buf += chunk.toString("utf8");
+      const nl = buf.indexOf("\n");
+      if (nl < 0) return;
+      const line = buf.slice(0, nl);
+      socket.end();
+      resolve(JSON.parse(line) as { result?: unknown; error?: { message: string } });
+    });
+    socket.on("error", reject);
+  });
+}
+
+function rawAdminRpc(
+  socketPath: string,
+  method: string,
+  params: unknown,
+): Promise<{ result?: unknown; error?: { message: string } }> {
+  return new Promise((resolve, reject) => {
+    const socket = createConnection(socketPath);
+    let buf = "";
+    const fail = (err: unknown) => {
+      socket.destroy();
+      reject(err);
+    };
+    socket.on("connect", () =>
+      socket.write(
+        `${JSON.stringify({ id: 1, method: "authenticate", params: { token: ADMIN_TOKEN } })}\n`,
+      ),
+    );
+    socket.on("data", (chunk) => {
+      buf += chunk.toString("utf8");
+      let nl = buf.indexOf("\n");
+      while (nl >= 0) {
+        const line = buf.slice(0, nl);
+        buf = buf.slice(nl + 1);
+        const msg = JSON.parse(line) as {
+          id?: number;
+          result?: unknown;
+          error?: { message: string };
+        };
+        if (msg.id === 1) {
+          if (msg.error) return fail(new Error(msg.error.message));
+          socket.write(`${JSON.stringify({ id: 2, method, params })}\n`);
+        } else if (msg.id === 2) {
+          socket.end();
+          resolve(msg);
+        }
+        nl = buf.indexOf("\n");
+      }
+    });
+    socket.on("error", fail);
+  });
+}
+
 describe("daemon multi-client over the socket", () => {
+  test("raw launchRun rejects missing or blank targets", async () => {
+    const socketPath = join(dir, "target.sock");
+    const daemon = new KeelDaemon({
+      socketPath,
+      dbPath: join(dir, "target.db"),
+      adminToken: ADMIN_TOKEN,
+    });
+    await daemon.start();
+    try {
+      const missing = await rawRpc(socketPath, "launchRun", {
+        source: chainUrl.source,
+        input: null,
+        name: "missing",
+      });
+      expect(missing.error?.message).toMatch(/launchRun requires target/);
+
+      const blank = await rawRpc(socketPath, "launchRun", {
+        source: chainUrl.source,
+        input: null,
+        name: "blank",
+        target: "   ",
+      });
+      expect(blank.error?.message).toMatch(/non-empty target/);
+    } finally {
+      daemon.stop();
+    }
+  });
+
+  test("raw putSchedule rejects missing or blank targets", async () => {
+    const socketPath = join(dir, "schedule-target.sock");
+    const daemon = new KeelDaemon({
+      socketPath,
+      dbPath: join(dir, "schedule-target.db"),
+      adminToken: ADMIN_TOKEN,
+    });
+    await daemon.start();
+    try {
+      const missing = await rawAdminRpc(socketPath, "putSchedule", {
+        name: "missing-target",
+        source: chainUrl.source,
+        input: null,
+        intervalMs: 60_000,
+      });
+      expect(missing.error?.message).toMatch(/putSchedule requires target/);
+
+      const blank = await rawAdminRpc(socketPath, "putSchedule", {
+        name: "blank-target",
+        source: chainUrl.source,
+        input: null,
+        target: "   ",
+        intervalMs: 60_000,
+      });
+      expect(blank.error?.message).toMatch(/non-empty target/);
+    } finally {
+      daemon.stop();
+    }
+  });
+
   test("startup reconciles stale retained workspace rows", async () => {
     const socketPath = join(dir, "reconcile.sock");
     const dbPath = join(dir, "reconcile.db");

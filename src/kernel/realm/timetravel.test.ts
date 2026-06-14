@@ -29,7 +29,9 @@ describe("retry", () => {
       onStepExecute: (k) => executed.push(k),
     });
 
-    const first = await kernel.run<string>(flakyUrl, null, { name: "flaky" }).catch(() => null);
+    const first = await kernel
+      .run<string>(flakyUrl, null, { name: "flaky", target: process.cwd() })
+      .catch(() => null);
     expect(store.getRun("r")?.status).toBe("failed");
     expect(executed).toEqual(["pre", "flaky"]); // pre + the failing agent ran
     expect(first).toBeNull();

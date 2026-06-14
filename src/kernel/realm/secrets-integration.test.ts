@@ -70,7 +70,7 @@ describe("trusted-local secrets side-channel", () => {
       agents: new AgentProviderRegistry().register(echoProvider),
       secrets,
     });
-    const handle = await kernel.run<string>(url, null, { name: "leak" });
+    const handle = await kernel.run<string>(url, null, { name: "leak", target: process.cwd() });
 
     expect(handle.status).toBe("finished");
     expect(handle.output).toBe("the token is sup3r-s3cret-value");
@@ -104,7 +104,9 @@ describe("trusted-local secrets side-channel", () => {
       agents: new AgentProviderRegistry().register(provider),
       secrets,
     });
-    const handle = await kernel.run<string>(SESSION_SECRET_WORKFLOW, null);
+    const handle = await kernel.run<string>(SESSION_SECRET_WORKFLOW, null, {
+      target: process.cwd(),
+    });
 
     expect(handle.status).toBe("finished");
     expect(handle.output).toBe("session saw session-secret-value");
@@ -130,7 +132,9 @@ describe("trusted-local secrets side-channel", () => {
       agents: new AgentProviderRegistry().register(provider),
       secrets,
     });
-    const handle = await kernel.run<string>(TOLERATED_FAILURE_WORKFLOW, null);
+    const handle = await kernel.run<string>(TOLERATED_FAILURE_WORKFLOW, null, {
+      target: process.cwd(),
+    });
 
     expect(handle.status).toBe("finished");
     expect(handle.output).toBe("tolerated");

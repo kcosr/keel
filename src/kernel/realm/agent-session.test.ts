@@ -13,7 +13,7 @@ import type {
 import { AgentProviderRegistry } from "../../agents/types.ts";
 import { JournalStore } from "../../journal/store.ts";
 import { WorkflowCtx } from "../ctx.ts";
-import { RealmKernel } from "./realm-host.ts";
+import { type ClientCapturedWorkflow, RealmKernel, type RunHandle } from "./realm-host.ts";
 
 const WORKFLOW = {
   source: `
@@ -120,8 +120,28 @@ class FailsOnceOnReviseProvider implements AgentProvider {
   }
 }
 
+type RunMeta = { name?: string | null; target?: string | null };
+
+class TargetedRealmKernel extends RealmKernel {
+  override run<O>(
+    workflow: ClientCapturedWorkflow,
+    input: unknown,
+    meta: RunMeta = {},
+  ): Promise<RunHandle<O>> {
+    return super.run<O>(workflow, input, { target: process.cwd(), ...meta });
+  }
+
+  override launch<O>(
+    workflow: ClientCapturedWorkflow,
+    input: unknown,
+    meta: RunMeta = {},
+  ): { runId: string; done: Promise<RunHandle<O>> } {
+    return super.launch<O>(workflow, input, { target: process.cwd(), ...meta });
+  }
+}
+
 function kernel(store: JournalStore, provider: AgentProvider, extra: Record<string, unknown> = {}) {
-  return new RealmKernel(store, {
+  return new TargetedRealmKernel(store, {
     idgen: () => "run-1",
     clock: () => 1,
     rng: () => 0.5,
@@ -147,6 +167,17 @@ describe("ctx.agentSession", () => {
       rng: () => 0.5,
     });
     expect(() => ctx.agentSession({ key: "primary" })).toThrow(/requires the realm kernel/);
+  });
+
+  test("agent sessions reject a missing run target instead of using host cwd", async () => {
+    const k = new RealmKernel(JournalStore.memory(), {
+      idgen: () => "run-1",
+      clock: () => 1,
+      rng: () => 0.5,
+      agents: new AgentProviderRegistry().register(new RecordingSessionProvider()),
+    });
+
+    await expect(k.run(WORKFLOW, { second: false })).rejects.toThrow(/requires a target/);
   });
 
   test("later turns resume the latest completed participant token and completed turns replay", async () => {
@@ -888,7 +919,7 @@ describe("ctx.agentSession", () => {
     const store = JournalStore.memory();
     const provider = new RecordingSessionProvider();
     let n = 0;
-    const k = new RealmKernel(store, {
+    const k = new TargetedRealmKernel(store, {
       idgen: () => `chain-${n++}`,
       clock: () => 1,
       rng: () => 0.5,
@@ -962,7 +993,7 @@ function liveContinuityWorkflow(provider: "claude" | "pi", toolPolicy: "none" | 
 }
 
 function liveKernel(provider: AgentProvider, calls: AgentInvocation[]) {
-  return new RealmKernel(JournalStore.memory(), {
+  return new TargetedRealmKernel(JournalStore.memory(), {
     idgen: () => "live-run",
     agents: new AgentProviderRegistry().register({
       name: provider.name,

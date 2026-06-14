@@ -7,6 +7,7 @@ import { existsSync } from "node:fs";
 import type { JournalStore } from "../journal/store.ts";
 import type { AgentSessionWorkspaceRow, RunStatus } from "../journal/types.ts";
 import type { RealmKernel, RunHandle } from "../kernel/realm/realm-host.ts";
+import { requireRunTarget } from "../target.ts";
 import {
   DEFAULT_WORKFLOW_DEFINITION_TTL_MS,
   evictWorkflowDefinitionCache,
@@ -59,8 +60,7 @@ export class InProcessKeel implements KeelApi {
   }
 
   async launchRun(req: LaunchRequest): Promise<{ runId: string }> {
-    const target =
-      typeof req.target === "string" && req.target.length > 0 ? req.target : process.cwd();
+    const target = requireRunTarget(req.target, "launchRun");
     const { runId, done } = this.kernel.launch(
       {
         source: req.source,

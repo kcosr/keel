@@ -34,6 +34,7 @@ import { KeelDaemon } from "../daemon/server.ts";
 import { runExecuteScript } from "../execute/runtime.ts";
 import type { RunOutcome, WorkflowProvenance } from "../rpc/contract.ts";
 import type { RunReport } from "../rpc/projection.ts";
+import { cliTargetPath } from "../target.ts";
 import { runTui } from "../tui/index.ts";
 import { displayName, formatDuration, formatListRuns, formatUtcTimestamp } from "./run-display.ts";
 import { createTextWatchFormatter, formatNdjsonWatchEvent } from "./watch-format.ts";
@@ -693,7 +694,7 @@ export function parseSchedulePutArgs(args: string[]): SchedulePutArgs {
       out.input = parseLaunchInput(requireFlagValue(args, i, "--input"));
       i += 2;
     } else if (arg === "--target") {
-      out.target = resolve(requireFlagValue(args, i, "--target"));
+      out.target = resolve(cliTargetPath(requireFlagValue(args, i, "--target")));
       i += 2;
     } else if (arg === "--interval-ms") {
       const value = Number(requireFlagValue(args, i, "--interval-ms"));
@@ -796,7 +797,7 @@ function parseSourceArgs(
       out.input = parseLaunchInput(requireFlagValue(args, i, "--input"));
       i += 2;
     } else if (arg === "--target") {
-      out.target = resolve(requireFlagValue(args, i, "--target"));
+      out.target = resolve(cliTargetPath(requireFlagValue(args, i, "--target")));
       i += 2;
     } else if (arg.startsWith("--")) {
       throw new Error(`unknown flag ${arg}`);

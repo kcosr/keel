@@ -40,7 +40,7 @@ describe("ctx.agent — structured output + fan-out", () => {
     const handle = await kernel(store, mock).run<number>(
       reviewUrl,
       { domains: ["auth", "net"] },
-      { name: "review" },
+      { name: "review", target: process.cwd() },
     );
     expect(handle.status).toBe("finished");
     expect(handle.output).toBe(3); // 2 + 1 findings
@@ -62,7 +62,10 @@ describe("ctx.agent — bounded schema retry", () => {
         },
       },
     });
-    const handle = await kernel(store, mock).run<number>(singleUrl, null, { name: "s" });
+    const handle = await kernel(store, mock).run<number>(singleUrl, null, {
+      name: "s",
+      target: process.cwd(),
+    });
     expect(handle.status).toBe("finished");
     expect(handle.output).toBe(42); // 21 * 2
   });
@@ -72,9 +75,9 @@ describe("ctx.agent — bounded schema retry", () => {
     const mock = new MockProvider({
       responses: { ask: { outputs: ["nope"] } },
     });
-    await expect(kernel(store, mock).run(singleUrl, null, { name: "s" })).rejects.toThrow(
-      /failed schema validation/,
-    );
+    await expect(
+      kernel(store, mock).run(singleUrl, null, { name: "s", target: process.cwd() }),
+    ).rejects.toThrow(/failed schema validation/);
     expect(store.getRun("run_0")?.status).toBe("failed");
   });
 });
@@ -108,7 +111,7 @@ describe("ctx.agent — replay vs re-execution", () => {
         if (point === "before-commit" && key === "double") throw new Error("CRASH");
       },
     });
-    await k1.run(singleUrl, null, { name: "s" }).catch(() => null);
+    await k1.run(singleUrl, null, { name: "s", target: process.cwd() }).catch(() => null);
     expect(asks).toBe(1); // agent ran once
     expect(store.getRun("run_0")?.status).toBe("running"); // resumable
 
@@ -139,7 +142,7 @@ describe("ctx.agent — replay vs re-execution", () => {
         if (point === "before-commit" && key === "ask") throw new Error("CRASH");
       },
     });
-    await k1.run(singleUrl, null, { name: "s" }).catch(() => null);
+    await k1.run(singleUrl, null, { name: "s", target: process.cwd() }).catch(() => null);
     expect(asks).toBe(1); // ran, but crashed before commit
     expect(store.getRun("run_0")?.status).toBe("running");
 

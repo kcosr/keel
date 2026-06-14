@@ -170,7 +170,9 @@ describe("RealmKernel interruptRun", () => {
     const store = JournalStore.memory();
     const provider = new InterruptibleProvider();
     const k = kernel(store, provider);
-    const { runId, done } = k.launch<number>(AGENT_WORKFLOW, null);
+    const { runId, done } = k.launch<number>(AGENT_WORKFLOW, null, {
+      target: process.cwd(),
+    });
 
     await provider.waitForStart();
     expect(store.getLatestAttempt(runId, "agent")?.status).toBe("pending");
@@ -195,7 +197,9 @@ describe("RealmKernel interruptRun", () => {
     const store = JournalStore.memory();
     const provider = new InterruptibleSessionProvider();
     const k = kernel(store, provider);
-    const { runId, done } = k.launch<number>(SESSION_WORKFLOW, null);
+    const { runId, done } = k.launch<number>(SESSION_WORKFLOW, null, {
+      target: process.cwd(),
+    });
 
     await provider.waitForStart();
     k.interruptRun(runId, "session pause");
@@ -217,7 +221,7 @@ describe("RealmKernel interruptRun", () => {
   test("rejects terminal runs and duplicate interrupt is idempotent", async () => {
     const store = JournalStore.memory();
     const k = kernel(store, new ImmediateProvider());
-    const finished = await k.run<number>(AGENT_WORKFLOW, null);
+    const finished = await k.run<number>(AGENT_WORKFLOW, null, { target: process.cwd() });
 
     expect(() => k.interruptRun(finished.runId)).toThrow(/cannot interrupt terminal run/);
     store.updateRun(finished.runId, { status: "waiting-signal", finishedAtMs: null });

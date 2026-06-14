@@ -17,6 +17,7 @@ import { type Json, hashJson } from "../../hash.ts";
 import type { JournalStore } from "../../journal/store.ts";
 import type { RunRow, RunStatus } from "../../journal/types.ts";
 import type { WorkflowProvenance } from "../../rpc/contract.ts";
+import { optionalRunTarget, requireRunTarget } from "../../target.ts";
 import {
   defaultDefinitionCacheRoot,
   isWorkflowDefinitionHash,
@@ -189,7 +190,7 @@ export class RealmKernel {
     meta: { name?: string | null; target?: string | null } = {},
   ): { runId: string; done: Promise<RunHandle<O>> } {
     const at = this.host.clock();
-    const target = meta.target !== undefined ? meta.target : process.cwd();
+    const target = optionalRunTarget(meta.target, "RealmKernel.launch");
     const name = meta.name !== undefined ? meta.name : (workflow.name ?? null);
     const { snapshot, entryPath } = snapshotWorkflowSource(this.store, workflow.source, {
       name,
@@ -243,13 +244,14 @@ export class RealmKernel {
       this.definitionCacheRoot,
     );
     const at = this.host.clock();
+    const target = optionalRunTarget(meta.target, "RealmKernel.launchDefinition");
     const runId = this.idgen();
     this.store.insertRun({
       runId,
       workflowName: meta.name ?? null,
       definitionVersion: definitionHash,
       workflowRef: meta.workflowRef ?? definitionHash,
-      runTarget: meta.target ?? null,
+      runTarget: target,
       status: "running",
       parentRunId: null,
       tenantId: null,
@@ -263,7 +265,7 @@ export class RealmKernel {
     this.store.appendEvent(
       runId,
       "run.started",
-      { name: meta.name ?? null, definitionHash, target: meta.target ?? null },
+      { name: meta.name ?? null, definitionHash, target },
       this.host.clock(),
     );
     return { runId, done: this.execute<O>(runId, entryPath, input) };
@@ -608,6 +610,7 @@ export class RealmKernel {
     });
     if (preflight.kind === "replay") return preflight;
 
+    const target = requireRunTarget(m.target, `agent session "${m.agentKey}"`);
     let cwd: string;
     let workspacePath: string | undefined;
     let workspaceTarget: string | undefined;
@@ -618,12 +621,7 @@ export class RealmKernel {
           `agent session "${m.agentKey}" requests workspaceIsolation but the kernel has no workspaceStore configured`,
         );
       }
-      if (!m.target) {
-        throw new Error(
-          `agent session "${m.agentKey}" requires a target; launch with --target or set an agent/profile target`,
-        );
-      }
-      const gitTarget = resolveGitRootTarget(m.target);
+      const gitTarget = resolveGitRootTarget(target);
       const path = retainedWorkspacePath(this.workspaceStore, runId, m.agentKey);
       let needsCreate = false;
       this.store.transaction(() => {
@@ -691,13 +689,8 @@ export class RealmKernel {
       workspaceTarget = gitTarget.target;
       workspaceBaseCommit = gitTarget.baseCommit;
     } else {
-      if (!m.target) {
-        throw new Error(
-          `agent session "${m.agentKey}" requires a target; launch with --target or set an agent/profile target`,
-        );
-      }
-      assertUsableTargetDirectory(m.target);
-      cwd = m.target;
+      assertUsableTargetDirectory(target);
+      cwd = target;
     }
 
     this.store.transaction(() => {
@@ -1163,18 +1156,14 @@ export class RealmKernel {
               let worktree: ReturnType<typeof createWorktree> | null = null;
               let cwd: string;
               try {
-                if (!m.target) {
-                  throw new Error(
-                    `agent "${m.key}" requires a target; launch with --target or set an agent/profile target`,
-                  );
-                }
+                const target = requireRunTarget(m.target, `agent "${m.key}"`);
                 if (m.workspaceIsolation) {
-                  const gitTarget = resolveGitRootTarget(m.target);
+                  const gitTarget = resolveGitRootTarget(target);
                   worktree = createWorktree(gitTarget.target, m.key);
                   cwd = worktree.path;
                 } else {
-                  assertUsableTargetDirectory(m.target);
-                  cwd = m.target;
+                  assertUsableTargetDirectory(target);
+                  cwd = target;
                 }
               } catch (err) {
                 engine.failStep(

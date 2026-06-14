@@ -13,6 +13,7 @@ import { captureWorkflowFile } from "../../src/workflow-definitions/capture.ts";
 const HERE = new URL(".", import.meta.url).pathname;
 const reviewUrl = `${HERE}review.workflow.ts`;
 const reviewWorkflow = captureWorkflowFile(reviewUrl);
+const RUN_META = { name: "review", target: HERE };
 
 const DOMAINS = [
   "ssh-boundary", "http-core", "http-auth", "priv-bootstrap", "container-exec",
@@ -78,7 +79,7 @@ describe("review workload port on mock", () => {
     const store = JournalStore.memory();
     const handle = await kernel(store, buildMock(90)).run<{
       stats: { raw: number; deduped: number; confirmed: number };
-    }>(reviewWorkflow, { root: "/repo", provider: "mock" }, { name: "review" });
+    }>(reviewWorkflow, { root: "/repo", provider: "mock" }, RUN_META);
 
     expect(handle.status).toBe("finished");
     expect(handle.output?.stats).toEqual({ raw: 90, deduped: 90, confirmed: 90 });
@@ -98,7 +99,7 @@ describe("review workload port on mock", () => {
         }
       },
     });
-    await k1.run(reviewWorkflow, { root: "/repo", provider: "mock" }, { name: "review" }).catch(() => null);
+    await k1.run(reviewWorkflow, { root: "/repo", provider: "mock" }, RUN_META).catch(() => null);
     expect(store.getRun("run_0")?.status).toBe("running");
 
     const resumeExec: string[] = [];
@@ -119,7 +120,7 @@ describe("review workload port on mock", () => {
   test("editing synthPrompt re-runs exactly one agent (synthesize)", async () => {
     const store = JournalStore.memory();
     const mock = buildMock(20);
-    await kernel(store, mock).run(reviewWorkflow, { root: "/repo", provider: "mock" }, { name: "review" });
+    await kernel(store, mock).run(reviewWorkflow, { root: "/repo", provider: "mock" }, RUN_META);
 
     // Edit the synthPrompt helper's text and rerun against the edited file.
     const editedUrl = `${HERE}review-synthedit.workflow.ts`;

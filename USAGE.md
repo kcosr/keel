@@ -75,7 +75,8 @@ JSON frame envelopes by default until the run reaches a terminal state:
 ...
 ```
 
-Use `--output text` when you want the compact human transcript.
+Use `--output text` when you want the compact human transcript; adjacent live
+agent text/reasoning chunks are coalesced into readable paragraphs.
 
 Use `--detach` when a script needs the run id without streaming:
 
@@ -199,13 +200,15 @@ keel watch run_...
 {"kind":"durable","seq":4,"type":"agent.message","payload":{"key":"review:auth","attempt":1,"text":"..."},"atMs":...}
 ```
 
-Use `--output text` for human-oriented compact output:
+Use `--output text` for human-oriented compact output. Adjacent live `text` and
+`reasoning` chunks from the same agent key are rendered under one header, while
+durable final messages still print as their own rows:
 
 ```text
 [1] run.started {"name":"review.workflow.ts"}
 [2] phase: Find
-[live] agent review:auth text: ...
-[3] agent review:auth message: ...
+[live] agent review:auth text: streaming answer...
+[3] agent review:auth message: streaming answer...
 [4] step.completed review:auth (effectful)
 [5] run.finished
 ```

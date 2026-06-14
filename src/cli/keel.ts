@@ -27,12 +27,14 @@ import { fileURLToPath } from "node:url";
 import { ClaudeProvider } from "../agents/claude.ts";
 import { PiProvider } from "../agents/pi.ts";
 import { AgentProviderRegistry } from "../agents/types.ts";
-import { redactCapabilityTokens, redactCapabilityTokensInValue } from "../auth/redaction.ts";
+import { redactCapabilityTokens } from "../auth/redaction.ts";
 import { DaemonClient } from "../daemon/client.ts";
 import { KeelDaemon } from "../daemon/server.ts";
 import { runExecuteScript } from "../execute/runtime.ts";
-import type { EventEnvelope, RunOutcome, WorkflowProvenance } from "../rpc/contract.ts";
+import type { RunOutcome, WorkflowProvenance } from "../rpc/contract.ts";
 import type { RunReport } from "../rpc/projection.ts";
+import { createTextWatchFormatter, formatNdjsonWatchEvent } from "./watch-format.ts";
+import type { WatchFormatOptions } from "./watch-format.ts";
 
 const KEEL_DIR = process.env.KEEL_DIR ?? join(homedir(), ".keel");
 const SOCKET = process.env.KEEL_SOCKET ?? join(KEEL_DIR, "keel.sock");
@@ -827,12 +829,7 @@ export function parseWatchArgs(args: string[]): {
 
 type WatchStatus = RunOutcome["status"];
 
-interface WatchFormatOptions {
-  output?: OutputFormat;
-  tools?: boolean;
-}
-
-async function watchRun(
+export async function watchRun(
   client: DaemonClient,
   runId: string,
   opts: WatchFormatOptions,
@@ -842,9 +839,19 @@ async function watchRun(
     let settled = false;
     let pendingStatus: WatchStatus | null = null;
     let unsubscribe = () => {};
+    const output = opts.output ?? "text";
+    if (output !== "text" && output !== "ndjson") {
+      throw new Error(`watchRun only supports text or ndjson output, got ${output}`);
+    }
+    const textFormatter = output === "text" ? createTextWatchFormatter(opts) : null;
+    const flushTextFormatter = (): void => {
+      if (!textFormatter) return;
+      for (const chunk of textFormatter.flush()) process.stdout.write(chunk);
+    };
     const finish = (status: WatchStatus): void => {
       if (settled) return;
       settled = true;
+      flushTextFormatter();
       unsubscribe();
       resolve(status);
     };
@@ -856,7 +863,11 @@ async function watchRun(
       runId,
       0,
       (e) => {
-        process.stdout.write(formatWatchEvent(e, opts));
+        if (textFormatter) {
+          for (const chunk of textFormatter.push(e)) process.stdout.write(chunk);
+        } else {
+          process.stdout.write(formatNdjsonWatchEvent(e));
+        }
         if (e.type === "run.finished") noteStatus("finished");
         else if (e.type === "run.failed") noteStatus("failed");
         else if (e.type === "run.continued") noteStatus("continued");
@@ -873,6 +884,7 @@ async function watchRun(
         }
       },
       (err) => {
+        flushTextFormatter();
         process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
         finish("failed");
       },
@@ -884,111 +896,9 @@ async function watchRun(
   });
 }
 
-export function formatWatchEvent(event: EventEnvelope, opts: WatchFormatOptions = {}): string {
-  const safeEvent = redactCapabilityTokensInValue(event);
-  if ((opts.output ?? "text") === "ndjson") return `${JSON.stringify(safeEvent)}\n`;
-
-  const prefix = safeEvent.kind === "durable" ? `[${safeEvent.seq}]` : "[live]";
-  const payload = safeEvent.payload;
-  switch (safeEvent.type) {
-    case "agent.event":
-      if (!opts.tools && isToolTracePayload(payload)) return "";
-      return `${prefix} ${formatAgentEvent(payload)}\n`;
-    case "agent.message":
-      return `${prefix} ${formatAgentMessage(payload)}\n`;
-    case "agent.tool_call":
-      if (!opts.tools) return "";
-      return `${prefix} ${formatAgentTranscriptEvent(payload, "tool_call")}\n`;
-    case "agent.tool_result":
-      if (!opts.tools) return "";
-      return `${prefix} ${formatAgentTranscriptEvent(payload, "tool_result")}\n`;
-    case "phase": {
-      const title = prop(payload, "title");
-      return `${prefix} phase${title ? `: ${compact(title)}` : ""}\n`;
-    }
-    case "log": {
-      const message = prop(payload, "message");
-      const data = prop(payload, "data");
-      return `${prefix} log${message ? `: ${compact(message)}` : ""}${
-        hasContent(data) ? ` ${compact(data)}` : ""
-      }\n`;
-    }
-    case "step.completed": {
-      const stableKey = prop(payload, "stableKey");
-      const effectType = prop(payload, "effectType");
-      return `${prefix} step.completed${stableKey ? ` ${compact(stableKey)}` : ""}${
-        effectType ? ` (${compact(effectType)})` : ""
-      }\n`;
-    }
-    case "run.parked": {
-      const kind = prop(payload, "kind");
-      const key = prop(payload, "key");
-      return `${prefix} run.parked${kind ? ` ${compact(kind)}` : ""}${
-        key ? ` ${compact(key)}` : ""
-      }\n`;
-    }
-    case "run.failed": {
-      const message = prop(payload, "message") ?? prop(payload, "error");
-      return `${prefix} run.failed${message ? `: ${compact(message)}` : formatPayload(payload)}\n`;
-    }
-    default:
-      return `${prefix} ${safeEvent.type}${formatPayload(payload)}\n`;
-  }
-}
-
-function isToolTracePayload(payload: unknown): boolean {
-  const traceType = prop(prop(payload, "event"), "type");
-  return traceType === "tool_call" || traceType === "tool_result";
-}
-
-function formatAgentMessage(payload: unknown): string {
-  const key = prop(payload, "key");
-  const text = prop(payload, "text");
-  const omitted = prop(payload, "omitted");
-  const byteLength = prop(payload, "byteLength");
-  const label = key ? `agent ${compact(key)} message` : "agent message";
-  if (omitted) return `${label}: omitted ${compact(byteLength ?? 0)} bytes`;
-  return hasContent(text) ? `${label}: ${compact(text)}` : `${label}${formatPayload(payload)}`;
-}
-
-function formatAgentTranscriptEvent(payload: unknown, kind: "tool_call" | "tool_result"): string {
-  const key = prop(payload, "key");
-  const data = prop(payload, "data");
-  const omitted = prop(payload, "omitted");
-  const byteLength = prop(payload, "byteLength");
-  const label = key ? `agent ${compact(key)} ${kind}` : `agent ${kind}`;
-  if (omitted) return `${label}: omitted ${compact(byteLength ?? 0)} bytes`;
-  return hasContent(data) ? `${label}: ${compact(data)}` : `${label}${formatPayload(payload)}`;
-}
-
-function formatAgentEvent(payload: unknown): string {
-  const key = prop(payload, "key");
-  const event = prop(payload, "event");
-  const traceType = prop(event, "type");
-  const data = prop(event, "data");
-  const parts = ["agent"];
-  if (key) parts.push(compact(key));
-  if (traceType) parts.push(compact(traceType));
-  const label = parts.join(" ");
-  if (!key && !traceType && !hasContent(data)) return `${label}: ${compact(payload)}`;
-  if (!traceType && hasContent(event)) return `${label}: ${compact(event)}`;
-  return hasContent(data) ? `${label}: ${compact(data)}` : label;
-}
-
-function formatPayload(payload: unknown): string {
-  return hasContent(payload) ? ` ${compact(payload)}` : "";
-}
-
 function prop(value: unknown, key: string): unknown {
   if (value === null || typeof value !== "object") return undefined;
   return (value as Record<string, unknown>)[key];
-}
-
-function hasContent(value: unknown): boolean {
-  if (value == null) return false;
-  if (typeof value === "string") return value.length > 0;
-  if (typeof value === "object") return Object.keys(value).length > 0;
-  return true;
 }
 
 function compact(value: unknown, max = 300): string {

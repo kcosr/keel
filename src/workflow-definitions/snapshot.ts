@@ -38,7 +38,8 @@ interface WorkflowDefinitionManifest {
   sourceRoot: string;
   runtime: {
     bunVersion: string;
-    keelDefinitionAbi: 1;
+    keelDefinitionAbi: typeof WORKFLOW_DEFINITION_ABI_VERSION;
+    workflowSdkAbi: typeof WORKFLOW_SDK_ABI_VERSION;
   };
 }
 
@@ -64,10 +65,39 @@ export interface SnapshotWorkflowOptions {
 }
 
 const DEFINITION_PREFIX = "wf_sha256_";
+export const WORKFLOW_DEFINITION_ABI_VERSION = 1;
+export const WORKFLOW_SDK_ABI_VERSION = 1;
+export const CURRENT_WORKFLOW_SDK_ABI_VERSION = WORKFLOW_SDK_ABI_VERSION;
 export const MAX_WORKFLOW_SOURCE_BYTES = 256 * 1024;
 export const DEFAULT_WORKFLOW_DEFINITION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const NODE_BUILTINS = new Set([...builtinModules, ...builtinModules.map((name) => `node:${name}`)]);
 const tsTranspiler = new Bun.Transpiler({ loader: "tsx" });
+
+export class UnsupportedWorkflowSdkAbiError extends Error {
+  readonly requiredAbi: number;
+  readonly supportedAbi: number;
+  readonly definitionHash: string;
+
+  constructor(
+    definitionHash: string,
+    requiredAbi: number,
+    supportedAbi = CURRENT_WORKFLOW_SDK_ABI_VERSION,
+  ) {
+    super(
+      `workflow definition ${definitionHash} requires workflow SDK ABI ${requiredAbi}, but this daemon supports ABI ${supportedAbi}`,
+    );
+    this.name = "UnsupportedWorkflowSdkAbiError";
+    this.requiredAbi = requiredAbi;
+    this.supportedAbi = supportedAbi;
+    this.definitionHash = definitionHash;
+  }
+}
+
+export function isUnsupportedWorkflowSdkAbiError(
+  err: unknown,
+): err is UnsupportedWorkflowSdkAbiError {
+  return err instanceof UnsupportedWorkflowSdkAbiError;
+}
 
 interface KeelPackageRootInputs {
   envRoot?: string | undefined;
@@ -155,6 +185,7 @@ export function materializeWorkflowDefinition(
   const row = store.getWorkflowDefinition(hash);
   if (!row) throw new Error(`workflow definition ${hash} not found`);
   const manifest = parseManifest(row);
+  validateWorkflowSdkAbi(hash, manifest);
   const root = join(cacheRoot, hash);
   const entryPath = join(root, manifest.modules.length === 0 ? "entry.ts" : manifest.entry);
   if (isMaterializationComplete(root, manifest)) {
@@ -210,12 +241,14 @@ function isMaterializationComplete(root: string, manifest: WorkflowDefinitionMan
         ? join(root, "node_modules", "@kcosr", "keel")
         : join(root, "node_modules", ...packageName.split("/"));
     if (!existsSync(linked)) return false;
+    if (packageName === "@kcosr/keel" && !isCurrentSdkLink(linked)) return false;
   }
   return true;
 }
 
 function validateExternalPackagePins(packagePins: CapturedExternalPackage[]): void {
   for (const pinned of packagePins) {
+    if (pinned.name === "@kcosr/keel") continue;
     const root = pinned.name === "@kcosr/keel" ? keelPackageRoot() : pinned.root;
     validatePackageIntegrity(pinned.name, root, pinned);
   }
@@ -291,19 +324,11 @@ function createWorkflowDefinitionSnapshot(
     sourceRoot,
     runtime: {
       bunVersion: Bun.version,
-      keelDefinitionAbi: 1,
+      keelDefinitionAbi: WORKFLOW_DEFINITION_ABI_VERSION,
+      workflowSdkAbi: WORKFLOW_SDK_ABI_VERSION,
     },
   };
-  const hash = `${DEFINITION_PREFIX}${sha256Hex(
-    canonicalJson({
-      format: manifest.format,
-      entry: manifest.entry,
-      modules: manifest.modules,
-      externalImports: manifest.externalImports,
-      externalPackages: manifest.externalPackages,
-      runtime: manifest.runtime,
-    }),
-  )}`;
+  const hash = workflowDefinitionHashForManifest(manifest);
 
   return {
     hash,
@@ -362,7 +387,34 @@ function parseManifest(row: WorkflowDefinitionRow): WorkflowDefinitionManifest {
   if (parsed.format !== "keel.workflow-definition.v1") {
     throw new Error(`unsupported workflow definition manifest for ${row.hash}`);
   }
+  if (typeof parsed.runtime?.workflowSdkAbi !== "number") {
+    throw new Error(`workflow definition ${row.hash} is missing runtime.workflowSdkAbi`);
+  }
   return parsed;
+}
+
+export function workflowDefinitionHashForManifest(
+  manifest: Pick<
+    WorkflowDefinitionManifest,
+    "format" | "entry" | "modules" | "externalImports" | "externalPackages" | "runtime"
+  >,
+): string {
+  return `${DEFINITION_PREFIX}${sha256Hex(
+    canonicalJson({
+      format: manifest.format,
+      entry: manifest.entry,
+      modules: manifest.modules,
+      externalImports: manifest.externalImports,
+      externalPackages: manifest.externalPackages,
+      runtime: manifest.runtime,
+    }),
+  )}`;
+}
+
+function validateWorkflowSdkAbi(hash: string, manifest: WorkflowDefinitionManifest): void {
+  if (manifest.runtime.workflowSdkAbi !== CURRENT_WORKFLOW_SDK_ABI_VERSION) {
+    throw new UnsupportedWorkflowSdkAbiError(hash, manifest.runtime.workflowSdkAbi);
+  }
 }
 
 function linkExternalResolution(
@@ -383,7 +435,6 @@ function linkExternalResolution(
     const pinned = packagePins.find((pkg) => pkg.name === packageName);
     if (packageName === "@kcosr/keel") {
       const src = keelPackageRoot();
-      validatePackageIntegrity(packageName, src, pinned);
       linkPackage(join(nodeModules, "@kcosr", "keel"), src);
     } else {
       const src = join(sourceRoot, "node_modules", ...packageName.split("/"));
@@ -405,7 +456,7 @@ function collectExternalPackages(
   const names = new Set<string>();
   for (const specifier of externalImports) {
     const packageName = packageNameForImport(specifier);
-    if (packageName) names.add(packageName);
+    if (packageName && packageName !== "@kcosr/keel") names.add(packageName);
   }
   return [...names].sort().map((name) => {
     const root =
@@ -515,6 +566,16 @@ function linkPackage(dest: string, src: string): void {
   if (existsSync(dest)) return;
   mkdirSync(dirname(dest), { recursive: true });
   symlinkSync(src, dest, "dir");
+}
+
+function isCurrentSdkLink(path: string): boolean {
+  try {
+    return (
+      lstatSync(path).isSymbolicLink() && realpathSync(path) === realpathSync(keelPackageRoot())
+    );
+  } catch {
+    return false;
+  }
 }
 
 function rewriteSdkImportsForMaterialization(code: string, modulePath: string): string {

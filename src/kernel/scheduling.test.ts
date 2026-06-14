@@ -55,6 +55,27 @@ describe("durable ctx.sleep park/wake", () => {
     expect(res.woken).toEqual(["r2"]);
     expect(store.getRun("r2")?.status).toBe("finished");
   });
+
+  test("unsupported workflow SDK ABI fails a due timer run instead of retrying every tick", async () => {
+    const store = JournalStore.memory();
+    let t = 0;
+    const clock = () => t;
+    const kernel = new RealmKernel(store, { idgen: () => "r_abi", clock });
+
+    await kernel.run(napUrl, null, { name: "nap" });
+    expect(store.getRun("r_abi")?.status).toBe("waiting-timer");
+    requireUnsupportedSdkAbi(store, store.getRun("r_abi")?.definitionVersion as string);
+
+    t = 1500;
+    const supervisor = new Supervisor({ store, kernel, clock });
+    expect((await supervisor.tick()).woken).toEqual([]);
+    const failed = store.getRun("r_abi");
+    expect(failed?.status).toBe("failed");
+    expect(JSON.parse(failed?.errorJson ?? "{}").message).toContain(
+      "requires workflow SDK ABI 2, but this daemon supports ABI 1",
+    );
+    expect((await supervisor.tick()).woken).toEqual([]);
+  });
 });
 
 describe("cron schedules", () => {
@@ -89,4 +110,57 @@ describe("cron schedules", () => {
     const after = await new Supervisor({ store, kernel, clock: () => t }).tick();
     expect(after.fired).toEqual([]);
   });
+
+  test("unsupported workflow SDK ABI disables only the offending due schedule", async () => {
+    const store = JournalStore.memory();
+    const t = 1000;
+    let n = 0;
+    const kernel = new RealmKernel(store, { idgen: () => `cron-${n++}`, clock: () => t });
+    const bad = snapshotWorkflowSource(store, chainUrl.source, {
+      name: "bad",
+      nowMs: t,
+    }).snapshot.hash;
+    const good = snapshotWorkflowSource(store, "export default async () => 1;\n", {
+      name: "good",
+      nowMs: t,
+    }).snapshot.hash;
+    requireUnsupportedSdkAbi(store, bad);
+    store.putSchedule({
+      name: "bad",
+      workflowRef: bad,
+      inputJson: JSON.stringify({ n: 1 }),
+      intervalMs: 60_000,
+      nextFireMs: 500,
+    });
+    store.putSchedule({
+      name: "good",
+      workflowRef: good,
+      inputJson: "null",
+      intervalMs: 60_000,
+      nextFireMs: 500,
+    });
+
+    const res = await new Supervisor({ store, kernel, clock: () => t }).tick();
+    expect(res.fired).toEqual(["good"]);
+    const badSchedule = store.db
+      .query<{ enabled: number; last_error_json: string | null }, []>(
+        "SELECT enabled, last_error_json FROM schedules WHERE name = 'bad'",
+      )
+      .get();
+    expect(badSchedule?.enabled).toBe(0);
+    expect(JSON.parse(badSchedule?.last_error_json ?? "{}").message).toContain(
+      "requires workflow SDK ABI 2, but this daemon supports ABI 1",
+    );
+    expect(store.listRuns().map((run) => run.workflowName)).toEqual(["good"]);
+  });
 });
+
+function requireUnsupportedSdkAbi(store: JournalStore, hash: string): void {
+  const row = store.getWorkflowDefinition(hash);
+  if (!row?.manifestJson) throw new Error(`missing manifest for ${hash}`);
+  const manifest = JSON.parse(row.manifestJson) as { runtime: { workflowSdkAbi: number } };
+  manifest.runtime.workflowSdkAbi = 2;
+  store.db
+    .query("UPDATE workflow_definitions SET manifest_json = ? WHERE hash = ?")
+    .run(JSON.stringify(manifest), hash);
+}

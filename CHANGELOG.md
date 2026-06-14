@@ -59,6 +59,8 @@
   no longer authority to inspect or mutate a run.
 - Resume/retry/rewind/fork execute the run's stored workflow definition snapshot;
   rerun with a source override creates a fresh snapshot.
+- Workflow resume across compatible Keel upgrades now uses an explicit workflow
+  SDK ABI for `@kcosr/keel` instead of pinning the full package tree.
 - Long-lived waits/event streams re-check capability validity and fail when a
   presented capability is revoked or expires; each wait/subscription is bound to
   the credential presented when it was started.
@@ -90,6 +92,8 @@
 - Capability-looking tokens are redacted from CLI/daemon diagnostic output.
 - Bootstrap admin capability setup no longer re-enables a revoked bootstrap token
   on daemon restart.
-- Workflow snapshots now fail closed when pinned external package bytes drift.
+- Workflow snapshots now fail closed when persisted definitions require an
+  unsupported workflow SDK ABI, and automatic timer/orphan/schedule drive paths
+  persist that deterministic failure instead of retrying silently.
 - `@kcosr/keel` workflow snapshot materialization now links to the package root
   instead of its parent directory.

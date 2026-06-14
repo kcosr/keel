@@ -752,10 +752,18 @@ export class JournalStore {
   }): void {
     this.db
       .query(
-        `INSERT INTO schedules (name, workflow_ref, input_json, interval_ms, next_fire_ms, enabled)
-         VALUES ($name, $ref, $input, $interval, $next, 1)
+        `INSERT INTO schedules (
+           name, workflow_ref, input_json, interval_ms, next_fire_ms, enabled, last_error_json, last_failed_at_ms
+         )
+         VALUES ($name, $ref, $input, $interval, $next, 1, NULL, NULL)
          ON CONFLICT(name) DO UPDATE SET
-           workflow_ref = $ref, input_json = $input, interval_ms = $interval, next_fire_ms = $next, enabled = 1`,
+           workflow_ref = $ref,
+           input_json = $input,
+           interval_ms = $interval,
+           next_fire_ms = $next,
+           enabled = 1,
+           last_error_json = NULL,
+           last_failed_at_ms = NULL`,
       )
       .run({
         $name: s.name,
@@ -796,8 +804,18 @@ export class JournalStore {
 
   advanceSchedule(name: string, nextFireMs: number, lastRunId: string): void {
     this.db
-      .query("UPDATE schedules SET next_fire_ms = ?, last_run_id = ? WHERE name = ?")
+      .query(
+        "UPDATE schedules SET next_fire_ms = ?, last_run_id = ?, last_error_json = NULL, last_failed_at_ms = NULL WHERE name = ?",
+      )
       .run(nextFireMs, lastRunId, name);
+  }
+
+  disableScheduleWithError(name: string, errorJson: string, atMs: number): void {
+    this.db
+      .query(
+        "UPDATE schedules SET enabled = 0, last_error_json = ?, last_failed_at_ms = ? WHERE name = ?",
+      )
+      .run(errorJson, atMs, name);
   }
 
   // ---- time travel (retry/rewind/fork, §18) ------------------------------

@@ -6,6 +6,16 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { canonicalJson } from "../hash.ts";
+import { RealmKernel } from "../kernel/realm/realm-host.ts";
+import {
+  materializeWorkflowDefinition,
+  snapshotWorkflowSource,
+} from "../workflow-definitions/snapshot.ts";
+import {
+  canonicalWorkflowDefinitionManifestV12,
+  workflowDefinitionHashForV12Migration,
+} from "./migrations.ts";
 import { JournalStore } from "./store.ts";
 
 /** Build a minimal v4-era DB by hand: journal WITHOUT seq, approvals WITHOUT
@@ -101,8 +111,90 @@ function makeV8Db(path: string): void {
   db.close();
 }
 
+const sdkWorkflowSource =
+  'import { passthrough } from "@kcosr/keel";\nexport default async () => passthrough<number>().parse(1);\n';
+
+function oldWorkflowManifest(source = sdkWorkflowSource, integrity = "sha256-old") {
+  return {
+    format: "keel.workflow-definition.v1",
+    entry: "entry.ts",
+    modules: [{ path: "entry.ts", code: source }],
+    externalImports: ["@kcosr/keel"],
+    externalPackages: [
+      {
+        name: "@kcosr/keel",
+        root: "/old/keel",
+        integrity,
+      },
+    ],
+    sourceRoot: "client-captured://source",
+    runtime: {
+      bunVersion: Bun.version,
+      keelDefinitionAbi: 1,
+    },
+  };
+}
+
+function makeV11Db(path: string): void {
+  const db = new Database(path, { create: true });
+  db.exec("PRAGMA journal_mode = WAL;");
+  db.exec(`
+    CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE runs (
+      run_id             TEXT PRIMARY KEY,
+      workflow_name      TEXT,
+      definition_version TEXT NOT NULL,
+      workflow_ref       TEXT,
+      status             TEXT NOT NULL,
+      parent_run_id      TEXT,
+      tenant_id          TEXT,
+      input_ref          TEXT,
+      output_ref         TEXT,
+      error_json         TEXT,
+      heartbeat_at_ms    INTEGER,
+      runtime_owner_id   TEXT,
+      created_at_ms      INTEGER NOT NULL,
+      finished_at_ms     INTEGER
+    );
+    CREATE TABLE schedules (
+      name         TEXT PRIMARY KEY,
+      workflow_ref TEXT NOT NULL,
+      input_json   TEXT,
+      interval_ms  INTEGER NOT NULL,
+      next_fire_ms INTEGER NOT NULL,
+      enabled      INTEGER NOT NULL DEFAULT 1,
+      last_run_id  TEXT
+    );
+    CREATE TABLE workflow_definitions (
+      hash          TEXT PRIMARY KEY,
+      name          TEXT,
+      kind          TEXT NOT NULL,
+      code          TEXT NOT NULL,
+      source_map    TEXT,
+      manifest_json TEXT,
+      created_at_ms INTEGER NOT NULL
+    );
+  `);
+  db.query("INSERT INTO schema_meta (key, value) VALUES ('schema_version', '11')").run();
+  db.close();
+}
+
+function insertOldWorkflowDefinition(
+  db: Database,
+  hash: string,
+  manifest: ReturnType<typeof oldWorkflowManifest>,
+): void {
+  const [entry] = manifest.modules;
+  if (!entry) throw new Error("old workflow manifest is missing entry module");
+  db.query(
+    `INSERT INTO workflow_definitions (
+      hash, name, kind, code, source_map, manifest_json, created_at_ms
+    ) VALUES (?, 'wf', 'source', ?, NULL, ?, 1)`,
+  ).run(hash, entry.code, JSON.stringify(manifest));
+}
+
 describe("schema migrations", () => {
-  test("a v4 DB migrates forward to v11 in place and idempotently", () => {
+  test("a v4 DB migrates forward to v12 in place and idempotently", () => {
     const dir = mkdtempSync(join(tmpdir(), "keel-mig-"));
     try {
       const path = join(dir, "old.db");
@@ -115,7 +207,7 @@ describe("schema migrations", () => {
       const ver = store.db
         .query<{ value: string }, []>("SELECT value FROM schema_meta WHERE key='schema_version'")
         .get();
-      expect(ver?.value).toBe("11");
+      expect(ver?.value).toBe("12");
 
       // new columns exist
       const jcols = store.db.query<{ name: string }, []>("PRAGMA table_info(journal)").all();
@@ -164,7 +256,7 @@ describe("schema migrations", () => {
     const ver = store.db
       .query<{ value: string }, []>("SELECT value FROM schema_meta WHERE key='schema_version'")
       .get();
-    expect(ver?.value).toBe("11");
+    expect(ver?.value).toBe("12");
     store.close();
   });
 
@@ -178,7 +270,7 @@ describe("schema migrations", () => {
       const ver = store.db
         .query<{ value: string }, []>("SELECT value FROM schema_meta WHERE key='schema_version'")
         .get();
-      expect(ver?.value).toBe("11");
+      expect(ver?.value).toBe("12");
 
       const schedule = store.db
         .query<{ enabled: number; workflow_ref: string }, []>(
@@ -218,6 +310,142 @@ describe("schema migrations", () => {
       store.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("v11 workflow definitions migrate to SDK ABI manifests and repoint runs and schedules", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-mig-v11-"));
+    try {
+      const path = join(dir, "old.db");
+      makeV11Db(path);
+      const db = new Database(path);
+      const oldHash = "wf_sha256_old_sdk";
+      const oldManifest = oldWorkflowManifest();
+      const newHash = workflowDefinitionHashForV12Migration(
+        canonicalWorkflowDefinitionManifestV12(oldManifest),
+      );
+      insertOldWorkflowDefinition(db, oldHash, oldManifest);
+      db.query(
+        `INSERT INTO runs (
+          run_id, workflow_name, definition_version, workflow_ref, status,
+          input_ref, created_at_ms
+        ) VALUES ('r_active', 'wf', ?, 'stdin', 'waiting-timer', 'null', 1)`,
+      ).run(oldHash);
+      db.query(
+        `INSERT INTO schedules (
+          name, workflow_ref, input_json, interval_ms, next_fire_ms, enabled
+        ) VALUES ('hourly', ?, 'null', 60000, 1, 1)`,
+      ).run(oldHash);
+      db.close();
+
+      const cacheRoot = join(dir, "definitions");
+      const store = JournalStore.open(path);
+      expect(store.getRun("r_active")?.definitionVersion).toBe(newHash);
+      const schedule = store.db
+        .query<{ workflow_ref: string; last_error_json: string | null }, []>(
+          "SELECT workflow_ref, last_error_json FROM schedules WHERE name = 'hourly'",
+        )
+        .get();
+      expect(schedule).toEqual({ workflow_ref: newHash, last_error_json: null });
+      expect(store.getWorkflowDefinition(oldHash)).toBeNull();
+      expect(store.getWorkflowDefinition(newHash)).not.toBeNull();
+
+      const entry = materializeWorkflowDefinition(store, newHash, cacheRoot);
+      expect(entry.endsWith("entry.ts")).toBe(true);
+      const kernel = new RealmKernel(store, { clock: () => 2, definitionCacheRoot: cacheRoot });
+      const out = await kernel.resume("r_active");
+      expect(out.status).toBe("finished");
+      store.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("v11 workflow migration fails on a recomputed hash collision with different content", () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-mig-v11-collision-"));
+    try {
+      const path = join(dir, "old.db");
+      makeV11Db(path);
+      const db = new Database(path);
+      const oldManifest = oldWorkflowManifest();
+      const newHash = workflowDefinitionHashForV12Migration(
+        canonicalWorkflowDefinitionManifestV12(oldManifest),
+      );
+      insertOldWorkflowDefinition(db, "wf_sha256_old_collision", oldManifest);
+      db.query(
+        `INSERT INTO workflow_definitions (
+          hash, name, kind, code, source_map, manifest_json, created_at_ms
+        ) VALUES (?, 'other', 'source', 'export default async () => 2;', NULL, '{}', 1)`,
+      ).run(newHash);
+      db.close();
+
+      expect(() => JournalStore.open(path)).toThrow(/workflow definition migration collision/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("v11 workflow migration collapses duplicate definitions that differ only by SDK pin", () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-mig-v11-duplicates-"));
+    try {
+      const path = join(dir, "old.db");
+      makeV11Db(path);
+      const db = new Database(path);
+      const oldA = oldWorkflowManifest(sdkWorkflowSource, "sha256-old-a");
+      const oldB = oldWorkflowManifest(sdkWorkflowSource, "sha256-old-b");
+      const newHash = workflowDefinitionHashForV12Migration(
+        canonicalWorkflowDefinitionManifestV12(oldA),
+      );
+      insertOldWorkflowDefinition(db, "wf_sha256_old_a", oldA);
+      insertOldWorkflowDefinition(db, "wf_sha256_old_b", oldB);
+      db.query(
+        `INSERT INTO runs (
+          run_id, workflow_name, definition_version, workflow_ref, status,
+          input_ref, created_at_ms
+        ) VALUES ('r_a', 'wf', 'wf_sha256_old_a', 'stdin', 'running', 'null', 1)`,
+      ).run();
+      db.query(
+        `INSERT INTO schedules (
+          name, workflow_ref, input_json, interval_ms, next_fire_ms, enabled
+        ) VALUES ('hourly', 'wf_sha256_old_b', 'null', 60000, 1, 0)`,
+      ).run();
+      db.close();
+
+      const store = JournalStore.open(path);
+      expect(store.getRun("r_a")?.definitionVersion).toBe(newHash);
+      expect(
+        store.db.query<{ workflow_ref: string }, []>("SELECT workflow_ref FROM schedules").get()
+          ?.workflow_ref,
+      ).toBe(newHash);
+      expect(store.getWorkflowDefinition("wf_sha256_old_a")).toBeNull();
+      expect(store.getWorkflowDefinition("wf_sha256_old_b")).toBeNull();
+      expect(
+        store.db.query<{ c: number }, []>("SELECT COUNT(*) AS c FROM workflow_definitions").get()
+          ?.c,
+      ).toBe(1);
+      store.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("v12 migration hash projection matches current snapshot creation at ship time", () => {
+    const store = JournalStore.memory();
+    try {
+      const { snapshot } = snapshotWorkflowSource(store, sdkWorkflowSource, {
+        name: "lock",
+        nowMs: 1,
+      });
+      const { workflowSdkAbi: _workflowSdkAbi, ...oldRuntime } = snapshot.manifest.runtime;
+      const migrated = canonicalWorkflowDefinitionManifestV12({
+        ...snapshot.manifest,
+        externalPackages: [{ name: "@kcosr/keel", root: "/old/keel", integrity: "sha256-old" }],
+        runtime: oldRuntime,
+      });
+      expect(canonicalJson(migrated)).toBe(canonicalJson(snapshot.manifest));
+      expect(workflowDefinitionHashForV12Migration(migrated)).toBe(snapshot.hash);
+    } finally {
+      store.close();
     }
   });
 });

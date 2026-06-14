@@ -290,7 +290,11 @@ secrets in workflow TypeScript.
 
 Client-captured workflow v1 is single-file only. The only external import a
 workflow source may use is the exact SDK import `@kcosr/keel`; relative imports,
-SDK subpaths, and arbitrary packages are rejected.
+SDK subpaths, and arbitrary packages are rejected. `@kcosr/keel` resolves through
+the current daemon's workflow SDK bridge, guarded by the workflow SDK ABI stored
+in the definition manifest. Compatible Keel upgrades can resume existing
+definitions; a daemon that does not support the stored ABI fails the run with a
+required-versus-supported ABI error.
 
 ### Workspace Root
 
@@ -689,7 +693,9 @@ with that name.
 Schedules pin the workflow definition hash captured when the schedule is created.
 They do not reread a path or automatically adopt later source edits. Existing
 path-based schedules from older databases are disabled by migration and should
-be recreated from current source.
+be recreated from current source. If a pinned definition requires an unsupported
+workflow SDK ABI, the daemon disables that schedule and persists the ABI error
+instead of retrying it on every supervisor tick.
 
 ## API Reference
 
@@ -833,9 +839,10 @@ runs.
 - Saved workflows, saved tasks, durable task pause/re-entry, and durable child
   workflow spawning (`ctx.spawn`) are not implemented in this v1 execute/auth
   pass.
-- Workflow definition manifests include runtime/import metadata and external
-  package tree integrity checks, but Keel does not vendor external packages into
-  the journal or provide lockfile-level package-store replay in v1.
+- Workflow definition manifests include runtime/import metadata and a workflow
+  SDK ABI for the daemon-provided `@kcosr/keel` bridge. Keel does not vendor
+  arbitrary external packages into the journal or provide lockfile-level
+  package-store replay in v1.
 - SQLite is the only implemented store. Postgres compatibility is a discipline
   enforced by tests, not a working backend.
 - Secrets and profiles are programmatic-only on the bundled daemon.

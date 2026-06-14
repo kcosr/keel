@@ -12,6 +12,7 @@ import { AgentProviderRegistry } from "../agents/types.ts";
 import { hashCapabilityToken } from "../auth/capabilities.ts";
 import { JournalStore } from "../journal/store.ts";
 import { captureWorkflowFile } from "../workflow-definitions/capture.ts";
+import { snapshotWorkflowSource } from "../workflow-definitions/snapshot.ts";
 import { DaemonClient } from "./client.ts";
 import { KeelDaemon } from "./server.ts";
 
@@ -452,6 +453,47 @@ describe("HITL over the socket", () => {
       daemon.stop();
     }
   });
+
+  test("unsupported workflow SDK ABI on approval wake fails the run and surfaces the error", async () => {
+    const socketPath = join(dir, "h-abi.sock");
+    const dbPath = join(dir, "h-abi.db");
+    const gateUrl = captureWorkflowFile(
+      new URL("../kernel/realm/fixtures/gate.workflow.ts", import.meta.url).pathname,
+    );
+    const daemon = new KeelDaemon({
+      socketPath,
+      dbPath,
+      agents: new AgentProviderRegistry().register(new MockProvider()),
+      superviseMs: 100_000,
+      adminToken: ADMIN_TOKEN,
+    });
+    await daemon.start();
+    try {
+      const c = await DaemonClient.connect(socketPath);
+      const { runId, capability } = await c.launchRun({
+        ...gateUrl,
+        input: null,
+        name: "gate",
+      });
+      await c.authenticate(capability as string);
+      await c.waitForRun(runId);
+      expect((await c.getRun(runId))?.status).toBe("waiting-human");
+      requireUnsupportedSdkAbiForRun(dbPath, runId);
+
+      await c.authenticate(ADMIN_TOKEN);
+      await expect(
+        c.decideApproval(runId, "approve-deploy", { status: "approved" }),
+      ).rejects.toThrow(/requires workflow SDK ABI 2, but this daemon supports ABI 1/);
+      const failed = await c.getRun(runId);
+      expect(failed?.status).toBe("failed");
+      expect(failed?.error?.message).toContain(
+        "requires workflow SDK ABI 2, but this daemon supports ABI 1",
+      );
+      c.close();
+    } finally {
+      daemon.stop();
+    }
+  });
 });
 
 describe("kill -9 daemon recovery", () => {
@@ -518,6 +560,72 @@ describe("kill -9 daemon recovery", () => {
       await d2.exited;
     }
   }, 30000);
+
+  test("unsupported workflow SDK ABI during orphan recovery fails the reclaimed run", async () => {
+    const socketPath = join(dir, "orphan-abi.sock");
+    const dbPath = join(dir, "orphan-abi.db");
+    const setup = JournalStore.open(dbPath);
+    try {
+      const { snapshot } = snapshotWorkflowSource(
+        setup,
+        'import { passthrough } from "@kcosr/keel";\nexport default async () => passthrough<number>().parse(1);\n',
+        {
+          name: "orphan",
+          nowMs: 1,
+          cacheRoot: join(dir, "setup-definitions"),
+        },
+      );
+      setup.insertRun({
+        runId: "orphan",
+        workflowName: "orphan",
+        definitionVersion: snapshot.hash,
+        workflowRef: "stdin",
+        status: "running",
+        parentRunId: null,
+        tenantId: null,
+        inputRef: "null",
+        outputRef: null,
+        errorJson: null,
+        heartbeatAtMs: null,
+        runtimeOwnerId: null,
+        createdAtMs: 1,
+      });
+      requireUnsupportedSdkAbi(setup, snapshot.hash);
+    } finally {
+      setup.close();
+    }
+
+    const daemon = new KeelDaemon({
+      socketPath,
+      dbPath,
+      ownerId: "orphan-reclaimer",
+      agents: new AgentProviderRegistry().register(new MockProvider()),
+      superviseMs: 100_000,
+    });
+    await daemon.start();
+    try {
+      await until(async () => {
+        const probe = JournalStore.open(dbPath);
+        try {
+          return probe.getRun("orphan")?.status === "failed";
+        } finally {
+          probe.close();
+        }
+      }, 4000);
+      const probe = JournalStore.open(dbPath);
+      try {
+        const failed = probe.getRun("orphan");
+        expect(failed?.runtimeOwnerId).toBe("orphan-reclaimer");
+        expect(JSON.parse(failed?.errorJson ?? "{}").message).toContain(
+          "requires workflow SDK ABI 2, but this daemon supports ABI 1",
+        );
+      } finally {
+        probe.close();
+      }
+    } finally {
+      daemon.stop();
+    }
+  });
 });
 
 async function waitForLine(stream: ReadableStream, prefix: string): Promise<void> {
@@ -537,4 +645,25 @@ async function until(cond: () => Promise<boolean | undefined>, timeoutMs: number
     await Bun.sleep(50);
   }
   throw new Error("condition not met in time");
+}
+
+function requireUnsupportedSdkAbiForRun(dbPath: string, runId: string): void {
+  const store = JournalStore.open(dbPath);
+  try {
+    const run = store.getRun(runId);
+    if (!run) throw new Error(`run ${runId} not found`);
+    requireUnsupportedSdkAbi(store, run.definitionVersion);
+  } finally {
+    store.close();
+  }
+}
+
+function requireUnsupportedSdkAbi(store: JournalStore, hash: string): void {
+  const row = store.getWorkflowDefinition(hash);
+  if (!row?.manifestJson) throw new Error(`missing manifest for ${hash}`);
+  const manifest = JSON.parse(row.manifestJson) as { runtime: { workflowSdkAbi: number } };
+  manifest.runtime.workflowSdkAbi = 2;
+  store.db
+    .query("UPDATE workflow_definitions SET manifest_json = ? WHERE hash = ?")
+    .run(JSON.stringify(manifest), hash);
 }

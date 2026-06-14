@@ -19,6 +19,7 @@ import {
 import { redactCapabilityTokensInValue } from "../auth/redaction.ts";
 import { JournalStore } from "../journal/store.ts";
 import { RealmKernel } from "../kernel/realm/realm-host.ts";
+import { failRunWithError } from "../kernel/run-errors.ts";
 import { Supervisor } from "../kernel/supervisor.ts";
 import type { EventEnvelope, WorkflowProvenance } from "../rpc/contract.ts";
 import { EventHub } from "../rpc/event-hub.ts";
@@ -26,6 +27,7 @@ import { InProcessKeel } from "../rpc/in-process.ts";
 import {
   DEFAULT_WORKFLOW_DEFINITION_TTL_MS,
   evictWorkflowDefinitionCache,
+  isUnsupportedWorkflowSdkAbiError,
   keelPackageRoot,
   snapshotWorkflowSource,
 } from "../workflow-definitions/snapshot.ts";
@@ -173,7 +175,14 @@ export class KeelDaemon {
     if (!run) throw new Error(`run ${runId} not found`);
     if (run.status.startsWith("waiting-")) {
       this.claimOrReject(runId);
-      await this.api.resumeRun(runId);
+      try {
+        await this.api.resumeRun(runId);
+      } catch (err) {
+        if (isUnsupportedWorkflowSdkAbiError(err)) {
+          failRunWithError(this.store, runId, err, this.clock());
+        }
+        throw err;
+      }
       const out = await this.api.waitForRun(runId);
       return { status: out.status };
     }
@@ -196,7 +205,11 @@ export class KeelDaemon {
     for (const run of this.store.listRunsByStatus("running")) {
       if (this.store.claimRun(run.runId, this.ownerId, staleBefore, this.clock())) {
         this.owned.add(run.runId);
-        void this.api.resumeRun(run.runId).catch(() => {});
+        void this.api.resumeRun(run.runId).catch((err) => {
+          if (isUnsupportedWorkflowSdkAbiError(err)) {
+            failRunWithError(this.store, run.runId, err, this.clock());
+          }
+        });
       }
     }
   }

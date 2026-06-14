@@ -4,7 +4,9 @@
 // (a fresh supervisor reads due timers/schedules and proceeds).
 
 import type { JournalStore } from "../journal/store.ts";
+import { isUnsupportedWorkflowSdkAbiError } from "../workflow-definitions/snapshot.ts";
 import type { RealmKernel } from "./realm/realm-host.ts";
+import { failRunWithError, serializedErrorJson } from "./run-errors.ts";
 
 export interface SupervisorDeps {
   store: JournalStore;
@@ -46,7 +48,10 @@ export class Supervisor {
       try {
         await this.kernel.resume(runId);
         woken.push(runId);
-      } catch {
+      } catch (err) {
+        if (isUnsupportedWorkflowSdkAbiError(err)) {
+          failRunWithError(this.store, runId, err, now);
+        }
         // a resume that re-parks (a later timer) or errors is left for next tick
       }
     }
@@ -56,14 +61,23 @@ export class Supervisor {
   private async fireDueSchedules(now: number): Promise<string[]> {
     const fired: string[] = [];
     for (const s of this.store.dueSchedules(now)) {
-      const { runId } = this.kernel.launchDefinition(
-        s.workflowRef,
-        s.inputJson ? JSON.parse(s.inputJson) : null,
-        {
-          name: s.name,
-          workflowRef: s.workflowRef,
-        },
-      );
+      let runId: string;
+      try {
+        runId = this.kernel.launchDefinition(
+          s.workflowRef,
+          s.inputJson ? JSON.parse(s.inputJson) : null,
+          {
+            name: s.name,
+            workflowRef: s.workflowRef,
+          },
+        ).runId;
+      } catch (err) {
+        if (isUnsupportedWorkflowSdkAbiError(err)) {
+          this.store.disableScheduleWithError(s.name, serializedErrorJson(err), now);
+          continue;
+        }
+        throw err;
+      }
       if (!this.claim(runId)) continue;
       // advance to the next slot from the scheduled time (not drifting on now)
       const next = Math.max(s.nextFireMs + s.intervalMs, now + s.intervalMs);

@@ -7,6 +7,7 @@ import {
   readFileSync,
   readlinkSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -81,6 +82,7 @@ describe("workflow definition snapshots", () => {
         const link = join(cacheRoot, snapshot.hash, "node_modules", "@kcosr", "keel");
         expect(lstatSync(link).isSymbolicLink()).toBe(true);
         expect(resolve(readlinkSync(link))).toBe(resolve(import.meta.dir, "..", ".."));
+        expect(snapshot.manifest.externalPackages).toEqual([]);
         expect(readFileSync(join(cacheRoot, snapshot.hash, "entry.ts"), "utf8")).toContain(
           'from "./node_modules/@kcosr/keel/src/sdk.ts"',
         );
@@ -185,7 +187,7 @@ describe("workflow definition snapshots", () => {
     }
   });
 
-  test("cached materialization still validates external package integrity", () => {
+  test("cached materialization validates SDK ABI instead of SDK package integrity", () => {
     const dir = mkdtempSync(join(tmpdir(), "keel-snapshot-integrity-"));
     const store = JournalStore.memory();
     try {
@@ -200,18 +202,57 @@ describe("workflow definition snapshots", () => {
       const row = store.getWorkflowDefinition(snapshot.hash);
       if (!row?.manifestJson) throw new Error("missing workflow definition manifest");
       const manifest = JSON.parse(row.manifestJson) as {
-        externalPackages: Array<{ integrity: string }>;
+        externalPackages: Array<{ name: string; root: string; integrity: string }>;
+        runtime: { workflowSdkAbi: number };
       };
-      const pinned = manifest.externalPackages[0];
-      if (!pinned) throw new Error("missing external package pin");
-      pinned.integrity = "sha256-bad";
+      manifest.externalPackages.push({
+        name: "@kcosr/keel",
+        root: "/old/keel",
+        integrity: "sha256-bad",
+      });
       store.db
         .query("UPDATE workflow_definitions SET manifest_json = ? WHERE hash = ?")
         .run(JSON.stringify(manifest), snapshot.hash);
 
-      expect(() => materializeWorkflowDefinition(store, snapshot.hash, cacheRoot)).toThrow(
-        /changed since snapshot/,
+      expect(materializeWorkflowDefinition(store, snapshot.hash, cacheRoot)).toBe(
+        join(cacheRoot, snapshot.hash, "entry.ts"),
       );
+
+      manifest.runtime.workflowSdkAbi = 2;
+      store.db
+        .query("UPDATE workflow_definitions SET manifest_json = ? WHERE hash = ?")
+        .run(JSON.stringify(manifest), snapshot.hash);
+      expect(() => materializeWorkflowDefinition(store, snapshot.hash, cacheRoot)).toThrow(
+        /requires workflow SDK ABI 2, but this daemon supports ABI 1/,
+      );
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("cached materialization repairs a stale SDK symlink", () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-snapshot-stale-sdk-"));
+    const store = JournalStore.memory();
+    try {
+      const cacheRoot = join(dir, "definitions");
+      const source =
+        'import { passthrough } from "@kcosr/keel";\nexport default async () => passthrough();\n';
+      const { snapshot } = snapshotWorkflowSource(store, source, {
+        name: "stale-sdk",
+        nowMs: 1,
+        cacheRoot,
+      });
+      const oldRoot = join(dir, "old-keel");
+      mkdirSync(join(oldRoot, "src"), { recursive: true });
+      writeFileSync(join(oldRoot, "package.json"), '{"name":"@kcosr/keel"}\n');
+      writeFileSync(join(oldRoot, "src", "sdk.ts"), "export {};\n");
+      const link = join(cacheRoot, snapshot.hash, "node_modules", "@kcosr", "keel");
+      rmSync(link, { recursive: true, force: true });
+      symlinkSync(oldRoot, link, "dir");
+
+      materializeWorkflowDefinition(store, snapshot.hash, cacheRoot);
+      expect(resolve(readlinkSync(link))).toBe(resolve(import.meta.dir, "..", ".."));
     } finally {
       store.close();
       rmSync(dir, { recursive: true, force: true });

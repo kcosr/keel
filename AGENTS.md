@@ -40,6 +40,24 @@ database:
 The migration boundary is the compatibility boundary. After migration has run,
 the rest of the code should operate against the current schema only.
 
+## Workflow SDK ABI
+
+`WORKFLOW_SDK_ABI_VERSION` is the resume compatibility boundary for workflow
+source that imports `@kcosr/keel`. Bump it when a change can alter the
+workflow-facing contract or replay-visible behavior, including:
+
+- exported SDK names or call shapes in `src/sdk.ts`;
+- `ctx.*` method signatures, durable wait semantics, or replay-visible behavior;
+- worker/host protocol expectations required by compiled workflow source;
+- schema helper behavior or structural hashing visible to workflow authors;
+- workflow definition manifest/runtime fields used during materialization.
+
+Do not bump the ABI for internal implementation changes that preserve the
+workflow-facing contract. If a future daemon claims support for more than one
+workflow SDK ABI, materialization must route older ABIs to an actual versioned
+bridge or compatibility shim; accepting multiple numbers while linking every
+definition to the current `src/sdk.ts` is not sufficient.
+
 ## Capabilities
 
 Agent permissions should fail closed.

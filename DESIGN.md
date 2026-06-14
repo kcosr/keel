@@ -485,17 +485,23 @@ import; the cache is not the source of truth.
 
 Client-captured workflow v1 is intentionally single-file. The only external
 import allowed in workflow source is the exact SDK specifier `@kcosr/keel`,
-linked from the daemon's installed package during materialization. Relative
-imports, SDK subpaths, arbitrary packages, dynamic imports, and
-capability/nondeterministic imports are rejected by the snapshot/lint boundary.
-Resume/retry/rewind/fork use the stored definition. Rerun with a source override
-creates a new snapshot intentionally.
+linked from the daemon's installed package during materialization. That SDK is a
+runtime-provided bridge guarded by `runtime.workflowSdkAbi` in the definition
+manifest, not a byte-for-byte package-tree pin. Compatible Keel upgrades can
+resume old definitions when the daemon supports the stored workflow SDK ABI; an
+unsupported ABI is a deterministic pre-execution failure. Relative imports, SDK
+subpaths, arbitrary packages, dynamic imports, and capability/nondeterministic
+imports are rejected by the snapshot/lint boundary. Resume/retry/rewind/fork use
+the stored definition. Rerun with a source override creates a new snapshot
+intentionally.
 
 The materialized `definitions/<hash>/` tree is a rebuildable cache, not durable
 state. It is written through a temp directory and atomic rename so a concurrent
-resume never imports a half-written tree. Definition-row GC prunes only old rows
-unreferenced by any run and by any enabled schedule; cache eviction skips hashes
-used by running or parked runs.
+resume never imports a half-written tree. Materialization validates the workflow
+SDK ABI and ensures the `@kcosr/keel` link targets the current package root
+before execution. Definition-row GC prunes only old rows unreferenced by any run
+and by any enabled schedule; cache eviction skips hashes used by running or
+parked runs.
 
 ### 8.5 Run capabilities
 

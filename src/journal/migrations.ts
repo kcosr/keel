@@ -9,9 +9,14 @@
 // History: v1 base → v2 runs.workflow_ref → v3 schedules table → v4
 // signals.consumed_key → v5 journal.seq → v6 approvals.prompt/requested_caps_json
 // → v7 workflow_definitions → v8 capabilities → v9 schedule definitions
-// → v10 nullable display names → v11 durable agent session tables.
+// → v10 nullable display names → v11 durable agent session tables
+// → v12 workflow SDK ABI manifests and schedule failure state.
 
 import type { Database } from "bun:sqlite";
+import { canonicalJson, sha256Hex } from "../hash.ts";
+
+const DEFINITION_PREFIX = "wf_sha256_";
+const WORKFLOW_SDK_ABI_V12 = 1;
 
 /** True if `table` already has `column` (so we don't re-add it). */
 function hasColumn(db: Database, table: string, column: string): boolean {
@@ -120,7 +125,144 @@ export function applyMigration(db: Database, fromVersion: number): void {
       break;
     case 10: // → v11: durable logical agent session metadata tables.
       break;
+    case 11: // → v12: workflow SDK ABI manifests and durable schedule fire errors.
+      addColumn(db, "schedules", "last_error_json", "TEXT");
+      addColumn(db, "schedules", "last_failed_at_ms", "INTEGER");
+      migrateWorkflowDefinitionManifestsToV12(db);
+      break;
     default:
       throw new Error(`no migration defined from schema version ${fromVersion}`);
   }
+}
+
+interface RawWorkflowDefinitionV11 {
+  hash: string;
+  name: string | null;
+  kind: string;
+  code: string;
+  source_map: string | null;
+  manifest_json: string | null;
+  created_at_ms: number;
+}
+
+interface WorkflowDefinitionManifestV11 {
+  format?: unknown;
+  entry?: unknown;
+  modules?: unknown;
+  externalImports?: unknown;
+  externalPackages?: unknown;
+  sourceRoot?: unknown;
+  runtime?: Record<string, unknown>;
+}
+
+function migrateWorkflowDefinitionManifestsToV12(db: Database): void {
+  const rows = db.query<RawWorkflowDefinitionV11, []>("SELECT * FROM workflow_definitions").all();
+  for (const row of rows) {
+    if (!row.manifest_json) continue;
+    const manifest = JSON.parse(row.manifest_json) as WorkflowDefinitionManifestV11;
+    if (manifest.format !== "keel.workflow-definition.v1") continue;
+    if (typeof manifest.runtime?.workflowSdkAbi === "number") continue;
+
+    const canonicalManifest = canonicalWorkflowDefinitionManifestV12(manifest);
+    const canonicalManifestJson = canonicalJson(canonicalManifest);
+    const newHash = workflowDefinitionHashForV12Migration(canonicalManifest);
+    const existing = db
+      .query<RawWorkflowDefinitionV11, [string]>(
+        "SELECT * FROM workflow_definitions WHERE hash = ?",
+      )
+      .get(newHash);
+
+    if (existing) {
+      assertWorkflowDefinitionCollisionIsMergeable(existing, row, canonicalManifestJson, newHash);
+    } else {
+      db.query(
+        `INSERT INTO workflow_definitions (
+           hash, name, kind, code, source_map, manifest_json, created_at_ms
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        newHash,
+        row.name,
+        row.kind,
+        row.code,
+        row.source_map,
+        canonicalManifestJson,
+        row.created_at_ms,
+      );
+    }
+
+    db.query("UPDATE runs SET definition_version = ? WHERE definition_version = ?").run(
+      newHash,
+      row.hash,
+    );
+    db.query("UPDATE schedules SET workflow_ref = ? WHERE workflow_ref = ?").run(newHash, row.hash);
+    db.query(
+      `DELETE FROM workflow_definitions
+       WHERE hash = ?
+         AND hash NOT IN (SELECT definition_version FROM runs)
+         AND hash NOT IN (SELECT workflow_ref FROM schedules)`,
+    ).run(row.hash);
+  }
+}
+
+function assertWorkflowDefinitionCollisionIsMergeable(
+  existing: RawWorkflowDefinitionV11,
+  oldRow: RawWorkflowDefinitionV11,
+  canonicalManifestJson: string,
+  newHash: string,
+): void {
+  if (
+    existing.kind !== oldRow.kind ||
+    existing.code !== oldRow.code ||
+    existing.source_map !== oldRow.source_map ||
+    existing.manifest_json !== canonicalManifestJson
+  ) {
+    throw new Error(
+      `workflow definition migration collision for ${newHash}: existing row differs from migrated content`,
+    );
+  }
+}
+
+export function canonicalWorkflowDefinitionManifestV12(
+  manifest: WorkflowDefinitionManifestV11,
+): Record<string, unknown> {
+  const runtime =
+    manifest.runtime && typeof manifest.runtime === "object" && !Array.isArray(manifest.runtime)
+      ? manifest.runtime
+      : {};
+  const packages = Array.isArray(manifest.externalPackages)
+    ? manifest.externalPackages.filter(
+        (pkg) =>
+          !(
+            pkg &&
+            typeof pkg === "object" &&
+            "name" in pkg &&
+            (pkg as { name?: unknown }).name === "@kcosr/keel"
+          ),
+      )
+    : [];
+  return {
+    format: manifest.format,
+    entry: manifest.entry,
+    modules: manifest.modules,
+    externalImports: manifest.externalImports,
+    externalPackages: packages,
+    sourceRoot: manifest.sourceRoot,
+    runtime: {
+      ...runtime,
+      workflowSdkAbi: WORKFLOW_SDK_ABI_V12,
+    },
+  };
+}
+
+export function workflowDefinitionHashForV12Migration(manifest: Record<string, unknown>): string {
+  return `${DEFINITION_PREFIX}${sha256Hex(
+    canonicalJson({
+      format: manifest.format,
+      entry: manifest.entry,
+      modules: manifest.modules,
+      externalImports: manifest.externalImports,
+      externalPackages: manifest.externalPackages,
+      runtime: manifest.runtime,
+    }),
+  )}`;
 }

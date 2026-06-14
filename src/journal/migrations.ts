@@ -10,7 +10,8 @@
 // signals.consumed_key → v5 journal.seq → v6 approvals.prompt/requested_caps_json
 // → v7 workflow_definitions → v8 capabilities → v9 schedule definitions
 // → v10 nullable display names → v11 durable agent session tables
-// → v12 workflow SDK ABI manifests and schedule failure state.
+// → v12 workflow SDK ABI manifests and schedule failure state
+// → v13 run targets and retained agent session workspaces.
 
 import type { Database } from "bun:sqlite";
 import { parse } from "acorn";
@@ -131,6 +132,27 @@ export function applyMigration(db: Database, fromVersion: number): void {
       addColumn(db, "schedules", "last_error_json", "TEXT");
       addColumn(db, "schedules", "last_failed_at_ms", "INTEGER");
       migrateWorkflowDefinitionManifestsToV12(db);
+      break;
+    case 12: // → v13: run/schedule targets and retained session workspace metadata.
+      addColumn(db, "runs", "run_target", "TEXT");
+      addColumn(db, "schedules", "schedule_target", "TEXT");
+      db.exec(`CREATE TABLE IF NOT EXISTS agent_session_workspaces (
+        run_id              TEXT NOT NULL,
+        agent_key           TEXT NOT NULL,
+        workspace_path      TEXT NOT NULL,
+        target              TEXT NOT NULL,
+        base_commit         TEXT NOT NULL,
+        status              TEXT NOT NULL,
+        last_turn_key       TEXT,
+        last_turn_attempt   INTEGER,
+        last_diff_event_seq INTEGER,
+        last_error_event_seq INTEGER,
+        created_at_ms       INTEGER NOT NULL,
+        updated_at_ms       INTEGER NOT NULL,
+        merged_at_ms        INTEGER,
+        discarded_at_ms     INTEGER,
+        PRIMARY KEY (run_id, agent_key)
+      )`);
       break;
     default:
       throw new Error(`no migration defined from schema version ${fromVersion}`);

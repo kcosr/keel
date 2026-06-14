@@ -3,7 +3,12 @@ import type { Json } from "../hash.ts";
 import { RUN_FINISHED_INLINE_OUTPUT_BYTES } from "./output.ts";
 
 export interface DurableAgentEvent {
-  type: "agent.message" | "agent.tool_call" | "agent.tool_result";
+  type:
+    | "agent.message"
+    | "agent.tool_call"
+    | "agent.tool_result"
+    | "agent.diff"
+    | "workspace.diff_error";
   payload: Json;
 }
 

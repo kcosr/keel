@@ -132,13 +132,15 @@ bun src/cli/keel.ts <command> [args]
 |---|---|
 | `daemon` | Start the daemon in the foreground. |
 | `link [dir]` | Symlink this repo's SDK into `<dir>/node_modules`; defaults to the current directory. |
-| `launch [workflow.ts] [--name n] [--input json] [--output json\|text\|ndjson] [--tools] [--detach] [--emit-capability]` | Start a run from client-captured workflow source. Attached launch streams NDJSON by default; detached launch prints JSON. |
-| `run [workflow.ts] [--name n] [--input json] [--output json\|text\|ndjson] [--tools]` | Launch a run and print a JSON envelope, text transcript, or NDJSON events. |
+| `launch [workflow.ts] [--name n] [--input json] [--target dir] [--output json\|text\|ndjson] [--tools] [--detach] [--emit-capability]` | Start a run from client-captured workflow source. Attached launch streams NDJSON by default; detached launch prints JSON. |
+| `run [workflow.ts] [--name n] [--input json] [--target dir] [--output json\|text\|ndjson] [--tools]` | Launch a run and print a JSON envelope, text transcript, or NDJSON events. |
 | `watch <runId> [--output ndjson\|text] [--tools]` | Stream run events until terminal or parked. |
 | `get <runId>` | Print the canonical run projection as JSON. |
 | `output <runId> [--output json\|text]` | Print the terminal workflow output. |
 | `report <runId> [--output json\|text]` | Print a journaled per-node result digest. |
 | `list [--output text\|json]` | List runs as an aligned table or JSON envelope. Requires admin. |
+| `schedule put <name> [workflow.ts] --interval-ms ms [--target dir]` | Create or replace a pinned workflow schedule. Requires admin. |
+| `workspace list/show/diff/merge/discard/gc ...` | Inspect and manage retained isolated session workspaces. |
 | `tui [runId] [--status status] [--limit n] [--output text]` | Open an interactive run browser or direct run detail/watch view. Browser mode requires admin. |
 | `gc` | Prune unreferenced workflow definition rows and cache entries. Requires admin. |
 | `resume [--detach] [--tools] <runId>` | Resume a parked, interrupted, or incomplete run. Watches by default. |
@@ -375,6 +377,9 @@ Workflow input is always passed with `--input <json>`. The positional slot is
 only source, never input. `--name` is an optional display label; if omitted for
 stdin launches, the run is unnamed (`null` in JSON, `(unnamed)` in text output).
 Names are not handles and may repeat. Use run ids for follow-up commands.
+`--target <dir>` overrides the default run target (the CLI cwd); the selected
+target is stored with the run and inherited by agents unless a profile/spec sets
+a target.
 
 On launch, the daemon stores an immutable workflow definition snapshot by content
 hash and runs from a daemon-owned materialized cache. Resume, retry, rewind,
@@ -391,24 +396,37 @@ in the definition manifest. Compatible Keel upgrades can resume existing
 definitions; a daemon that does not support the stored ABI fails the run with a
 required-versus-supported ABI error.
 
-### Workspace Root
+### Targets And Retained Workspaces
 
-`KEEL_WORKSPACE_ROOT` points to the git repository root used when an agent sets
-`workspaceIsolation: true`:
+Every new run records a default `target`: for `keel launch` and `keel run` this
+is the CLI cwd, or `--target <dir>` when supplied. Non-isolated agents execute
+with provider `cwd = target`; Keel does not fall back to the daemon cwd. Agent
+specs/profiles may set their own absolute `target`.
+
+`workspaceIsolation: true` requires the resolved target to be the git repository
+root. If a subdirectory is supplied, the run fails and names the detected repo
+root to pass explicitly. Isolated `ctx.agent` calls still use a temporary
+worktree and emit `agent.diff`.
+
+Isolated `ctx.agentSession` participants use one retained worktree per
+`(runId, agentKey)` under `KEEL_WORKSPACE_STORE` (default: beside the journal
+under `KEEL_DIR/workspaces` for the bundled daemon). The workspace is reused
+across turns and retries, marked `pending_review` when the run becomes terminal,
+and is not merged or deleted automatically.
 
 ```bash
-KEEL_ADMIN_TOKEN=kc_admin_local \
-  KEEL_WORKSPACE_ROOT=/home/kevin/worktrees/keel \
-  keel daemon
+keel workspace list <runId>
+keel workspace show <runId> <agentKey>
+keel workspace diff <runId> <agentKey> [--output json]
+keel workspace merge <runId> <agentKey>
+keel workspace discard <runId> <agentKey>
+keel workspace gc [--older-than-ms ms] [--include-pending]
 ```
 
-Agents that do not request workspace isolation do not require a workspace root.
-An agent with `workspaceIsolation: true` fails closed without one; it does not
-fall back to editing the daemon cwd.
-
-When enabled, the agent works in an isolated git worktree at the run's base
-commit. Its changes are captured as an `agent.diff` event and are not merged
-into the real tree automatically.
+Merge/discard are explicit operator actions and refuse while the run is
+non-terminal or the participant has an active turn. Merge applies the current
+workspace state back to its recorded target; the retained workspace remains until
+discarded or garbage-collected.
 
 ### Authorization
 
@@ -598,6 +616,7 @@ const finding = await ctx.agent({
 | `allowTools?` | Provider-native tool additions after policy resolution. |
 | `denyTools?` | Provider-native tool removals after policy resolution. |
 | `workspaceIsolation?` | Explicit opt-in to isolated worktree execution and `agent.diff` capture. |
+| `target?` | Absolute daemon-resolvable directory for this agent; defaults to the run target. Isolated agents require a git repository root. |
 | `capabilities?` | Explicit normalized capability declaration used when `toolPolicy` is omitted. |
 | `secrets?` | Secret names to inject from the side channel. |
 | `onFailure?` | `"throw"` by default, or `"null"` to tolerate terminal failure. |
@@ -669,15 +688,16 @@ Both keys must match `[A-Za-z0-9_-]+`; ordinary `ctx.step` and `ctx.agent` keys
 may not start with `__session.`.
 
 Participant identity is fixed for the run after profiles, tool policy, allowed
-tools, denied tools, capabilities, workspace isolation, and secret names are
-resolved. Changing the participant identity or reusing a turn key with a changed
+tools, denied tools, capabilities, workspace isolation, target, and secret names
+are resolved. Changing the participant identity or reusing a turn key with a changed
 prompt/schema/options fails the run instead of starting a fresh backend session.
 
 Session participants require providers that support stable backend sessions
 (`pi`/Codex and `claude`). A later turn must resume from the latest completed
 session token; if the token is missing or the provider cannot resume, the turn
-fails. `workspaceIsolation: true` is not supported for `ctx.agentSession` yet.
-If `onFailure: "null"` is set, a tolerated failure can complete as `null` only
+fails. With `workspaceIsolation: true`, one retained workspace is created per
+`(runId, agentKey)`, reused across all turns/retries, and retained for explicit
+inspect/merge/discard/GC. If `onFailure: "null"` is set, a tolerated failure can complete as `null` only
 after a session token has been captured.
 
 Runs that use `ctx.agentSession` can resume after crashes and can retry failed
@@ -805,8 +825,10 @@ that durable input.
 
 ### Schedules
 
-Schedules pin the workflow definition hash captured when the schedule is created.
-They do not reread a path or automatically adopt later source edits. Existing
+Schedules pin the workflow definition hash and default target captured when the
+schedule is created. CLI schedule creation defaults the target to the creation
+cwd and supports `--target <dir>`. Schedules do not reread a path or
+automatically adopt later source edits. Existing
 path-based schedules from older databases are disabled by migration and should
 be recreated from current source. If a pinned definition requires an unsupported
 workflow SDK ABI, the daemon disables that schedule and persists the ABI error
@@ -823,13 +845,15 @@ Unix socket; tests and embedded callers may use it in-process.
 interface LaunchRequest {
   source: string;
   input: unknown;
+  target?: string; // required by raw API callers; CLI/client wrappers supply cwd by default
   name?: string | null;
   provenance?: { kind: "stdin" } | { kind: "clientPath"; path: string };
 }
 ```
 
-`source` is workflow TypeScript captured by the client. `provenance` is
-display-only; the daemon never opens or parses it for execution.
+`source` is workflow TypeScript captured by the client. `target` is the default
+daemon-resolvable run target inherited by agents. `provenance` is display-only;
+the daemon never opens or parses it for execution.
 
 ### KeelApi
 
@@ -849,6 +873,12 @@ interface KeelApi {
   getRunReport(runId: string): RunReport | null;
   getBlockage(runId: string): Blockage;
   listRuns(): RunSummary[];
+  listRunWorkspaces(runId: string): RunWorkspaceView[];
+  getRunWorkspace(runId: string, agentKey: string): RunWorkspaceView | null;
+  getRunWorkspaceDiff(runId: string, agentKey: string): RunWorkspaceDiff;
+  mergeRunWorkspace(runId: string, agentKey: string): RunWorkspaceView;
+  discardRunWorkspace(runId: string, agentKey: string): RunWorkspaceView;
+  gcWorkspaces(opts?: { olderThanMs?: number; includePending?: boolean }): WorkspaceGcResult;
   waitForRun(runId: string): Promise<RunOutcome>;
   getRunOutput(runId: string): Promise<RunOutcome>;
   gcDefinitions(opts?: { ttlMs?: number; cacheMinAgeMs?: number }): Promise<{

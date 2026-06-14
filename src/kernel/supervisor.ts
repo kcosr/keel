@@ -69,6 +69,7 @@ export class Supervisor {
           {
             name: s.name,
             workflowRef: s.workflowRef,
+            target: s.scheduleTarget,
           },
         ).runId;
       } catch (err) {

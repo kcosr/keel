@@ -916,6 +916,7 @@ describe("keel CLI", () => {
             createdAtMs: number;
             finishedAtMs: number | null;
             parentRunId: string | null;
+            runTarget?: string | null;
           }>;
         };
         expect(payload.runs.map((run) => run.runId)).toEqual([firstRun.runId, secondRun.runId]);
@@ -924,6 +925,7 @@ describe("keel CLI", () => {
           "finishedAtMs",
           "parentRunId",
           "runId",
+          "runTarget",
           "status",
           "workflowName",
         ]);

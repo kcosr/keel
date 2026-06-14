@@ -6,7 +6,6 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { canonicalJson } from "../hash.ts";
 import { RealmKernel } from "../kernel/realm/realm-host.ts";
 import {
   materializeWorkflowDefinition,
@@ -194,7 +193,7 @@ function insertOldWorkflowDefinition(
 }
 
 describe("schema migrations", () => {
-  test("a v4 DB migrates forward to v12 in place and idempotently", () => {
+  test("a v4 DB migrates forward to v13 in place and idempotently", () => {
     const dir = mkdtempSync(join(tmpdir(), "keel-mig-"));
     try {
       const path = join(dir, "old.db");
@@ -207,7 +206,7 @@ describe("schema migrations", () => {
       const ver = store.db
         .query<{ value: string }, []>("SELECT value FROM schema_meta WHERE key='schema_version'")
         .get();
-      expect(ver?.value).toBe("12");
+      expect(ver?.value).toBe("13");
 
       // new columns exist
       const jcols = store.db.query<{ name: string }, []>("PRAGMA table_info(journal)").all();
@@ -231,6 +230,16 @@ describe("schema migrations", () => {
         .query<{ name: string }, []>("PRAGMA table_info(agent_session_turns)")
         .all();
       expect(turns.some((c) => c.name === "observed_session_token")).toBe(true);
+      const runCols = store.db.query<{ name: string }, []>("PRAGMA table_info(runs)").all();
+      expect(runCols.some((c) => c.name === "run_target")).toBe(true);
+      const scheduleCols = store.db
+        .query<{ name: string }, []>("PRAGMA table_info(schedules)")
+        .all();
+      expect(scheduleCols.some((c) => c.name === "schedule_target")).toBe(true);
+      const workspaces = store.db
+        .query<{ name: string }, []>("PRAGMA table_info(agent_session_workspaces)")
+        .all();
+      expect(workspaces.some((c) => c.name === "workspace_path")).toBe(true);
 
       // existing rows preserved (additive) and seq backfilled per-run monotonic
       const rows = store.listJournalRows("r");
@@ -256,7 +265,7 @@ describe("schema migrations", () => {
     const ver = store.db
       .query<{ value: string }, []>("SELECT value FROM schema_meta WHERE key='schema_version'")
       .get();
-    expect(ver?.value).toBe("12");
+    expect(ver?.value).toBe("13");
     store.close();
   });
 
@@ -270,7 +279,7 @@ describe("schema migrations", () => {
       const ver = store.db
         .query<{ value: string }, []>("SELECT value FROM schema_meta WHERE key='schema_version'")
         .get();
-      expect(ver?.value).toBe("12");
+      expect(ver?.value).toBe("13");
 
       const schedule = store.db
         .query<{ enabled: number; workflow_ref: string }, []>(
@@ -370,11 +379,13 @@ describe("schema migrations", () => {
       expect(store.getWorkflowDefinition(oldHash)).toBeNull();
       expect(store.getWorkflowDefinition(newHash)).not.toBeNull();
 
-      const entry = materializeWorkflowDefinition(store, newHash, cacheRoot);
-      expect(entry.endsWith("entry.ts")).toBe(true);
+      expect(() => materializeWorkflowDefinition(store, newHash, cacheRoot)).toThrow(
+        /requires workflow SDK ABI 1, but this daemon supports ABI 2/,
+      );
       const kernel = new RealmKernel(store, { clock: () => 2, definitionCacheRoot: cacheRoot });
-      const out = await kernel.resume("r_active");
-      expect(out.status).toBe("finished");
+      await expect(kernel.resume("r_active")).rejects.toThrow(
+        /requires workflow SDK ABI 1, but this daemon supports ABI 2/,
+      );
       store.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -493,7 +504,7 @@ describe("schema migrations", () => {
     }
   });
 
-  test("v12 migration hash projection matches current snapshot creation at ship time", () => {
+  test("v12 migration stamps the historical workflow SDK ABI", () => {
     const store = JournalStore.memory();
     try {
       const { snapshot } = snapshotWorkflowSource(store, sdkWorkflowSource, {
@@ -506,8 +517,8 @@ describe("schema migrations", () => {
         externalPackages: [{ name: "@kcosr/keel", root: "/old/keel", integrity: "sha256-old" }],
         runtime: oldRuntime,
       });
-      expect(canonicalJson(migrated)).toBe(canonicalJson(snapshot.manifest));
-      expect(workflowDefinitionHashForV12Migration(migrated)).toBe(snapshot.hash);
+      expect((migrated.runtime as { workflowSdkAbi: number }).workflowSdkAbi).toBe(1);
+      expect(workflowDefinitionHashForV12Migration(migrated)).not.toBe(snapshot.hash);
     } finally {
       store.close();
     }

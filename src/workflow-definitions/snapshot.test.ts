@@ -248,12 +248,12 @@ describe("workflow definition snapshots", () => {
         join(cacheRoot, snapshot.hash, "entry.ts"),
       );
 
-      manifest.runtime.workflowSdkAbi = 2;
+      manifest.runtime.workflowSdkAbi = 3;
       store.db
         .query("UPDATE workflow_definitions SET manifest_json = ? WHERE hash = ?")
         .run(JSON.stringify(manifest), snapshot.hash);
       expect(() => materializeWorkflowDefinition(store, snapshot.hash, cacheRoot)).toThrow(
-        /requires workflow SDK ABI 2, but this daemon supports ABI 1/,
+        /requires workflow SDK ABI 3, but this daemon supports ABI 2/,
       );
     } finally {
       store.close();
@@ -354,7 +354,7 @@ function putPersistedDefinition(
       runtime: {
         bunVersion: Bun.version,
         keelDefinitionAbi: 1,
-        workflowSdkAbi: 1,
+        workflowSdkAbi: 2,
       },
     }),
     createdAtMs: 1,

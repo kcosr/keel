@@ -58,9 +58,10 @@ Postgres-dialect discipline).
   (timer id `${key}#${ms}`); `ctx.signal` keys by name + per-name occurrence — so
   reordering/inserting waits doesn't reattach a persisted wait to the wrong site.
 - **Capability *enforcement* landed (§11):** provider tool policies map to vendor
-  flags; worktree isolation is an explicit `workspaceIsolation` opt-in that fails
-  closed without a configured `workspaceRoot`; the diff gate persists the full
-  patch, secrets are injected as trusted-local provider env, `continueAsNew` is
+  flags; worktree isolation is an explicit `workspaceIsolation` opt-in requiring
+  a resolved target (git repo root for isolated agents); retained session
+  workspaces persist for review, secrets are injected as trusted-local provider
+  env, `continueAsNew` is
   an atomic transactional handoff with lineage, and fork is fenced to terminal
   runs. The OS-sandbox capability backstop remains the one unimplemented
   hardening.
@@ -76,8 +77,8 @@ Postgres-dialect discipline).
 - **Two surfaces are programmatic-only on the bundled daemon:** secret injection
   (`SecretStore`) and agent profiles (`agentProfiles`) require constructing the
   daemon/kernel in code; the CLI wires capability credentials
-  (`KEEL_ADMIN_TOKEN`, `KEEL_RUN_CAP`, `KEEL_CAP_FILE`) and
-  `KEEL_WORKSPACE_ROOT`.
+  (`KEEL_ADMIN_TOKEN`, `KEEL_RUN_CAP`, `KEEL_CAP_FILE`) and the retained
+  workspace store (`KEEL_WORKSPACE_STORE`).
 
 ---
 
@@ -606,6 +607,7 @@ interface AgentSpec<T> {
   allowTools?: string[];            // provider-native additions on top of toolPolicy
   denyTools?: string[];             // provider-native removals from the final allowlist
   workspaceIsolation?: boolean;     // explicit worktree + diff capture opt-in
+  target?: string;                  // daemon-resolvable cwd; defaults to run target
   capabilities?: Capabilities;      // §11.1; used when toolPolicy is omitted
   // note: no memo mode — agents are always memoized (L18); re-think is
   // expressed via retry(stableKey), rerun with a source override, or iteration loops
@@ -618,8 +620,9 @@ exactly three parameters); `ctx.agent` carries `key` in its option bag.
 `toolPolicy` is the public shorthand over the capability enum; `allowTools` and
 `denyTools` are provider-native adjustments when a workflow intentionally needs
 to add or remove a specific backend tool. `workspaceIsolation` is intentionally
-separate: it chooses the isolated worktree/diff-capture execution mode.
-If both `toolPolicy` and `capabilities` are set, `toolPolicy` controls provider
+separate: it chooses the isolated worktree/diff-capture execution mode. `target`
+selects the provider cwd and participates in agent identity. If both `toolPolicy`
+and `capabilities` are set, `toolPolicy` controls provider
 tools. `toolPolicy:'unrestricted'` cannot be combined with `allowTools` or
 `denyTools` until provider-native deny semantics are supported.
 
@@ -830,8 +833,8 @@ __session.<agentKey>.<turnKey>
 
 Participant and turn key components are limited to `[A-Za-z0-9_-]+`; ordinary
 author keys may not use the `__session.` prefix. The worker resolves profiles,
-tool policy, provider-native tool lists, capabilities, workspace isolation, and
-secret names before hashing participant identity. The realm host stores that
+tool policy, provider-native tool lists, capabilities, workspace isolation,
+target, and secret names before hashing participant identity. The realm host stores that
 hash in `agent_sessions` and rejects drift. Turn identity reuses the journal
 row's `(version, input_hash)` for the derived key and is append-only within a
 participant.
@@ -852,9 +855,10 @@ fallback for durable sessions. A completed turn replays its journaled output and
 does not call the provider. Completing a turn without a token is an error,
 because future turns would not be able to continue.
 
-The first cut is intentionally fail-closed: providers must declare stable
-session support, `workspaceIsolation` is rejected, and runs with session rows
-cannot be rerun, rewound, or forked. `continueAsNew` starts a fresh run and does
+The session path is intentionally fail-closed: providers must declare stable
+session support; isolated sessions get one retained workspace per `(runId,
+agentKey)`; and runs with session rows cannot be rerun, rewound, or forked.
+`continueAsNew` starts a fresh run and does
 not carry backend session tokens. Provider session-token trace events are
 consumed for write-ahead state only and are not persisted in the durable event
 stream.
@@ -889,8 +893,9 @@ a standalone threat-model document is not yet written.
 > "enforcement later" framing below is historical. What is real now: the
 > normalized tool policies map to per-vendor tool flags in one place
 > (`resolvedToolPolicyToPiArgs`, `resolvedToolPolicyToClaudeArgs`);
-> `workspaceIsolation` is an explicit opt-in and fails closed with no configured
-> `workspaceRoot`; the diff gate journals the full patch; secrets are resolved
+> `workspaceIsolation` is an explicit opt-in and fails closed without a target
+> that is a git repository root for isolated execution; the diff gate journals
+> review metadata; secrets are resolved
 > from the side channel and injected as provider env without requiring workspace
 > isolation or redacting agent-visible output; and **capabilities + secrets fold
 > into both the agent version AND the input hash, identically on the realm and
@@ -935,13 +940,18 @@ redaction system.
 
 ### 11.3 Workspace isolation & the diff gate (plain git — jj dropped)
 
-Agents that set `workspaceIsolation: true` run with `cwd` in an **isolated git
-worktree** checked out at the run's base commit, seeing their own writes (v1's
-jj/CoW "union read" semantics don't exist in plain git and are dropped as a
-claim). Changes merge to the real tree only through a **diff-review gate**:
-`{modifiedFiles, addedFiles, deletedFiles, contentDiff}` exported as JSON,
-merged on approval (human or webhook). The VCS lives behind an interface — git
-worktrees now; jj or container overlays swappable later (§17 L9).
+Agents resolve a daemon-visible **target** from the agent spec/profile or the
+run target captured at launch. Non-isolated agents run with `cwd = target`.
+Agents that set `workspaceIsolation: true` require the target to be the git repo
+root and run with `cwd` in an **isolated git worktree** checked out at the run's
+base commit, seeing their own writes (v1's jj/CoW "union read" semantics don't exist in plain git and are dropped as a
+claim). One-shot isolated `ctx.agent` worktrees are removed after the call.
+Isolated `ctx.agentSession` participants retain one worktree per `(runId,
+agentKey)` in a Keel workspace store, reuse it across turns/retries, and mark it
+`pending_review` when the run is terminal. Changes are never auto-merged or
+auto-deleted; operator merge/discard/GC commands act on the retained workspace.
+The VCS lives behind an interface — git worktrees now; jj or container overlays
+swappable later (§17 L9).
 
 ### 11.4 Approval as a first-class dataflow node
 

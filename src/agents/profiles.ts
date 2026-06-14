@@ -17,6 +17,7 @@ export interface AgentProfile {
   allowTools?: string[];
   denyTools?: string[];
   workspaceIsolation?: boolean;
+  target?: string;
   capabilities?: Record<string, unknown>;
   maxRetries?: number;
   lenient?: boolean;
@@ -36,6 +37,7 @@ const INHERITED = [
   "allowTools",
   "denyTools",
   "workspaceIsolation",
+  "target",
   "capabilities",
   "maxRetries",
   "lenient",

@@ -6,7 +6,7 @@
 // path (the StepEngine is identical, validated under real kill -9 in Phase 3).
 
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { AgentFailure, executeAgent, runAgentWithStall } from "../../agents/execute.ts";
@@ -24,7 +24,14 @@ import {
   resolveKeelPackageRoot,
   snapshotWorkflowSource,
 } from "../../workflow-definitions/snapshot.ts";
-import { createWorktree } from "../../workspace/worktree.ts";
+import {
+  assertUsableTargetDirectory,
+  createRetainedWorktree,
+  createWorktree,
+  diffWorkspace,
+  resolveGitRootTarget,
+  retainedWorkspacePath,
+} from "../../workspace/worktree.ts";
 import { type DurableAgentEvent, finalAgentMessageEvents } from "../agent-events.ts";
 import type { CtxHost, FaultPoint } from "../ctx.ts";
 import { extractModuleHelpers } from "../module-helpers.ts";
@@ -66,8 +73,8 @@ export interface RealmKernelOptions {
   agents?: AgentProviderRegistry;
   /** Side-channel secret store (§11.2); enables env injection + terminal cleanup. */
   secrets?: SecretStore;
-  /** Git repo root for agents that explicitly request workspaceIsolation (§11.3). */
-  workspaceRoot?: string;
+  /** Keel-owned store for retained isolated session workspaces. */
+  workspaceStore?: string;
   /** Named agent profiles resolved before version computation (§10.2). */
   agentProfiles?: Record<string, unknown>;
   /** Daemon-owned workflow definition materialization cache. */
@@ -152,7 +159,7 @@ export class RealmKernel {
     this.definitionCacheRoot = opts.definitionCacheRoot ?? defaultDefinitionCacheRoot();
     if (opts.agents) this.registry = opts.agents;
     if (opts.secrets) this.secrets = opts.secrets;
-    if (opts.workspaceRoot) this.workspaceRoot = opts.workspaceRoot;
+    if (opts.workspaceStore) this.workspaceStore = opts.workspaceStore;
     if (opts.agentProfiles) this.agentProfiles = opts.agentProfiles;
   }
 
@@ -171,7 +178,7 @@ export class RealmKernel {
   }
 
   private readonly secrets?: SecretStore;
-  private readonly workspaceRoot?: string;
+  private readonly workspaceStore?: string;
   private readonly agentProfiles?: Record<string, unknown>;
 
   /** Start a run and return its id immediately, with a promise for completion.
@@ -179,9 +186,10 @@ export class RealmKernel {
   launch<O>(
     workflow: ClientCapturedWorkflow,
     input: unknown,
-    meta: { name?: string | null } = {},
+    meta: { name?: string | null; target?: string | null } = {},
   ): { runId: string; done: Promise<RunHandle<O>> } {
     const at = this.host.clock();
+    const target = meta.target !== undefined ? meta.target : process.cwd();
     const name = meta.name !== undefined ? meta.name : (workflow.name ?? null);
     const { snapshot, entryPath } = snapshotWorkflowSource(this.store, workflow.source, {
       name,
@@ -195,6 +203,7 @@ export class RealmKernel {
       workflowName: name,
       definitionVersion: snapshot.hash,
       workflowRef: workflowRefFromProvenance(workflow.provenance),
+      runTarget: target ?? null,
       status: "running",
       parentRunId: null,
       tenantId: null,
@@ -208,7 +217,7 @@ export class RealmKernel {
     this.store.appendEvent(
       runId,
       "run.started",
-      { name, definitionHash: snapshot.hash },
+      { name, definitionHash: snapshot.hash, target: target ?? null },
       this.host.clock(),
     );
     return { runId, done: this.execute<O>(runId, entryPath, input) };
@@ -217,7 +226,7 @@ export class RealmKernel {
   async run<O>(
     workflow: ClientCapturedWorkflow,
     input: unknown,
-    meta: { name?: string | null } = {},
+    meta: { name?: string | null; target?: string | null } = {},
   ): Promise<RunHandle<O>> {
     return this.launch<O>(workflow, input, meta).done;
   }
@@ -225,7 +234,7 @@ export class RealmKernel {
   launchDefinition<O>(
     definitionHash: string,
     input: unknown,
-    meta: { name?: string | null; workflowRef?: string | null } = {},
+    meta: { name?: string | null; workflowRef?: string | null; target?: string | null } = {},
   ): { runId: string; done: Promise<RunHandle<O>> } {
     assertWorkflowDefinitionHash(definitionHash);
     const entryPath = materializeWorkflowDefinition(
@@ -240,6 +249,7 @@ export class RealmKernel {
       workflowName: meta.name ?? null,
       definitionVersion: definitionHash,
       workflowRef: meta.workflowRef ?? definitionHash,
+      runTarget: meta.target ?? null,
       status: "running",
       parentRunId: null,
       tenantId: null,
@@ -253,7 +263,7 @@ export class RealmKernel {
     this.store.appendEvent(
       runId,
       "run.started",
-      { name: meta.name ?? null, definitionHash },
+      { name: meta.name ?? null, definitionHash, target: meta.target ?? null },
       this.host.clock(),
     );
     return { runId, done: this.execute<O>(runId, entryPath, input) };
@@ -401,8 +411,12 @@ export class RealmKernel {
     if (run.status !== "failed") throw new Error(`retry needs a failed run (is ${run.status})`);
     const executionPath = this.executionPathForRun(run);
     this.store.deleteFailedRows(runId);
-    this.store.updateRun(runId, { status: "running", errorJson: null, finishedAtMs: null });
-    this.store.appendEvent(runId, "run.retry", {}, this.host.clock());
+    const at = this.host.clock();
+    this.store.transaction(() => {
+      this.store.updateRun(runId, { status: "running", errorJson: null, finishedAtMs: null });
+      this.store.reopenPendingReviewWorkspaces(runId, at);
+      this.store.appendEvent(runId, "run.retry", {}, at);
+    });
     const input = run.inputRef ? JSON.parse(run.inputRef) : undefined;
     return { runId, done: this.execute<O>(runId, executionPath, input) };
   }
@@ -510,6 +524,10 @@ export class RealmKernel {
         attempt: number;
         inputHash: string;
         startedAtMs: number;
+        cwd: string;
+        workspacePath?: string;
+        workspaceTarget?: string;
+        workspaceBaseCommit?: string;
         resumeToken?: string;
       } {
     if (!provider.supportsSessions) {
@@ -517,7 +535,7 @@ export class RealmKernel {
     }
     const inputHash = hashJson(m.inputs as Json);
     const startedAtMs = this.host.clock();
-    const result = this.store.transaction(() => {
+    const preflight = this.store.transaction(() => {
       let session = this.store.getAgentSession(runId, m.agentKey);
       if (!session) {
         this.store.insertAgentSession({
@@ -579,43 +597,163 @@ export class RealmKernel {
           `agent session "${m.agentKey}" has no current session token for new turn "${m.turnKey}"`,
         );
       }
+      return {
+        kind: "execute" as const,
+        attempt,
+        inputHash,
+        startedAtMs,
+        startedSessionToken,
+        ...(startedSessionToken ? { resumeToken: startedSessionToken } : {}),
+      };
+    });
+    if (preflight.kind === "replay") return preflight;
 
+    let cwd: string;
+    let workspacePath: string | undefined;
+    let workspaceTarget: string | undefined;
+    let workspaceBaseCommit: string | undefined;
+    if (m.workspaceIsolation) {
+      if (!this.workspaceStore) {
+        throw new Error(
+          `agent session "${m.agentKey}" requests workspaceIsolation but the kernel has no workspaceStore configured`,
+        );
+      }
+      if (!m.target) {
+        throw new Error(
+          `agent session "${m.agentKey}" requires a target; launch with --target or set an agent/profile target`,
+        );
+      }
+      const gitTarget = resolveGitRootTarget(m.target);
+      const path = retainedWorkspacePath(this.workspaceStore, runId, m.agentKey);
+      let needsCreate = false;
+      this.store.transaction(() => {
+        const existingWorkspace = this.store.getAgentSessionWorkspace(runId, m.agentKey);
+        if (!existingWorkspace) {
+          this.store.insertAgentSessionWorkspace({
+            runId,
+            agentKey: m.agentKey,
+            workspacePath: path,
+            target: gitTarget.target,
+            baseCommit: gitTarget.baseCommit,
+            status: "creating",
+            lastTurnKey: null,
+            lastTurnAttempt: null,
+            lastDiffEventSeq: null,
+            lastErrorEventSeq: null,
+            createdAtMs: startedAtMs,
+            updatedAtMs: startedAtMs,
+            mergedAtMs: null,
+            discardedAtMs: null,
+          });
+          needsCreate = true;
+          return;
+        }
+        if (existingWorkspace.target !== gitTarget.target) {
+          throw new Error(
+            `agent session "${m.agentKey}" workspace target changed from ${existingWorkspace.target} to ${gitTarget.target}`,
+          );
+        }
+        if (
+          existingWorkspace.status === "active" &&
+          existingWorkspace.lastTurnKey === m.turnKey &&
+          existingWorkspace.lastTurnAttempt === preflight.attempt
+        ) {
+          return;
+        }
+        if (existingWorkspace.status !== "idle" && existingWorkspace.status !== "diff_error") {
+          throw new Error(
+            `agent session "${m.agentKey}" workspace is ${existingWorkspace.status} and cannot start a turn`,
+          );
+        }
+      });
+      if (needsCreate) {
+        try {
+          createRetainedWorktree(gitTarget.repoRoot, path, gitTarget.baseCommit);
+        } catch (err) {
+          this.store.updateAgentSessionWorkspace(runId, m.agentKey, {
+            status: "abandoned",
+            updatedAtMs: this.host.clock(),
+          });
+          throw err;
+        }
+      }
+      if (!existsSync(path)) {
+        this.store.updateAgentSessionWorkspace(runId, m.agentKey, {
+          status: "abandoned",
+          updatedAtMs: this.host.clock(),
+        });
+        throw new Error(
+          `agent session "${m.agentKey}" retained workspace is missing at ${path}; refusing to create a fresh workspace for an existing conversation`,
+        );
+      }
+      cwd = path;
+      workspacePath = path;
+      workspaceTarget = gitTarget.target;
+      workspaceBaseCommit = gitTarget.baseCommit;
+    } else {
+      if (!m.target) {
+        throw new Error(
+          `agent session "${m.agentKey}" requires a target; launch with --target or set an agent/profile target`,
+        );
+      }
+      assertUsableTargetDirectory(m.target);
+      cwd = m.target;
+    }
+
+    this.store.transaction(() => {
       this.store.putJournalRow({
         runId,
         stableKey: m.stableKey,
-        attempt,
+        attempt: preflight.attempt,
         effectType: "effectful",
         status: "pending",
         version: m.version,
         inputHash,
         inputDeps: m.deps,
-        sessionToken: startedSessionToken,
+        sessionToken: preflight.startedSessionToken,
         startedAtMs,
       });
       this.store.putAgentSessionTurn({
         runId,
         agentKey: m.agentKey,
         turnKey: m.turnKey,
-        attempt,
+        attempt: preflight.attempt,
         stableKey: m.stableKey,
         status: "pending",
-        startedSessionToken,
+        startedSessionToken: preflight.startedSessionToken,
         observedSessionToken: null,
         completedSessionToken: null,
         startedAtMs,
         finishedAtMs: null,
       });
-      this.store.updateAgentSessionActive(runId, m.agentKey, m.turnKey, attempt, startedAtMs);
-      return {
-        kind: "execute" as const,
-        attempt,
-        inputHash,
+      this.store.updateAgentSessionActive(
+        runId,
+        m.agentKey,
+        m.turnKey,
+        preflight.attempt,
         startedAtMs,
-        ...(startedSessionToken ? { resumeToken: startedSessionToken } : {}),
-      };
+      );
+      if (workspacePath) {
+        this.store.updateAgentSessionWorkspace(runId, m.agentKey, {
+          status: "active",
+          lastTurnKey: m.turnKey,
+          lastTurnAttempt: preflight.attempt,
+          updatedAtMs: startedAtMs,
+        });
+      }
     });
-    if (result.kind === "execute") this.host.fault?.("after-pending", m.stableKey);
-    return result;
+    this.host.fault?.("after-pending", m.stableKey);
+    return {
+      kind: "execute" as const,
+      attempt: preflight.attempt,
+      inputHash,
+      startedAtMs,
+      cwd,
+      ...(workspacePath ? { workspacePath } : {}),
+      ...(workspaceTarget ? { workspaceTarget } : {}),
+      ...(workspaceBaseCommit ? { workspaceBaseCommit } : {}),
+      ...(preflight.resumeToken ? { resumeToken: preflight.resumeToken } : {}),
+    };
   }
 
   private recordAgentSessionToken(
@@ -643,13 +781,71 @@ export class RealmKernel {
     engine.emitAgentTrace(key, attempt, ev);
   }
 
+  private captureSessionWorkspaceEvents(
+    m: Extract<WorkerRequest, { type: "agent-turn" }>,
+    begun: {
+      attempt: number;
+      workspacePath?: string;
+      workspaceTarget?: string;
+      workspaceBaseCommit?: string;
+    },
+  ): { events: DurableAgentEvent[]; status: "idle" | "diff_error" } {
+    if (!begun.workspacePath) return { events: [], status: "idle" };
+    try {
+      const bundle = diffWorkspace(begun.workspacePath);
+      return {
+        status: "idle",
+        events: [
+          {
+            type: "agent.diff",
+            payload: {
+              key: m.stableKey,
+              agentKey: m.agentKey,
+              turnKey: m.turnKey,
+              workspacePath: begun.workspacePath,
+              target: begun.workspaceTarget ?? m.target,
+              baseCommit: begun.workspaceBaseCommit ?? null,
+              modified: bundle.modified,
+              added: bundle.added,
+              deleted: bundle.deleted,
+              contentDiff: bundle.contentDiff,
+            },
+          },
+        ],
+      };
+    } catch (err) {
+      return {
+        status: "diff_error",
+        events: [
+          {
+            type: "workspace.diff_error",
+            payload: {
+              key: m.stableKey,
+              agentKey: m.agentKey,
+              turnKey: m.turnKey,
+              workspacePath: begun.workspacePath,
+              error: serializeError(err),
+            },
+          },
+        ],
+      };
+    }
+  }
+
   private completeAgentSessionTurn(
     runId: string,
     m: Extract<WorkerRequest, { type: "agent-turn" }>,
-    begun: { attempt: number; inputHash: string; startedAtMs: number; resumeToken?: string },
+    begun: {
+      attempt: number;
+      inputHash: string;
+      startedAtMs: number;
+      workspacePath?: string;
+      resumeToken?: string;
+    },
     value: unknown,
     providerSessionToken: string | undefined,
     events: DurableAgentEvent[] = [],
+    workspaceStatus: "idle" | "diff_error" = "idle",
   ): void {
     if (this.isRunInterrupted(runId)) return;
     const journalRow = this.store.getJournalRow(runId, m.stableKey, begun.attempt);
@@ -673,8 +869,12 @@ export class RealmKernel {
       if (stored.artifact) {
         this.store.putArtifact(stored.artifact.hash, stored.artifact.bytes, finishedAtMs);
       }
+      let lastDiffEventSeq: number | null = null;
+      let lastErrorEventSeq: number | null = null;
       for (const event of events) {
-        this.store.appendEvent(runId, event.type, event.payload, finishedAtMs);
+        const seq = this.store.appendEvent(runId, event.type, event.payload, finishedAtMs);
+        if (event.type === "agent.diff") lastDiffEventSeq = seq;
+        if (event.type === "workspace.diff_error") lastErrorEventSeq = seq;
       }
       this.store.putJournalRow({
         runId,
@@ -707,6 +907,16 @@ export class RealmKernel {
         tokenAfter,
         finishedAtMs,
       );
+      if (begun.workspacePath) {
+        this.store.updateAgentSessionWorkspace(runId, m.agentKey, {
+          status: workspaceStatus,
+          lastTurnKey: m.turnKey,
+          lastTurnAttempt: begun.attempt,
+          ...(lastDiffEventSeq !== null ? { lastDiffEventSeq } : {}),
+          ...(lastErrorEventSeq !== null ? { lastErrorEventSeq } : {}),
+          updatedAtMs: finishedAtMs,
+        });
+      }
     });
     this.store.appendEvent(
       runId,
@@ -719,12 +929,20 @@ export class RealmKernel {
   private failAgentSessionTurn(
     runId: string,
     m: Extract<WorkerRequest, { type: "agent-turn" }>,
-    begun: { attempt: number; inputHash: string; startedAtMs: number },
+    begun: { attempt: number; inputHash: string; startedAtMs: number; workspacePath?: string },
     err: unknown,
+    events: DurableAgentEvent[] = [],
   ): void {
     if (this.isRunInterrupted(runId)) return;
     const atMs = this.host.clock();
     this.store.transaction(() => {
+      let lastDiffEventSeq: number | null = null;
+      let lastErrorEventSeq: number | null = null;
+      for (const event of events) {
+        const seq = this.store.appendEvent(runId, event.type, event.payload, atMs);
+        if (event.type === "agent.diff") lastDiffEventSeq = seq;
+        if (event.type === "workspace.diff_error") lastErrorEventSeq = seq;
+      }
       const existing = this.store.getJournalRow(runId, m.stableKey, begun.attempt);
       this.store.putJournalRow({
         runId,
@@ -741,6 +959,16 @@ export class RealmKernel {
         finishedAtMs: atMs,
       });
       this.store.failAgentSessionTurn(runId, m.agentKey, m.turnKey, begun.attempt, atMs);
+      if (begun.workspacePath) {
+        this.store.updateAgentSessionWorkspace(runId, m.agentKey, {
+          status: "idle",
+          lastTurnKey: m.turnKey,
+          lastTurnAttempt: begun.attempt,
+          ...(lastDiffEventSeq !== null ? { lastDiffEventSeq } : {}),
+          ...(lastErrorEventSeq !== null ? { lastErrorEventSeq } : {}),
+          updatedAtMs: atMs,
+        });
+      }
     });
   }
 
@@ -773,6 +1001,7 @@ export class RealmKernel {
       this.activeSessionRuns.add(runId);
       sessionRunGuarded = true;
     }
+    const runTarget = this.store.getRun(runId)?.runTarget ?? null;
     const source = readSourceSafe(workflowUrl);
     const sourcePath = workflowUrl.startsWith("file:")
       ? new URL(workflowUrl).pathname
@@ -852,6 +1081,7 @@ export class RealmKernel {
                 sab,
                 moduleHelpers,
                 agentProfiles: this.agentProfiles ?? {},
+                runTarget,
               } satisfies HostReply);
               break;
             case "step-begin": {
@@ -930,10 +1160,23 @@ export class RealmKernel {
               // §11: an explicitly isolated agent edits in a git worktree;
               // secrets are injected as invocation env from the side channel.
               const caps = m.capabilities ?? undefined;
-              if (m.workspaceIsolation && !this.workspaceRoot) {
-                const err = new Error(
-                  `agent "${m.key}" requests workspaceIsolation but the kernel has no workspaceRoot configured`,
-                );
+              let worktree: ReturnType<typeof createWorktree> | null = null;
+              let cwd: string;
+              try {
+                if (!m.target) {
+                  throw new Error(
+                    `agent "${m.key}" requires a target; launch with --target or set an agent/profile target`,
+                  );
+                }
+                if (m.workspaceIsolation) {
+                  const gitTarget = resolveGitRootTarget(m.target);
+                  worktree = createWorktree(gitTarget.target, m.key);
+                  cwd = worktree.path;
+                } else {
+                  assertUsableTargetDirectory(m.target);
+                  cwd = m.target;
+                }
+              } catch (err) {
                 engine.failStep(
                   m.key,
                   begun.attempt,
@@ -943,13 +1186,9 @@ export class RealmKernel {
                   err,
                   "effectful",
                 );
-                reply(m.id, { ok: false, error: { name: "Error", message: err.message } });
+                reply(m.id, { ok: false, error: serializeError(err) });
                 break;
               }
-              const worktree =
-                m.workspaceIsolation && this.workspaceRoot
-                  ? createWorktree(this.workspaceRoot, m.key)
-                  : null;
               const secretRefs = this.secrets?.resolve(runId, m.secrets) ?? [];
               const secretEnv: Record<string, string> = {};
               for (const r of secretRefs) secretEnv[r.name] = r.value;
@@ -970,7 +1209,7 @@ export class RealmKernel {
                           denyTools: m.denyTools,
                           ...(m.reasoning ? { reasoning: m.reasoning } : {}),
                           ...(caps ? { capabilities: caps } : {}),
-                          ...(worktree ? { cwd: worktree.path } : {}),
+                          cwd,
                           ...(secretRefs.length > 0 ? { env: secretEnv } : {}),
                           ...(begun.resumeToken ? { resumeToken: begun.resumeToken } : {}),
                           abortSignal: signal,
@@ -1140,14 +1379,6 @@ export class RealmKernel {
               }
               this.onStepExecute?.(m.stableKey);
               const caps = m.capabilities ?? undefined;
-              if (m.workspaceIsolation) {
-                const err = new Error(
-                  "ctx.agentSession({ workspaceIsolation: true }) is not supported",
-                );
-                this.failAgentSessionTurn(runId, m, begun, err);
-                reply(m.id, { ok: false, error: serializeError(err) });
-                break;
-              }
               const secretRefs = this.secrets?.resolve(runId, m.secrets) ?? [];
               const secretEnv: Record<string, string> = {};
               for (const r of secretRefs) secretEnv[r.name] = r.value;
@@ -1168,6 +1399,7 @@ export class RealmKernel {
                           denyTools: m.denyTools,
                           ...(m.reasoning ? { reasoning: m.reasoning } : {}),
                           ...(caps ? { capabilities: caps } : {}),
+                          cwd: begun.cwd,
                           ...(secretRefs.length > 0 ? { env: secretEnv } : {}),
                           ...(begun.resumeToken ? { resumeToken: begun.resumeToken } : {}),
                           abortSignal: signal,
@@ -1208,6 +1440,7 @@ export class RealmKernel {
                   if (settled || this.isRunInterrupted(runId)) return;
                   const output = execution.output;
                   const text = execution.text;
+                  const workspaceCapture = this.captureSessionWorkspaceEvents(m, begun);
                   try {
                     this.completeAgentSessionTurn(
                       runId,
@@ -1215,7 +1448,11 @@ export class RealmKernel {
                       begun,
                       output,
                       execution.sessionToken,
-                      finalAgentMessageEvents(m.stableKey, begun.attempt, text),
+                      [
+                        ...workspaceCapture.events,
+                        ...finalAgentMessageEvents(m.stableKey, begun.attempt, text),
+                      ],
+                      workspaceCapture.status,
                     );
                   } catch (err) {
                     if (!(err instanceof AgentSessionContinuityError)) {
@@ -1232,8 +1469,17 @@ export class RealmKernel {
                   if (m.onFailure === "null" && agentErr instanceof AgentFailure) {
                     const errJson = serializeError(agentErr) as unknown as Json;
                     engine.emit("agent.tolerated_failure", { key: m.stableKey, error: errJson });
+                    const workspaceCapture = this.captureSessionWorkspaceEvents(m, begun);
                     try {
-                      this.completeAgentSessionTurn(runId, m, begun, null, undefined);
+                      this.completeAgentSessionTurn(
+                        runId,
+                        m,
+                        begun,
+                        null,
+                        undefined,
+                        workspaceCapture.events,
+                        workspaceCapture.status,
+                      );
                     } catch (err) {
                       if (!(err instanceof AgentSessionContinuityError)) {
                         abort(err);
@@ -1246,7 +1492,13 @@ export class RealmKernel {
                     reply(m.id, { ok: true, output: null, contentHash: hashJson(null) });
                     return;
                   }
-                  this.failAgentSessionTurn(runId, m, begun, agentErr);
+                  this.failAgentSessionTurn(
+                    runId,
+                    m,
+                    begun,
+                    agentErr,
+                    this.captureSessionWorkspaceEvents(m, begun).events,
+                  );
                   reply(m.id, {
                     ok: false,
                     error: serializeError(agentErr),
@@ -1326,21 +1578,26 @@ export class RealmKernel {
             case "phase":
               engine.emit("phase", { title: m.title });
               break;
-            case "result":
-              this.store.updateRun(runId, {
-                status: "finished",
-                outputRef: JSON.stringify(m.output ?? null),
-                finishedAtMs: this.host.clock(),
+            case "result": {
+              const at = this.host.clock();
+              this.store.transaction(() => {
+                this.store.updateRun(runId, {
+                  status: "finished",
+                  outputRef: JSON.stringify(m.output ?? null),
+                  finishedAtMs: at,
+                });
+                this.store.appendEvent(
+                  runId,
+                  "run.finished",
+                  runFinishedPayload(m.output ?? null),
+                  at,
+                );
+                this.store.markRunWorkspacesPendingReview(runId, at);
               });
-              this.store.appendEvent(
-                runId,
-                "run.finished",
-                runFinishedPayload(m.output ?? null),
-                this.host.clock(),
-              );
               this.secrets?.wipe(runId); // §11.2: secrets live per-run; wipe on terminal
               finish(() => resolve({ runId, status: "finished", output: m.output as O }));
               break;
+            }
             case "continue": {
               // §19: end this run (status 'continued') and chain a fresh run of
               // the same workflow with the new input — bounded journal growth.
@@ -1349,6 +1606,7 @@ export class RealmKernel {
               const name = run.workflowName;
               const definitionVersion = run.definitionVersion;
               const workflowRef = run.workflowRef;
+              const runTarget = run.runTarget;
               const nextId = this.idgen();
               const at = this.host.clock();
               // ATOMIC handoff: create the successor AND mark this run 'continued'
@@ -1361,6 +1619,7 @@ export class RealmKernel {
                   workflowName: name,
                   definitionVersion,
                   workflowRef,
+                  runTarget,
                   status: "running",
                   parentRunId: runId, // lineage
                   tenantId: null,
@@ -1378,6 +1637,7 @@ export class RealmKernel {
                   finishedAtMs: at,
                 });
                 this.store.appendEvent(runId, "run.continued", { continuedTo: nextId }, at);
+                this.store.markRunWorkspacesPendingReview(runId, at);
               });
               this.secrets?.wipe(runId);
               // start the successor's execution OUTSIDE the transaction
@@ -1392,12 +1652,16 @@ export class RealmKernel {
                 // resumable: leave run 'running'
                 this.store.appendEvent(runId, "run.aborted", m.error, this.host.clock());
               } else {
-                this.store.updateRun(runId, {
-                  status: "failed",
-                  errorJson: JSON.stringify(m.error),
-                  finishedAtMs: this.host.clock(),
+                const at = this.host.clock();
+                this.store.transaction(() => {
+                  this.store.updateRun(runId, {
+                    status: "failed",
+                    errorJson: JSON.stringify(m.error),
+                    finishedAtMs: at,
+                  });
+                  this.store.appendEvent(runId, "run.failed", m.error, at);
+                  this.store.markRunWorkspacesPendingReview(runId, at);
                 });
-                this.store.appendEvent(runId, "run.failed", m.error, this.host.clock());
                 this.secrets?.wipe(runId); // terminal failure: wipe secrets
               }
               finish(() => reject(rebuildError(m.error)));

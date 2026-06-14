@@ -74,12 +74,12 @@ const COMMANDS: [string, string, string][] = [
   ["link", "[dir]", "make <dir> (default: cwd) able to import the @kcosr/keel SDK"],
   [
     "launch",
-    "[workflow.ts] [--name n] [--input json] [--output json|text|ndjson] [--tools] [--detach] [--emit-capability]",
+    "[workflow.ts] [--name n] [--input json] [--target dir] [--output json|text|ndjson] [--tools] [--detach] [--emit-capability]",
     "start a run from client-captured workflow source",
   ],
   [
     "run",
-    "[workflow.ts] [--name n] [--input json] [--output json|text|ndjson] [--tools]",
+    "[workflow.ts] [--name n] [--input json] [--target dir] [--output json|text|ndjson] [--tools]",
     "launch and print the result",
   ],
   ["watch", "<runId> [--output ndjson|text] [--tools]", "stream a run's events until it finishes"],
@@ -91,6 +91,16 @@ const COMMANDS: [string, string, string][] = [
     "tui",
     "[runId] [--status status] [--limit n] [--output text]",
     "open the interactive run browser",
+  ],
+  [
+    "schedule",
+    "put <name> [workflow.ts] --interval-ms ms [--target dir]",
+    "create or replace a cron schedule",
+  ],
+  [
+    "workspace",
+    "list|show|diff|merge|discard|gc ...",
+    "inspect and manage retained agent workspaces",
   ],
   ["gc", "", "prune unreferenced workflow definitions and cache entries"],
   ["resume", "[--detach] [--tools] <runId>", "resume a parked or incomplete run"],
@@ -125,7 +135,7 @@ function topHelp(): string {
     "Commands:",
     ...rows,
     "",
-    "Environment: KEEL_SOCKET, KEEL_DB, KEEL_DIR, KEEL_ADMIN_TOKEN, KEEL_RUN_CAP, KEEL_CAP_FILE, KEEL_CAP_DIR, KEEL_WORKSPACE_ROOT",
+    "Environment: KEEL_SOCKET, KEEL_DB, KEEL_DIR, KEEL_ADMIN_TOKEN, KEEL_RUN_CAP, KEEL_CAP_FILE, KEEL_CAP_DIR, KEEL_WORKSPACE_STORE",
     "Run `keel help <command>` for one command.",
     "",
   ].join("\n");
@@ -166,8 +176,8 @@ async function dispatch(argv: string[]): Promise<number> {
         dbPath: DB,
         agents,
         ...(process.env.KEEL_ADMIN_TOKEN ? { adminToken: process.env.KEEL_ADMIN_TOKEN } : {}),
-        ...(process.env.KEEL_WORKSPACE_ROOT
-          ? { workspaceRoot: process.env.KEEL_WORKSPACE_ROOT }
+        ...(process.env.KEEL_WORKSPACE_STORE
+          ? { workspaceStore: process.env.KEEL_WORKSPACE_STORE }
           : {}),
       });
       await daemon.start();
@@ -220,6 +230,7 @@ async function dispatch(argv: string[]): Promise<number> {
       const launched = await client.launchRun({
         source: captured.source,
         input: launchOpts.input,
+        target: launchOpts.target,
         name: launchOpts.name ?? captured.defaultName,
         provenance: captured.provenance,
       });
@@ -268,6 +279,7 @@ async function dispatch(argv: string[]): Promise<number> {
       const launched = await client.launchRun({
         source: captured.source,
         input: runOpts.input,
+        target: runOpts.target,
         name: runOpts.name ?? captured.defaultName,
         provenance: captured.provenance,
       });
@@ -371,6 +383,30 @@ async function dispatch(argv: string[]): Promise<number> {
           : formatListRuns(runs, Date.now()),
       );
       return 0;
+    }
+    case "schedule": {
+      const [sub, ...scheduleArgs] = rest;
+      if (sub !== "put") return usage("schedule needs put <name> [workflow.ts]");
+      const parsed = parseSchedulePutArgs(scheduleArgs);
+      if (!parsed.name) return usage("schedule needs put <name> [workflow.ts]");
+      const captured = await readCommandSource(parsed.file, "workflow");
+      const client = await openClient();
+      await client.putSchedule({
+        name: parsed.name,
+        source: captured.source,
+        workflowName: parsed.workflowName ?? captured.defaultName,
+        input: parsed.input,
+        target: parsed.target,
+        intervalMs: parsed.intervalMs,
+        ...(parsed.firstFireMs !== undefined ? { firstFireMs: parsed.firstFireMs } : {}),
+      });
+      process.stdout.write(
+        `${JSON.stringify({ ok: true, name: parsed.name, target: parsed.target })}\n`,
+      );
+      return 0;
+    }
+    case "workspace": {
+      return await workspaceCommand(rest);
     }
     case "tui": {
       const parsed = parseTuiArgs(rest);
@@ -595,6 +631,7 @@ export interface LaunchArgs {
   file?: string;
   name?: string | null;
   input: unknown;
+  target?: string;
 }
 
 export interface RunArgs {
@@ -603,6 +640,7 @@ export interface RunArgs {
   file?: string;
   name?: string | null;
   input: unknown;
+  target?: string;
 }
 
 export interface ExecuteArgs {
@@ -615,8 +653,23 @@ export interface ExecuteArgs {
   args: string[];
 }
 
+export interface SchedulePutArgs {
+  name?: string;
+  file?: string;
+  workflowName?: string | null;
+  input: unknown;
+  target: string;
+  intervalMs: number;
+  firstFireMs?: number;
+}
+
 export function parseLaunchArgs(args: string[]): LaunchArgs {
-  const out: LaunchArgs = { detach: false, emitCapability: false, tools: false, input: {} };
+  const out: LaunchArgs = {
+    detach: false,
+    emitCapability: false,
+    tools: false,
+    input: {},
+  };
   parseSourceArgs(args, out, { detach: true, emitCapability: true, output: true, tools: true });
   return out;
 }
@@ -624,6 +677,46 @@ export function parseLaunchArgs(args: string[]): LaunchArgs {
 export function parseRunArgs(args: string[]): RunArgs {
   const out: RunArgs = { tools: false, input: {} };
   parseSourceArgs(args, out, { detach: false, emitCapability: false, output: true, tools: true });
+  return out;
+}
+
+export function parseSchedulePutArgs(args: string[]): SchedulePutArgs {
+  const out: SchedulePutArgs = { input: {}, target: process.cwd(), intervalMs: 0 };
+  const positional: string[] = [];
+  let i = 0;
+  while (i < args.length) {
+    const arg = args[i] as string;
+    if (arg === "--name") {
+      out.workflowName = requireFlagValue(args, i, "--name");
+      i += 2;
+    } else if (arg === "--input") {
+      out.input = parseLaunchInput(requireFlagValue(args, i, "--input"));
+      i += 2;
+    } else if (arg === "--target") {
+      out.target = resolve(requireFlagValue(args, i, "--target"));
+      i += 2;
+    } else if (arg === "--interval-ms") {
+      const value = Number(requireFlagValue(args, i, "--interval-ms"));
+      if (!Number.isFinite(value) || value <= 0) throw new Error("--interval-ms must be positive");
+      out.intervalMs = value;
+      i += 2;
+    } else if (arg === "--first-fire-ms") {
+      const value = Number(requireFlagValue(args, i, "--first-fire-ms"));
+      if (!Number.isFinite(value)) throw new Error("--first-fire-ms must be a number");
+      out.firstFireMs = value;
+      i += 2;
+    } else if (arg.startsWith("--")) {
+      throw new Error(`unknown schedule put flag ${arg}`);
+    } else {
+      positional.push(arg);
+      i += 1;
+    }
+  }
+  if (positional.length > 2)
+    throw new Error(`unexpected argument ${positional[2]} for schedule put`);
+  out.name = positional[0];
+  out.file = positional[1];
+  if (out.intervalMs <= 0) throw new Error("schedule put requires --interval-ms ms");
   return out;
 }
 
@@ -672,6 +765,7 @@ function parseSourceArgs(
     file?: string;
     name?: string | null;
     input: unknown;
+    target?: string;
     detach?: boolean;
     emitCapability?: boolean;
     tools?: boolean;
@@ -700,6 +794,9 @@ function parseSourceArgs(
       i += 2;
     } else if (arg === "--input") {
       out.input = parseLaunchInput(requireFlagValue(args, i, "--input"));
+      i += 2;
+    } else if (arg === "--target") {
+      out.target = resolve(requireFlagValue(args, i, "--target"));
       i += 2;
     } else if (arg.startsWith("--")) {
       throw new Error(`unknown flag ${arg}`);
@@ -936,6 +1033,68 @@ export function parseWatchArgs(args: string[]): {
 }
 
 type WatchStatus = RunOutcome["status"];
+
+async function workspaceCommand(args: string[]): Promise<number> {
+  const [sub, runId, agentKey, ...rest] = args;
+  const client = await openClient();
+  switch (sub) {
+    case "list": {
+      if (!runId) return usage("workspace needs list <runId>");
+      const workspaces = await client.listRunWorkspaces(runId);
+      process.stdout.write(`${JSON.stringify({ workspaces })}\n`);
+      return 0;
+    }
+    case "show": {
+      if (!runId || !agentKey) return usage("workspace needs show <runId> <agentKey>");
+      process.stdout.write(
+        `${JSON.stringify(await client.getRunWorkspace(runId, agentKey), null, 2)}\n`,
+      );
+      return 0;
+    }
+    case "diff": {
+      if (!runId || !agentKey) return usage("workspace needs diff <runId> <agentKey>");
+      const out = await client.getRunWorkspaceDiff(runId, agentKey);
+      const json = rest[0] === "--output" && rest[1] === "json";
+      if (rest.length > 0 && !json) throw new Error("workspace diff supports only --output json");
+      if (json) process.stdout.write(`${JSON.stringify(out)}\n`);
+      else process.stdout.write(out.contentDiff);
+      return 0;
+    }
+    case "merge": {
+      if (!runId || !agentKey) return usage("workspace needs merge <runId> <agentKey>");
+      process.stdout.write(`${JSON.stringify(await client.mergeRunWorkspace(runId, agentKey))}\n`);
+      return 0;
+    }
+    case "discard": {
+      if (!runId || !agentKey) return usage("workspace needs discard <runId> <agentKey>");
+      process.stdout.write(
+        `${JSON.stringify(await client.discardRunWorkspace(runId, agentKey))}\n`,
+      );
+      return 0;
+    }
+    case "gc": {
+      let includePending = false;
+      let olderThanMs: number | undefined;
+      for (let i = 0; i < args.slice(1).length; i += 1) {
+        const arg = args.slice(1)[i];
+        if (arg === "--include-pending") includePending = true;
+        else if (arg === "--older-than-ms") {
+          const value = Number(args.slice(1)[i + 1]);
+          if (!Number.isFinite(value) || value < 0)
+            throw new Error("--older-than-ms must be non-negative");
+          olderThanMs = value;
+          i += 1;
+        } else if (arg?.startsWith("--")) throw new Error(`unknown workspace gc flag ${arg}`);
+      }
+      process.stdout.write(
+        `${JSON.stringify(await client.gcWorkspaces({ ...(olderThanMs !== undefined ? { olderThanMs } : {}), ...(includePending ? { includePending } : {}) }))}\n`,
+      );
+      return 0;
+    }
+    default:
+      return usage("workspace needs list|show|diff|merge|discard|gc");
+  }
+}
 
 export async function watchRun(
   client: DaemonClient,

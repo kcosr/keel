@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 ### Added
+- Retained isolated workspaces for `ctx.agentSession({ workspaceIsolation: true })`: one workspace per `(runId, agentKey)`, reused across turns/retries and retained for explicit inspect, merge, discard, or GC.
+- Run/schedule agent targets via `--target`, per-agent/profile `target`, and workspace lifecycle RPC/CLI commands (`keel workspace ...`).
 - Top-level `workflows/` directory for reusable operational workflows, starting
   with `iterative-review.workflow.ts`, a signal-driven multi-turn review loop,
   and `implement-review-loop.workflow.ts`, a bounded write-capable
@@ -41,6 +43,9 @@
   `run.interrupted` audit events and best-effort active worker/provider abort.
 
 ### Changed
+- Agent provider `cwd` is now the resolved run/agent target for non-isolated agents; isolated agents require the target to be a git repository root and no longer use daemon cwd or `KEEL_WORKSPACE_ROOT` fallback.
+- Workflow SDK ABI bumped to 2 because agent target resolution participates in agent/session identity.
+- Workspace startup/GC reconciliation now clears stale `creating` rows, reconciles terminal `active`/`creating` rows, and makes workspace GC idempotent.
 - Agent secrets are now trusted-local env injection only: secrets no longer
   require `workspaceIsolation`, and exact secret values emitted by agents are no
   longer redacted from outputs, events, tolerated failures, or isolated diffs.

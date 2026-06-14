@@ -16,6 +16,7 @@ function agentVersion(spec: {
   allowTools?: string[];
   denyTools?: string[];
   workspaceIsolation?: boolean;
+  target?: string | null;
   secrets?: string[];
 }): string {
   const tools = resolveToolPolicy({
@@ -35,6 +36,7 @@ function agentVersion(spec: {
       allowTools: tools.allowTools,
       denyTools: tools.denyTools,
       workspaceIsolation: spec.workspaceIsolation === true,
+      target: spec.target ?? null,
       capabilities: caps,
       secrets: spec.secrets ?? [],
     },
@@ -63,6 +65,13 @@ describe("agent identity includes capabilities and secrets", () => {
   test("changing workspace isolation changes the version", () => {
     const base = { prompt: "p", provider: "pi", toolPolicy: "read-only" as const };
     expect(agentVersion(base)).not.toBe(agentVersion({ ...base, workspaceIsolation: true }));
+  });
+
+  test("changing target changes the version", () => {
+    const base = { prompt: "p", provider: "pi", toolPolicy: "read-only" as const };
+    expect(agentVersion({ ...base, target: "/repo/a" })).not.toBe(
+      agentVersion({ ...base, target: "/repo/b" }),
+    );
   });
 
   test("changing the secrets set changes the version", () => {

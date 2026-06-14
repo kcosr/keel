@@ -72,7 +72,7 @@ describe("durable ctx.sleep park/wake", () => {
     const failed = store.getRun("r_abi");
     expect(failed?.status).toBe("failed");
     expect(JSON.parse(failed?.errorJson ?? "{}").message).toContain(
-      "requires workflow SDK ABI 2, but this daemon supports ABI 1",
+      "requires workflow SDK ABI 3, but this daemon supports ABI 2",
     );
     expect((await supervisor.tick()).woken).toEqual([]);
   });
@@ -149,7 +149,7 @@ describe("cron schedules", () => {
       .get();
     expect(badSchedule?.enabled).toBe(0);
     expect(JSON.parse(badSchedule?.last_error_json ?? "{}").message).toContain(
-      "requires workflow SDK ABI 2, but this daemon supports ABI 1",
+      "requires workflow SDK ABI 3, but this daemon supports ABI 2",
     );
     expect(store.listRuns().map((run) => run.workflowName)).toEqual(["good"]);
   });
@@ -178,10 +178,10 @@ describe("unsupported SDK ABI direct lifecycle calls", () => {
       resultInline: "1",
     });
 
-    await expect(kernel.resume("r_resume")).rejects.toThrow(/requires workflow SDK ABI 2/);
-    await expect(kernel.retry("r_retry")).rejects.toThrow(/requires workflow SDK ABI 2/);
-    await expect(kernel.rewind("r_rewind", "keep")).rejects.toThrow(/requires workflow SDK ABI 2/);
-    await expect(kernel.rerun("r_rerun")).rejects.toThrow(/requires workflow SDK ABI 2/);
+    await expect(kernel.resume("r_resume")).rejects.toThrow(/requires workflow SDK ABI 3/);
+    await expect(kernel.retry("r_retry")).rejects.toThrow(/requires workflow SDK ABI 3/);
+    await expect(kernel.rewind("r_rewind", "keep")).rejects.toThrow(/requires workflow SDK ABI 3/);
+    await expect(kernel.rerun("r_rerun")).rejects.toThrow(/requires workflow SDK ABI 3/);
 
     expect(store.getRun("r_resume")?.status).toBe("waiting-timer");
     expect(store.getRun("r_retry")?.status).toBe("failed");
@@ -195,7 +195,7 @@ function requireUnsupportedSdkAbi(store: JournalStore, hash: string): void {
   const row = store.getWorkflowDefinition(hash);
   if (!row?.manifestJson) throw new Error(`missing manifest for ${hash}`);
   const manifest = JSON.parse(row.manifestJson) as { runtime: { workflowSdkAbi: number } };
-  manifest.runtime.workflowSdkAbi = 2;
+  manifest.runtime.workflowSdkAbi = 3;
   store.db
     .query("UPDATE workflow_definitions SET manifest_json = ? WHERE hash = ?")
     .run(JSON.stringify(manifest), hash);

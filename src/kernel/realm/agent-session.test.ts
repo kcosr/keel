@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { existsSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type {
   AgentHooks,
   AgentInvocation,
@@ -126,6 +130,16 @@ function kernel(store: JournalStore, provider: AgentProvider, extra: Record<stri
   });
 }
 
+function initGitRepo(repo: string): void {
+  const g = (args: string[]) => execFileSync("git", args, { cwd: repo });
+  g(["init", "-q"]);
+  g(["config", "user.email", "t@t"]);
+  g(["config", "user.name", "t"]);
+  writeFileSync(join(repo, "seed.txt"), "seed\n");
+  g(["add", "-A"]);
+  g(["commit", "-q", "-m", "init"]);
+}
+
 describe("ctx.agentSession", () => {
   test("in-process WorkflowCtx rejects agentSession", () => {
     const ctx = new WorkflowCtx(JournalStore.memory(), "run-1", {
@@ -204,7 +218,7 @@ describe("ctx.agentSession", () => {
     expect(failedTurns).toBe(0);
   });
 
-  test("session provider support, key validation, and workspace isolation fail closed", async () => {
+  test("session provider support, key validation, and missing workspace store fail closed", async () => {
     const noSession: AgentProvider = {
       name: "session",
       async generate() {
@@ -239,7 +253,240 @@ describe("ctx.agentSession", () => {
     };
     await expect(
       kernel(JournalStore.memory(), new RecordingSessionProvider()).run(isolated, null),
-    ).rejects.toThrow(/workspaceIsolation/);
+    ).rejects.toThrow(/workspaceStore/);
+  });
+
+  test("workspace-isolated sessions reuse one retained workspace across turns", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "keel-session-target-"));
+    const workspaceStore = mkdtempSync(join(tmpdir(), "keel-session-store-"));
+    try {
+      const g = (args: string[]) => execFileSync("git", args, { cwd: repo });
+      g(["init", "-q"]);
+      g(["config", "user.email", "t@t"]);
+      g(["config", "user.name", "t"]);
+      writeFileSync(join(repo, "seed.txt"), "seed\n");
+      g(["add", "-A"]);
+      g(["commit", "-q", "-m", "init"]);
+
+      const isolated = {
+        source: `
+          import { type Ctx } from "@kcosr/keel";
+          export default async function wf(ctx: Ctx): Promise<string> {
+            const primary = ctx.agentSession({ key: "primary", provider: "session", workspaceIsolation: true, capabilities: { fs: "workspace-write" } });
+            await primary.turn({ key: "draft", prompt: "draft" });
+            await primary.turn({ key: "revise", prompt: "revise" });
+            return "done";
+          }
+        `,
+        name: "isolated-session",
+      };
+      const calls: AgentInvocation[] = [];
+      const provider: AgentProvider = {
+        name: "session",
+        supportsSessions: true,
+        async generate(invocation, hooks) {
+          calls.push({ ...invocation });
+          const token = invocation.resumeToken ?? "sess-1";
+          hooks.onSessionToken?.(token);
+          const path = join(invocation.cwd ?? "", "state.txt");
+          const prior = existsSync(path) ? readFileSync(path, "utf8") : "";
+          writeFileSync(path, `${prior}${invocation.key}\n`);
+          return { text: "ok", transcript: [], sessionToken: token };
+        },
+      };
+
+      const store = JournalStore.memory();
+      const result = await kernel(store, provider, { workspaceStore }).run<string>(isolated, null, {
+        target: repo,
+      });
+      expect(result.status).toBe("finished");
+      expect(calls).toHaveLength(2);
+      expect(calls[0]?.cwd).toBe(calls[1]?.cwd);
+      expect(calls[0]?.cwd?.startsWith(workspaceStore)).toBe(true);
+      const workspace = store.getAgentSessionWorkspace("run-1", "primary");
+      expect(workspace).toMatchObject({ target: repo, status: "pending_review" });
+      expect(workspace?.workspacePath).toBe(calls[0]?.cwd);
+      expect(readFileSync(join(workspace?.workspacePath ?? "", "state.txt"), "utf8")).toContain(
+        "__session.primary.draft\n__session.primary.revise\n",
+      );
+      expect(existsSync(join(repo, "state.txt"))).toBe(false);
+      expect(store.listEvents("run-1").filter((e) => e.type === "agent.diff")).toHaveLength(2);
+
+      const replayed = await kernel(store, provider, { workspaceStore }).resume<string>("run-1");
+      expect(replayed.output).toBe("done");
+      expect(calls).toHaveLength(2);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+      rmSync(workspaceStore, { recursive: true, force: true });
+    }
+  });
+
+  test("two isolated participants can target different repositories", async () => {
+    const repoA = mkdtempSync(join(tmpdir(), "keel-session-target-a-"));
+    const repoB = mkdtempSync(join(tmpdir(), "keel-session-target-b-"));
+    const workspaceStore = mkdtempSync(join(tmpdir(), "keel-session-store-multi-"));
+    try {
+      initGitRepo(repoA);
+      initGitRepo(repoB);
+      const workflow = {
+        source: `
+          import { type Ctx } from "@kcosr/keel";
+          export default async function wf(ctx: Ctx, input: { a: string; b: string }): Promise<string> {
+            await ctx.agentSession({ key: "a", provider: "session", workspaceIsolation: true, target: input.a, capabilities: { fs: "workspace-write" } }).turn({ key: "one", prompt: "one" });
+            await ctx.agentSession({ key: "b", provider: "session", workspaceIsolation: true, target: input.b, capabilities: { fs: "workspace-write" } }).turn({ key: "one", prompt: "one" });
+            return "done";
+          }
+        `,
+        name: "isolated-session-multi-target",
+      };
+      const provider: AgentProvider = {
+        name: "session",
+        supportsSessions: true,
+        async generate(invocation, hooks) {
+          const token = invocation.resumeToken ?? `${invocation.key}-token`;
+          hooks.onSessionToken?.(token);
+          writeFileSync(join(invocation.cwd ?? "", "owner.txt"), `${invocation.key}\n`);
+          return { text: "ok", transcript: [], sessionToken: token };
+        },
+      };
+      const store = JournalStore.memory();
+      const result = await kernel(store, provider, { workspaceStore }).run<string>(
+        workflow,
+        { a: repoA, b: repoB },
+        { target: repoA },
+      );
+      expect(result.status).toBe("finished");
+      const a = store.getAgentSessionWorkspace("run-1", "a");
+      const b = store.getAgentSessionWorkspace("run-1", "b");
+      expect(a?.target).toBe(repoA);
+      expect(b?.target).toBe(repoB);
+      expect(a?.workspacePath).not.toBe(b?.workspacePath);
+      expect(readFileSync(join(a?.workspacePath ?? "", "owner.txt"), "utf8")).toBe(
+        "__session.a.one\n",
+      );
+      expect(readFileSync(join(b?.workspacePath ?? "", "owner.txt"), "utf8")).toBe(
+        "__session.b.one\n",
+      );
+      expect(existsSync(join(repoA, "owner.txt"))).toBe(false);
+      expect(existsSync(join(repoB, "owner.txt"))).toBe(false);
+    } finally {
+      rmSync(repoA, { recursive: true, force: true });
+      rmSync(repoB, { recursive: true, force: true });
+      rmSync(workspaceStore, { recursive: true, force: true });
+    }
+  });
+
+  test("retry reuses the retained isolated workspace", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "keel-session-retry-target-"));
+    const workspaceStore = mkdtempSync(join(tmpdir(), "keel-session-retry-store-"));
+    try {
+      initGitRepo(repo);
+      const workflow = {
+        source: `
+          import { type Ctx } from "@kcosr/keel";
+          export default async function wf(ctx: Ctx): Promise<string> {
+            const primary = ctx.agentSession({ key: "primary", provider: "session", workspaceIsolation: true, capabilities: { fs: "workspace-write" } });
+            await primary.turn({ key: "draft", prompt: "draft" });
+            await primary.turn({ key: "revise", prompt: "revise" });
+            return "done";
+          }
+        `,
+        name: "isolated-retry",
+      };
+      const calls: AgentInvocation[] = [];
+      let failed = false;
+      const provider: AgentProvider = {
+        name: "session",
+        supportsSessions: true,
+        async generate(invocation, hooks) {
+          calls.push({ ...invocation });
+          const token = invocation.resumeToken ?? "sess-1";
+          hooks.onSessionToken?.(token);
+          const state = join(invocation.cwd ?? "", "state.txt");
+          const prior = existsSync(state) ? readFileSync(state, "utf8") : "";
+          writeFileSync(state, `${prior}${invocation.key}\n`);
+          if (invocation.key === "__session.primary.revise" && !failed) {
+            failed = true;
+            throw new Error("transient failure");
+          }
+          return { text: "ok", transcript: [], sessionToken: token };
+        },
+      };
+      const store = JournalStore.memory();
+      await kernel(store, provider, { workspaceStore })
+        .run<string>(workflow, null, { target: repo })
+        .catch(() => null);
+      expect(store.getRun("run-1")?.status).toBe("failed");
+      const failedWorkspace = store.getAgentSessionWorkspace("run-1", "primary");
+      expect(failedWorkspace?.status).toBe("pending_review");
+
+      const retried = await kernel(store, provider, { workspaceStore }).retry<string>("run-1");
+      expect(retried.status).toBe("finished");
+      const workspace = store.getAgentSessionWorkspace("run-1", "primary");
+      expect(workspace?.workspacePath).toBe(failedWorkspace?.workspacePath);
+      expect(readFileSync(join(workspace?.workspacePath ?? "", "state.txt"), "utf8")).toBe(
+        "__session.primary.draft\n__session.primary.revise\n__session.primary.revise\n",
+      );
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+      rmSync(workspaceStore, { recursive: true, force: true });
+    }
+  });
+
+  test("a later turn can continue after diff_error while preserving diagnostics", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "keel-session-diff-error-target-"));
+    const workspaceStore = mkdtempSync(join(tmpdir(), "keel-session-diff-error-store-"));
+    try {
+      initGitRepo(repo);
+      const workflow = {
+        source: `
+          import { type Ctx } from "@kcosr/keel";
+          export default async function wf(ctx: Ctx): Promise<string> {
+            const primary = ctx.agentSession({ key: "primary", provider: "session", workspaceIsolation: true, capabilities: { fs: "workspace-write" } });
+            await primary.turn({ key: "break", prompt: "break" });
+            await primary.turn({ key: "repair", prompt: "repair" });
+            return "done";
+          }
+        `,
+        name: "isolated-diff-error",
+      };
+      let first = true;
+      const provider: AgentProvider = {
+        name: "session",
+        supportsSessions: true,
+        async generate(invocation, hooks) {
+          const token = invocation.resumeToken ?? "sess-1";
+          hooks.onSessionToken?.(token);
+          const gitFile = join(invocation.cwd ?? "", ".git");
+          const backup = join(invocation.cwd ?? "", ".git.bak");
+          if (first) {
+            first = false;
+            renameSync(gitFile, backup);
+          } else {
+            renameSync(backup, gitFile);
+            writeFileSync(join(invocation.cwd ?? "", "repaired.txt"), "ok\n");
+          }
+          return { text: "ok", transcript: [], sessionToken: token };
+        },
+      };
+
+      const store = JournalStore.memory();
+      const result = await kernel(store, provider, { workspaceStore }).run<string>(workflow, null, {
+        target: repo,
+      });
+      expect(result.status).toBe("finished");
+      const workspace = store.getAgentSessionWorkspace("run-1", "primary");
+      expect(workspace?.status).toBe("pending_review");
+      expect(typeof workspace?.lastErrorEventSeq).toBe("number");
+      expect(typeof workspace?.lastDiffEventSeq).toBe("number");
+      expect(workspace?.lastDiffEventSeq).toBeGreaterThan(workspace?.lastErrorEventSeq ?? 0);
+      const events = store.listEvents("run-1");
+      expect(events.map((e) => e.type)).toContain("workspace.diff_error");
+      expect(events.filter((e) => e.type === "agent.diff")).toHaveLength(1);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+      rmSync(workspaceStore, { recursive: true, force: true });
+    }
   });
 
   test("participant identity drift fails closed before provider execution", async () => {

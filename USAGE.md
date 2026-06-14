@@ -431,8 +431,13 @@ non-terminal, the participant has an active turn, or the workspace has already
 moved to a terminal lifecycle status such as `merged` or `discarded`. Merge
 applies the current workspace state back to its recorded target; after merge,
 the retained workspace remains until garbage-collected. A still-pending
-workspace can be discarded instead. Stale retained-workspace cleanup beyond
-explicit `gc` is intentionally deferred to the workspace retention policy.
+workspace can be discarded instead. Durable `agent.diff.contentDiff` values are
+bounded and end with a truncation notice when the retained workspace should be
+inspected for the full patch; changed path arrays are capped with
+`omittedPathCounts`/`pathLimit` metadata. Retained workspace diff capture that
+exceeds Keel's explicit git status or diff buffers is recorded as
+`workspace.diff_error`. Stale retained-workspace cleanup beyond explicit `gc` is
+intentionally deferred to the workspace retention policy.
 
 ### Authorization
 

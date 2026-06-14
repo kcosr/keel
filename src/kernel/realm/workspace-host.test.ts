@@ -16,6 +16,7 @@ import type {
 import { AgentProviderRegistry } from "../../agents/types.ts";
 import { JournalStore } from "../../journal/store.ts";
 import { captureWorkflowFile } from "../../workflow-definitions/capture.ts";
+import { GIT_DIFF_MAX_BUFFER_BYTES } from "../../workspace/worktree.ts";
 import { RealmKernel } from "./realm-host.ts";
 
 const writeUrl = captureWorkflowFile(
@@ -160,7 +161,7 @@ describe("durable diff + worktree cleanup", () => {
   });
   afterEach(() => rmSync(repo, { recursive: true, force: true }));
 
-  test("the agent.diff event carries the full contentDiff, and the worktree is removed", async () => {
+  test("the agent.diff event carries bounded reviewable contentDiff, and the worktree is removed", async () => {
     const store = JournalStore.memory();
     const kernel = new RealmKernel(store, {
       idgen: () => "r",
@@ -173,9 +174,39 @@ describe("durable diff + worktree cleanup", () => {
     expect(diffEvent).toBeDefined();
     const payload = JSON.parse(diffEvent?.payloadJson ?? "{}");
     expect(payload.added).toContain("added-by-agent.txt");
-    expect(payload.contentDiff).toContain("AGENT WAS HERE"); // durable reviewable patch
+    expect(payload.contentDiff).toContain("AGENT WAS HERE"); // durable reviewable patch content
     // the real tree is untouched (changes stay in the worktree until approval)
     expect(existsSync(join(repo, "added-by-agent.txt"))).toBe(false);
+  });
+
+  test("one-shot oversized diff emits diff_error without failing the agent step", async () => {
+    const store = JournalStore.memory();
+    const largeWriter: AgentProvider = {
+      name: "writer",
+      async generate(inv: AgentInvocation): Promise<AgentResult> {
+        if (inv.cwd) {
+          writeFileSync(
+            join(inv.cwd, "seed.txt"),
+            `${"z".repeat(GIT_DIFF_MAX_BUFFER_BYTES + 64 * 1024)}\n`,
+          );
+        }
+        return { text: "edited despite diff size", transcript: [] };
+      },
+    };
+    const kernel = new RealmKernel(store, {
+      idgen: () => "r",
+      agents: new AgentProviderRegistry().register(largeWriter),
+    });
+
+    const handle = await kernel.run<string>(writeUrl, null, { name: "w", target: repo });
+
+    expect(handle.status).toBe("finished");
+    expect(handle.output).toBe("edited despite diff size");
+    const events = store.listEvents("r");
+    expect(events.some((event) => event.type === "agent.diff")).toBe(false);
+    const diffError = events.find((event) => event.type === "workspace.diff_error");
+    expect(diffError?.payloadJson).toContain("git diff output exceeded explicit");
+    expect(existsSync(join(repo, "seed.txt"))).toBe(true);
   });
 
   test("a secret a write agent writes into a file is journaled in the durable diff", async () => {

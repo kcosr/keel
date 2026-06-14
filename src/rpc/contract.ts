@@ -66,6 +66,12 @@ export interface RunWorkspaceDiff {
   modified: string[];
   added: string[];
   deleted: string[];
+  omittedPathCounts: {
+    modified: number;
+    added: number;
+    deleted: number;
+  };
+  pathLimit: number;
   contentDiff: string;
 }
 

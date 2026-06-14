@@ -12,6 +12,7 @@ import type {
 } from "../../agents/types.ts";
 import { AgentProviderRegistry } from "../../agents/types.ts";
 import { JournalStore } from "../../journal/store.ts";
+import { GIT_DIFF_MAX_BUFFER_BYTES } from "../../workspace/worktree.ts";
 import { WorkflowCtx } from "../ctx.ts";
 import { type ClientCapturedWorkflow, RealmKernel, type RunHandle } from "./realm-host.ts";
 
@@ -458,6 +459,55 @@ describe("ctx.agentSession", () => {
       expect(readFileSync(join(workspace?.workspacePath ?? "", "state.txt"), "utf8")).toBe(
         "__session.primary.draft\n__session.primary.revise\n__session.primary.revise\n",
       );
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+      rmSync(workspaceStore, { recursive: true, force: true });
+    }
+  });
+
+  test("oversized retained workspace diffs become explicit diff_error events", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "keel-session-large-diff-target-"));
+    const workspaceStore = mkdtempSync(join(tmpdir(), "keel-session-large-diff-store-"));
+    try {
+      initGitRepo(repo);
+      const workflow = {
+        source: `
+          import { type Ctx } from "@kcosr/keel";
+          export default async function wf(ctx: Ctx): Promise<string> {
+            const primary = ctx.agentSession({ key: "primary", provider: "session", workspaceIsolation: true, capabilities: { fs: "workspace-write" } });
+            await primary.turn({ key: "huge", prompt: "huge" });
+            return "done";
+          }
+        `,
+        name: "isolated-large-diff",
+      };
+      const provider: AgentProvider = {
+        name: "session",
+        supportsSessions: true,
+        async generate(invocation, hooks) {
+          const token = invocation.resumeToken ?? "sess-1";
+          hooks.onSessionToken?.(token);
+          writeFileSync(
+            join(invocation.cwd ?? "", "seed.txt"),
+            `${"z".repeat(GIT_DIFF_MAX_BUFFER_BYTES + 64 * 1024)}\n`,
+          );
+          return { text: "ok", transcript: [], sessionToken: token };
+        },
+      };
+
+      const store = JournalStore.memory();
+      const result = await kernel(store, provider, { workspaceStore }).run<string>(workflow, null, {
+        target: repo,
+      });
+
+      expect(result.status).toBe("finished");
+      const workspace = store.getAgentSessionWorkspace("run-1", "primary");
+      expect(workspace?.status).toBe("diff_error");
+      const events = store.listEvents("run-1");
+      expect(events.some((e) => e.type === "agent.diff")).toBe(false);
+      const diffError = events.find((e) => e.type === "workspace.diff_error");
+      expect(diffError?.payloadJson).toContain("git diff output exceeded explicit");
+      expect(diffError?.payloadJson).toContain(String(GIT_DIFF_MAX_BUFFER_BYTES));
     } finally {
       rmSync(repo, { recursive: true, force: true });
       rmSync(workspaceStore, { recursive: true, force: true });

@@ -636,7 +636,7 @@ export class JournalStore {
     return this.db
       .query<{ hash: string }, []>(
         `SELECT DISTINCT definition_version AS hash FROM runs
-         WHERE status IN ('running', 'waiting-human', 'waiting-signal', 'waiting-timer')`,
+         WHERE status IN ('running', 'waiting-human', 'waiting-signal', 'waiting-timer', 'interrupted')`,
       )
       .all()
       .map((r) => r.hash);

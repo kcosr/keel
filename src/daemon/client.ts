@@ -111,6 +111,9 @@ export class DaemonClient {
   resumeRun(runId: string): Promise<RunStart> {
     return this.rpc("resumeRun", { runId });
   }
+  interruptRun(runId: string, reason?: string): Promise<{ runId: string; status: "interrupted" }> {
+    return this.rpc("interruptRun", { runId, reason });
+  }
   rerunRun(
     runId: string,
     opts?: {

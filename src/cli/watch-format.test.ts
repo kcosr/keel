@@ -188,4 +188,13 @@ describe("watch event one-shot helpers", () => {
     expect(formatWatchEvent(event, { output: "ndjson" })).not.toContain("kc_run_secretValue");
     expect(formatWatchEvent(event, { output: "ndjson" })).not.toContain("kc_admin_secretValue");
   });
+
+  test("renders run.interrupted as a parked lifecycle event", () => {
+    const event = durable(239, "run.interrupted", {
+      previousStatus: "running",
+      reason: "inspect kc_run_secretValue",
+    });
+    expect(formatWatchEvent(event)).toBe("[239] run.interrupted: inspect «redacted-capability»\n");
+    expect(formatWatchEvent(event, { output: "ndjson" })).not.toContain("kc_run_secretValue");
+  });
 });

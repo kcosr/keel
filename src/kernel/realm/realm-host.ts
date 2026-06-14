@@ -13,6 +13,7 @@ import type { Capabilities } from "../../agents/capabilities.ts";
 import { AgentFailure, executeAgent, runAgentWithStall } from "../../agents/execute.ts";
 import { type SecretStore, redact } from "../../agents/secrets.ts";
 import type { AgentProvider, AgentProviderRegistry, TraceEvent } from "../../agents/types.ts";
+import { redactCapabilityTokens } from "../../auth/redaction.ts";
 import { type Json, hashJson } from "../../hash.ts";
 import type { JournalStore } from "../../journal/store.ts";
 import type { RunRow, RunStatus } from "../../journal/types.ts";
@@ -42,6 +43,15 @@ export interface RunHandle<O> {
   runId: string;
   status: RunStatus;
   output?: O;
+}
+
+export interface InterruptRunResult {
+  runId: string;
+  status: "interrupted";
+}
+
+interface ActiveExecution {
+  interrupt(): void;
 }
 
 export interface RealmKernelOptions {
@@ -82,6 +92,13 @@ class AgentSessionContinuityError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "AgentSessionContinuityError";
+  }
+}
+
+class RunInterruptedError extends Error {
+  constructor(runId: string) {
+    super(`run ${runId} interrupted`);
+    this.name = "RunInterruptedError";
   }
 }
 
@@ -134,6 +151,7 @@ export class RealmKernel {
   private readonly definitionCacheRoot: string;
   private readonly activeSessionRuns = new Set<string>();
   private readonly activeWorkers = new Set<Worker>();
+  private readonly activeExecutions = new Map<string, Set<ActiveExecution>>();
 
   constructor(store: JournalStore, opts: RealmKernelOptions = {}) {
     this.store = store;
@@ -154,8 +172,12 @@ export class RealmKernel {
   }
 
   shutdown(): void {
+    for (const active of this.activeExecutions.values()) {
+      for (const execution of active) execution.interrupt();
+    }
     for (const worker of this.activeWorkers) worker.terminate();
     this.activeWorkers.clear();
+    this.activeExecutions.clear();
     this.activeSessionRuns.clear();
   }
 
@@ -252,6 +274,40 @@ export class RealmKernel {
     return { runId, done: this.execute<O>(runId, entryPath, input) };
   }
 
+  interruptRun(runId: string, reason?: string): InterruptRunResult {
+    const run = this.store.getRun(runId);
+    if (!run) throw new Error(`run ${runId} not found`);
+    if (TERMINAL.has(run.status)) {
+      throw new Error(`cannot interrupt terminal run ${runId} (is ${run.status})`);
+    }
+    if (run.status === "interrupted") {
+      this.store.updateRun(runId, { heartbeatAtMs: null, runtimeOwnerId: null });
+      return { runId, status: "interrupted" };
+    }
+
+    const safeReason = redactInterruptionReason(reason);
+    this.store.transaction(() => {
+      this.store.updateRun(runId, {
+        status: "interrupted",
+        heartbeatAtMs: null,
+        runtimeOwnerId: null,
+      });
+      this.store.appendEvent(
+        runId,
+        "run.interrupted",
+        {
+          previousStatus: run.status,
+          ...(safeReason ? { reason: safeReason } : {}),
+        },
+        this.host.clock(),
+      );
+    });
+
+    const active = [...(this.activeExecutions.get(runId) ?? [])];
+    for (const execution of active) execution.interrupt();
+    return { runId, status: "interrupted" };
+  }
+
   async resume<O>(runId: string): Promise<RunHandle<O>> {
     return this.startResume<O>(runId).done;
   }
@@ -271,6 +327,9 @@ export class RealmKernel {
     }
     const executionPath = this.executionPathForRun(run);
     const input = run.inputRef ? JSON.parse(run.inputRef) : undefined;
+    if (run.status === "interrupted") {
+      this.store.updateRun(runId, { status: "running", errorJson: null, finishedAtMs: null });
+    }
     this.store.appendEvent(runId, "run.resumed", {}, this.host.clock());
     return { runId, done: this.execute<O>(runId, executionPath, input) };
   }
@@ -307,6 +366,9 @@ export class RealmKernel {
   ): { runId: string; done: Promise<RunHandle<O>> } {
     const run = this.store.getRun(runId);
     if (!run) throw new Error(`run ${runId} not found`);
+    if (run.status === "interrupted") {
+      throw new Error(`cannot rerun interrupted run ${runId}; resume it first`);
+    }
     if (this.store.hasAgentSessions(runId)) {
       throw new Error(
         `run ${runId} uses durable agent sessions and cannot be rerun; start a fresh run instead`,
@@ -372,6 +434,9 @@ export class RealmKernel {
   ): { runId: string; done: Promise<RunHandle<O>> } {
     const run = this.store.getRun(runId);
     if (!run) throw new Error(`run ${runId} not found`);
+    if (run.status === "interrupted") {
+      throw new Error(`cannot rewind interrupted run ${runId}; resume it first`);
+    }
     if (this.store.hasAgentSessions(runId)) {
       throw new Error(
         `run ${runId} uses durable agent sessions and cannot be rewound; start a fresh run instead`,
@@ -576,6 +641,7 @@ export class RealmKernel {
     token: string,
     expectedToken: string | undefined,
   ): void {
+    if (this.isRunInterrupted(runId)) return;
     if (expectedToken && token !== expectedToken) {
       throw new AgentSessionContinuityError(
         `agent session "${m.agentKey}" turn "${m.turnKey}" resumed with token "${expectedToken}" but provider reported "${token}"`,
@@ -611,6 +677,7 @@ export class RealmKernel {
     providerSessionToken: string | undefined,
     events: DurableAgentEvent[] = [],
   ): void {
+    if (this.isRunInterrupted(runId)) return;
     const journalRow = this.store.getJournalRow(runId, m.stableKey, begun.attempt);
     const turn = this.store.getLatestAgentSessionTurn(runId, m.agentKey, m.turnKey);
     const tokenAfter =
@@ -681,6 +748,7 @@ export class RealmKernel {
     begun: { attempt: number; inputHash: string; startedAtMs: number },
     err: unknown,
   ): void {
+    if (this.isRunInterrupted(runId)) return;
     const atMs = this.host.clock();
     this.store.transaction(() => {
       const existing = this.store.getJournalRow(runId, m.stableKey, begun.attempt);
@@ -700,6 +768,22 @@ export class RealmKernel {
       });
       this.store.failAgentSessionTurn(runId, m.agentKey, m.turnKey, begun.attempt, atMs);
     });
+  }
+
+  private registerActiveExecution(runId: string, active: ActiveExecution): () => void {
+    const set = this.activeExecutions.get(runId) ?? new Set<ActiveExecution>();
+    set.add(active);
+    this.activeExecutions.set(runId, set);
+    return () => {
+      const current = this.activeExecutions.get(runId);
+      if (!current) return;
+      current.delete(active);
+      if (current.size === 0) this.activeExecutions.delete(runId);
+    };
+  }
+
+  private isRunInterrupted(runId: string): boolean {
+    return this.store.getRun(runId)?.status === "interrupted";
   }
 
   private execute<O>(runId: string, workflowUrl: string, input: unknown): Promise<RunHandle<O>> {
@@ -726,17 +810,30 @@ export class RealmKernel {
       const control = new Int32Array(sab, 0, CONTROL_WORDS);
       const valueView = new Float64Array(sab, VALUE_OFFSET, 1);
       const worker = new Worker(WORKER_URL, { type: "module" });
+      const runAbortController = new AbortController();
       this.activeWorkers.add(worker);
 
       let settled = false;
+      let unregisterActive = () => {};
       const finish = (fn: () => void): void => {
         if (settled) return;
         settled = true;
         if (sessionRunGuarded) this.activeSessionRuns.delete(runId);
         this.activeWorkers.delete(worker);
+        unregisterActive();
         worker.terminate();
         fn();
       };
+      const finishInterrupted = (): void => {
+        finish(() => resolve({ runId, status: "interrupted" }));
+      };
+      const active: ActiveExecution = {
+        interrupt: () => {
+          runAbortController.abort(new RunInterruptedError(runId));
+          finishInterrupted();
+        },
+      };
+      unregisterActive = this.registerActiveExecution(runId, active);
       const reply = (id: number, payload: unknown): void => {
         // After the run settles the worker is terminated; a late reply from an
         // in-flight agent (e.g. another fan-out verifier finishing after a crash)
@@ -751,6 +848,10 @@ export class RealmKernel {
       // Settle a run as resumable (a host-side crash fault); the pending row
       // written before the fault drives re-execution on the next run.
       const abort = (err: unknown): void => {
+        if (this.isRunInterrupted(runId)) {
+          finishInterrupted();
+          return;
+        }
         this.store.appendEvent(
           runId,
           "run.aborted",
@@ -761,8 +862,13 @@ export class RealmKernel {
       };
 
       worker.onmessage = (e: MessageEvent<WorkerRequest>) => {
+        if (settled) return;
         const m = e.data;
         try {
+          if (m.type !== "ready" && this.isRunInterrupted(runId)) {
+            finishInterrupted();
+            return;
+          }
           switch (m.type) {
             case "ready":
               worker.postMessage({
@@ -917,14 +1023,20 @@ export class RealmKernel {
                           abortSignal: signal,
                         },
                         {
-                          onSessionToken: (tok) =>
-                            engine.recordSessionToken(m.key, begun.attempt, tok),
+                          onSessionToken: (tok) => {
+                            if (!settled && !this.isRunInterrupted(runId)) {
+                              engine.recordSessionToken(m.key, begun.attempt, tok);
+                            }
+                          },
                           // §11.2: redact secrets from STREAMED events too — a
                           // provider may stream a secret (thinking/tool output)
                           // before the final output is redacted. Tool calls/results
                           // are durably appended here before returning to the adapter.
-                          onEvent: (ev) =>
-                            this.emitAgentTrace(engine, m.key, begun.attempt, ev, allSecrets),
+                          onEvent: (ev) => {
+                            if (!settled && !this.isRunInterrupted(runId)) {
+                              this.emitAgentTrace(engine, m.key, begun.attempt, ev, allSecrets);
+                            }
+                          },
                         },
                         {
                           ...(m.jsonSchema != null ? { jsonSchema: m.jsonSchema } : {}),
@@ -935,9 +1047,11 @@ export class RealmKernel {
                     {
                       ...(m.timeoutMs != null ? { timeoutMs: m.timeoutMs } : {}),
                       ...(m.stallRetries != null ? { stallRetries: m.stallRetries } : {}),
+                      signal: runAbortController.signal,
                       onStall: (a) => engine.emit("agent.stalled", { key: m.key, attempt: a }),
                     },
                   );
+                  if (settled || this.isRunInterrupted(runId)) return;
                   // §11.2: redact exact secret values from the output before it
                   // ever reaches the journal (defense-in-depth over the side channel).
                   let output = execution.output;
@@ -994,6 +1108,7 @@ export class RealmKernel {
                     contentHash: hashJson(output),
                   });
                 } catch (agentErr) {
+                  if (settled || this.isRunInterrupted(runId)) return;
                   // onFailure:'null' (D7) tolerates a terminal failure: journal a
                   // COMPLETED null (with failure metadata as an event) so resume
                   // replays null instead of re-calling the agent.
@@ -1141,17 +1256,29 @@ export class RealmKernel {
                           abortSignal: signal,
                         },
                         {
-                          onSessionToken: (tok) =>
-                            this.recordAgentSessionToken(
-                              engine,
-                              runId,
-                              m,
-                              begun.attempt,
-                              tok,
-                              begun.resumeToken,
-                            ),
-                          onEvent: (ev) =>
-                            this.emitAgentTrace(engine, m.stableKey, begun.attempt, ev, allSecrets),
+                          onSessionToken: (tok) => {
+                            if (!settled && !this.isRunInterrupted(runId)) {
+                              this.recordAgentSessionToken(
+                                engine,
+                                runId,
+                                m,
+                                begun.attempt,
+                                tok,
+                                begun.resumeToken,
+                              );
+                            }
+                          },
+                          onEvent: (ev) => {
+                            if (!settled && !this.isRunInterrupted(runId)) {
+                              this.emitAgentTrace(
+                                engine,
+                                m.stableKey,
+                                begun.attempt,
+                                ev,
+                                allSecrets,
+                              );
+                            }
+                          },
                         },
                         {
                           ...(m.jsonSchema != null ? { jsonSchema: m.jsonSchema } : {}),
@@ -1162,11 +1289,12 @@ export class RealmKernel {
                     {
                       ...(m.timeoutMs != null ? { timeoutMs: m.timeoutMs } : {}),
                       ...(m.stallRetries != null ? { stallRetries: m.stallRetries } : {}),
+                      signal: runAbortController.signal,
                       onStall: (a) =>
                         engine.emit("agent.stalled", { key: m.stableKey, attempt: a }),
                     },
                   );
-                  if (settled) return;
+                  if (settled || this.isRunInterrupted(runId)) return;
                   let output = execution.output;
                   if (allSecrets.length > 0) {
                     const r = redact(JSON.stringify(output ?? null), allSecrets);
@@ -1199,7 +1327,7 @@ export class RealmKernel {
                   }
                   reply(m.id, { ok: true, output, contentHash: hashJson(output) });
                 } catch (agentErr) {
-                  if (settled) return;
+                  if (settled || this.isRunInterrupted(runId)) return;
                   if (m.onFailure === "null" && agentErr instanceof AgentFailure) {
                     let errJson = serializeError(agentErr) as unknown as Json;
                     if (allSecrets.length > 0) {
@@ -1380,6 +1508,10 @@ export class RealmKernel {
             }
           }
         } catch (hostErr) {
+          if (this.isRunInterrupted(runId)) {
+            finishInterrupted();
+            return;
+          }
           // A host-side fault (e.g. injected crash) — leave the run resumable and
           // tear down; the pending row written before the fault drives re-execution.
           this.store.appendEvent(
@@ -1393,6 +1525,10 @@ export class RealmKernel {
       };
 
       worker.onerror = (e: ErrorEvent) => {
+        if (this.isRunInterrupted(runId)) {
+          finishInterrupted();
+          return;
+        }
         finish(() => reject(new Error(`realm worker error: ${e.message}`)));
       };
     });
@@ -1403,6 +1539,12 @@ function rebuildError(e: { name: string; message: string }): Error {
   const err = new Error(e.message);
   err.name = e.name;
   return err;
+}
+
+function redactInterruptionReason(reason: string | undefined): string | undefined {
+  if (reason === undefined) return undefined;
+  const redacted = redactCapabilityTokens(reason).trim();
+  return redacted.length > 0 ? redacted : undefined;
 }
 
 function serializeError(err: unknown): { name: string; message: string } {

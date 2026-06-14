@@ -23,6 +23,7 @@ const onceUrl = captureWorkflowFile(new URL("agent-once.workflow.ts", FIX).pathn
 const reviewUrl = captureWorkflowFile(new URL("agent-review.workflow.ts", FIX).pathname);
 const chainUrl = captureWorkflowFile(new URL("chain.workflow.ts", FIX).pathname);
 const flakyUrl = captureWorkflowFile(new URL("flaky.workflow.ts", FIX).pathname);
+const signalUrl = captureWorkflowFile(new URL("await-signal.workflow.ts", FIX).pathname);
 const WORKFLOW_TEST_TIMEOUT_MS = 20_000;
 
 function keel(store: JournalStore, mock?: MockProvider): InProcessKeel {
@@ -771,6 +772,56 @@ describe("lifecycle start methods", () => {
     },
     WORKFLOW_TEST_TIMEOUT_MS,
   );
+
+  test("waitForRun reports interrupted after interrupting a parked run", async () => {
+    const store = JournalStore.memory();
+    const api = keel(store);
+    const { runId } = await api.launchRun({ ...signalUrl, input: null, name: "signal" });
+    expect((await api.waitForRun(runId)).status).toBe("waiting-signal");
+
+    await expect(api.interruptRun(runId, "inspect")).resolves.toEqual({
+      runId,
+      status: "interrupted",
+    });
+    expect(api.getRun(runId)?.status).toBe("interrupted");
+    expect((await api.waitForRun(runId)).status).toBe("interrupted");
+  });
+
+  test("interruptRun parks a running row and only resume can leave interrupted", async () => {
+    const store = JournalStore.memory();
+    store.insertRun({
+      runId: "run_interrupt",
+      workflowName: "interrupt",
+      definitionVersion:
+        "wf_sha256_0000000000000000000000000000000000000000000000000000000000000000",
+      workflowRef: null,
+      status: "running",
+      parentRunId: null,
+      tenantId: null,
+      inputRef: null,
+      outputRef: null,
+      errorJson: null,
+      heartbeatAtMs: null,
+      runtimeOwnerId: null,
+      createdAtMs: 1,
+    });
+    const api = keel(store);
+
+    await expect(api.interruptRun("run_interrupt", "inspect kc_run_secretValue")).resolves.toEqual({
+      runId: "run_interrupt",
+      status: "interrupted",
+    });
+    expect(api.getRun("run_interrupt")?.status).toBe("interrupted");
+    expect(api.getBlockage("run_interrupt")).toMatchObject({
+      reason: "interrupted",
+      interrupted: { reason: "inspect «redacted-capability»", previousStatus: "running" },
+    });
+    await expect(api.retryRun("run_interrupt")).rejects.toThrow(
+      "retry needs a failed run (is interrupted)",
+    );
+    await expect(api.rerunRun("run_interrupt")).rejects.toThrow(/resume it first/);
+    await expect(api.rewindRun("run_interrupt", "step")).rejects.toThrow(/resume it first/);
+  });
 
   test(
     "rewindRun to an unknown step rejects without starting work",

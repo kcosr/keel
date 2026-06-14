@@ -2,7 +2,7 @@
 // with a fake vendor (deterministic), plus a LIVE pi smoke gated by KEEL_LIVE=1.
 
 import { describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { JournalStore } from "../journal/store.ts";
@@ -39,6 +39,15 @@ function kernel(store: JournalStore, vendor: AgentProvider, extra: Record<string
     agents: new AgentProviderRegistry().register(vendor),
     ...extra,
   });
+}
+
+async function until(cond: () => boolean, timeoutMs = 2000): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (cond()) return;
+    await Bun.sleep(20);
+  }
+  throw new Error("condition not met in time");
 }
 
 describe("session-resume four-branch table (through the realm)", () => {
@@ -105,6 +114,46 @@ describe("session-resume four-branch table (through the realm)", () => {
 });
 
 describe("PiProvider diagnostics", () => {
+  test("abortSignal kills an active Pi subprocess", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-pi-abort-"));
+    try {
+      const bin = join(dir, "fake-pi");
+      const prompted = join(dir, "prompted");
+      const aborted = join(dir, "aborted");
+      await Bun.write(
+        bin,
+        `#!/bin/sh
+trap 'printf 1 > ${aborted}; exit 0' TERM
+while IFS= read -r line; do
+  case "$line" in
+    *get_state*) printf '%s\n' '{"type":"response","id":1,"data":{"sessionId":"sess-abort"}}' ;;
+    *prompt*) printf 1 > ${prompted} ;;
+  esac
+done
+`,
+      );
+      chmodSync(bin, 0o755);
+      const provider = new PiProvider({ bin, timeoutMs: 10_000 });
+      const controller = new AbortController();
+      const running = provider.generate(
+        {
+          key: "pi-abort",
+          provider: "pi",
+          prompt: "hello",
+          toolPolicy: "none",
+          abortSignal: controller.signal,
+        },
+        {},
+      );
+      await until(() => existsSync(prompted));
+      controller.abort();
+      await expect(running).rejects.toThrow(/aborted/);
+      await until(() => existsSync(aborted));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("uses KEEL_PI_BIN when bin is not passed", async () => {
     const dir = mkdtempSync(join(tmpdir(), "keel-pi-env-bin-"));
     const previous = process.env.KEEL_PI_BIN;

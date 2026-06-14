@@ -7,6 +7,7 @@ import type { Blockage, RunProjection, RunReport } from "../rpc/projection.ts";
 export interface ExecuteKeel {
   launch(req: ExecuteLaunchRequest): Promise<ExecuteRunHandle>;
   resume(runId: string): Promise<RunStart>;
+  interrupt(runId: string, reason?: string): Promise<{ runId: string; status: "interrupted" }>;
   retry(runId: string): Promise<RunStart>;
   rewind(runId: string, toStableKey: string): Promise<RunStart>;
   fork(
@@ -122,6 +123,10 @@ export function createExecuteKeel(opts: ExecuteRuntimeOptions): ExecuteKeel {
     async resume(runId) {
       await authenticateKnownRun(runId);
       return opts.client.resumeRun(runId);
+    },
+    async interrupt(runId, reason) {
+      await authenticateKnownRun(runId);
+      return opts.client.interruptRun(runId, reason);
     },
     async retry(runId) {
       await authenticateKnownRun(runId);
@@ -244,7 +249,8 @@ async function* eventIterable(
       if (
         event.type === "run.finished" ||
         event.type === "run.failed" ||
-        event.type === "run.continued"
+        event.type === "run.continued" ||
+        event.type === "run.interrupted"
       ) {
         return;
       }

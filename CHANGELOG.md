@@ -33,6 +33,9 @@
   materialized from the journal for run execution and resume.
 - Daemon-enforced bearer capabilities for run control, including launch-minted
   run capabilities, admin capabilities, and client-side capability files.
+- `keel interrupt <runId> [reason]` and `interruptRun` park non-terminal runs in
+  public status `interrupted` until an explicit `resume`, with durable
+  `run.interrupted` audit events and best-effort active worker/provider abort.
 
 ### Changed
 - Attached CLI text transcripts now coalesce adjacent live agent text/reasoning
@@ -65,6 +68,9 @@
   `--tools` to attached text commands to include them.
 - Run lifecycle operations are capability-gated by the daemon. Run id alone is
   no longer authority to inspect or mutate a run.
+- Interrupted runs are skipped by daemon restart recovery, timer supervisor wake,
+  signal delivery, and approval delivery; interruption reasons are redacted
+  before durable persistence and appear in blockage/report output.
 - Resume/retry/rewind/fork execute the run's stored workflow definition snapshot;
   rerun with a source override creates a fresh snapshot.
 - Workflow resume across compatible Keel upgrades now uses an explicit workflow

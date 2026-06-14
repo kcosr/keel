@@ -32,8 +32,9 @@ recovery; liveness (stall-retry, timeouts, blockage); agent capabilities,
 explicit git-worktree isolation, diff gate, and secrets side-channel; durable
 `ctx.sleep` with the supervisor and cron; full HITL (`ctx.human`/`ctx.signal`);
 time travel (retry/rewind/fork); immutable workflow definition snapshots;
-daemon-enforced bearer capabilities; stateless `keel execute`; and ops
-(artifact GC, `continueAsNew`, Postgres-dialect discipline).
+daemon-enforced bearer capabilities; explicit resumable run interruption;
+stateless `keel execute`; and ops (artifact GC, `continueAsNew`,
+Postgres-dialect discipline).
 
 **Deltas from the original design text, all intentional and noted in place:**
 
@@ -306,6 +307,14 @@ dedup key.** Re-asking a model is harmless; agents with real side effects write
 into isolated workspaces (§11.3), so a re-run lands in a fresh workspace, not a
 doubled mutation. Mid-call recovery for long agent calls: §10.4.
 
+User-requested `interrupt` is a durable crash-like boundary with a visible parked
+status. Keel first commits `runs.status = 'interrupted'` plus `run.interrupted`,
+then aborts active workers/providers. Late work from that abandoned execution is
+fenced by the active-execution abort state and must not convert pending rows to
+failed rows, append final agent transcripts, or overwrite the interrupted status.
+Rows completed before the interrupt commit remain completed; rows still pending
+re-execute or recover when the user explicitly resumes.
+
 **Supersession (closing a v1 gap).** The journal PK is
 `(runId, stableKey, attempt)`. Memoization lookup reads the **highest attempt**
 for a `stableKey`: if its `(inputHash, version)` match and status is
@@ -317,7 +326,7 @@ it; nothing ever rewrites it).
 
 ```
 resume(runId):
-  load run row; verify resumable (status not terminal)
+  load run row; verify resumable (status not terminal; interrupted is resumable)
   load the archived definition for the run's pinned definitionVersion
   re-execute the body in the deterministic realm, where every ctx.* call:
     - looks up its journal row by (stableKey, inputHash, version), highest attempt
@@ -409,16 +418,19 @@ mode can never diverge.
 v1 froze the wire contract at P0 — before any effect, parking, or approval shape
 existed, which risks freezing the wrong contract. v2 freezes it **after the
 effect shapes exist and before daemon extraction** (Phase 11): the contract is
-designed against real `launchRun`/`resumeRun`/`getRun`/event-subscription needs
+designed against real `launchRun`/`resumeRun`/`interruptRun`/`getRun`/event-subscription needs
 demonstrated by the mock-scale review workload, then the daemon extraction (Phase 12)
 is a transport swap, not a redesign — the property v1 actually wanted.
 
 ### 7.4 Daemon crash recovery
 
 The journal is the source of truth, not daemon memory. On restart the daemon
-rebuilds run state from the journal and resumes incomplete runs. Run ownership
-uses a compare-and-set fence on `runtimeOwnerId` so a restarted daemon and a
-stale one cannot both drive one run.
+rebuilds run state from the journal and resumes incomplete `running` runs.
+Operator-interrupted runs are parked with public status `interrupted` and are
+not reclaimed by restart recovery, timer supervision, signal delivery, or
+approval delivery; only explicit `resume` moves them back to `running`. Run
+ownership uses a compare-and-set fence on `runtimeOwnerId` so a restarted daemon
+and a stale one cannot both drive one run.
 
 ### 7.5 Definition pinning & the edit-and-resume flow
 
@@ -508,8 +520,8 @@ parked runs.
 Run id is an identifier, not authority. Launch mints a broad run capability for
 that run; daemon methods authorize against bearer capabilities stored only as
 hashes in the `capabilities` table. The default run capability covers normal
-run lifecycle operations: read, watch/events, output, resume, retry, rewind,
-fork, and ordinary signal. `ctx.human` approve/deny and daemon-wide list require
+run lifecycle operations: read, watch/events, output, resume, interrupt, retry,
+rewind, fork, and ordinary signal. `ctx.human` approve/deny and daemon-wide list require
 an admin capability (`{ kind: "daemon" }`, action `admin`).
 
 The CLI writes run capabilities into private cap files by default and returns
@@ -832,10 +844,12 @@ Session state lives beside the journal:
 
 Begin/record/complete/fail update these rows transactionally with the journal
 row. A new later turn resumes from `agent_sessions.current_session_token`; a
-pending turn resumes from its observed token or the token it started with. A
-completed turn replays its journaled output and does not call the provider.
-Completing a turn without a token is an error, because future turns would not be
-able to continue.
+pending turn resumes from its observed token or the token it started with. If an
+interrupt lands after token observation but before completion, the turn remains
+pending and explicit resume uses that observed token; there is no fresh-session
+fallback for durable sessions. A completed turn replays its journaled output and
+does not call the provider. Completing a turn without a token is an error,
+because future turns would not be able to continue.
 
 The first cut is intentionally fail-closed: providers must declare stable
 session support, `workspaceIsolation` is rejected, and runs with session rows
@@ -971,8 +985,10 @@ The original run survived because stall-retry fired (`lens:authz stalled after
 own phase and acceptance criteria (Phase 13 — v1's criteria-less "P2.5" is
 retired). The as-built API method is **`getBlockage(runId)`** (KeelApi), returning
 `{ reason: 'none' | 'running' | 'waiting_human' | 'waiting_child' |
-'waiting_signal' | 'waiting_timer' | 'stalled_no_heartbeat', blockedOn, context }`
-(the `waiting_human` case surfaces the persisted approval prompt) — stall
+'waiting_signal' | 'waiting_timer' | 'stalled_no_heartbeat' | 'interrupted',
+blockedOn, context }` (the `waiting_human` case surfaces the persisted approval
+prompt; `interrupted` includes the redacted reason, previous status, last phase,
+and last wait metadata) — stall
 debugging as one call instead of log archaeology.
 
 ### 12.3 Agent-facing surface (deferred tier)
@@ -1228,6 +1244,7 @@ CREATE TABLE runs (
   workflow_ref       TEXT,               -- display-only provenance / pinned hash
   status             TEXT NOT NULL,      -- running | waiting-human | waiting-signal
                                          -- | waiting-timer | waiting-approval
+                                         -- | interrupted
                                          -- | finished | failed | cancelled | continued
   parent_run_id      TEXT,               -- fork / spawn / continueAsNew lineage
   tenant_id          TEXT,               -- single reserved column (see D2)

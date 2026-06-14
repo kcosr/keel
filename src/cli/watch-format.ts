@@ -134,6 +134,10 @@ function formatTextWatchEvent(event: EventEnvelope, opts: WatchFormatOptions): s
         key ? ` ${compact(key)}` : ""
       }\n`;
     }
+    case "run.interrupted": {
+      const reason = prop(payload, "reason");
+      return `${prefix} run.interrupted${reason ? `: ${compact(reason)}` : ""}\n`;
+    }
     case "run.failed": {
       const message = prop(payload, "message") ?? prop(payload, "error");
       return `${prefix} run.failed${message ? `: ${compact(message)}` : formatPayload(payload)}\n`;

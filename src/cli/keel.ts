@@ -93,6 +93,7 @@ const COMMANDS: [string, string, string][] = [
   ["list", "[--output text|json]", "list runs"],
   ["gc", "", "prune unreferenced workflow definitions and cache entries"],
   ["resume", "[--detach] [--tools] <runId>", "resume a parked or incomplete run"],
+  ["interrupt", "<runId> [reason]", "interrupt a non-terminal run until explicit resume"],
   ["retry", "[--detach] [--tools] <runId>", "re-run a failed run from its failed step"],
   [
     "rewind",
@@ -347,6 +348,17 @@ async function dispatch(argv: string[]): Promise<number> {
         : await watchRun(client, out.runId, { output: "text", tools: parsed.tools });
       if (parsed.detach) process.stdout.write(`${out.runId}\t${out.status}\n`);
       return parsed.detach ? 0 : statusExitCode(terminal ?? out.status);
+    }
+    case "interrupt": {
+      const [runId, ...reasonParts] = rest;
+      if (!runId) return usage("interrupt needs <runId> [reason]");
+      const client = await openClient();
+      const out = await client.interruptRun(
+        runId,
+        reasonParts.length > 0 ? reasonParts.join(" ") : undefined,
+      );
+      process.stdout.write(`${out.runId}\t${out.status}\n`);
+      return 0;
     }
     case "list": {
       const parsed = parseListArgs(rest);
@@ -788,7 +800,7 @@ export function formatDuration(startMs: number, endMs: number): string {
 }
 
 function isParked(status: string): boolean {
-  return status.startsWith("waiting-");
+  return status.startsWith("waiting-") || status === "interrupted";
 }
 
 function statusExitCode(status: string): number {
@@ -948,6 +960,7 @@ export async function watchRun(
         else if (e.type === "run.failed") noteStatus("failed");
         else if (e.type === "run.continued") noteStatus("continued");
         else if (e.type === "run.parked") noteStatus(parkedStatus(e.payload));
+        else if (e.type === "run.interrupted") noteStatus("interrupted");
         else if (e.type === "authorization.failed") noteStatus("failed");
         else if (
           e.type === "run.resumed" ||

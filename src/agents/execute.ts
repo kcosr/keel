@@ -24,6 +24,13 @@ export class StepTimeoutError extends Error {
   }
 }
 
+export class AgentAbortError extends Error {
+  constructor(message = "agent execution aborted") {
+    super(message);
+    this.name = "AgentAbortError";
+  }
+}
+
 /**
  * Run an agent under a per-attempt stall timeout (DESIGN.md §12.2). If an attempt
  * does not finish within `timeoutMs`, the attempt is ABORTED (its AbortSignal
@@ -33,30 +40,63 @@ export class StepTimeoutError extends Error {
  */
 export async function runAgentWithStall(
   run: (signal: AbortSignal) => Promise<AgentExecution>,
-  opts: { timeoutMs?: number; stallRetries?: number; onStall?: (attempt: number) => void },
+  opts: {
+    timeoutMs?: number;
+    stallRetries?: number;
+    onStall?: (attempt: number) => void;
+    signal?: AbortSignal;
+  },
 ): Promise<AgentExecution> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_AGENT_TIMEOUT_MS;
   const stallRetries = opts.stallRetries ?? DEFAULT_STALL_RETRIES;
   for (let attempt = 0; attempt <= stallRetries; attempt++) {
+    if (opts.signal?.aborted) throw abortError(opts.signal);
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let removeAbortListener: (() => void) | undefined;
+    let externallyAborted = false;
+    const externalSignal = opts.signal;
     const stall = new Promise<"stall">((resolve) => {
       timer = setTimeout(() => resolve("stall"), timeoutMs);
     });
+    const abort = externalSignal
+      ? new Promise<"abort">((resolve) => {
+          const onAbort = () => {
+            externallyAborted = true;
+            controller.abort(externalSignal.reason);
+            resolve("abort");
+          };
+          externalSignal.addEventListener("abort", onAbort, { once: true });
+          removeAbortListener = () => externalSignal.removeEventListener("abort", onAbort);
+        })
+      : null;
     try {
-      const result = await Promise.race([run(controller.signal), stall]);
+      const result = await Promise.race(
+        abort ? [run(controller.signal), stall, abort] : [run(controller.signal), stall],
+      );
+      if (result === "abort") throw abortError(opts.signal);
       if (result !== "stall") return result;
       controller.abort(); // kill the stalled attempt's subprocess
       opts.onStall?.(attempt);
     } catch (err) {
+      // External aborts are interruption/cancellation, not provider failures or stalls.
+      if (externallyAborted || opts.signal?.aborted) throw abortError(opts.signal);
       // an aborted attempt may reject; treat it as a stall and retry, else rethrow
       if (controller.signal.aborted) opts.onStall?.(attempt);
       else throw err;
     } finally {
       if (timer) clearTimeout(timer);
+      removeAbortListener?.();
     }
   }
   throw new StepTimeoutError("agent", timeoutMs, stallRetries + 1);
+}
+
+function abortError(signal: AbortSignal | undefined): Error {
+  const reason = signal?.reason;
+  if (reason instanceof Error) return reason;
+  if (typeof reason === "string" && reason.length > 0) return new AgentAbortError(reason);
+  return new AgentAbortError();
 }
 
 export interface AgentExecution {

@@ -27,6 +27,9 @@
   digest, and execute control scripts can call `keel.report(runId)`.
 - `keel list [--output text|json]` now has an explicit JSON envelope for scripts
   and includes created/finished/parent run metadata in run summaries.
+- `keel tui [runId] [--status status] [--limit n]` opens an interactive terminal
+  run browser/detail/watch UI with local filtering, `subscribeEvents` backfill,
+  conservative lifecycle controls, and terminal restore guards.
 - `keel gc` prunes old unreferenced workflow definition rows and rebuildable
   materialized definition cache directories.
 - Immutable workflow definition snapshots are stored by content hash and
@@ -67,6 +70,9 @@
   NDJSON event streams, and human transcripts require `--output text`.
 - `keel list` now defaults to a headered, aligned text table instead of raw
   tab-separated rows; scripts should use `keel list --output json`.
+- `getRun`/`getRunReport` projections include `createdAtMs` and `finishedAtMs`
+  so direct run detail views can render the same timestamps and durations as
+  `keel list`.
 - Compact text transcripts hide agent tool calls/results by default. Add
   `--tools` to attached text commands to include them.
 - Run lifecycle operations are capability-gated by the daemon. Run id alone is

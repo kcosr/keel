@@ -167,6 +167,8 @@ describe("projection is golden-locked", () => {
         status: "finished",
         definitionVersion,
         parentRunId: null,
+        createdAtMs: 1,
+        finishedAtMs: 1,
         phase: null,
         error: null,
         nodes: [

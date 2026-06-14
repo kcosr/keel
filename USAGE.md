@@ -139,6 +139,7 @@ bun src/cli/keel.ts <command> [args]
 | `output <runId> [--output json\|text]` | Print the terminal workflow output. |
 | `report <runId> [--output json\|text]` | Print a journaled per-node result digest. |
 | `list [--output text\|json]` | List runs as an aligned table or JSON envelope. Requires admin. |
+| `tui [runId] [--status status] [--limit n] [--output text]` | Open an interactive run browser or direct run detail/watch view. Browser mode requires admin. |
 | `gc` | Prune unreferenced workflow definition rows and cache entries. Requires admin. |
 | `resume [--detach] [--tools] <runId>` | Resume a parked, interrupted, or incomplete run. Watches by default. |
 | `interrupt <runId> [reason]` | Stop active work and park a non-terminal run until explicit `resume`. |
@@ -288,6 +289,56 @@ RPC method remains a bare `RunSummary[]`:
 ```
 
 `--output ndjson` is invalid for `list`.
+
+### Interactive Run Browser TUI
+
+`keel tui` opens a terminal UI in the alternate screen. It requires interactive
+stdin and stdout; `--output json` and `--output ndjson` are rejected because the
+TUI is not a script output mode.
+
+```bash
+keel tui
+keel tui --status running --limit 25
+keel tui run_...
+```
+
+Without a positional run id, the browser calls `listRuns()` and therefore
+requires admin credentials (`KEEL_ADMIN_TOKEN` or an admin capability source).
+If listing is denied, use `keel tui <runId>` with a run-scoped capability to open
+direct detail/watch mode for that run. Direct mode uses the same daemon `get`,
+`report`, `output`, lifecycle, signal, and `subscribeEvents` RPC authorization as
+the non-interactive CLI.
+
+Browser keys: `j`/`k` or arrow keys move, `g`/`G` jump, `/` filters locally by run
+id/workflow/status, `r` refreshes, `Enter` opens detail, `w` opens detail and
+attaches watch, `R` resumes, `t` retries, `s` prompts for a signal, and `q`
+quits. Browser columns mirror `keel list`: run id, status, workflow, created,
+and client-computed duration.
+
+Detail keys: `w` attaches/detaches a local watch subscription, `R` resumes, `t`
+retries, `e` prompts for a rewind step key, `s` prompts for `ctx.signal` as
+`name [json]`, `o` loads terminal output when finished, `b`/`Esc` returns to the
+browser (or quits direct mode), and `q` quits. Approval decisions remain
+admin-gated in v1; pressing `a` without known admin credentials reports
+`approval requires admin credentials` instead of attempting a run-scoped action.
+
+Watch uses `subscribeEvents(runId, afterSeq)`: the first attach backfills durable
+events from sequence `0`, reattach resumes after the last durable sequence seen
+for that run, and local detach/exit only removes the TUI subscriber. Live
+`agent.event` frames are displayed while connected but are not replayable. If the
+daemon emits `authorization.failed` or the subscription errors, the TUI detaches
+locally and shows the error in the status line.
+
+Successful resume, retry, rewind, signal, or admin approval actions keep the run
+in detail view, refresh the projection/report, and attach watch from the last
+durable sequence already seen. Daemon rejections for authorization, ownership, or
+ineligible status leave the current view intact and are surfaced in the status
+line. Terminal state is restored on normal quit, Ctrl-C in raw mode, command
+errors, and `SIGINT`.
+
+The PTY smoke strategy for the TUI is dev/test-only: opt-in tests should allocate
+a pseudo-terminal with a system wrapper such as `script`/`unbuffer` when
+available. The shipped CLI does not add native TUI or PTY runtime dependencies.
 
 ### Exit Codes
 
@@ -795,6 +846,7 @@ interface KeelApi {
   rewindRun(runId: string, toStableKey: string): Promise<RunStart>;
   forkRun(runId: string, opts?: { atStableKey?: string; newRunId?: string }): RunLaunchResult;
   getRun(runId: string): RunProjection | null;
+  getRunReport(runId: string): RunReport | null;
   getBlockage(runId: string): Blockage;
   listRuns(): RunSummary[];
   waitForRun(runId: string): Promise<RunOutcome>;
@@ -823,6 +875,20 @@ interface RunSummary {
   createdAtMs: number;
   finishedAtMs: number | null;
   parentRunId: string | null;
+}
+
+interface RunProjection {
+  runId: string;
+  workflowName: string | null;
+  status: "running" | "waiting-human" | "waiting-signal" | "waiting-timer" | "waiting-approval" | "interrupted" | "finished" | "failed" | "cancelled" | "continued";
+  definitionVersion: string;
+  parentRunId: string | null;
+  createdAtMs: number;
+  finishedAtMs: number | null;
+  nodes: NodeView[];
+  phase: string | null;
+  error: { name: string; message: string } | null;
+  stats: { steps: number; agents: number; artifacts: number };
 }
 ```
 

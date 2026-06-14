@@ -125,6 +125,9 @@ and the API notes in `USAGE.md` in the same change.
 - Run `bun test` when shared kernel, journal, daemon, CLI, or provider behavior
   changes.
 - For docs-only changes, a focused formatter/linter check is enough.
+- For TUI changes, keep terminal-independent state/view/event/input coverage in
+  `src/tui`; any PTY smoke must be opt-in, dev/test-only, and must not add a
+  native runtime dependency to the shipped CLI.
 
 ### Provider Testing
 

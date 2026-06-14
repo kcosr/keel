@@ -9,6 +9,7 @@
 //   keel get <runId>                    print the run projection
 //   keel resume <runId>                 resume a non-terminal run
 //   keel list [--output text|json]      list runs
+//   keel tui [runId]                   interactive run browser/detail/watch
 //
 // Socket + db paths default under ~/.keel (override with KEEL_SOCKET / KEEL_DB).
 
@@ -32,8 +33,9 @@ import { DaemonClient } from "../daemon/client.ts";
 import { KeelDaemon } from "../daemon/server.ts";
 import { runExecuteScript } from "../execute/runtime.ts";
 import type { RunOutcome, WorkflowProvenance } from "../rpc/contract.ts";
-import type { RunReport, RunSummary } from "../rpc/projection.ts";
-import { formatTable, tableCell } from "./table.ts";
+import type { RunReport } from "../rpc/projection.ts";
+import { runTui } from "../tui/index.ts";
+import { displayName, formatDuration, formatListRuns, formatUtcTimestamp } from "./run-display.ts";
 import { createTextWatchFormatter, formatNdjsonWatchEvent } from "./watch-format.ts";
 import type { WatchFormatOptions } from "./watch-format.ts";
 
@@ -41,13 +43,7 @@ const KEEL_DIR = process.env.KEEL_DIR ?? join(homedir(), ".keel");
 const SOCKET = process.env.KEEL_SOCKET ?? join(KEEL_DIR, "keel.sock");
 const DB = process.env.KEEL_DB ?? join(KEEL_DIR, "keel.db");
 const CAP_DIR = process.env.KEEL_CAP_DIR ?? join(KEEL_DIR, "caps");
-const RUN_LIST_WORKFLOW_MAX_WIDTH = 40;
-const DURATION_UNITS = [
-  { label: "d", ms: 86_400_000 },
-  { label: "h", ms: 3_600_000 },
-  { label: "m", ms: 60_000 },
-  { label: "s", ms: 1_000 },
-] as const;
+export { formatDuration, formatListRuns, formatUtcTimestamp } from "./run-display.ts";
 
 export const OUTPUT_FORMATS = ["json", "text", "ndjson"] as const;
 export type OutputFormat = (typeof OUTPUT_FORMATS)[number];
@@ -91,6 +87,11 @@ const COMMANDS: [string, string, string][] = [
   ["output", "<runId> [--output json|text]", "print a run's terminal output"],
   ["report", "<runId> [--output json|text]", "print a run's per-node result digest"],
   ["list", "[--output text|json]", "list runs"],
+  [
+    "tui",
+    "[runId] [--status status] [--limit n] [--output text]",
+    "open the interactive run browser",
+  ],
   ["gc", "", "prune unreferenced workflow definitions and cache entries"],
   ["resume", "[--detach] [--tools] <runId>", "resume a parked or incomplete run"],
   ["interrupt", "<runId> [reason]", "interrupt a non-terminal run until explicit resume"],
@@ -371,6 +372,16 @@ async function dispatch(argv: string[]): Promise<number> {
       );
       return 0;
     }
+    case "tui": {
+      const parsed = parseTuiArgs(rest);
+      return await runTui({
+        ...parsed,
+        clientFactory: openClient,
+        stdin: process.stdin,
+        stdout: process.stdout,
+        knownAdmin: Boolean(process.env.KEEL_ADMIN_TOKEN),
+      });
+    }
     case "gc": {
       const client = await openClient();
       const out = await client.gcDefinitions();
@@ -505,6 +516,13 @@ export interface ListArgs {
   output: ListOutputFormat;
 }
 
+export interface TuiArgs {
+  runId?: string;
+  status?: string;
+  limit?: number;
+  output: "text";
+}
+
 export function parseListArgs(args: string[]): ListArgs {
   let output: ListOutputFormat = "text";
   const positional: string[] = [];
@@ -533,6 +551,40 @@ function parseListOutputFormat(value: string): ListOutputFormat {
     throw new Error("--output ndjson is not available for list; expected text or json");
   }
   throw new Error(`invalid --output ${value} for list; expected text or json`);
+}
+
+export function parseTuiArgs(args: string[]): TuiArgs {
+  const positional: string[] = [];
+  const out: TuiArgs = { output: "text" };
+  let i = 0;
+  while (i < args.length) {
+    const arg = args[i] as string;
+    if (arg === "--status") {
+      out.status = requireFlagValue(args, i, "--status");
+      i += 2;
+    } else if (arg === "--limit") {
+      const value = requireFlagValue(args, i, "--limit");
+      const parsed = Number(value);
+      if (!Number.isInteger(parsed) || parsed <= 0) {
+        throw new Error(`--limit must be a positive integer, got ${value}`);
+      }
+      out.limit = parsed;
+      i += 2;
+    } else if (arg === "--output") {
+      const value = requireFlagValue(args, i, "--output");
+      if (value !== "text")
+        throw new Error(`--output ${value} is not available for tui; expected text`);
+      i += 2;
+    } else if (arg.startsWith("--")) {
+      throw new Error(`unknown tui flag ${arg}`);
+    } else {
+      positional.push(arg);
+      i += 1;
+    }
+  }
+  if (positional.length > 1) throw new Error(`unexpected argument ${positional[1]} for tui`);
+  if (positional[0]) out.runId = positional[0];
+  return out;
 }
 
 export interface LaunchArgs {
@@ -765,38 +817,6 @@ async function readCommandSource(
     defaultName: null,
     provenance: { kind: "stdin" },
   };
-}
-
-function displayName(name: string | null | undefined): string {
-  return name ?? "(unnamed)";
-}
-
-export function formatListRuns(runs: readonly RunSummary[], nowMs: number): string {
-  return formatTable(
-    ["RUN ID", "STATUS", "WORKFLOW", "CREATED", "DURATION"],
-    runs.map((run) => [
-      run.runId,
-      run.status,
-      tableCell(displayName(run.workflowName), { maxWidth: RUN_LIST_WORKFLOW_MAX_WIDTH }),
-      formatUtcTimestamp(run.createdAtMs),
-      formatDuration(run.createdAtMs, run.finishedAtMs ?? nowMs),
-    ]),
-  );
-}
-
-export function formatUtcTimestamp(epochMs: number): string {
-  if (!Number.isFinite(epochMs)) throw new Error(`invalid timestamp ${epochMs}`);
-  return new Date(epochMs).toISOString();
-}
-
-export function formatDuration(startMs: number, endMs: number): string {
-  if (!Number.isFinite(startMs)) throw new Error(`invalid duration start ${startMs}`);
-  if (!Number.isFinite(endMs)) throw new Error(`invalid duration end ${endMs}`);
-  const elapsedMs = Math.max(0, Math.floor(endMs - startMs));
-  for (const unit of DURATION_UNITS) {
-    if (elapsedMs >= unit.ms) return `${Math.floor(elapsedMs / unit.ms)}${unit.label}`;
-  }
-  return `${elapsedMs}ms`;
 }
 
 function isParked(status: string): boolean {

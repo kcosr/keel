@@ -24,6 +24,7 @@ import {
   parseListArgs,
   parseOutputFormat,
   parseRunArgs,
+  parseTuiArgs,
   parseWatchArgs,
   resolveWorkflowPath,
   watchRun,
@@ -82,6 +83,7 @@ describe("keel CLI", () => {
       expect(out.code).toBe(0);
       expect(out.stdout).toContain("Usage: keel <command>");
       expect(out.stdout).toContain("list [--output text|json]");
+      expect(out.stdout).toContain("tui [runId] [--status status] [--limit n] [--output text]");
       expect(out.stdout).toContain("interrupt <runId> [reason]");
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -170,6 +172,20 @@ describe("keel CLI", () => {
         "",
       ].join("\n"),
     );
+  });
+
+  test("tui args parse direct run, filters, and reject non-text output", () => {
+    expect(parseTuiArgs([])).toEqual({ output: "text" });
+    expect(parseTuiArgs(["run_123", "--status", "running", "--limit", "25"])).toEqual({
+      output: "text",
+      runId: "run_123",
+      status: "running",
+      limit: 25,
+    });
+    expect(parseTuiArgs(["--output", "text"])).toEqual({ output: "text" });
+    expect(() => parseTuiArgs(["--output", "json"])).toThrow("not available for tui");
+    expect(() => parseTuiArgs(["--limit", "0"])).toThrow("positive integer");
+    expect(() => parseTuiArgs(["run_1", "run_2"])).toThrow("unexpected argument run_2");
   });
 
   test("watch args default to ndjson and parse --output", () => {

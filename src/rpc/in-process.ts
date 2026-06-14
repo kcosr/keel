@@ -41,6 +41,13 @@ import {
 } from "./projection.ts";
 
 const WORKSPACE_RECONCILE_STALE_MS = 30_000;
+const WORKSPACE_MERGEABLE_STATUSES = new Set<AgentSessionWorkspaceRow["status"]>([
+  "pending_review",
+]);
+const WORKSPACE_DISCARDABLE_STATUSES = new Set<AgentSessionWorkspaceRow["status"]>([
+  "pending_review",
+  "diff_error",
+]);
 
 export class InProcessKeel implements KeelApi {
   private readonly running = new Map<string, Promise<RunHandle<unknown>>>();
@@ -197,7 +204,7 @@ export class InProcessKeel implements KeelApi {
 
   mergeRunWorkspace(runId: string, agentKey: string): RunWorkspaceView {
     const row = this.requireWorkspace(runId, agentKey);
-    this.assertWorkspaceOperatorAllowed(row.runId, row.agentKey, "merge");
+    this.assertWorkspaceOperatorAllowed(row, "merge");
     if (!existsSync(row.workspacePath)) {
       throw new Error(`workspace ${runId}/${agentKey} is missing at ${row.workspacePath}`);
     }
@@ -226,7 +233,7 @@ export class InProcessKeel implements KeelApi {
 
   discardRunWorkspace(runId: string, agentKey: string): RunWorkspaceView {
     const row = this.requireWorkspace(runId, agentKey);
-    this.assertWorkspaceOperatorAllowed(row.runId, row.agentKey, "discard");
+    this.assertWorkspaceOperatorAllowed(row, "discard");
     removeRetainedWorkspace(row.target, row.workspacePath, row.baseCommit);
     const at = Date.now();
     this.store.transaction(() => {
@@ -352,20 +359,28 @@ export class InProcessKeel implements KeelApi {
   }
 
   private assertWorkspaceOperatorAllowed(
-    runId: string,
-    agentKey: string,
+    row: AgentSessionWorkspaceRow,
     operation: "merge" | "discard",
   ): void {
-    const run = this.store.getRun(runId);
-    if (!run) throw new Error(`run ${runId} not found`);
+    const run = this.store.getRun(row.runId);
+    if (!run) throw new Error(`run ${row.runId} not found`);
     if (!["finished", "failed", "cancelled", "continued"].includes(run.status)) {
       throw new Error(
-        `cannot ${operation} workspace ${runId}/${agentKey} while run is ${run.status}`,
+        `cannot ${operation} workspace ${row.runId}/${row.agentKey} while run is ${run.status}`,
       );
     }
-    const session = this.store.getAgentSession(runId, agentKey);
+    const session = this.store.getAgentSession(row.runId, row.agentKey);
     if (session?.activeTurnKey) {
-      throw new Error(`cannot ${operation} workspace ${runId}/${agentKey} while a turn is active`);
+      throw new Error(
+        `cannot ${operation} workspace ${row.runId}/${row.agentKey} while a turn is active`,
+      );
+    }
+    const allowedStatuses =
+      operation === "merge" ? WORKSPACE_MERGEABLE_STATUSES : WORKSPACE_DISCARDABLE_STATUSES;
+    if (!allowedStatuses.has(row.status)) {
+      throw new Error(
+        `cannot ${operation} workspace ${row.runId}/${row.agentKey} with status ${row.status}`,
+      );
     }
   }
 }

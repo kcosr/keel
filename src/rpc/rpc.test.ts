@@ -787,6 +787,8 @@ describe("workspace lifecycle operations", () => {
       });
       expect(api.mergeRunWorkspace("r-merge", "agent").status).toBe("merged");
       expect(readFileSync(join(repo, "merged.txt"), "utf8")).toBe("merged\n");
+      expect(() => api.mergeRunWorkspace("r-merge", "agent")).toThrow(/status merged/);
+      expect(() => api.discardRunWorkspace("r-merge", "agent")).toThrow(/status merged/);
 
       const discardPath = retainedWorkspacePath(workspaceStore, "r-discard", "agent");
       createRetainedWorktree(repo, discardPath, baseCommit);
@@ -801,6 +803,8 @@ describe("workspace lifecycle operations", () => {
       });
       expect(api.discardRunWorkspace("r-discard", "agent").status).toBe("discarded");
       expect(existsSync(discardPath)).toBe(false);
+      expect(() => api.mergeRunWorkspace("r-discard", "agent")).toThrow(/status discarded/);
+      expect(() => api.discardRunWorkspace("r-discard", "agent")).toThrow(/status discarded/);
 
       const pendingPath = retainedWorkspacePath(workspaceStore, "r-pending", "agent");
       createRetainedWorktree(repo, pendingPath, baseCommit);

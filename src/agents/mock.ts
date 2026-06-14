@@ -32,6 +32,7 @@ export interface MockConfig {
 
 export class MockProvider implements AgentProvider {
   readonly name = "mock";
+  readonly supportsSessions = true;
   private readonly calls = new Map<string, number>();
 
   constructor(private readonly config: MockConfig = {}) {}

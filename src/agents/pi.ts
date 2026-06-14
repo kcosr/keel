@@ -46,6 +46,7 @@ interface PiMessage {
 
 export class PiProvider implements AgentProvider {
   readonly name = "pi";
+  readonly supportsSessions = true;
   private readonly cwd: string;
   private readonly bin: string;
   private readonly timeoutMs: number;

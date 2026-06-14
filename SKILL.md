@@ -4,6 +4,8 @@ A **workflow** is an `async (ctx, input) => output` function. You call agents an
 do work through `ctx`; Keel runs it durably and survives crashes. For a single
 workflow, run inline TypeScript with `keel run <<'TS'` so no workflow file is
 needed. `keel run` prints a structured JSON envelope by default.
+For reusable operational workflows, check `workflows/README.md` and launch the
+documented workflow file instead of copying fixture code.
 
 Assume the daemon is already running and the `keel` CLI is already configured to
 reach it. Do not start the daemon, restart systemd, or use admin credentials from
@@ -44,6 +46,7 @@ The body runs in a sandbox. Stay inside it or the run is rejected:
 
 ```ts
 ctx.agent(spec)                       // call an LLM agent (the real work); see §4
+ctx.agentSession(spec).turn(spec)     // realm-only multi-turn logical agent; see §4.1
 ctx.step(key, schema, inputs, fn)     // pure compute; memoized & re-run only if inputs/code change
 ctx.now() / ctx.random()              // the only time / randomness allowed
 ctx.sleep(key, ms)                    // durable pause
@@ -81,6 +84,36 @@ retried.
 ```ts
 capabilities: { fs: "none", network: "none", shell: true, secrets: [] }
 ```
+
+## 4.1 Multi-Turn Agent Sessions (`ctx.agentSession`)
+
+Use `ctx.agentSession` only when later turns need the same backend conversation
+memory as earlier turns. Declare participant identity once, then call `.turn`
+with stable turn keys:
+
+```ts
+const primary = ctx.agentSession({
+  key: "primary",
+  provider: "pi",
+  toolPolicy: "read-only",
+});
+
+await primary.turn({ key: "draft", prompt: draftPrompt, schema: Draft });
+const revised = await primary.turn({ key: "revise", prompt: revisePrompt, schema: Draft });
+```
+
+Participant and turn keys must match `[A-Za-z0-9_-]+`. Do not use
+`__session.` as a `ctx.step` or `ctx.agent` key prefix; Keel reserves it for
+derived session-turn journal keys.
+
+Do not use session turns for independent fan-out. A participant is a single
+forward-only backend thread, so concurrent turns on the same participant fail.
+Use separate participant keys for independent conversations.
+
+Session runs can resume and retry, but not rerun, rewind, or fork. Changing a
+participant's resolved provider/model/tool/capability identity or changing a
+completed/pending turn's prompt/schema/options for the same turn key fails
+closed. `workspaceIsolation: true` is not supported for `ctx.agentSession` yet.
 
 ## 5. Schemas
 

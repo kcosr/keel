@@ -178,12 +178,13 @@ describe("ClaudeProvider", () => {
       expect(args).toContain("sonnet");
       expect(args).toContain("--effort");
       expect(args).toContain("high");
-      expect(args).toContain("--tools");
+      expect(args).toContain("--allowed-tools");
       expect(args).toContain("Read");
       expect(args).toContain("Grep");
       expect(args).toContain("LS");
       expect(args).toContain("Bash");
       expect(args).not.toContain("Glob");
+      expect(args).not.toContain("--permission-mode");
       expect(args.at(-2)).toBe("--");
       expect(args.at(-1)).toBe("hello");
     } finally {
@@ -217,8 +218,50 @@ describe("ClaudeProvider", () => {
       expect(args).toContain("--resume");
       expect(args[args.indexOf("--resume") + 1]).toBe(RESUME_ID);
       expect(args).not.toContain("--session-id");
-      expect(args).toContain("--tools");
-      expect(args[args.indexOf("--tools") + 1]).toBe("");
+      expect(args).toContain("--allowed-tools");
+      expect(args[args.indexOf("--allowed-tools") + 1]).toBe("");
+      expect(args).not.toContain("--permission-mode");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("fails promptly when a streamed session token hook rejects", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-claude-token-hook-"));
+    try {
+      const bin = join(dir, "fake-claude");
+      const argsPath = join(dir, "args.json");
+      await Bun.write(
+        bin,
+        `#!${process.execPath}
+const args = process.argv.slice(2);
+await Bun.write(${JSON.stringify(argsPath)}, JSON.stringify(args));
+console.log(JSON.stringify({ type: "system", subtype: "init", session_id: "rotated-session" }));
+await Bun.sleep(1000);
+console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, session_id: "rotated-session", result: "final answer" }));
+`,
+      );
+      chmodSync(bin, 0o755);
+
+      const provider = new ClaudeProvider({ bin, timeoutMs: 5_000 });
+      const started = Date.now();
+      await expect(
+        provider.generate(
+          {
+            key: "claude-token-hook",
+            provider: "claude",
+            prompt: "resume",
+            resumeToken: RESUME_ID,
+            toolPolicy: "none",
+          },
+          {
+            onSessionToken: (token) => {
+              if (token !== RESUME_ID) throw new Error(`mismatched token ${token}`);
+            },
+          },
+        ),
+      ).rejects.toThrow(/mismatched token rotated-session/);
+      expect(Date.now() - started).toBeLessThan(800);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -4,7 +4,7 @@
 // or tricks. Integers are epoch-ms; JSON travels as TEXT. Reserved tables
 // (approvals/signals/timers) are created now though their effects land later.
 
-export const SCHEMA_VERSION = 10;
+export const SCHEMA_VERSION = 11;
 
 export const DDL = /* sql */ `
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -52,6 +52,37 @@ CREATE TABLE IF NOT EXISTS journal (
 );
 
 CREATE INDEX IF NOT EXISTS journal_by_run ON journal (run_id);
+
+CREATE TABLE IF NOT EXISTS agent_sessions (
+  run_id                    TEXT NOT NULL,
+  agent_key                 TEXT NOT NULL,
+  identity_hash             TEXT NOT NULL,
+  identity_json             TEXT NOT NULL,
+  current_session_token     TEXT,
+  latest_completed_turn_key TEXT,
+  latest_completed_attempt  INTEGER,
+  active_turn_key           TEXT,
+  active_turn_attempt       INTEGER,
+  created_at_ms             INTEGER NOT NULL,
+  updated_at_ms             INTEGER NOT NULL,
+  PRIMARY KEY (run_id, agent_key)
+);
+
+CREATE TABLE IF NOT EXISTS agent_session_turns (
+  run_id                  TEXT NOT NULL,
+  agent_key               TEXT NOT NULL,
+  turn_key                TEXT NOT NULL,
+  attempt                 INTEGER NOT NULL,
+  stable_key              TEXT NOT NULL,
+  status                  TEXT NOT NULL,
+  started_session_token   TEXT,
+  observed_session_token  TEXT,
+  completed_session_token TEXT,
+  started_at_ms           INTEGER,
+  finished_at_ms          INTEGER,
+  PRIMARY KEY (run_id, agent_key, turn_key, attempt),
+  UNIQUE (run_id, stable_key, attempt)
+);
 
 CREATE TABLE IF NOT EXISTS artifacts (
   hash          TEXT PRIMARY KEY,

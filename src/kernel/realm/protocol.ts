@@ -51,6 +51,34 @@ export type WorkerRequest =
       deps: InputDep[] | null;
     }
   | {
+      type: "agent-turn";
+      id: number;
+      agentKey: string;
+      turnKey: string;
+      stableKey: string;
+      identityHash: string;
+      identityJson: string;
+      prompt: string;
+      provider: string;
+      model: string | null;
+      reasoning: string | null;
+      toolPolicy: ToolPolicy;
+      allowTools: string[];
+      denyTools: string[];
+      workspaceIsolation: boolean;
+      capabilities: Capabilities | null;
+      secrets: string[];
+      version: string;
+      inputs: unknown;
+      jsonSchema: unknown;
+      maxRetries: number;
+      lenient: boolean;
+      onFailure: "throw" | "null";
+      timeoutMs: number | null;
+      stallRetries: number | null;
+      deps: InputDep[] | null;
+    }
+  | {
       type: "step-commit";
       id: number;
       key: string;

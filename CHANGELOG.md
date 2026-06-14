@@ -3,6 +3,19 @@
 ## [Unreleased]
 
 ### Added
+- Top-level `workflows/` directory for reusable operational workflows, starting
+  with `iterative-review.workflow.ts`, a signal-driven multi-turn review loop,
+  and `implement-review-loop.workflow.ts`, a bounded write-capable
+  implementer/read-only reviewer loop backed by `ctx.agentSession`.
+- Reusable spec-authoring workflows: a creator-driven `spec-review-loop` that
+  preserves reviewer correspondence while the invoking agent owns the main spec,
+  and a fully orchestrated `spec-author-review-loop` that loops a spec creator
+  with a correspondence reviewer.
+- `ctx.agentSession({ key, ... }).turn({ key, prompt, ... })` for realm
+  workflows that need one logical Pi/Codex or Claude backend conversation across
+  multiple durable turns in the same run. Session runs fail closed for
+  rerun/rewind/fork, reject participant or turn identity drift, and include
+  `KEEL_LIVE=1` backend-continuity smokes for Claude and the Pi/Codex adapter.
 - `keel execute` runs stateless TypeScript control scripts outside the workflow
   realm with injected `keel`, `args`, `state`, and `env`; stdout is always the
   returned JSON value and runtime failures are structured JSON on stderr.
@@ -48,6 +61,7 @@
   `KEEL_CAP_DIR`.
 
 ### Fixed
+- Provider session tokens are no longer persisted as `agent.event` payloads.
 - Workflow snapshotting resolves the `@kcosr/keel` SDK package root from the
   repository (env override, source location, then runtime paths) instead of
   `import.meta.url` alone, which resolved to the filesystem root in the compiled

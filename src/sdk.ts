@@ -7,5 +7,14 @@
 // has none at all.
 
 export { jsonSchema, passthrough, type Schema } from "./kernel/schema.ts";
-export type { Ctx, AgentSpec, HumanSpec, HumanDecision, StepOpts } from "./kernel/ctx.ts";
+export type {
+  AgentSession,
+  AgentSessionSpec,
+  AgentSpec,
+  AgentTurnSpec,
+  Ctx,
+  HumanDecision,
+  HumanSpec,
+  StepOpts,
+} from "./kernel/ctx.ts";
 export type { Capabilities, ToolPolicy } from "./agents/capabilities.ts";

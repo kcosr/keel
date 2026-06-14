@@ -67,6 +67,34 @@ export interface JournalRow {
   finishedAtMs: number | null;
 }
 
+export interface AgentSessionRow {
+  runId: string;
+  agentKey: string;
+  identityHash: string;
+  identityJson: string;
+  currentSessionToken: string | null;
+  latestCompletedTurnKey: string | null;
+  latestCompletedAttempt: number | null;
+  activeTurnKey: string | null;
+  activeTurnAttempt: number | null;
+  createdAtMs: number;
+  updatedAtMs: number;
+}
+
+export interface AgentSessionTurnRow {
+  runId: string;
+  agentKey: string;
+  turnKey: string;
+  attempt: number;
+  stableKey: string;
+  status: JournalStatus;
+  startedSessionToken: string | null;
+  observedSessionToken: string | null;
+  completedSessionToken: string | null;
+  startedAtMs: number | null;
+  finishedAtMs: number | null;
+}
+
 export type NewJournalRow = Omit<
   JournalRow,
   | "attempt"

@@ -16,6 +16,14 @@ import type { Schema } from "./schema.ts";
 import { StepEngine } from "./step-engine.ts";
 import { computeVersion } from "./version.ts";
 
+const SESSION_STABLE_KEY_PREFIX = "__session.";
+
+function assertNotReservedAuthorKey(key: string, kind: string): void {
+  if (key.startsWith(SESSION_STABLE_KEY_PREFIX)) {
+    throw new Error(`${kind} key "${key}" uses reserved prefix ${SESSION_STABLE_KEY_PREFIX}`);
+  }
+}
+
 /** Optional per-step controls. `version` pins an explicit version (tests);
  * `bump` is the author's manual structural-invalidation knob (§5.2). */
 export interface StepOpts {
@@ -63,6 +71,39 @@ export interface AgentSpec<T> {
   version?: string;
 }
 
+export type AgentSessionSpec = Omit<
+  AgentSpec<unknown>,
+  | "key"
+  | "prompt"
+  | "schema"
+  | "onFailure"
+  | "maxRetries"
+  | "lenient"
+  | "timeoutMs"
+  | "stallRetries"
+  | "bump"
+  | "version"
+> & {
+  key: string;
+};
+
+export interface AgentTurnSpec<T> {
+  key: string;
+  prompt: string;
+  schema?: Schema<T>;
+  onFailure?: "throw" | "null";
+  maxRetries?: number;
+  lenient?: boolean;
+  timeoutMs?: number;
+  stallRetries?: number;
+  bump?: string | number;
+  version?: string;
+}
+
+export interface AgentSession {
+  turn<T>(spec: AgentTurnSpec<T>): Promise<T>;
+}
+
 export interface HumanSpec {
   /** Stable key for the approval request (durable across resume). */
   key: string;
@@ -92,6 +133,9 @@ export interface Ctx {
 
   /** Effectful agent call: journaled; a completed one never re-runs on resume. */
   agent<T>(spec: AgentSpec<T>): Promise<T>;
+
+  /** Realm-only durable logical agent session. */
+  agentSession(spec: AgentSessionSpec): AgentSession;
 
   /** Journaled wall-clock — the only time source in workflow scope. */
   now(): number;
@@ -166,6 +210,7 @@ export class WorkflowCtx implements Ctx {
     fn: (inputs: I) => T | Promise<T>,
     opts?: StepOpts,
   ): Promise<T> {
+    assertNotReservedAuthorKey(key, "ctx.step");
     const version =
       opts?.version ??
       computeVersion({ fn, schema, ...(opts?.bump !== undefined ? { bump: opts.bump } : {}) });
@@ -202,6 +247,7 @@ export class WorkflowCtx implements Ctx {
       rawSpec,
       this.agentProfiles as AgentProfiles | undefined,
     ) as AgentSpec<T>;
+    assertNotReservedAuthorKey(spec.key, "ctx.agent");
     // Secret injection is realm-only (the side channel lives on the daemon host);
     // fail loudly rather than silently ignoring a secrets request in-process.
     if (spec.secrets?.length) {
@@ -282,7 +328,9 @@ export class WorkflowCtx implements Ctx {
             {
               onSessionToken: (tok) => this.engine.recordSessionToken(spec.key, begun.attempt, tok),
               onEvent: (e) =>
-                this.engine.emit("agent.event", { key: spec.key, event: e as unknown as Json }),
+                e.type === "session"
+                  ? undefined
+                  : this.engine.emit("agent.event", { key: spec.key, event: e as unknown as Json }),
             },
             {
               ...(jsonSchema !== undefined ? { jsonSchema } : {}),
@@ -338,6 +386,10 @@ export class WorkflowCtx implements Ctx {
       );
       throw err;
     }
+  }
+
+  agentSession(_spec: AgentSessionSpec): AgentSession {
+    throw new Error("ctx.agentSession requires the realm kernel");
   }
 
   now(): number {

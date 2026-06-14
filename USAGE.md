@@ -423,6 +423,7 @@ versioning and can cause affected steps to re-run.
 |---|---|
 | `step(key, schema, inputs, fn, opts?)` | Pure, memoized step. Re-runs only if inputs or version change. |
 | `agent(spec)` | Journaled LLM agent call. A completed agent effect never re-runs on resume. |
+| `agentSession(spec)` | Realm-only logical agent participant with multiple durable `.turn(...)` calls in one backend conversation. |
 | `now()` / `random()` | Journaled wall-clock and entropy. Recorded once, replayed thereafter. |
 | `sleep(key, ms)` | Durable sleep. Parks the run until the supervisor wakes it. |
 | `human(spec)` | Park until a human approval/denial is delivered. |
@@ -519,6 +520,58 @@ later resume replays `null` rather than calling the agent again.
 Pi and Claude session tokens are captured write-ahead. If the daemon dies during
 an agent call, resume reconnects to the same provider session when possible
 rather than starting a fresh call.
+
+## Agent Sessions
+
+Use `ctx.agentSession` when one logical participant must carry backend
+conversation memory across multiple durable turns:
+
+```ts
+const primary = ctx.agentSession({
+  key: "primary",
+  provider: "pi",
+  toolPolicy: "read-only",
+});
+
+await primary.turn({
+  key: "draft",
+  prompt: "Remember this code word for the next turn: alpha-123. Return JSON.",
+  schema: Ack,
+});
+
+const recalled = await primary.turn({
+  key: "recall",
+  prompt: "What code word did I ask you to remember earlier?",
+  schema: Recall,
+});
+```
+
+The participant key identifies the logical agent. Each turn key identifies one
+journaled interaction and is derived internally as `__session.<agent>.<turn>`.
+Both keys must match `[A-Za-z0-9_-]+`; ordinary `ctx.step` and `ctx.agent` keys
+may not start with `__session.`.
+
+Participant identity is fixed for the run after profiles, tool policy, allowed
+tools, denied tools, capabilities, workspace isolation, and secret names are
+resolved. Changing the participant identity or reusing a turn key with a changed
+prompt/schema/options fails the run instead of starting a fresh backend session.
+
+Session participants require providers that support stable backend sessions
+(`pi`/Codex and `claude`). A later turn must resume from the latest completed
+session token; if the token is missing or the provider cannot resume, the turn
+fails. `workspaceIsolation: true` is not supported for `ctx.agentSession` yet.
+If `onFailure: "null"` is set, a tolerated failure can complete as `null` only
+after a session token has been captured.
+
+Runs that use `ctx.agentSession` can resume after crashes and can retry failed
+turns, but `rerun`, `rewind`, and `fork` reject them. Start a fresh run when you
+need to change completed session history.
+
+Crash resume and retry are at-least-once with respect to the backend
+conversation: a turn prompt may be delivered again if the prior attempt reached
+the provider but did not commit in Keel. Completed turn outputs replay from the
+journal on any host, but sending a new turn requires access to the provider's
+local session state on the host where that backend conversation lives.
 
 ## Capabilities And Secrets
 

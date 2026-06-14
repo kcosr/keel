@@ -17,6 +17,7 @@ travel, and daemon behavior.
 |---|---|
 | Use Keel, run workflows, inspect commands/API, understand paths and daemon state | `USAGE.md` |
 | Write workflows as an agent or human author | `SKILL.md` |
+| Launch reusable workflow files with documented inputs and signals | `workflows/README.md` |
 | Work in this repo safely: migrations, changelog, compatibility, capability rules | `AGENTS.md` |
 | Understand architecture, tradeoffs, historical design decisions, and acceptance workload | `DESIGN.md` |
 | See user-visible changes over time | `CHANGELOG.md` |
@@ -33,6 +34,7 @@ but not the authoritative command/API lookup.
 | `SKILL.md` | Compact workflow-authoring guide for agents and humans. |
 | `AGENTS.md` | Project conventions for agents working in this repo. |
 | `DESIGN.md` | Architecture/design-history record and acceptance workload context. |
+| `workflows/` | Reusable operational workflows with documented inputs and signals. |
 | `fixtures/review-workload/` | Active large fan-out review workload fixture and live rehearsal target. |
 
 ## Status

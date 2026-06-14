@@ -133,8 +133,8 @@ export function resolvedToolPolicyToClaudeArgs(resolved: ResolvedToolPolicy): st
   for (const tool of resolved.denyTools) {
     deleteToolCaseInsensitive(tools, normalizeClaudeToolName(tool));
   }
-  if (tools.size === 0) return ["--tools", ""];
-  return ["--tools", ...tools];
+  if (tools.size === 0) return ["--allowed-tools", ""];
+  return ["--allowed-tools", ...tools];
 }
 
 function rejectUnrestrictedAdjustments(

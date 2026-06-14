@@ -64,6 +64,8 @@ export interface AgentHooks {
 
 export interface AgentProvider {
   readonly name: string;
+  /** True when resumeToken is a stable handle to one forward-only backend thread. */
+  readonly supportsSessions?: boolean;
   generate(invocation: AgentInvocation, hooks: AgentHooks): Promise<AgentResult>;
 }
 

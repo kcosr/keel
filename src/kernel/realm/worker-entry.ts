@@ -22,6 +22,7 @@ import {
   DEFAULT_SCHEMA_MAX_RETRIES,
 } from "../../agents/defaults.ts";
 import { type AgentProfiles, resolveProfile } from "../../agents/profiles.ts";
+import { type Json, hashJson } from "../../hash.ts";
 import type { Schema } from "../schema.ts";
 import { closureOfHelpers, computeVersion } from "../version.ts";
 import {
@@ -320,6 +321,24 @@ const signalOccurrences = new Map<string, number>();
 // ---- tagged-envelope edge detection ---------------------------------------
 
 const provenance = new WeakMap<object, { stepKey: string; contentHash: string }>();
+const SESSION_KEY_RE = /^[A-Za-z0-9_-]+$/;
+const SESSION_STABLE_KEY_PREFIX = "__session.";
+
+function assertNotReservedAuthorKey(key: string, kind: string): void {
+  if (key.startsWith(SESSION_STABLE_KEY_PREFIX)) {
+    throw new Error(`${kind} key "${key}" uses reserved prefix ${SESSION_STABLE_KEY_PREFIX}`);
+  }
+}
+
+function assertSessionKey(key: string, kind: string): void {
+  if (!SESSION_KEY_RE.test(key)) {
+    throw new Error(`${kind} key "${key}" must match ${SESSION_KEY_RE.source}`);
+  }
+}
+
+function sessionStableKey(agentKey: string, turnKey: string): string {
+  return `${SESSION_STABLE_KEY_PREFIX}${agentKey}.${turnKey}`;
+}
 
 function tag<T>(result: T, stepKey: string, contentHash: string): T {
   if (result !== null && typeof result === "object") {
@@ -361,6 +380,7 @@ const ctx = Object.freeze({
     fn: (inputs: unknown) => T | Promise<T>,
     opts?: { version?: string; bump?: string | number; deps?: string[] },
   ): Promise<T> {
+    assertNotReservedAuthorKey(key, "ctx.step");
     const version =
       opts?.version ??
       computeVersion({
@@ -441,6 +461,7 @@ const ctx = Object.freeze({
     // Resolve a named profile into concrete fields BEFORE versioning, so the
     // RESOLVED settings (not the profile name) enter the version/input hash.
     const spec = resolveProfile(rawSpec, agentProfiles) as Omit<typeof rawSpec, "profile">;
+    assertNotReservedAuthorKey(spec.key, "ctx.agent");
     const provider = spec.provider ?? DEFAULT_AGENT_PROVIDER;
     const schema = spec.schema as Schema<unknown> | undefined;
     const tools = resolveToolPolicy({
@@ -520,6 +541,161 @@ const ctx = Object.freeze({
     const err = new Error(reply.error?.message ?? "agent failed");
     err.name = reply.error?.name ?? "AgentFailure";
     throw err;
+  },
+  agentSession(rawSessionSpec: {
+    key: string;
+    profile?: string;
+    provider?: string;
+    model?: string;
+    reasoning?: string;
+    toolPolicy?: ToolPolicy;
+    allowTools?: string[];
+    denyTools?: string[];
+    workspaceIsolation?: boolean;
+    capabilities?: Record<string, unknown>;
+    secrets?: string[];
+  }): {
+    turn<T>(spec: {
+      key: string;
+      prompt: string;
+      schema?: Schemaish<T>;
+      onFailure?: "throw" | "null";
+      maxRetries?: number;
+      lenient?: boolean;
+      timeoutMs?: number;
+      stallRetries?: number;
+      bump?: string | number;
+      version?: string;
+    }): Promise<T>;
+  } {
+    const sessionSpec = resolveProfile(rawSessionSpec, agentProfiles) as Omit<
+      typeof rawSessionSpec,
+      "profile"
+    >;
+    assertSessionKey(sessionSpec.key, "agentSession");
+    if (sessionSpec.workspaceIsolation === true) {
+      throw new Error("ctx.agentSession({ workspaceIsolation: true }) is not supported");
+    }
+    const provider = sessionSpec.provider ?? DEFAULT_AGENT_PROVIDER;
+    const tools = resolveToolPolicy({
+      ...(sessionSpec.capabilities ? { capabilities: sessionSpec.capabilities } : {}),
+      ...(sessionSpec.toolPolicy ? { toolPolicy: sessionSpec.toolPolicy } : {}),
+      ...(sessionSpec.allowTools ? { allowTools: sessionSpec.allowTools } : {}),
+      ...(sessionSpec.denyTools ? { denyTools: sessionSpec.denyTools } : {}),
+    });
+    const caps = tools.capabilities;
+    const identity = {
+      agentKey: sessionSpec.key,
+      provider,
+      model: sessionSpec.model ?? null,
+      reasoning: sessionSpec.reasoning ?? null,
+      toolPolicy: tools.toolPolicy,
+      allowTools: tools.allowTools,
+      denyTools: tools.denyTools,
+      workspaceIsolation: false,
+      capabilities: caps,
+      secrets: sessionSpec.secrets ?? [],
+    };
+    const identityHash = hashJson(identity as unknown as Json);
+    const identityJson = JSON.stringify(identity);
+    return Object.freeze({
+      async turn<T>(rawTurnSpec: {
+        key: string;
+        prompt: string;
+        schema?: Schemaish<T>;
+        onFailure?: "throw" | "null";
+        maxRetries?: number;
+        lenient?: boolean;
+        timeoutMs?: number;
+        stallRetries?: number;
+        bump?: string | number;
+        version?: string;
+      }): Promise<T> {
+        assertSessionKey(rawTurnSpec.key, "agentSession.turn");
+        const schema = rawTurnSpec.schema as Schema<unknown> | undefined;
+        const stableKey = sessionStableKey(sessionSpec.key, rawTurnSpec.key);
+        const controls = {
+          maxRetries: rawTurnSpec.maxRetries ?? DEFAULT_SCHEMA_MAX_RETRIES,
+          lenient: rawTurnSpec.lenient ?? DEFAULT_AGENT_LENIENT,
+          onFailure: rawTurnSpec.onFailure ?? DEFAULT_AGENT_ON_FAILURE,
+          timeoutMs: rawTurnSpec.timeoutMs ?? null,
+          stallRetries: rawTurnSpec.stallRetries ?? null,
+        };
+        const version =
+          rawTurnSpec.version ??
+          computeVersion({
+            spec: {
+              prompt: rawTurnSpec.prompt,
+              provider,
+              model: sessionSpec.model ?? null,
+              reasoning: sessionSpec.reasoning ?? null,
+              toolPolicy: tools.toolPolicy,
+              allowTools: tools.allowTools,
+              denyTools: tools.denyTools,
+              workspaceIsolation: false,
+              capabilities: caps,
+              secrets: sessionSpec.secrets ?? [],
+              participantIdentityHash: identityHash,
+              controls,
+            },
+            schema,
+            ...(rawTurnSpec.bump !== undefined ? { bump: rawTurnSpec.bump } : {}),
+          });
+        const inputs = {
+          prompt: rawTurnSpec.prompt,
+          provider,
+          model: sessionSpec.model ?? null,
+          reasoning: sessionSpec.reasoning ?? null,
+          toolPolicy: tools.toolPolicy,
+          allowTools: tools.allowTools,
+          denyTools: tools.denyTools,
+          workspaceIsolation: false,
+          capabilities: caps,
+          secrets: sessionSpec.secrets ?? [],
+          participantIdentityHash: identityHash,
+          controls,
+        };
+        const reply = await rpc<{
+          ok: boolean;
+          output?: unknown;
+          contentHash?: string;
+          error?: { name: string; message: string };
+          failure?: boolean;
+        }>({
+          type: "agent-turn",
+          agentKey: sessionSpec.key,
+          turnKey: rawTurnSpec.key,
+          stableKey,
+          identityHash,
+          identityJson,
+          prompt: rawTurnSpec.prompt,
+          provider,
+          model: sessionSpec.model ?? null,
+          reasoning: sessionSpec.reasoning ?? null,
+          toolPolicy: tools.toolPolicy,
+          allowTools: tools.allowTools,
+          denyTools: tools.denyTools,
+          workspaceIsolation: false,
+          capabilities: caps,
+          secrets: sessionSpec.secrets ?? [],
+          version,
+          inputs,
+          jsonSchema: schema?.structural?.() ?? null,
+          maxRetries: controls.maxRetries,
+          lenient: controls.lenient,
+          onFailure: controls.onFailure,
+          timeoutMs: controls.timeoutMs,
+          stallRetries: controls.stallRetries,
+          deps: null,
+        });
+        if (reply.ok) {
+          return tag(reply.output as T, stableKey, reply.contentHash ?? "");
+        }
+        const err = new Error(reply.error?.message ?? "agent session turn failed");
+        err.name = reply.error?.name ?? "AgentFailure";
+        throw err;
+      },
+    });
   },
   now(): number {
     return ambient("now");

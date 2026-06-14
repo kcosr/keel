@@ -102,7 +102,7 @@ function makeV8Db(path: string): void {
 }
 
 describe("schema migrations", () => {
-  test("a v4 DB migrates forward to v10 in place and idempotently", () => {
+  test("a v4 DB migrates forward to v11 in place and idempotently", () => {
     const dir = mkdtempSync(join(tmpdir(), "keel-mig-"));
     try {
       const path = join(dir, "old.db");
@@ -115,7 +115,7 @@ describe("schema migrations", () => {
       const ver = store.db
         .query<{ value: string }, []>("SELECT value FROM schema_meta WHERE key='schema_version'")
         .get();
-      expect(ver?.value).toBe("10");
+      expect(ver?.value).toBe("11");
 
       // new columns exist
       const jcols = store.db.query<{ name: string }, []>("PRAGMA table_info(journal)").all();
@@ -131,6 +131,14 @@ describe("schema migrations", () => {
       const caps = store.db.query<{ name: string }, []>("PRAGMA table_info(capabilities)").all();
       expect(caps.some((c) => c.name === "secret_hash")).toBe(true);
       expect(caps.some((c) => c.name === "resource_json")).toBe(true);
+      const sessions = store.db
+        .query<{ name: string }, []>("PRAGMA table_info(agent_sessions)")
+        .all();
+      expect(sessions.some((c) => c.name === "identity_hash")).toBe(true);
+      const turns = store.db
+        .query<{ name: string }, []>("PRAGMA table_info(agent_session_turns)")
+        .all();
+      expect(turns.some((c) => c.name === "observed_session_token")).toBe(true);
 
       // existing rows preserved (additive) and seq backfilled per-run monotonic
       const rows = store.listJournalRows("r");
@@ -156,7 +164,7 @@ describe("schema migrations", () => {
     const ver = store.db
       .query<{ value: string }, []>("SELECT value FROM schema_meta WHERE key='schema_version'")
       .get();
-    expect(ver?.value).toBe("10");
+    expect(ver?.value).toBe("11");
     store.close();
   });
 
@@ -170,7 +178,7 @@ describe("schema migrations", () => {
       const ver = store.db
         .query<{ value: string }, []>("SELECT value FROM schema_meta WHERE key='schema_version'")
         .get();
-      expect(ver?.value).toBe("10");
+      expect(ver?.value).toBe("11");
 
       const schedule = store.db
         .query<{ enabled: number; workflow_ref: string }, []>(

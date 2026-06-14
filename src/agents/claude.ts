@@ -34,6 +34,7 @@ export interface ClaudeProviderOptions {
 
 export class ClaudeProvider implements AgentProvider {
   readonly name = "claude";
+  readonly supportsSessions = true;
   private readonly cwd: string;
   private readonly bin: string;
   private readonly timeoutMs: number;
@@ -111,7 +112,15 @@ export class ClaudeProvider implements AgentProvider {
       }
 
       const observedSession = stringValue(event.session_id);
-      if (observedSession) noteSessionToken(observedSession);
+      if (observedSession) {
+        try {
+          noteSessionToken(observedSession);
+        } catch (err) {
+          streamErr = `claude agent "${invocation.key}" session token hook failed: ${String(err)}`;
+          proc.kill();
+          return;
+        }
+      }
 
       if (event.type === "result") {
         terminal = event as ClaudeResultEvent;

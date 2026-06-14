@@ -9,7 +9,7 @@
 // History: v1 base → v2 runs.workflow_ref → v3 schedules table → v4
 // signals.consumed_key → v5 journal.seq → v6 approvals.prompt/requested_caps_json
 // → v7 workflow_definitions → v8 capabilities → v9 schedule definitions
-// → v10 nullable display names.
+// → v10 nullable display names → v11 durable agent session tables.
 
 import type { Database } from "bun:sqlite";
 
@@ -117,6 +117,8 @@ export function applyMigration(db: Database, fromVersion: number): void {
         )`,
         ["hash", "name", "kind", "code", "source_map", "manifest_json", "created_at_ms"],
       );
+      break;
+    case 10: // → v11: durable logical agent session metadata tables.
       break;
     default:
       throw new Error(`no migration defined from schema version ${fromVersion}`);

@@ -107,7 +107,7 @@ export class StepEngine {
   ): void {
     this.host.fault?.("before-commit", key);
     const existing = this.store.getJournalRow(this.runId, key, attempt);
-    const stored = this.storeResult(value);
+    const stored = prepareStepResult(value);
     // Artifact write + journal commit happen in ONE transaction, so a crash
     // leaves a committed row with its artifact present, or nothing — never a
     // dangling reference (§8.2).
@@ -165,7 +165,7 @@ export class StepEngine {
     const key = `__${kind}#${idx}`;
     const existing = this.store.getLatestAttempt(this.runId, key);
     if (existing && existing.status === "completed") {
-      return this.readResult(existing) as number;
+      return readJournalResult(this.store, existing) as number;
     }
     const value = generate();
     this.store.putJournalRow({
@@ -195,30 +195,35 @@ export class StepEngine {
     return this.ambient("random", this.host.rng);
   }
 
-  /** Split a result into inline (<=1KB) or content-addressed artifact (§8.2). */
-  private storeResult(value: unknown): {
-    inline: string | null;
-    artifact: { hash: string; bytes: Uint8Array } | null;
-  } {
-    const json = encode(value);
-    const bytes = new TextEncoder().encode(json);
-    if (bytes.byteLength <= INLINE_LIMIT_BYTES) {
-      return { inline: json, artifact: null };
-    }
-    return { inline: null, artifact: { hash: sha256Hex(json), bytes } };
-  }
-
   /** Read a completed row's result from whichever tier holds it. */
   private readResult(row: JournalRow): unknown {
-    if (row.resultArtifact) {
-      const data = this.store.getArtifactData(row.resultArtifact);
-      if (!data) {
-        throw new Error(`artifact ${row.resultArtifact} missing for step ${row.stableKey}`);
-      }
-      return JSON.parse(new TextDecoder().decode(data));
-    }
-    return decode(row.resultInline);
+    return readJournalResult(this.store, row);
   }
+}
+
+/** Split a result into inline (<=1KB) or content-addressed artifact (§8.2). */
+export function prepareStepResult(value: unknown): {
+  inline: string | null;
+  artifact: { hash: string; bytes: Uint8Array } | null;
+} {
+  const json = encode(value);
+  const bytes = new TextEncoder().encode(json);
+  if (bytes.byteLength <= INLINE_LIMIT_BYTES) {
+    return { inline: json, artifact: null };
+  }
+  return { inline: null, artifact: { hash: sha256Hex(json), bytes } };
+}
+
+/** Read a completed row's result from whichever tier holds it. */
+export function readJournalResult(store: JournalStore, row: JournalRow): unknown {
+  if (row.resultArtifact) {
+    const data = store.getArtifactData(row.resultArtifact);
+    if (!data) {
+      throw new Error(`artifact ${row.resultArtifact} missing for step ${row.stableKey}`);
+    }
+    return JSON.parse(new TextDecoder().decode(data));
+  }
+  return decode(row.resultInline);
 }
 
 export function encode(value: unknown): string {

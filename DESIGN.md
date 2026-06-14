@@ -720,7 +720,7 @@ load-bearing properties:
 | Drive mode | one-shot CLI, JSON/event flags | long-lived **`pi --mode rpc`** process; commands as JSON-RPC over stdin |
 | Session id | read from `payload.id` on an early stream event | returned **synchronously** by a `get_state` RPC right after spawn, *before* the prompt is sent (`stateResponse.data.sessionId`) |
 | Resume | `pi --resume --session <id>` | **`--session <id>` at spawn**; no `--resume` flag; semantics = *continue the conversation* |
-| Session TTL | ~24 h stale-token branch | **none** — session JSONL persists indefinitely; resume failure is detected via stderr ("session not found") and falls back to a fresh session |
+| Session TTL | ~24 h stale-token branch | **none** — session JSONL persists indefinitely; one-shot `ctx.agent` crash recovery can detect resume failure via stderr ("session not found") and re-execute fresh |
 | Disk state | `--session-dir` per step | Pi-managed `$PI_HOME/agent/sessions/<encoded-cwd>/<timestamp>_<id>.jsonl`, header `{type:"session", cwd}` |
 | Tool restriction | `noTools` | **neither integration restricts Pi tools** — verify a tools flag against Pi source; until then the OS-sandbox backstop (Phase 15) is the only enforcement |
 | Structured output | — | no native schema support visible; Keel's prompt-injected schema + bounded in-session retry is the mechanism |
@@ -776,16 +776,55 @@ pending + session_token    -> respawn pi --mode rpc --session <id>; the session
                               read, tool calls, partial reasoning); re-prompt
                               the step to continue to a terminal state
 pending + no token         -> re-execute fresh (crashed in the spawn→get_state gap)
-resume rejected            -> "session not found"/unreadable JSONL: re-execute
-                              fresh; log the wasted work
+resume rejected            -> one-shot ctx.agent recovery may re-execute fresh;
+                              durable logical agent sessions fail closed instead
 ```
+
+### 10.5 Durable logical agent sessions
+
+`ctx.agentSession(spec)` creates a realm-only logical participant for workflows
+that need multiple durable turns in one backend conversation. A turn is stored as
+a normal journal effect under a reserved derived key:
+
+```
+__session.<agentKey>.<turnKey>
+```
+
+Participant and turn key components are limited to `[A-Za-z0-9_-]+`; ordinary
+author keys may not use the `__session.` prefix. The worker resolves profiles,
+tool policy, provider-native tool lists, capabilities, workspace isolation, and
+secret names before hashing participant identity. The realm host stores that
+hash in `agent_sessions` and rejects drift. Turn identity reuses the journal
+row's `(version, input_hash)` for the derived key and is append-only within a
+participant.
+
+Session state lives beside the journal:
+
+- `agent_sessions` stores participant identity, the latest completed backend
+  session token, and the active turn fence.
+- `agent_session_turns` stores per-turn started, observed, and completed tokens.
+- `journal.session_token` remains the write-ahead token for the active attempt.
+
+Begin/record/complete/fail update these rows transactionally with the journal
+row. A new later turn resumes from `agent_sessions.current_session_token`; a
+pending turn resumes from its observed token or the token it started with. A
+completed turn replays its journaled output and does not call the provider.
+Completing a turn without a token is an error, because future turns would not be
+able to continue.
+
+The first cut is intentionally fail-closed: providers must declare stable
+session support, `workspaceIsolation` is rejected, and runs with session rows
+cannot be rerun, rewound, or forked. `continueAsNew` starts a fresh run and does
+not carry backend session tokens. Provider session-token trace events are
+consumed for write-ahead state only and are not persisted in the durable event
+stream.
 
 **Vendor resume matrix (one canonical statement, L19):** Pi = designed-in per
 the sequence above; Claude = supported when the provider exposes resume hooks;
 all other vendors = in-flight calls re-execute fresh on crash. The
 asymmetry is accepted — the loss is bounded at one in-flight call.
 
-### 10.5 Deterministic mock provider (core test asset)
+### 10.6 Deterministic mock provider (core test asset)
 
 A YAML-scripted `AgentLike` implementation (step vocabulary: reasoning / text /
 tool_call / wait / error / disconnect) so every kill-and-resume test and the

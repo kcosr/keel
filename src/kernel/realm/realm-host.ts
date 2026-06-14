@@ -12,7 +12,7 @@ import { pathToFileURL } from "node:url";
 import type { Capabilities } from "../../agents/capabilities.ts";
 import { AgentFailure, executeAgent, runAgentWithStall } from "../../agents/execute.ts";
 import { type SecretStore, redact } from "../../agents/secrets.ts";
-import type { AgentProviderRegistry } from "../../agents/types.ts";
+import type { AgentProvider, AgentProviderRegistry } from "../../agents/types.ts";
 import { type Json, hashJson } from "../../hash.ts";
 import type { JournalStore } from "../../journal/store.ts";
 import type { RunRow, RunStatus } from "../../journal/types.ts";
@@ -28,7 +28,7 @@ import { createWorktree } from "../../workspace/worktree.ts";
 import type { CtxHost, FaultPoint } from "../ctx.ts";
 import { extractModuleHelpers } from "../module-helpers.ts";
 import { RUN_FINISHED_INLINE_OUTPUT_BYTES } from "../output.ts";
-import { StepEngine } from "../step-engine.ts";
+import { StepEngine, prepareStepResult, readJournalResult } from "../step-engine.ts";
 import {
   CONTROL_WORDS,
   type HostReply,
@@ -74,6 +74,13 @@ const TERMINAL: ReadonlySet<RunStatus> = new Set<RunStatus>([
 const WORKER_URL = pathToFileURL(
   join(resolveKeelPackageRoot(), "src", "kernel", "realm", "worker-entry.ts"),
 );
+
+class AgentSessionContinuityError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AgentSessionContinuityError";
+  }
+}
 
 function canWriteOrRunShell(caps: Capabilities): boolean {
   return caps.fs === "workspace-write" || caps.shell;
@@ -122,6 +129,7 @@ export class RealmKernel {
   private readonly lintEnabled: boolean;
   private readonly registry?: AgentProviderRegistry;
   private readonly definitionCacheRoot: string;
+  private readonly activeSessionRuns = new Set<string>();
 
   constructor(store: JournalStore, opts: RealmKernelOptions = {}) {
     this.store = store;
@@ -284,6 +292,11 @@ export class RealmKernel {
   ): { runId: string; done: Promise<RunHandle<O>> } {
     const run = this.store.getRun(runId);
     if (!run) throw new Error(`run ${runId} not found`);
+    if (this.store.hasAgentSessions(runId)) {
+      throw new Error(
+        `run ${runId} uses durable agent sessions and cannot be rerun; start a fresh run instead`,
+      );
+    }
     const sourceOverride = opts.source !== undefined;
     const name = opts.name !== undefined ? opts.name : run.workflowName;
     const { definitionHash, workflowRef, entryPath } = sourceOverride
@@ -344,6 +357,11 @@ export class RealmKernel {
   ): { runId: string; done: Promise<RunHandle<O>> } {
     const run = this.store.getRun(runId);
     if (!run) throw new Error(`run ${runId} not found`);
+    if (this.store.hasAgentSessions(runId)) {
+      throw new Error(
+        `run ${runId} uses durable agent sessions and cannot be rewound; start a fresh run instead`,
+      );
+    }
     if (!this.store.getLatestAttempt(runId, toStableKey)) {
       throw new Error(`cannot rewind to unknown step "${toStableKey}"`);
     }
@@ -367,6 +385,11 @@ export class RealmKernel {
   fork(runId: string, opts: { atStableKey?: string; newRunId?: string } = {}): string {
     const src = this.store.getRun(runId);
     if (!src) throw new Error(`fork source run ${runId} not found`);
+    if (this.store.hasAgentSessions(runId)) {
+      throw new Error(
+        `run ${runId} uses durable agent sessions and cannot be forked; start a fresh run instead`,
+      );
+    }
     // Fence: only fork a terminal run, so the prefix snapshot is consistent (no
     // concurrent owner mutating it mid-copy) and all waits are resolved.
     if (!TERMINAL.has(src.status)) {
@@ -411,7 +434,252 @@ export class RealmKernel {
     };
   }
 
+  private beginAgentSessionTurn(
+    runId: string,
+    m: Extract<WorkerRequest, { type: "agent-turn" }>,
+    provider: AgentProvider,
+  ):
+    | { kind: "replay"; value: unknown }
+    | {
+        kind: "execute";
+        attempt: number;
+        inputHash: string;
+        startedAtMs: number;
+        resumeToken?: string;
+      } {
+    if (!provider.supportsSessions) {
+      throw new Error(`agent provider "${m.provider}" does not support durable sessions`);
+    }
+    const inputHash = hashJson(m.inputs as Json);
+    const startedAtMs = this.host.clock();
+    const result = this.store.transaction(() => {
+      let session = this.store.getAgentSession(runId, m.agentKey);
+      if (!session) {
+        this.store.insertAgentSession({
+          runId,
+          agentKey: m.agentKey,
+          identityHash: m.identityHash,
+          identityJson: m.identityJson,
+          currentSessionToken: null,
+          latestCompletedTurnKey: null,
+          latestCompletedAttempt: null,
+          activeTurnKey: null,
+          activeTurnAttempt: null,
+          createdAtMs: startedAtMs,
+          updatedAtMs: startedAtMs,
+        });
+        session = this.store.getAgentSession(runId, m.agentKey);
+      }
+      if (!session) throw new Error(`failed to create agent session "${m.agentKey}"`);
+      if (session.identityHash !== m.identityHash) {
+        throw new Error(
+          `agent session "${m.agentKey}" identity changed; use a new participant key or a fresh run`,
+        );
+      }
+
+      const existing = this.store.getLatestAttempt(runId, m.stableKey);
+      if (existing && (existing.inputHash !== inputHash || existing.version !== m.version)) {
+        throw new Error(
+          `agent session "${m.agentKey}" turn "${m.turnKey}" identity changed; use a new turn key or a fresh run`,
+        );
+      }
+      if (existing?.status === "completed") {
+        return { kind: "replay" as const, value: readJournalResult(this.store, existing) };
+      }
+
+      const resuming = existing?.status === "pending";
+      const attempt = resuming ? existing.attempt : existing ? existing.attempt + 1 : 1;
+      if (
+        session.activeTurnKey &&
+        (session.activeTurnKey !== m.turnKey || session.activeTurnAttempt !== attempt)
+      ) {
+        throw new Error(
+          `agent session "${m.agentKey}" already has active turn "${session.activeTurnKey}"`,
+        );
+      }
+
+      const turn = this.store.getLatestAgentSessionTurn(runId, m.agentKey, m.turnKey);
+      const startedSessionToken = resuming
+        ? (turn?.observedSessionToken ??
+          turn?.startedSessionToken ??
+          existing?.sessionToken ??
+          null)
+        : session.currentSessionToken
+          ? session.currentSessionToken
+          : session.latestCompletedTurnKey === null
+            ? null
+            : undefined;
+      if (startedSessionToken === undefined) {
+        throw new Error(
+          `agent session "${m.agentKey}" has no current session token for new turn "${m.turnKey}"`,
+        );
+      }
+
+      this.store.putJournalRow({
+        runId,
+        stableKey: m.stableKey,
+        attempt,
+        effectType: "effectful",
+        status: "pending",
+        version: m.version,
+        inputHash,
+        inputDeps: m.deps,
+        sessionToken: startedSessionToken,
+        startedAtMs,
+      });
+      this.store.putAgentSessionTurn({
+        runId,
+        agentKey: m.agentKey,
+        turnKey: m.turnKey,
+        attempt,
+        stableKey: m.stableKey,
+        status: "pending",
+        startedSessionToken,
+        observedSessionToken: null,
+        completedSessionToken: null,
+        startedAtMs,
+        finishedAtMs: null,
+      });
+      this.store.updateAgentSessionActive(runId, m.agentKey, m.turnKey, attempt, startedAtMs);
+      return {
+        kind: "execute" as const,
+        attempt,
+        inputHash,
+        startedAtMs,
+        ...(startedSessionToken ? { resumeToken: startedSessionToken } : {}),
+      };
+    });
+    if (result.kind === "execute") this.host.fault?.("after-pending", m.stableKey);
+    return result;
+  }
+
+  private recordAgentSessionToken(
+    engine: StepEngine,
+    runId: string,
+    m: Extract<WorkerRequest, { type: "agent-turn" }>,
+    attempt: number,
+    token: string,
+    expectedToken: string | undefined,
+  ): void {
+    if (expectedToken && token !== expectedToken) {
+      throw new AgentSessionContinuityError(
+        `agent session "${m.agentKey}" turn "${m.turnKey}" resumed with token "${expectedToken}" but provider reported "${token}"`,
+      );
+    }
+    this.store.transaction(() => {
+      engine.recordSessionToken(m.stableKey, attempt, token);
+      this.store.recordAgentSessionTurnToken(runId, m.agentKey, m.turnKey, attempt, token);
+    });
+  }
+
+  private completeAgentSessionTurn(
+    runId: string,
+    m: Extract<WorkerRequest, { type: "agent-turn" }>,
+    begun: { attempt: number; inputHash: string; startedAtMs: number; resumeToken?: string },
+    value: unknown,
+    providerSessionToken: string | undefined,
+  ): void {
+    const journalRow = this.store.getJournalRow(runId, m.stableKey, begun.attempt);
+    const turn = this.store.getLatestAgentSessionTurn(runId, m.agentKey, m.turnKey);
+    const tokenAfter =
+      turn?.observedSessionToken ?? providerSessionToken ?? journalRow?.sessionToken ?? null;
+    if (begun.resumeToken && providerSessionToken && providerSessionToken !== begun.resumeToken) {
+      throw new AgentSessionContinuityError(
+        `agent session "${m.agentKey}" turn "${m.turnKey}" resumed with token "${begun.resumeToken}" but provider returned "${providerSessionToken}"`,
+      );
+    }
+    if (!tokenAfter) {
+      throw new AgentSessionContinuityError(
+        `agent session "${m.agentKey}" turn "${m.turnKey}" completed without a session token`,
+      );
+    }
+    this.host.fault?.("before-commit", m.stableKey);
+    const stored = prepareStepResult(value);
+    const finishedAtMs = this.host.clock();
+    this.store.transaction(() => {
+      if (stored.artifact) {
+        this.store.putArtifact(stored.artifact.hash, stored.artifact.bytes, finishedAtMs);
+      }
+      this.store.putJournalRow({
+        runId,
+        stableKey: m.stableKey,
+        attempt: begun.attempt,
+        effectType: "effectful",
+        status: "completed",
+        version: m.version,
+        inputHash: begun.inputHash,
+        inputDeps: m.deps,
+        resultInline: stored.inline,
+        resultArtifact: stored.artifact?.hash ?? null,
+        sessionToken: tokenAfter,
+        startedAtMs: begun.startedAtMs,
+        finishedAtMs,
+      });
+      this.store.completeAgentSessionTurn(
+        runId,
+        m.agentKey,
+        m.turnKey,
+        begun.attempt,
+        tokenAfter,
+        finishedAtMs,
+      );
+      this.store.completeAgentSession(
+        runId,
+        m.agentKey,
+        m.turnKey,
+        begun.attempt,
+        tokenAfter,
+        finishedAtMs,
+      );
+    });
+    this.store.appendEvent(
+      runId,
+      "step.completed",
+      { stableKey: m.stableKey, effectType: "effectful" },
+      this.host.clock(),
+    );
+  }
+
+  private failAgentSessionTurn(
+    runId: string,
+    m: Extract<WorkerRequest, { type: "agent-turn" }>,
+    begun: { attempt: number; inputHash: string; startedAtMs: number },
+    err: unknown,
+  ): void {
+    const atMs = this.host.clock();
+    this.store.transaction(() => {
+      const existing = this.store.getJournalRow(runId, m.stableKey, begun.attempt);
+      this.store.putJournalRow({
+        runId,
+        stableKey: m.stableKey,
+        attempt: begun.attempt,
+        effectType: "effectful",
+        status: "failed",
+        version: m.version,
+        inputHash: begun.inputHash,
+        inputDeps: m.deps,
+        sessionToken: existing?.sessionToken ?? null,
+        errorJson: JSON.stringify(serializeError(err)),
+        startedAtMs: begun.startedAtMs,
+        finishedAtMs: atMs,
+      });
+      this.store.failAgentSessionTurn(runId, m.agentKey, m.turnKey, begun.attempt, atMs);
+    });
+  }
+
   private execute<O>(runId: string, workflowUrl: string, input: unknown): Promise<RunHandle<O>> {
+    let sessionRunGuarded = false;
+    if (this.store.hasAgentSessions(runId)) {
+      if (this.activeSessionRuns.has(runId)) {
+        return Promise.reject(
+          new Error(
+            `run ${runId} uses durable agent sessions and is already executing in this kernel`,
+          ),
+        );
+      }
+      this.activeSessionRuns.add(runId);
+      sessionRunGuarded = true;
+    }
     const source = readSourceSafe(workflowUrl);
     const sourcePath = workflowUrl.startsWith("file:")
       ? new URL(workflowUrl).pathname
@@ -428,6 +696,7 @@ export class RealmKernel {
       const finish = (fn: () => void): void => {
         if (settled) return;
         settled = true;
+        if (sessionRunGuarded) this.activeSessionRuns.delete(runId);
         worker.terminate();
         fn();
       };
@@ -618,6 +887,7 @@ export class RealmKernel {
                           // before the final output is redacted; the event log is
                           // forever, so scrub at the boundary.
                           onEvent: (ev) => {
+                            if (ev.type === "session") return;
                             let event = ev as unknown as Json;
                             if (allSecrets.length > 0) {
                               const r = redact(JSON.stringify(event), allSecrets);
@@ -742,6 +1012,182 @@ export class RealmKernel {
                       // best effort
                     }
                   }
+                }
+              })();
+              break;
+            }
+            case "agent-turn": {
+              const registry = this.registry;
+              if (!registry) {
+                reply(m.id, {
+                  ok: false,
+                  error: {
+                    name: "Error",
+                    message: "ctx.agentSession requires an agent provider registry",
+                  },
+                });
+                break;
+              }
+              const provider = registry.get(m.provider);
+              if (!sessionRunGuarded && this.activeSessionRuns.has(runId)) {
+                reply(m.id, {
+                  ok: false,
+                  error: {
+                    name: "Error",
+                    message: `run ${runId} uses durable agent sessions and is already executing in this kernel`,
+                  },
+                });
+                break;
+              }
+              let begun: ReturnType<typeof this.beginAgentSessionTurn>;
+              try {
+                begun = this.beginAgentSessionTurn(runId, m, provider);
+              } catch (err) {
+                const pending = this.store.getLatestAttempt(runId, m.stableKey);
+                if (pending?.status === "pending") {
+                  abort(err);
+                  break;
+                }
+                reply(m.id, { ok: false, error: serializeError(err) });
+                break;
+              }
+              if (begun.kind === "replay") {
+                reply(m.id, { ok: true, output: begun.value, contentHash: hashJson(begun.value) });
+                break;
+              }
+              if (!sessionRunGuarded) {
+                this.activeSessionRuns.add(runId);
+                sessionRunGuarded = true;
+              }
+              this.onStepExecute?.(m.stableKey);
+              const caps = m.capabilities ?? undefined;
+              if (m.workspaceIsolation) {
+                const err = new Error(
+                  "ctx.agentSession({ workspaceIsolation: true }) is not supported",
+                );
+                this.failAgentSessionTurn(runId, m, begun, err);
+                reply(m.id, { ok: false, error: serializeError(err) });
+                break;
+              }
+              if (
+                m.secrets.length > 0 &&
+                requiresSecretIsolation({ capabilities: caps, allowTools: m.allowTools })
+              ) {
+                const err = new Error(
+                  `agent session "${m.agentKey}" requests secrets with write, shell, or provider-native tool additions, which require workspaceIsolation and are not supported for sessions`,
+                );
+                this.failAgentSessionTurn(runId, m, begun, err);
+                reply(m.id, { ok: false, error: serializeError(err) });
+                break;
+              }
+              const secretRefs = this.secrets?.resolve(runId, m.secrets) ?? [];
+              const secretEnv: Record<string, string> = {};
+              for (const r of secretRefs) secretEnv[r.name] = r.value;
+              const allSecrets = this.secrets?.values(runId) ?? [];
+
+              void (async () => {
+                try {
+                  const execution = await runAgentWithStall(
+                    (signal) =>
+                      executeAgent(
+                        provider,
+                        {
+                          key: m.stableKey,
+                          provider: m.provider,
+                          prompt: m.prompt,
+                          ...(m.model ? { model: m.model } : {}),
+                          toolPolicy: m.toolPolicy,
+                          allowTools: m.allowTools,
+                          denyTools: m.denyTools,
+                          ...(m.reasoning ? { reasoning: m.reasoning } : {}),
+                          ...(caps ? { capabilities: caps } : {}),
+                          ...(secretRefs.length > 0 ? { env: secretEnv } : {}),
+                          ...(begun.resumeToken ? { resumeToken: begun.resumeToken } : {}),
+                          abortSignal: signal,
+                        },
+                        {
+                          onSessionToken: (tok) =>
+                            this.recordAgentSessionToken(
+                              engine,
+                              runId,
+                              m,
+                              begun.attempt,
+                              tok,
+                              begun.resumeToken,
+                            ),
+                          onEvent: (ev) => {
+                            if (ev.type === "session") return;
+                            let event = ev as unknown as Json;
+                            if (allSecrets.length > 0) {
+                              const r = redact(JSON.stringify(event), allSecrets);
+                              if (r.redacted) event = JSON.parse(r.text) as Json;
+                            }
+                            engine.emit("agent.event", { key: m.stableKey, event });
+                          },
+                        },
+                        {
+                          ...(m.jsonSchema != null ? { jsonSchema: m.jsonSchema } : {}),
+                          maxRetries: m.maxRetries,
+                          ...(m.lenient ? { coerce: true } : {}),
+                        },
+                      ),
+                    {
+                      ...(m.timeoutMs != null ? { timeoutMs: m.timeoutMs } : {}),
+                      ...(m.stallRetries != null ? { stallRetries: m.stallRetries } : {}),
+                      onStall: (a) =>
+                        engine.emit("agent.stalled", { key: m.stableKey, attempt: a }),
+                    },
+                  );
+                  if (settled) return;
+                  let output = execution.output;
+                  if (allSecrets.length > 0) {
+                    const r = redact(JSON.stringify(output ?? null), allSecrets);
+                    if (r.redacted) {
+                      output = JSON.parse(r.text);
+                      engine.emit("agent.redacted", { key: m.stableKey });
+                    }
+                  }
+                  try {
+                    this.completeAgentSessionTurn(runId, m, begun, output, execution.sessionToken);
+                  } catch (err) {
+                    if (!(err instanceof AgentSessionContinuityError)) {
+                      abort(err);
+                      return;
+                    }
+                    this.failAgentSessionTurn(runId, m, begun, err);
+                    reply(m.id, { ok: false, error: serializeError(err) });
+                    return;
+                  }
+                  reply(m.id, { ok: true, output, contentHash: hashJson(output) });
+                } catch (agentErr) {
+                  if (settled) return;
+                  if (m.onFailure === "null" && agentErr instanceof AgentFailure) {
+                    let errJson = serializeError(agentErr) as unknown as Json;
+                    if (allSecrets.length > 0) {
+                      const r = redact(JSON.stringify(errJson), allSecrets);
+                      if (r.redacted) errJson = JSON.parse(r.text) as Json;
+                    }
+                    engine.emit("agent.tolerated_failure", { key: m.stableKey, error: errJson });
+                    try {
+                      this.completeAgentSessionTurn(runId, m, begun, null, undefined);
+                    } catch (err) {
+                      if (!(err instanceof AgentSessionContinuityError)) {
+                        abort(err);
+                        return;
+                      }
+                      this.failAgentSessionTurn(runId, m, begun, err);
+                      reply(m.id, { ok: false, error: serializeError(err) });
+                      return;
+                    }
+                    reply(m.id, { ok: true, output: null, contentHash: hashJson(null) });
+                    return;
+                  }
+                  this.failAgentSessionTurn(runId, m, begun, agentErr);
+                  reply(m.id, {
+                    ok: false,
+                    error: serializeError(agentErr),
+                    failure: agentErr instanceof AgentFailure,
+                  });
                 }
               })();
               break;

@@ -1,0 +1,573 @@
+import { describe, expect, test } from "bun:test";
+import { randomUUID } from "node:crypto";
+import type {
+  AgentHooks,
+  AgentInvocation,
+  AgentProvider,
+  AgentResult,
+} from "../../agents/types.ts";
+import { AgentProviderRegistry } from "../../agents/types.ts";
+import { JournalStore } from "../../journal/store.ts";
+import { WorkflowCtx } from "../ctx.ts";
+import { RealmKernel } from "./realm-host.ts";
+
+const WORKFLOW = {
+  source: `
+    import { type Ctx, jsonSchema } from "@kcosr/keel";
+    const Out = jsonSchema<{ value: number }>({
+      type: "object",
+      additionalProperties: false,
+      required: ["value"],
+      properties: { value: { type: "number" } },
+    });
+    export default async function wf(ctx: Ctx, input: { second?: boolean } | null): Promise<number> {
+      const primary = ctx.agentSession({ key: "primary", provider: "session", toolPolicy: "read-only" });
+      const first = await primary.turn({ key: "draft", prompt: "draft", schema: Out });
+      if (input?.second === false) return first.value;
+      const second = await primary.turn({ key: "revise", prompt: "revise", schema: Out });
+      return first.value + second.value;
+    }
+  `,
+  name: "session",
+};
+
+class RecordingSessionProvider implements AgentProvider {
+  readonly name = "session";
+  readonly supportsSessions = true;
+  readonly calls: AgentInvocation[] = [];
+  private n = 0;
+
+  constructor(private readonly delayMs = 0) {}
+
+  async generate(invocation: AgentInvocation, hooks: AgentHooks): Promise<AgentResult> {
+    this.calls.push(invocation);
+    if (this.delayMs > 0) await Bun.sleep(this.delayMs);
+    const token = invocation.resumeToken ?? "sess-1";
+    hooks.onEvent?.({ type: "session", data: token });
+    hooks.onSessionToken?.(token);
+    const value = ++this.n;
+    return { text: JSON.stringify({ value }), transcript: [], sessionToken: token };
+  }
+}
+
+class FailsOnceOnReviseProvider implements AgentProvider {
+  readonly name = "session";
+  readonly supportsSessions = true;
+  readonly calls: AgentInvocation[] = [];
+  private n = 0;
+  private failed = false;
+
+  async generate(invocation: AgentInvocation, hooks: AgentHooks): Promise<AgentResult> {
+    this.calls.push(invocation);
+    const token = invocation.resumeToken ?? "sess-1";
+    hooks.onSessionToken?.(token);
+    if (invocation.key === "__session.primary.revise" && !this.failed) {
+      this.failed = true;
+      throw new Error("transient revise failure");
+    }
+    const value = ++this.n;
+    return { text: JSON.stringify({ value }), transcript: [], sessionToken: token };
+  }
+}
+
+function kernel(store: JournalStore, provider: AgentProvider, extra: Record<string, unknown> = {}) {
+  return new RealmKernel(store, {
+    idgen: () => "run-1",
+    clock: () => 1,
+    rng: () => 0.5,
+    agents: new AgentProviderRegistry().register(provider),
+    ...extra,
+  });
+}
+
+describe("ctx.agentSession", () => {
+  test("in-process WorkflowCtx rejects agentSession", () => {
+    const ctx = new WorkflowCtx(JournalStore.memory(), "run-1", {
+      clock: () => 1,
+      rng: () => 0.5,
+    });
+    expect(() => ctx.agentSession({ key: "primary" })).toThrow(/requires the realm kernel/);
+  });
+
+  test("later turns resume the latest completed participant token and completed turns replay", async () => {
+    const store = JournalStore.memory();
+    const provider = new RecordingSessionProvider();
+    const first = await kernel(store, provider).run<number>(WORKFLOW, { second: true });
+
+    expect(first.status).toBe("finished");
+    expect(first.output).toBe(3);
+    expect(provider.calls.map((c) => c.key)).toEqual([
+      "__session.primary.draft",
+      "__session.primary.revise",
+    ]);
+    expect(provider.calls[0]?.resumeToken).toBeUndefined();
+    expect(provider.calls[1]?.resumeToken).toBe("sess-1");
+    expect(store.getAgentSession("run-1", "primary")?.currentSessionToken).toBe("sess-1");
+
+    const replayed = await kernel(store, provider).resume<number>("run-1");
+    expect(replayed.output).toBe(3);
+    expect(provider.calls.length).toBe(2);
+  });
+
+  test("a pending later turn resumes with the token it started with", async () => {
+    const store = JournalStore.memory();
+    const provider = new RecordingSessionProvider();
+    const crashing = kernel(store, provider, {
+      fault: (point: string, key: string) => {
+        if (point === "before-commit" && key === "__session.primary.revise") {
+          throw new Error("CRASH");
+        }
+      },
+    });
+    await crashing.run(WORKFLOW, { second: true }).catch(() => null);
+    expect(provider.calls.length).toBe(2);
+    expect(store.getRun("run-1")?.status).toBe("running");
+
+    const resumed = await kernel(store, provider).resume<number>("run-1");
+    expect(resumed.status).toBe("finished");
+    expect(provider.calls.length).toBe(3);
+    expect(provider.calls[2]?.key).toBe("__session.primary.revise");
+    expect(provider.calls[2]?.resumeToken).toBe("sess-1");
+  });
+
+  test("retry deletes a failed session turn and re-drives it from the completed token", async () => {
+    const store = JournalStore.memory();
+    const provider = new FailsOnceOnReviseProvider();
+    const k = kernel(store, provider);
+
+    await k.run(WORKFLOW, { second: true }).catch(() => null);
+    expect(store.getRun("run-1")?.status).toBe("failed");
+    expect(store.getLatestAgentSessionTurn("run-1", "primary", "revise")?.status).toBe("failed");
+    expect(store.getAgentSession("run-1", "primary")?.currentSessionToken).toBe("sess-1");
+
+    const retried = await k.retry<number>("run-1");
+    expect(retried.status).toBe("finished");
+    expect(retried.output).toBe(3);
+    expect(provider.calls.map((c) => c.key)).toEqual([
+      "__session.primary.draft",
+      "__session.primary.revise",
+      "__session.primary.revise",
+    ]);
+    expect(provider.calls[2]?.resumeToken).toBe("sess-1");
+    expect(store.getLatestAgentSessionTurn("run-1", "primary", "revise")?.status).toBe("completed");
+    const failedTurns = store.db
+      .query<{ c: number }, []>(
+        "SELECT COUNT(*) AS c FROM agent_session_turns WHERE run_id = 'run-1' AND status = 'failed'",
+      )
+      .get()?.c;
+    expect(failedTurns).toBe(0);
+  });
+
+  test("session provider support, key validation, and workspace isolation fail closed", async () => {
+    const noSession: AgentProvider = {
+      name: "session",
+      async generate() {
+        return { text: "{}", transcript: [] };
+      },
+    };
+    await expect(kernel(JournalStore.memory(), noSession).run(WORKFLOW, null)).rejects.toThrow(
+      /does not support durable sessions/,
+    );
+
+    const badKey = {
+      source: `
+        import { type Ctx } from "@kcosr/keel";
+        export default async function wf(ctx: Ctx): Promise<void> {
+          await ctx.agentSession({ key: "bad.key", provider: "session" }).turn({ key: "x", prompt: "x" });
+        }
+      `,
+      name: "bad-key",
+    };
+    await expect(
+      kernel(JournalStore.memory(), new RecordingSessionProvider()).run(badKey, null),
+    ).rejects.toThrow(/must match/);
+
+    const isolated = {
+      source: `
+        import { type Ctx } from "@kcosr/keel";
+        export default async function wf(ctx: Ctx): Promise<void> {
+          await ctx.agentSession({ key: "p", provider: "session", workspaceIsolation: true }).turn({ key: "x", prompt: "x" });
+        }
+      `,
+      name: "isolated",
+    };
+    await expect(
+      kernel(JournalStore.memory(), new RecordingSessionProvider()).run(isolated, null),
+    ).rejects.toThrow(/workspaceIsolation/);
+  });
+
+  test("participant identity drift fails closed before provider execution", async () => {
+    const store = JournalStore.memory();
+    const provider = new RecordingSessionProvider();
+    const crashing = kernel(store, provider, {
+      fault: (point: string, key: string) => {
+        if (point === "before-commit" && key === "__session.primary.revise") {
+          throw new Error("CRASH");
+        }
+      },
+    });
+    await crashing.run(WORKFLOW, { second: true }).catch(() => null);
+    expect(provider.calls.length).toBe(2);
+
+    store.db
+      .query("UPDATE agent_sessions SET identity_hash = 'changed' WHERE run_id = 'run-1'")
+      .run();
+    await expect(kernel(store, provider).resume("run-1")).rejects.toThrow(/identity changed/);
+    expect(provider.calls.length).toBe(2);
+  });
+
+  test("turn identity drift fails closed before provider execution", async () => {
+    const store = JournalStore.memory();
+    const provider = new RecordingSessionProvider();
+    const crashing = kernel(store, provider, {
+      fault: (point: string, key: string) => {
+        if (point === "before-commit" && key === "__session.primary.revise") {
+          throw new Error("CRASH");
+        }
+      },
+    });
+    await crashing.run(WORKFLOW, { second: true }).catch(() => null);
+    expect(provider.calls.length).toBe(2);
+
+    const identity = store.getAgentSession("run-1", "primary")?.identityHash ?? "";
+    store.db
+      .query("UPDATE agent_sessions SET identity_hash = ? WHERE run_id = 'run-1'")
+      .run(identity);
+    store.db
+      .query(
+        "UPDATE journal SET version = 'changed' WHERE run_id = 'run-1' AND stable_key = '__session.primary.draft'",
+      )
+      .run();
+    await expect(kernel(store, provider).resume("run-1")).rejects.toThrow(
+      /turn "draft" identity changed/,
+    );
+    expect(provider.calls.length).toBe(2);
+  });
+
+  test("concurrent turns on one participant are rejected", async () => {
+    const store = JournalStore.memory();
+    const concurrent = {
+      source: `
+        import { type Ctx, jsonSchema } from "@kcosr/keel";
+        const Out = jsonSchema<{ value: number }>({
+          type: "object",
+          additionalProperties: false,
+          required: ["value"],
+          properties: { value: { type: "number" } },
+        });
+        export default async function wf(ctx: Ctx): Promise<number> {
+          const primary = ctx.agentSession({ key: "primary", provider: "session" });
+          const [a, b] = await Promise.all([
+            primary.turn({ key: "a", prompt: "a", schema: Out }),
+            primary.turn({ key: "b", prompt: "b", schema: Out }),
+          ]);
+          return a.value + b.value;
+        }
+      `,
+      name: "concurrent",
+    };
+    await expect(
+      kernel(store, new RecordingSessionProvider(50)).run(concurrent, null),
+    ).rejects.toThrow(/already has active turn/);
+    await Bun.sleep(100);
+    expect(store.getAgentSession("run-1", "primary")?.currentSessionToken).toBeNull();
+  });
+
+  test("a session provider that does not report a token cannot complete a turn", async () => {
+    const silent: AgentProvider = {
+      name: "session",
+      supportsSessions: true,
+      async generate() {
+        return { text: '{"value":1}', transcript: [] };
+      },
+    };
+    await expect(
+      kernel(JournalStore.memory(), silent).run(WORKFLOW, { second: false }),
+    ).rejects.toThrow(/completed without a session token/);
+  });
+
+  test("onFailure null can complete only after a session token was captured", async () => {
+    const tolerant = {
+      source: `
+        import { type Ctx, jsonSchema } from "@kcosr/keel";
+        const Out = jsonSchema<{ value: number }>({
+          type: "object",
+          additionalProperties: false,
+          required: ["value"],
+          properties: { value: { type: "number" } },
+        });
+        export default async function wf(ctx: Ctx): Promise<{ value: number } | null> {
+          const primary = ctx.agentSession({ key: "primary", provider: "session" });
+          return await primary.turn({
+            key: "draft",
+            prompt: "draft",
+            schema: Out,
+            onFailure: "null",
+            maxRetries: 0,
+          });
+        }
+      `,
+      name: "tolerant-session",
+    };
+    const invalidWithToken: AgentProvider = {
+      name: "session",
+      supportsSessions: true,
+      async generate(_invocation, hooks) {
+        hooks.onSessionToken?.("sess-1");
+        return { text: '{"wrong":true}', transcript: [], sessionToken: "sess-1" };
+      },
+    };
+    const finished = await kernel(JournalStore.memory(), invalidWithToken).run(tolerant, null);
+    expect(finished.status).toBe("finished");
+    expect(finished.output).toBeNull();
+
+    const invalidWithoutToken: AgentProvider = {
+      name: "session",
+      supportsSessions: true,
+      async generate() {
+        return { text: '{"wrong":true}', transcript: [] };
+      },
+    };
+    await expect(
+      kernel(JournalStore.memory(), invalidWithoutToken).run(tolerant, null),
+    ).rejects.toThrow(/completed without a session token/);
+  });
+
+  test("a new later turn fails closed when the current session token is missing", async () => {
+    const waitThenContinue = {
+      source: `
+        import { type Ctx, jsonSchema } from "@kcosr/keel";
+        const Out = jsonSchema<{ value: number }>({
+          type: "object",
+          additionalProperties: false,
+          required: ["value"],
+          properties: { value: { type: "number" } },
+        });
+        export default async function wf(ctx: Ctx): Promise<number> {
+          const primary = ctx.agentSession({ key: "primary", provider: "session" });
+          await primary.turn({ key: "draft", prompt: "draft", schema: Out });
+          await ctx.signal("go");
+          const second = await primary.turn({ key: "revise", prompt: "revise", schema: Out });
+          return second.value;
+        }
+      `,
+      name: "missing-token-later-turn",
+    };
+    const store = JournalStore.memory();
+    const provider = new RecordingSessionProvider();
+    const k = kernel(store, provider);
+    const parked = await k.run(waitThenContinue, null);
+    expect(parked.status).toBe("waiting-signal");
+    expect(provider.calls).toHaveLength(1);
+
+    store.db
+      .query("UPDATE agent_sessions SET current_session_token = NULL WHERE run_id = 'run-1'")
+      .run();
+    store.putSignal("run-1", "go", {}, 1);
+    await expect(k.resume("run-1")).rejects.toThrow(/no current session token/);
+    expect(provider.calls).toHaveLength(1);
+  });
+
+  test("a resumed turn fails if the provider reports a different token", async () => {
+    const mismatch: AgentProvider = {
+      name: "session",
+      supportsSessions: true,
+      async generate(invocation, hooks) {
+        const token = invocation.resumeToken ? "different-token" : "sess-1";
+        hooks.onSessionToken?.(token);
+        return { text: '{"value":1}', transcript: [], sessionToken: token };
+      },
+    };
+    await expect(
+      kernel(JournalStore.memory(), mismatch).run(WORKFLOW, { second: true }),
+    ).rejects.toThrow(/resumed with token/);
+  });
+
+  test("duplicate resumes of a pending session run are fenced in one kernel", async () => {
+    const store = JournalStore.memory();
+    const provider = new RecordingSessionProvider(80);
+    const crashing = kernel(store, provider, {
+      fault: (point: string, key: string) => {
+        if (point === "before-commit" && key === "__session.primary.revise") {
+          throw new Error("CRASH");
+        }
+      },
+    });
+    await crashing.run(WORKFLOW, { second: true }).catch(() => null);
+
+    const k = kernel(store, provider);
+    const results = await Promise.allSettled([k.resume("run-1"), k.resume("run-1")]);
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    expect(
+      results.some(
+        (r) => r.status === "rejected" && String(r.reason).includes("already executing"),
+      ),
+    ).toBe(true);
+  });
+
+  test("session-token events are not journaled", async () => {
+    const store = JournalStore.memory();
+    await kernel(store, new RecordingSessionProvider()).run(WORKFLOW, { second: false });
+
+    const events = store.listEvents("run-1").map((e) => ({
+      type: e.type,
+      payload: JSON.parse(e.payloadJson),
+    }));
+    expect(JSON.stringify(events)).not.toContain("sess-1");
+    expect(events.some((e) => e.type === "agent.event")).toBe(false);
+  });
+
+  test("rewind, rerun, and fork reject runs that used durable agent sessions", async () => {
+    const store = JournalStore.memory();
+    const k = kernel(store, new RecordingSessionProvider());
+    await k.run(WORKFLOW, { second: false });
+
+    await expect(k.rerun("run-1")).rejects.toThrow(/cannot be rerun/);
+    await expect(k.rewind("run-1", "__session.primary.draft")).rejects.toThrow(/cannot be rewound/);
+    expect(() => k.fork("run-1", { newRunId: "forked" })).toThrow(/cannot be forked/);
+  });
+
+  test("continueAsNew successor starts without inherited agent session rows", async () => {
+    const chain = {
+      source: `
+        import { type Ctx, jsonSchema } from "@kcosr/keel";
+        const Out = jsonSchema<{ value: number }>({
+          type: "object",
+          additionalProperties: false,
+          required: ["value"],
+          properties: { value: { type: "number" } },
+        });
+        export default async function wf(ctx: Ctx, input: { count: number }): Promise<number> {
+          if (input.count > 0) return 9;
+          const primary = ctx.agentSession({ key: "primary", provider: "session" });
+          await primary.turn({ key: "draft", prompt: "draft", schema: Out });
+          await ctx.continueAsNew({ count: 1 });
+        }
+      `,
+      name: "session-continue",
+    };
+    const store = JournalStore.memory();
+    const provider = new RecordingSessionProvider();
+    let n = 0;
+    const k = new RealmKernel(store, {
+      idgen: () => `chain-${n++}`,
+      clock: () => 1,
+      rng: () => 0.5,
+      agents: new AgentProviderRegistry().register(provider),
+    });
+
+    const first = await k.run<{ continuedTo: string }>(chain, { count: 0 });
+    expect(first.status).toBe("continued");
+    expect(first.output?.continuedTo).toBe("chain-1");
+    await until(() => store.getRun("chain-1")?.status === "finished", 4000);
+    expect(store.hasAgentSessions("chain-0")).toBe(true);
+    expect(store.hasAgentSessions("chain-1")).toBe(false);
+    expect(
+      store.db
+        .query<{ c: number }, []>(
+          "SELECT COUNT(*) AS c FROM agent_session_turns WHERE run_id = 'chain-1'",
+        )
+        .get()?.c,
+    ).toBe(0);
+  });
+});
+
+async function until(cond: () => boolean, timeoutMs: number): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (cond()) return;
+    await Bun.sleep(25);
+  }
+  throw new Error("condition did not settle in time");
+}
+
+const LIVE = process.env.KEEL_LIVE === "1";
+
+function liveContinuityWorkflow(provider: "claude" | "pi", toolPolicy: "none" | "read-only") {
+  return {
+    source: `
+      import { type Ctx, jsonSchema } from "@kcosr/keel";
+      const Ack = jsonSchema<{ ok: boolean }>({
+        type: "object",
+        additionalProperties: false,
+        required: ["ok"],
+        properties: { ok: { type: "boolean" } },
+      });
+      const Recall = jsonSchema<{ code: string }>({
+        type: "object",
+        additionalProperties: false,
+        required: ["code"],
+        properties: { code: { type: "string" } },
+      });
+      export default async function wf(ctx: Ctx, input: { code: string }): Promise<string> {
+        const agent = ctx.agentSession({
+          key: "primary",
+          provider: "${provider}",
+          toolPolicy: "${toolPolicy}",
+        });
+        await agent.turn({
+          key: "remember",
+          prompt: "Remember this exact code word for a later question in this same conversation: " + input.code + ". Return ONLY this JSON: {\\\"ok\\\":true}",
+          schema: Ack,
+        });
+        const recalled = await agent.turn({
+          key: "recall",
+          prompt: "What exact code word did I ask you to remember earlier in this conversation? Return ONLY one JSON object with exactly one string field named code.",
+          schema: Recall,
+        });
+        return recalled.code;
+      }
+    `,
+    name: `live-${provider}-session-continuity`,
+  };
+}
+
+function liveKernel(provider: AgentProvider, calls: AgentInvocation[]) {
+  return new RealmKernel(JournalStore.memory(), {
+    idgen: () => "live-run",
+    agents: new AgentProviderRegistry().register({
+      name: provider.name,
+      supportsSessions: provider.supportsSessions,
+      generate(invocation, hooks) {
+        calls.push({ ...invocation });
+        return provider.generate(invocation, hooks);
+      },
+    }),
+  });
+}
+
+describe.if(LIVE)("LIVE ctx.agentSession backend continuity", () => {
+  test("Claude recalls a first-turn code word only available through backend session resume", async () => {
+    const { ClaudeProvider } = await import("../../agents/claude.ts");
+    const calls: AgentInvocation[] = [];
+    const code = `keelclaude${randomUUID().replace(/-/g, "").slice(0, 12)}`;
+    const k = liveKernel(new ClaudeProvider({ timeoutMs: 120_000 }), calls);
+    const result = await k.run<string>(liveContinuityWorkflow("claude", "none"), { code });
+
+    expect(result.status).toBe("finished");
+    expect(result.output).toBe(code);
+    expect(calls).toHaveLength(2);
+    expect(calls[0]?.resumeToken).toBeUndefined();
+    expect(calls[1]?.resumeToken).toBeTruthy();
+    const replay = await k.resume<string>("live-run");
+    expect(replay.output).toBe(code);
+    expect(calls).toHaveLength(2);
+  }, 260_000);
+
+  test("Codex/Pi recalls a first-turn code word only available through backend session resume", async () => {
+    const { PiProvider } = await import("../../agents/pi.ts");
+    const calls: AgentInvocation[] = [];
+    const code = `keelcodex${randomUUID().replace(/-/g, "").slice(0, 12)}`;
+    const k = liveKernel(new PiProvider({ timeoutMs: 120_000 }), calls);
+    const result = await k.run<string>(liveContinuityWorkflow("pi", "read-only"), { code });
+
+    expect(result.status).toBe("finished");
+    expect(result.output).toBe(code);
+    expect(calls).toHaveLength(2);
+    expect(calls[0]?.resumeToken).toBeUndefined();
+    expect(calls[1]?.resumeToken).toBeTruthy();
+    const replay = await k.resume<string>("live-run");
+    expect(replay.output).toBe(code);
+    expect(calls).toHaveLength(2);
+  }, 260_000);
+});

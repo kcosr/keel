@@ -9,6 +9,8 @@ import { Database } from "bun:sqlite";
 import { applyMigration } from "./migrations.ts";
 import { DDL, SCHEMA_VERSION } from "./schema.ts";
 import type {
+  AgentSessionRow,
+  AgentSessionTurnRow,
   ArtifactRow,
   CapabilityRow,
   EventRow,
@@ -305,6 +307,188 @@ export class JournalStore {
 
   // ---- events -------------------------------------------------------------
 
+  // ---- agent sessions -----------------------------------------------------
+
+  hasAgentSessions(runId: string): boolean {
+    const row = this.db
+      .query<{ c: number }, [string]>(
+        "SELECT COUNT(*) AS c FROM agent_sessions WHERE run_id = ? LIMIT 1",
+      )
+      .get(runId);
+    return (row?.c ?? 0) > 0;
+  }
+
+  getAgentSession(runId: string, agentKey: string): AgentSessionRow | null {
+    const r = this.db
+      .query<RawAgentSessionRow, [string, string]>(
+        "SELECT * FROM agent_sessions WHERE run_id = ? AND agent_key = ?",
+      )
+      .get(runId, agentKey);
+    return r ? mapAgentSession(r) : null;
+  }
+
+  insertAgentSession(row: AgentSessionRow): void {
+    this.db
+      .query(
+        `INSERT INTO agent_sessions (
+           run_id, agent_key, identity_hash, identity_json, current_session_token,
+           latest_completed_turn_key, latest_completed_attempt,
+           active_turn_key, active_turn_attempt, created_at_ms, updated_at_ms
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        row.runId,
+        row.agentKey,
+        row.identityHash,
+        row.identityJson,
+        row.currentSessionToken,
+        row.latestCompletedTurnKey,
+        row.latestCompletedAttempt,
+        row.activeTurnKey,
+        row.activeTurnAttempt,
+        row.createdAtMs,
+        row.updatedAtMs,
+      );
+  }
+
+  updateAgentSessionActive(
+    runId: string,
+    agentKey: string,
+    activeTurnKey: string | null,
+    activeTurnAttempt: number | null,
+    atMs: number,
+  ): void {
+    this.db
+      .query(
+        `UPDATE agent_sessions
+         SET active_turn_key = ?, active_turn_attempt = ?, updated_at_ms = ?
+         WHERE run_id = ? AND agent_key = ?`,
+      )
+      .run(activeTurnKey, activeTurnAttempt, atMs, runId, agentKey);
+  }
+
+  completeAgentSession(
+    runId: string,
+    agentKey: string,
+    turnKey: string,
+    attempt: number,
+    token: string,
+    atMs: number,
+  ): void {
+    this.db
+      .query(
+        `UPDATE agent_sessions
+         SET current_session_token = ?,
+             latest_completed_turn_key = ?,
+             latest_completed_attempt = ?,
+             active_turn_key = NULL,
+             active_turn_attempt = NULL,
+             updated_at_ms = ?
+         WHERE run_id = ? AND agent_key = ?`,
+      )
+      .run(token, turnKey, attempt, atMs, runId, agentKey);
+  }
+
+  getLatestAgentSessionTurn(
+    runId: string,
+    agentKey: string,
+    turnKey: string,
+  ): AgentSessionTurnRow | null {
+    const r = this.db
+      .query<RawAgentSessionTurnRow, [string, string, string]>(
+        `SELECT * FROM agent_session_turns
+         WHERE run_id = ? AND agent_key = ? AND turn_key = ?
+         ORDER BY attempt DESC LIMIT 1`,
+      )
+      .get(runId, agentKey, turnKey);
+    return r ? mapAgentSessionTurn(r) : null;
+  }
+
+  putAgentSessionTurn(row: AgentSessionTurnRow): void {
+    this.db
+      .query(
+        `INSERT INTO agent_session_turns (
+           run_id, agent_key, turn_key, attempt, stable_key, status,
+           started_session_token, observed_session_token, completed_session_token,
+           started_at_ms, finished_at_ms
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (run_id, agent_key, turn_key, attempt) DO UPDATE SET
+           stable_key = excluded.stable_key,
+           status = excluded.status,
+           started_session_token = excluded.started_session_token,
+           observed_session_token = COALESCE(agent_session_turns.observed_session_token, excluded.observed_session_token),
+           completed_session_token = excluded.completed_session_token,
+           started_at_ms = COALESCE(agent_session_turns.started_at_ms, excluded.started_at_ms),
+           finished_at_ms = excluded.finished_at_ms`,
+      )
+      .run(
+        row.runId,
+        row.agentKey,
+        row.turnKey,
+        row.attempt,
+        row.stableKey,
+        row.status,
+        row.startedSessionToken,
+        row.observedSessionToken,
+        row.completedSessionToken,
+        row.startedAtMs,
+        row.finishedAtMs,
+      );
+  }
+
+  recordAgentSessionTurnToken(
+    runId: string,
+    agentKey: string,
+    turnKey: string,
+    attempt: number,
+    token: string,
+  ): void {
+    this.db
+      .query(
+        `UPDATE agent_session_turns
+         SET observed_session_token = ?
+         WHERE run_id = ? AND agent_key = ? AND turn_key = ? AND attempt = ? AND status = 'pending'`,
+      )
+      .run(token, runId, agentKey, turnKey, attempt);
+  }
+
+  completeAgentSessionTurn(
+    runId: string,
+    agentKey: string,
+    turnKey: string,
+    attempt: number,
+    token: string,
+    atMs: number,
+  ): void {
+    this.db
+      .query(
+        `UPDATE agent_session_turns
+         SET status = 'completed',
+             completed_session_token = ?,
+             finished_at_ms = ?
+         WHERE run_id = ? AND agent_key = ? AND turn_key = ? AND attempt = ?`,
+      )
+      .run(token, atMs, runId, agentKey, turnKey, attempt);
+  }
+
+  failAgentSessionTurn(
+    runId: string,
+    agentKey: string,
+    turnKey: string,
+    attempt: number,
+    atMs: number,
+  ): void {
+    this.db
+      .query(
+        `UPDATE agent_session_turns
+         SET status = 'failed',
+             finished_at_ms = ?
+         WHERE run_id = ? AND agent_key = ? AND turn_key = ? AND attempt = ?`,
+      )
+      .run(atMs, runId, agentKey, turnKey, attempt);
+    this.updateAgentSessionActive(runId, agentKey, null, null, atMs);
+  }
+
   /** Append an event; returns the assigned per-run sequence number. */
   appendEvent(runId: string, type: string, payload: unknown, atMs: number): number {
     const next = this.db
@@ -567,7 +751,12 @@ export class JournalStore {
 
   /** Delete the failed rows of a run (retry: the failed step re-executes). */
   deleteFailedRows(runId: string): void {
-    this.db.query("DELETE FROM journal WHERE run_id = ? AND status = 'failed'").run(runId);
+    this.transaction(() => {
+      this.db.query("DELETE FROM journal WHERE run_id = ? AND status = 'failed'").run(runId);
+      this.db
+        .query("DELETE FROM agent_session_turns WHERE run_id = ? AND status = 'failed'")
+        .run(runId);
+    });
   }
 
   /** Delete everything journaled AFTER a target step (rewind to that step). */
@@ -904,6 +1093,34 @@ interface RawJournalRow {
   finished_at_ms: number | null;
 }
 
+interface RawAgentSessionRow {
+  run_id: string;
+  agent_key: string;
+  identity_hash: string;
+  identity_json: string;
+  current_session_token: string | null;
+  latest_completed_turn_key: string | null;
+  latest_completed_attempt: number | null;
+  active_turn_key: string | null;
+  active_turn_attempt: number | null;
+  created_at_ms: number;
+  updated_at_ms: number;
+}
+
+interface RawAgentSessionTurnRow {
+  run_id: string;
+  agent_key: string;
+  turn_key: string;
+  attempt: number;
+  stable_key: string;
+  status: string;
+  started_session_token: string | null;
+  observed_session_token: string | null;
+  completed_session_token: string | null;
+  started_at_ms: number | null;
+  finished_at_ms: number | null;
+}
+
 interface RawEventRow {
   run_id: string;
   seq: number;
@@ -975,6 +1192,38 @@ function mapJournal(r: RawJournalRow): JournalRow {
     resultArtifact: r.result_artifact,
     sessionToken: r.session_token,
     errorJson: r.error_json,
+    startedAtMs: r.started_at_ms,
+    finishedAtMs: r.finished_at_ms,
+  };
+}
+
+function mapAgentSession(r: RawAgentSessionRow): AgentSessionRow {
+  return {
+    runId: r.run_id,
+    agentKey: r.agent_key,
+    identityHash: r.identity_hash,
+    identityJson: r.identity_json,
+    currentSessionToken: r.current_session_token,
+    latestCompletedTurnKey: r.latest_completed_turn_key,
+    latestCompletedAttempt: r.latest_completed_attempt,
+    activeTurnKey: r.active_turn_key,
+    activeTurnAttempt: r.active_turn_attempt,
+    createdAtMs: r.created_at_ms,
+    updatedAtMs: r.updated_at_ms,
+  };
+}
+
+function mapAgentSessionTurn(r: RawAgentSessionTurnRow): AgentSessionTurnRow {
+  return {
+    runId: r.run_id,
+    agentKey: r.agent_key,
+    turnKey: r.turn_key,
+    attempt: r.attempt,
+    stableKey: r.stable_key,
+    status: r.status as AgentSessionTurnRow["status"],
+    startedSessionToken: r.started_session_token,
+    observedSessionToken: r.observed_session_token,
+    completedSessionToken: r.completed_session_token,
     startedAtMs: r.started_at_ms,
     finishedAtMs: r.finished_at_ms,
   };

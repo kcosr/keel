@@ -6,10 +6,11 @@
 // "begin" from "complete" is what lets the realm run the fn between the two
 // commits while the journaling stays here.
 
+import type { TraceEvent } from "../agents/types.ts";
 import { type Json, hashJson, sha256Hex } from "../hash.ts";
 import type { JournalStore } from "../journal/store.ts";
 import type { EffectType, InputDep, JournalRow } from "../journal/types.ts";
-import type { DurableAgentEvent } from "./agent-events.ts";
+import { type DurableAgentEvent, durableAgentToolEvent } from "./agent-events.ts";
 import type { CtxHost } from "./ctx.ts";
 
 /** Results larger than this are stored content-addressed, not inline (§8.2). */
@@ -194,6 +195,17 @@ export class StepEngine {
 
   emitLive(type: string, payload: Json): void {
     this.host.liveEvent?.(this.runId, type, payload, this.host.clock());
+  }
+
+  emitAgentTrace(key: string, attempt: number, event: TraceEvent): void {
+    const durable = durableAgentToolEvent(key, attempt, event);
+    if (durable) {
+      this.emit(durable.type, durable.payload);
+      return;
+    }
+    if (event.type !== "session") {
+      this.emitLive("agent.event", { key, event: event as unknown as Json });
+    }
   }
 
   now(): number {

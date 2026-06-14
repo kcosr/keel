@@ -7,55 +7,35 @@ export interface DurableAgentEvent {
   payload: Json;
 }
 
-export function consolidatedAgentEvents(
+export function finalAgentMessageEvents(
   key: string,
+  attempt: number,
   text: string,
-  transcript: TraceEvent[],
 ): DurableAgentEvent[] {
-  const events: DurableAgentEvent[] = [];
-  let textBuffer = "";
-  let emittedText = false;
-  const flushText = (): void => {
-    if (textBuffer.length === 0) return;
-    events.push({
+  if (text.length === 0) return [];
+  return [
+    {
       type: "agent.message",
-      payload: { key, ...boundedField("text", textBuffer) },
-    });
-    emittedText = true;
-    textBuffer = "";
-  };
-  for (const event of transcript) {
-    if (event.type === "text" && typeof event.data === "string") {
-      textBuffer += event.data;
-    } else if (event.type === "tool_call") {
-      flushText();
-      events.push({
-        type: "agent.tool_call",
-        payload: { key, ...boundedField("data", event.data ?? null) },
-      });
-    } else if (event.type === "tool_result") {
-      flushText();
-      events.push({
-        type: "agent.tool_result",
-        payload: { key, ...boundedField("data", event.data ?? null) },
-      });
-    }
-  }
-  flushText();
-  if (!emittedText && text.length > 0) {
-    events.push({
-      type: "agent.message",
-      payload: { key, ...boundedField("text", text) },
-    });
-  }
-  return events;
+      payload: { key, attempt, ...boundedField("text", text) },
+    },
+  ];
 }
 
-export function redactTranscript(
-  transcript: TraceEvent[],
-  redactJson: (json: string) => string,
-): TraceEvent[] {
-  return transcript.map((event) => JSON.parse(redactJson(JSON.stringify(event))) as TraceEvent);
+export function durableAgentToolEvent(
+  key: string,
+  attempt: number,
+  event: TraceEvent,
+): DurableAgentEvent | null {
+  if (event.type !== "tool_call" && event.type !== "tool_result") return null;
+  return {
+    type: event.type === "tool_call" ? "agent.tool_call" : "agent.tool_result",
+    payload: {
+      key,
+      attempt,
+      ...(event.toolCallId ? { toolCallId: event.toolCallId } : {}),
+      ...boundedField("data", event.data ?? null),
+    },
+  };
 }
 
 function boundedField(name: "text" | "data", value: unknown): { [key: string]: Json } {

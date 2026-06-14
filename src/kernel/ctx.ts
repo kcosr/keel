@@ -12,7 +12,7 @@ import { type AgentProfiles, resolveProfile } from "../agents/profiles.ts";
 import type { AgentProviderRegistry } from "../agents/types.ts";
 import type { Json } from "../hash.ts";
 import type { JournalStore } from "../journal/store.ts";
-import { consolidatedAgentEvents } from "./agent-events.ts";
+import { finalAgentMessageEvents } from "./agent-events.ts";
 import type { Schema } from "./schema.ts";
 import { StepEngine } from "./step-engine.ts";
 import { computeVersion } from "./version.ts";
@@ -330,13 +330,7 @@ export class WorkflowCtx implements Ctx {
             },
             {
               onSessionToken: (tok) => this.engine.recordSessionToken(spec.key, begun.attempt, tok),
-              onEvent: (e) =>
-                e.type === "session"
-                  ? undefined
-                  : this.engine.emitLive("agent.event", {
-                      key: spec.key,
-                      event: e as unknown as Json,
-                    }),
+              onEvent: (e) => this.engine.emitAgentTrace(spec.key, begun.attempt, e),
             },
             {
               ...(jsonSchema !== undefined ? { jsonSchema } : {}),
@@ -359,7 +353,7 @@ export class WorkflowCtx implements Ctx {
         execution.output,
         null,
         "effectful",
-        consolidatedAgentEvents(spec.key, execution.text, execution.transcript),
+        finalAgentMessageEvents(spec.key, begun.attempt, execution.text),
       );
       return execution.output as T;
     } catch (err) {

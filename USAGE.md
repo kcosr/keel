@@ -184,7 +184,9 @@ is also rejected because detached launch returns a snapshot handle, not a stream
 Default watch output is newline-delimited JSON frame envelopes. Durable frames
 have `kind:"durable"` plus a per-run `seq`; live agent delta frames have
 `kind:"ephemeral"` and no sequence because they are delivered only to currently
-connected watchers.
+connected watchers. Finalized tool calls/results are durable immediately as
+`agent.tool_call`/`agent.tool_result` rows; live text/reasoning remains
+`agent.event` and is not backfilled.
 
 ```bash
 keel watch run_...
@@ -193,7 +195,8 @@ keel watch run_...
 ```json
 {"kind":"durable","seq":1,"type":"run.started","payload":{"name":"review.workflow.ts"},"atMs":...}
 {"kind":"ephemeral","type":"agent.event","payload":{"key":"review:auth","event":{"type":"text","data":"..."}},"atMs":...}
-{"kind":"durable","seq":3,"type":"agent.message","payload":{"key":"review:auth","text":"..."},"atMs":...}
+{"kind":"durable","seq":3,"type":"agent.tool_call","payload":{"key":"review:auth","attempt":1,"toolCallId":"toolu_...","data":{"name":"Read","args":{"file":"a.ts"}}},"atMs":...}
+{"kind":"durable","seq":4,"type":"agent.message","payload":{"key":"review:auth","attempt":1,"text":"..."},"atMs":...}
 ```
 
 Use `--output text` for human-oriented compact output:
@@ -215,10 +218,16 @@ keel watch run_... --output text --tools
 keel run --output text --tools ./workflow.ts --input '{"n":3}'
 ```
 
-Durable history is message-granular. Live token deltas are not backfilled and
-are not stored in SQLite; a watcher that connects mid-message receives live
-deltas from that point forward and then the full finalized `agent.message` row
-when the turn completes.
+Durable history is transcript-unit-granular, not token-granular. Live token and
+reasoning deltas are not backfilled and are not stored in SQLite; a watcher that
+connects mid-message receives live deltas from that point forward. Complete tool
+calls/results are appended and pushed as durable rows as soon as Keel observes
+them. A non-empty final assistant answer is appended at successful turn
+completion as one `agent.message` row containing the final `AgentResult.text`,
+not an interleaving of earlier text deltas. New transcript rows include
+`attempt`; tool rows include `toolCallId` when the provider supplies a stable id.
+Retries or recovery can produce duplicate-looking durable tool rows, which are
+kept as append-only audit history.
 
 ### Run, Output, And Report Formats
 
@@ -228,7 +237,8 @@ present.
 
 Use `keel run --output ndjson` to render the same attached execution as event
 envelopes while it runs, or `keel run --output text` for the compact transcript.
-Use `--tools` with text output to include agent tool call/result lines.
+Use `--tools` with text output to include agent tool call/result lines; NDJSON
+always includes every delivered frame.
 `--output` and `--tools` change rendering only; they do not change whether `run`
 starts and attaches to the workflow.
 
@@ -782,7 +792,8 @@ interface EphemeralEventEnvelope {
 
 Durable `seq` is monotonically increasing per run. `subscribeEvents(runId,
 afterSeq, ...)` first backfills durable rows with `seq > afterSeq`, then tails
-new durable rows and live ephemeral agent frames pushed by the daemon.
+new durable rows and live ephemeral agent frames pushed by the daemon. Ephemeral
+frames are never replayed for late subscribers.
 
 ## Development And Operations
 

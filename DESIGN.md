@@ -762,14 +762,22 @@ Native structured output for SDK agents; prompt-injected JSON extraction with
 output that fails its schema never enters the journal, so it can never poison a
 downstream hash.
 
-Agent stream delivery splits liveness from durability. Provider deltas are
-pushed from daemon memory to currently connected `subscribeEvents` watchers as
-ephemeral `agent.event` frames and are not persisted. When an agent attempt
-successfully finalizes, the daemon persists consolidated transcript rows:
-`agent.message` for the completed assistant text plus `agent.tool_call` and
-`agent.tool_result` for completed tool activity. `subscribeEvents` therefore
-backfills durable rows once on connect, then tails pushed durable rows and live
-ephemeral frames; it does not poll SQLite as the live stream.
+Agent stream delivery splits liveness from durability. Provider text/reasoning
+and progress deltas are pushed from daemon memory to currently connected
+`subscribeEvents` watchers as ephemeral `agent.event` frames and are not
+persisted or backfilled. Finalized tool calls and tool results are appended
+synchronously as durable `agent.tool_call`/`agent.tool_result` rows as soon as
+Keel observes them, with the host journal `attempt` and an optional provider
+`toolCallId`. If that append fails, the provider hook fails closed and the agent
+operation does not continue with a missing durable audit row. When an agent turn
+successfully completes, the daemon persists at most one non-empty `agent.message`
+row containing the final assistant answer text used for schema extraction; it no
+longer reconstructs interleaved prose from live text deltas. `subscribeEvents`
+registers, backfills durable rows with `seq > afterSeq`, then tails pushed
+durable rows and live ephemeral frames, so late subscribers see durable tool and
+final-message rows but not earlier live deltas. Duplicate-looking tool rows after
+retry or recovery remain append-only audit history; replay correctness comes from
+the completed journal step result, not transcript rows.
 
 ### 10.4 Session capture & mid-call crash recovery
 

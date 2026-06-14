@@ -213,6 +213,118 @@ for await (const chunk of Bun.stdin.stream()) {
     }
   });
 
+  test("maps tool execution ids onto TraceEvent.toolCallId", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-pi-tool-id-"));
+    try {
+      const bin = join(dir, "fake-pi");
+      await Bun.write(
+        bin,
+        `#!${process.execPath}
+const dec = new TextDecoder();
+let buf = "";
+for await (const chunk of Bun.stdin.stream()) {
+  buf += dec.decode(chunk);
+  let nl = buf.indexOf("\\n");
+  while (nl >= 0) {
+    const line = buf.slice(0, nl).trim();
+    buf = buf.slice(nl + 1);
+    if (line) {
+      const msg = JSON.parse(line);
+      if (msg.type === "get_state") {
+        console.log(JSON.stringify({ type: "response", id: msg.id, data: { sessionId: "sess-tool" } }));
+      }
+      if (msg.type === "prompt") {
+        console.log(JSON.stringify({ type: "tool_execution_start", executionId: "exec-1", toolName: "Read", args: { file: "a.ts" } }));
+        console.log(JSON.stringify({ type: "tool_execution_end", executionId: "exec-1", output: "ok" }));
+        console.log(JSON.stringify({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }] }));
+        process.exit(0);
+      }
+    }
+    nl = buf.indexOf("\\n");
+  }
+}
+`,
+      );
+      chmodSync(bin, 0o755);
+
+      const events: unknown[] = [];
+      const provider = new PiProvider({ bin });
+      const result = await provider.generate(
+        { key: "tool-id", provider: "pi", prompt: "hello", toolPolicy: "none" },
+        { onEvent: (event) => events.push(event) },
+      );
+
+      expect(result.text).toBe("done");
+      expect(events).toContainEqual({
+        type: "tool_call",
+        toolCallId: "exec-1",
+        data: {
+          type: "tool_execution_start",
+          executionId: "exec-1",
+          toolName: "Read",
+          args: { file: "a.ts" },
+        },
+      });
+      expect(events).toContainEqual({
+        type: "tool_result",
+        toolCallId: "exec-1",
+        data: { type: "tool_execution_end", executionId: "exec-1", output: "ok" },
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("propagates streamed event hook failures", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-pi-event-hook-"));
+    try {
+      const bin = join(dir, "fake-pi");
+      await Bun.write(
+        bin,
+        `#!${process.execPath}
+const dec = new TextDecoder();
+let buf = "";
+for await (const chunk of Bun.stdin.stream()) {
+  buf += dec.decode(chunk);
+  let nl = buf.indexOf("\\n");
+  while (nl >= 0) {
+    const line = buf.slice(0, nl).trim();
+    buf = buf.slice(nl + 1);
+    if (line) {
+      const msg = JSON.parse(line);
+      if (msg.type === "get_state") {
+        console.log(JSON.stringify({ type: "response", id: msg.id, data: { sessionId: "sess-hook" } }));
+      }
+      if (msg.type === "prompt") {
+        console.log(JSON.stringify({ type: "tool_execution_start", executionId: "exec-hook" }));
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+    }
+    nl = buf.indexOf("\\n");
+  }
+}
+`,
+      );
+      chmodSync(bin, 0o755);
+
+      const provider = new PiProvider({ bin, timeoutMs: 5_000 });
+      const started = Date.now();
+      await expect(
+        provider.generate(
+          { key: "event-hook", provider: "pi", prompt: "hello", toolPolicy: "none" },
+          {
+            onEvent: (event) => {
+              if (event.type === "tool_call") throw new Error("durable append failed");
+            },
+          },
+        ),
+      ).rejects.toThrow(/durable append failed/);
+      expect(Date.now() - started).toBeLessThan(800);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("uses resolved invocation capabilities instead of the derived policy label", async () => {
     const dir = mkdtempSync(join(tmpdir(), "keel-pi-resolved-caps-"));
     try {

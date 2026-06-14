@@ -159,10 +159,12 @@ describe("ClaudeProvider", () => {
       expect(events).toContainEqual({ type: "text", data: "hello " });
       expect(events).toContainEqual({
         type: "tool_call",
+        toolCallId: "toolu_1",
         data: { type: "tool_use", id: "toolu_1", name: "Read", input: { file_path: "a.ts" } },
       });
       expect(events).toContainEqual({
         type: "tool_result",
+        toolCallId: "toolu_1",
         data: { type: "tool_result", tool_use_id: "toolu_1", content: "ok" },
       });
       expect(events).toContainEqual({
@@ -262,6 +264,29 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
         ),
       ).rejects.toThrow(/mismatched token rotated-session/);
       expect(Date.now() - started).toBeLessThan(800);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("propagates streamed event hook failures", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-claude-event-hook-"));
+    try {
+      const bin = join(dir, "fake-claude");
+      const argsPath = join(dir, "args.json");
+      await writeFakeClaude(bin, argsPath);
+
+      const provider = new ClaudeProvider({ bin, timeoutMs: 5_000 });
+      await expect(
+        provider.generate(
+          { key: "claude-event-hook", provider: "claude", prompt: "hook", toolPolicy: "none" },
+          {
+            onEvent: (event) => {
+              if (event.type === "tool_call") throw new Error("durable append failed");
+            },
+          },
+        ),
+      ).rejects.toThrow(/durable append failed/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

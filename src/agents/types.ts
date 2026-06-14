@@ -17,6 +17,8 @@ export interface TraceEvent {
     | "disconnect"
     | "session";
   data?: unknown;
+  /** Provider-stable tool call/use id for finalized tool_call/tool_result events. */
+  toolCallId?: string;
 }
 
 export interface AgentInvocation {

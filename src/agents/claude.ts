@@ -138,7 +138,13 @@ export class ClaudeProvider implements AgentProvider {
       if (mapped.length > 0) {
         for (const ev of mapped) {
           transcript.push(ev);
-          hooks.onEvent?.(ev);
+          try {
+            hooks.onEvent?.(ev);
+          } catch (err) {
+            streamErr = `claude agent "${invocation.key}" event hook failed: ${String(err)}`;
+            proc.kill();
+            return;
+          }
           if (ev.type === "text" && typeof ev.data === "string") {
             lastAssistantText += ev.data;
           }
@@ -293,7 +299,12 @@ function mapAssistantMessage(message: unknown): TraceEvent[] {
       const thinking = stringValue(block.thinking) ?? stringValue(block.text);
       if (thinking) events.push({ type: "reasoning", data: thinking });
     } else if (type === "tool_use") {
-      events.push({ type: "tool_call", data: block });
+      const toolCallId = stringValue(block.id);
+      events.push({
+        type: "tool_call",
+        data: block,
+        ...(toolCallId ? { toolCallId } : {}),
+      });
     }
   }
   return events;
@@ -304,7 +315,12 @@ function mapUserMessage(message: unknown): TraceEvent[] {
   const events: TraceEvent[] = [];
   for (const block of content) {
     if (stringValue(block.type) === "tool_result") {
-      events.push({ type: "tool_result", data: block });
+      const toolCallId = stringValue(block.tool_use_id);
+      events.push({
+        type: "tool_result",
+        data: block,
+        ...(toolCallId ? { toolCallId } : {}),
+      });
     }
   }
   return events;

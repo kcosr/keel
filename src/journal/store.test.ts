@@ -51,6 +51,14 @@ describe("JournalStore (in-memory)", () => {
     expect(store.getRun("r_unnamed")?.workflowName).toBeNull();
   });
 
+  test("listRuns returns newest runs first with run id as a tiebreaker", () => {
+    store.insertRun({ ...newRun("r_a"), createdAtMs: 1000 });
+    store.insertRun({ ...newRun("r_c"), createdAtMs: 2000 });
+    store.insertRun({ ...newRun("r_b"), createdAtMs: 2000 });
+
+    expect(store.listRuns().map((run) => run.runId)).toEqual(["r_c", "r_b", "r_a"]);
+  });
+
   test("updateRun patches only named columns", () => {
     store.insertRun(newRun("r1"));
     store.updateRun("r1", { status: "finished", finishedAtMs: 2000 });

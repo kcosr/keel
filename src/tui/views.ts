@@ -18,7 +18,7 @@ export function renderTuiLines(state: TuiState, dims: TuiDimensions): string[] {
   const bodyHeight = height - 2;
   const body =
     state.view === "browser"
-      ? renderBrowserBody(state, dims.width)
+      ? renderBrowserBody(state, dims.width, bodyHeight)
       : renderDetailBody(state, dims.width);
   const status = renderStatusLine(state, dims.width);
   const help = state.view === "browser" ? browserHelp() : detailHelp(state);
@@ -28,7 +28,7 @@ export function renderTuiLines(state: TuiState, dims: TuiDimensions): string[] {
   ]);
 }
 
-function renderBrowserBody(state: TuiState, width: number): string[] {
+function renderBrowserBody(state: TuiState, width: number, bodyHeight: number): string[] {
   const browser = state.browser;
   const suffix = [
     browser.statusFilter ? `status=${browser.statusFilter}` : null,
@@ -44,13 +44,21 @@ function renderBrowserBody(state: TuiState, width: number): string[] {
     lines.push("  no runs");
     return lines;
   }
-  const maxRows = Math.max(1, 200);
-  const rows = browser.filteredRuns.slice(0, maxRows);
+  const maxRows = Math.max(0, bodyHeight - lines.length);
+  const firstRow = visibleBrowserStart(browser.selectedIndex, browser.filteredRuns.length, maxRows);
+  const rows = browser.filteredRuns.slice(firstRow, firstRow + maxRows);
   for (let index = 0; index < rows.length; index += 1) {
     const run = rows[index] as RunSummary;
-    lines.push(formatBrowserRow(run, index === browser.selectedIndex, state.nowMs, width));
+    lines.push(
+      formatBrowserRow(run, firstRow + index === browser.selectedIndex, state.nowMs, width),
+    );
   }
   return lines;
+}
+
+function visibleBrowserStart(selectedIndex: number, rowCount: number, maxRows: number): number {
+  if (maxRows <= 0 || rowCount <= maxRows) return 0;
+  return Math.min(Math.max(0, selectedIndex - maxRows + 1), rowCount - maxRows);
 }
 
 function renderDetailBody(state: TuiState, width: number): string[] {

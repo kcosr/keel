@@ -53,6 +53,31 @@ describe("tui views", () => {
     ]);
   });
 
+  test("keeps selected browser row visible after scrolling past the first page", () => {
+    const runs = Array.from(
+      { length: 8 },
+      (_, index): RunSummary => ({
+        ...run,
+        runId: `run_${index}`,
+        workflowName: `workflow_${index}`,
+        createdAtMs: Date.UTC(2026, 5, 14, 1, index, 0, 0),
+      }),
+    );
+    let state = setBrowserRuns(createTuiState({ nowMs: Date.UTC(2026, 5, 14, 2, 0, 0, 0) }), runs);
+    state = {
+      ...state,
+      browser: {
+        ...state.browser,
+        selectedIndex: 6,
+      },
+    };
+
+    const lines = renderTuiLines(state, { width: 100, height: 8 });
+
+    expect(lines.some((line) => line.startsWith("> run_6"))).toBe(true);
+    expect(lines.some((line) => line.includes("run_0"))).toBe(false);
+  });
+
   test("ansi frame clears stale rows below a shrunken render", () => {
     const state = setBrowserRuns(createTuiState(), [run]);
     const frame = renderAnsiFrame(state, { width: 80, height: 6 });

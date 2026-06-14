@@ -390,6 +390,7 @@ function parseManifest(row: WorkflowDefinitionRow): WorkflowDefinitionManifest {
   if (typeof parsed.runtime?.workflowSdkAbi !== "number") {
     throw new Error(`workflow definition ${row.hash} is missing runtime.workflowSdkAbi`);
   }
+  validatePersistedImportBoundary(row, parsed);
   return parsed;
 }
 
@@ -414,6 +415,45 @@ export function workflowDefinitionHashForManifest(
 function validateWorkflowSdkAbi(hash: string, manifest: WorkflowDefinitionManifest): void {
   if (manifest.runtime.workflowSdkAbi !== CURRENT_WORKFLOW_SDK_ABI_VERSION) {
     throw new UnsupportedWorkflowSdkAbiError(hash, manifest.runtime.workflowSdkAbi);
+  }
+}
+
+function validatePersistedImportBoundary(
+  row: WorkflowDefinitionRow,
+  manifest: WorkflowDefinitionManifest,
+): void {
+  if (!Array.isArray(manifest.modules)) {
+    throw new Error(`workflow definition ${row.hash} manifest modules must be an array`);
+  }
+  if (!Array.isArray(manifest.externalImports)) {
+    throw new Error(`workflow definition ${row.hash} manifest externalImports must be an array`);
+  }
+  if (!Array.isArray(manifest.externalPackages)) {
+    throw new Error(`workflow definition ${row.hash} manifest externalPackages must be an array`);
+  }
+  const modules =
+    manifest.modules.length > 0 ? manifest.modules : [{ path: "entry.ts", code: row.code }];
+  for (const module of modules) {
+    if (typeof module.path !== "string" || typeof module.code !== "string") {
+      throw new Error(`workflow definition ${row.hash} manifest module entries are invalid`);
+    }
+  }
+  const actualImports = collectExternalImports(modules).sort();
+  for (const spec of actualImports) {
+    if (spec !== "@kcosr/keel") {
+      throw new Error(`workflow import "${spec}" is not allowed; only @kcosr/keel is supported`);
+    }
+  }
+  const declaredImports = [...manifest.externalImports].sort();
+  if (canonicalJson(declaredImports) !== canonicalJson(actualImports)) {
+    throw new Error(`workflow definition ${row.hash} manifest externalImports do not match source`);
+  }
+  for (const pinned of manifest.externalPackages) {
+    if (pinned.name !== "@kcosr/keel") {
+      throw new Error(
+        `workflow definition ${row.hash} includes unsupported external package "${pinned.name}"`,
+      );
+    }
   }
 }
 

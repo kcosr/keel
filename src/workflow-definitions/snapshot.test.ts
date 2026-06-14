@@ -139,6 +139,36 @@ describe("workflow definition snapshots", () => {
     }
   });
 
+  test("persisted definitions with non-SDK imports or SDK subpaths fail closed", () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-snapshot-persisted-imports-"));
+    const store = JournalStore.memory();
+    try {
+      const cacheRoot = join(dir, "definitions");
+      putPersistedDefinition(
+        store,
+        "wf_sha256_persisted_subpath",
+        'import { runExecuteScript } from "@kcosr/keel/execute"; export default async () => runExecuteScript;\n',
+        ["@kcosr/keel/execute"],
+      );
+      expect(() =>
+        materializeWorkflowDefinition(store, "wf_sha256_persisted_subpath", cacheRoot),
+      ).toThrow(/@kcosr\/keel\/execute" is not allowed/);
+
+      putPersistedDefinition(
+        store,
+        "wf_sha256_persisted_package",
+        'import x from "left-pad"; export default async () => x;\n',
+        ["left-pad"],
+      );
+      expect(() =>
+        materializeWorkflowDefinition(store, "wf_sha256_persisted_package", cacheRoot),
+      ).toThrow(/left-pad" is not allowed/);
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("materialization recovers from a partial cache directory", () => {
     const dir = mkdtempSync(join(tmpdir(), "keel-snapshot-partial-"));
     const store = JournalStore.memory();
@@ -301,3 +331,32 @@ describe("workflow definition snapshots", () => {
     }
   });
 });
+
+function putPersistedDefinition(
+  store: JournalStore,
+  hash: string,
+  source: string,
+  externalImports: string[],
+): void {
+  store.putWorkflowDefinition({
+    hash,
+    name: "persisted",
+    kind: "source",
+    code: source,
+    sourceMap: null,
+    manifestJson: JSON.stringify({
+      format: "keel.workflow-definition.v1",
+      entry: "entry.ts",
+      modules: [{ path: "entry.ts", code: source }],
+      externalImports,
+      externalPackages: [],
+      sourceRoot: "client-captured://source",
+      runtime: {
+        bunVersion: Bun.version,
+        keelDefinitionAbi: 1,
+        workflowSdkAbi: 1,
+      },
+    }),
+    createdAtMs: 1,
+  });
+}

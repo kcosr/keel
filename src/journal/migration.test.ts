@@ -385,6 +385,47 @@ describe("schema migrations", () => {
     }
   });
 
+  test("v11 workflow migration rejects persisted SDK subpaths and arbitrary package imports", () => {
+    const cases = [
+      {
+        hash: "wf_sha256_bad_subpath",
+        source:
+          'import { runExecuteScript } from "@kcosr/keel/execute"; export default async () => runExecuteScript;\n',
+        externalImports: ["@kcosr/keel/execute"],
+        externalPackages: [{ name: "@kcosr/keel", root: "/old/keel", integrity: "sha256-old" }],
+        message: /@kcosr\/keel\/execute" is not allowed/,
+      },
+      {
+        hash: "wf_sha256_bad_package",
+        source: 'import leftPad from "left-pad"; export default async () => leftPad;\n',
+        externalImports: ["left-pad"],
+        externalPackages: [
+          { name: "left-pad", root: "/old/node_modules/left-pad", integrity: "sha256-old" },
+        ],
+        message: /left-pad" is not allowed/,
+      },
+    ];
+
+    for (const c of cases) {
+      const dir = mkdtempSync(join(tmpdir(), "keel-mig-v11-invalid-import-"));
+      try {
+        const path = join(dir, "old.db");
+        makeV11Db(path);
+        const db = new Database(path);
+        insertOldWorkflowDefinition(db, c.hash, {
+          ...oldWorkflowManifest(c.source),
+          externalImports: c.externalImports,
+          externalPackages: c.externalPackages,
+        });
+        db.close();
+
+        expect(() => JournalStore.open(path)).toThrow(c.message);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  });
+
   test("v11 workflow migration collapses duplicate definitions that differ only by SDK pin", () => {
     const dir = mkdtempSync(join(tmpdir(), "keel-mig-v11-duplicates-"));
     try {

@@ -13,10 +13,12 @@
 // → v12 workflow SDK ABI manifests and schedule failure state.
 
 import type { Database } from "bun:sqlite";
+import { parse } from "acorn";
 import { canonicalJson, sha256Hex } from "../hash.ts";
 
 const DEFINITION_PREFIX = "wf_sha256_";
 const WORKFLOW_SDK_ABI_V12 = 1;
+const tsTranspiler = new Bun.Transpiler({ loader: "tsx" });
 
 /** True if `table` already has `column` (so we don't re-add it). */
 function hasColumn(db: Database, table: string, column: string): boolean {
@@ -162,6 +164,7 @@ function migrateWorkflowDefinitionManifestsToV12(db: Database): void {
     const manifest = JSON.parse(row.manifest_json) as WorkflowDefinitionManifestV11;
     if (manifest.format !== "keel.workflow-definition.v1") continue;
     if (typeof manifest.runtime?.workflowSdkAbi === "number") continue;
+    validateWorkflowDefinitionManifestForV12Migration(row.hash, row.code, manifest);
 
     const canonicalManifest = canonicalWorkflowDefinitionManifestV12(manifest);
     const canonicalManifestJson = canonicalJson(canonicalManifest);
@@ -265,4 +268,141 @@ export function workflowDefinitionHashForV12Migration(manifest: Record<string, u
       runtime: manifest.runtime,
     }),
   )}`;
+}
+
+function validateWorkflowDefinitionManifestForV12Migration(
+  hash: string,
+  code: string,
+  manifest: WorkflowDefinitionManifestV11,
+): void {
+  if (!Array.isArray(manifest.modules)) {
+    throw new Error(`workflow definition ${hash} manifest modules must be an array`);
+  }
+  if (!Array.isArray(manifest.externalImports)) {
+    throw new Error(`workflow definition ${hash} manifest externalImports must be an array`);
+  }
+  if (!Array.isArray(manifest.externalPackages)) {
+    throw new Error(`workflow definition ${hash} manifest externalPackages must be an array`);
+  }
+  const modules = manifest.modules.length > 0 ? manifest.modules : [{ path: "entry.ts", code }];
+  for (const module of modules) {
+    if (!isCapturedModuleV11(module)) {
+      throw new Error(`workflow definition ${hash} manifest module entries are invalid`);
+    }
+  }
+  const actualImports = collectExternalImportsForV12Migration(modules).sort();
+  for (const spec of actualImports) {
+    if (spec !== "@kcosr/keel") {
+      throw new Error(`workflow import "${spec}" is not allowed; only @kcosr/keel is supported`);
+    }
+  }
+  const declaredImports = [...manifest.externalImports].sort();
+  if (canonicalJson(declaredImports) !== canonicalJson(actualImports)) {
+    throw new Error(`workflow definition ${hash} manifest externalImports do not match source`);
+  }
+  for (const pinned of manifest.externalPackages) {
+    if (!isCapturedExternalPackageV11(pinned)) {
+      throw new Error(`workflow definition ${hash} manifest external package entries are invalid`);
+    }
+    if (pinned.name !== "@kcosr/keel") {
+      throw new Error(
+        `workflow definition ${hash} includes unsupported external package "${pinned.name}"`,
+      );
+    }
+  }
+}
+
+function isCapturedModuleV11(value: unknown): value is { path: string; code: string } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as { path?: unknown }).path === "string" &&
+    typeof (value as { code?: unknown }).code === "string"
+  );
+}
+
+function isCapturedExternalPackageV11(value: unknown): value is { name: string } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as { name?: unknown }).name === "string"
+  );
+}
+
+function collectExternalImportsForV12Migration(
+  modules: Array<{ path: string; code: string }>,
+): string[] {
+  const imports = new Set<string>();
+  for (const module of modules) {
+    for (const spec of staticImportsForV12Migration(module.code, module.path)) {
+      if (!spec.startsWith(".") && !spec.startsWith("/")) imports.add(spec);
+    }
+  }
+  return [...imports];
+}
+
+function staticImportsForV12Migration(source: string, filename: string): string[] {
+  let ast: { type: string } & Record<string, unknown>;
+  try {
+    ast = parse(tsTranspiler.transformSync(source), {
+      ecmaVersion: "latest",
+      sourceType: "module",
+    }) as unknown as { type: string } & Record<string, unknown>;
+  } catch (err) {
+    throw new Error(
+      `could not parse workflow imports in ${filename}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  const imports: string[] = [];
+  walkMigrationAst(ast, (node) => {
+    if (node.type === "ImportExpression") {
+      throw new Error(`dynamic import(...) is not allowed in workflow code: ${filename}`);
+    }
+    if (
+      node.type === "ImportDeclaration" ||
+      node.type === "ExportNamedDeclaration" ||
+      node.type === "ExportAllDeclaration"
+    ) {
+      const src = (node.source as ({ value?: unknown } & Record<string, unknown>) | undefined)
+        ?.value;
+      if (typeof src === "string") imports.push(src);
+    }
+  });
+  return imports;
+}
+
+function walkMigrationAst(
+  root: { type: string } & Record<string, unknown>,
+  fn: (node: { type: string } & Record<string, unknown>) => void,
+): void {
+  const visit = (node: { type: string } & Record<string, unknown>): void => {
+    fn(node);
+    for (const child of childMigrationNodes(node)) visit(child);
+  };
+  visit(root);
+}
+
+function childMigrationNodes(
+  node: { type: string } & Record<string, unknown>,
+): Array<{ type: string } & Record<string, unknown>> {
+  const out: Array<{ type: string } & Record<string, unknown>> = [];
+  for (const key of Object.keys(node)) {
+    if (key === "loc" || key === "start" || key === "end" || key === "type") continue;
+    const value = node[key];
+    if (Array.isArray(value)) {
+      for (const v of value) if (isMigrationAstNode(v)) out.push(v);
+    } else if (isMigrationAstNode(value)) {
+      out.push(value);
+    }
+  }
+  return out;
+}
+
+function isMigrationAstNode(value: unknown): value is { type: string } & Record<string, unknown> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as { type?: unknown }).type === "string"
+  );
 }

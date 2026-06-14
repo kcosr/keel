@@ -25,6 +25,9 @@ const onceUrl = captureWorkflowFile(
 const napUrl = captureWorkflowFile(
   new URL("../kernel/realm/fixtures/nap.workflow.ts", import.meta.url).pathname,
 );
+const signalUrl = captureWorkflowFile(
+  new URL("../kernel/realm/fixtures/await-signal.workflow.ts", import.meta.url).pathname,
+);
 const ADMIN_TOKEN = "kc_admin_test";
 
 let dir: string;
@@ -484,6 +487,43 @@ describe("HITL over the socket", () => {
       await expect(
         c.decideApproval(runId, "approve-deploy", { status: "approved" }),
       ).rejects.toThrow(/requires workflow SDK ABI 2, but this daemon supports ABI 1/);
+      const failed = await c.getRun(runId);
+      expect(failed?.status).toBe("failed");
+      expect(failed?.error?.message).toContain(
+        "requires workflow SDK ABI 2, but this daemon supports ABI 1",
+      );
+      c.close();
+    } finally {
+      daemon.stop();
+    }
+  });
+
+  test("unsupported workflow SDK ABI on signal wake fails the run and surfaces the error", async () => {
+    const socketPath = join(dir, "signal-abi.sock");
+    const dbPath = join(dir, "signal-abi.db");
+    const daemon = new KeelDaemon({
+      socketPath,
+      dbPath,
+      agents: new AgentProviderRegistry().register(new MockProvider()),
+      superviseMs: 100_000,
+      adminToken: ADMIN_TOKEN,
+    });
+    await daemon.start();
+    try {
+      const c = await DaemonClient.connect(socketPath);
+      const { runId, capability } = await c.launchRun({
+        ...signalUrl,
+        input: null,
+        name: "signal",
+      });
+      await c.authenticate(capability as string);
+      await c.waitForRun(runId);
+      expect((await c.getRun(runId))?.status).toBe("waiting-signal");
+      requireUnsupportedSdkAbiForRun(dbPath, runId);
+
+      await expect(c.sendSignal(runId, "proceed", { go: true, by: "test" })).rejects.toThrow(
+        /requires workflow SDK ABI 2, but this daemon supports ABI 1/,
+      );
       const failed = await c.getRun(runId);
       expect(failed?.status).toBe("failed");
       expect(failed?.error?.message).toContain(

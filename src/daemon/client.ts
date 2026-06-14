@@ -13,6 +13,7 @@ import type {
   WorkspaceGcResult,
 } from "../rpc/contract.ts";
 import type { RunProjection, RunReport, RunSummary } from "../rpc/projection.ts";
+import { clientRunTargetOrCwd } from "../target.ts";
 
 /** Async-shaped client over the socket (the in-process KeelApi is sync; the wire
  * is async). Same method names, Promise-returning. */
@@ -109,7 +110,10 @@ export class DaemonClient {
   }
 
   launchRun(req: LaunchRequest): Promise<RunLaunchResult> {
-    return this.rpc("launchRun", { ...req, target: req.target ?? process.cwd() });
+    return this.rpc("launchRun", {
+      ...req,
+      target: clientRunTargetOrCwd(req.target, "launchRun"),
+    });
   }
   resumeRun(runId: string): Promise<RunStart> {
     return this.rpc("resumeRun", { runId });
@@ -168,7 +172,10 @@ export class DaemonClient {
     intervalMs: number;
     firstFireMs?: number;
   }): Promise<{ ok: boolean }> {
-    return this.rpc("putSchedule", { ...req, target: req.target ?? process.cwd() });
+    return this.rpc("putSchedule", {
+      ...req,
+      target: clientRunTargetOrCwd(req.target, "putSchedule"),
+    });
   }
   listRunWorkspaces(runId: string): Promise<RunWorkspaceView[]> {
     return this.rpc("listRunWorkspaces", { runId });

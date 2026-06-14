@@ -45,7 +45,11 @@
 ### Changed
 - `keel list` and the TUI run browser now show newest runs first by default, and
   the browser keeps the selected row visible while moving through long lists.
-- Agent provider `cwd` is now the resolved run/agent target for non-isolated agents; isolated agents require the target to be a git repository root and no longer use daemon cwd or `KEEL_WORKSPACE_ROOT` fallback.
+- Agent provider `cwd` is now the resolved run/agent target for non-isolated
+  agents; isolated agents require the target to be a git repository root and no
+  longer use daemon cwd or `KEEL_WORKSPACE_ROOT` fallback. Raw daemon/RPC launch
+  and schedule calls now reject missing or blank targets, while CLI/client
+  wrappers still capture their own cwd as the default target.
 - Workflow SDK ABI bumped to 2 because agent target resolution participates in agent/session identity.
 - Workspace startup/GC reconciliation now clears stale `creating` rows, reconciles terminal `active`/`creating` rows, and makes workspace GC idempotent.
 - Agent secrets are now trusted-local env injection only: secrets no longer

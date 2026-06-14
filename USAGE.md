@@ -378,9 +378,9 @@ Workflow input is always passed with `--input <json>`. The positional slot is
 only source, never input. `--name` is an optional display label; if omitted for
 stdin launches, the run is unnamed (`null` in JSON, `(unnamed)` in text output).
 Names are not handles and may repeat. Use run ids for follow-up commands.
-`--target <dir>` overrides the default run target (the CLI cwd); the selected
-target is stored with the run and inherited by agents unless a profile/spec sets
-a target.
+`--target <dir>` overrides the default run target (the CLI cwd); the value must
+be non-empty. The selected target is stored with the run and inherited by agents
+unless a profile/spec sets a target.
 
 On launch, the daemon stores an immutable workflow definition snapshot by content
 hash and runs from a daemon-owned materialized cache. Resume, retry, rewind,
@@ -399,10 +399,12 @@ required-versus-supported ABI error.
 
 ### Targets And Retained Workspaces
 
-Every new run records a default `target`: for `keel launch` and `keel run` this
-is the CLI cwd, or `--target <dir>` when supplied. Non-isolated agents execute
-with provider `cwd = target`; Keel does not fall back to the daemon cwd. Agent
-specs/profiles may set their own absolute `target`.
+Every CLI/client-created run records a default `target`: for `keel launch` and
+`keel run` this is the client cwd, or `--target <dir>` when supplied. Raw
+low-level API callers must send a non-empty target; the daemon rejects missing or
+blank targets rather than substituting its own cwd. Non-isolated agents execute
+with provider `cwd = target`. Agent specs/profiles may set their own absolute
+`target`.
 
 `workspaceIsolation: true` requires the resolved target to be the git repository
 root. If a subdirectory is supplied, the run fails and names the detected repo
@@ -828,8 +830,9 @@ that durable input.
 
 Schedules pin the workflow definition hash and default target captured when the
 schedule is created. CLI schedule creation defaults the target to the creation
-cwd and supports `--target <dir>`. Schedules do not reread a path or
-automatically adopt later source edits. Existing
+cwd and supports a non-empty `--target <dir>`. Raw schedule API calls must also
+provide a non-empty target. Schedules do not reread a path or automatically
+adopt later source edits. Existing
 path-based schedules from older databases are disabled by migration and should
 be recreated from current source. If a pinned definition requires an unsupported
 workflow SDK ABI, the daemon disables that schedule and persists the ABI error
@@ -846,15 +849,16 @@ Unix socket; tests and embedded callers may use it in-process.
 interface LaunchRequest {
   source: string;
   input: unknown;
-  target?: string; // required by raw API callers; CLI/client wrappers supply cwd by default
+  target?: string; // non-empty; raw API callers must supply it; CLI/client wrappers use cwd
   name?: string | null;
   provenance?: { kind: "stdin" } | { kind: "clientPath"; path: string };
 }
 ```
 
 `source` is workflow TypeScript captured by the client. `target` is the default
-daemon-resolvable run target inherited by agents. `provenance` is display-only;
-the daemon never opens or parses it for execution.
+daemon-resolvable run target inherited by agents; daemon/server boundaries reject
+missing or blank target strings instead of falling back to daemon cwd.
+`provenance` is display-only; the daemon never opens or parses it for execution.
 
 ### KeelApi
 

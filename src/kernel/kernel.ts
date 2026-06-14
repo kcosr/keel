@@ -8,6 +8,7 @@
 import { randomUUID } from "node:crypto";
 import type { JournalStore } from "../journal/store.ts";
 import type { RunStatus } from "../journal/types.ts";
+import { optionalRunTarget } from "../target.ts";
 import { type Ctx, type CtxHost, type FaultPoint, WorkflowCtx } from "./ctx.ts";
 
 export type Workflow<I, O> = (ctx: Ctx, input: I) => Promise<O>;
@@ -15,6 +16,7 @@ export type Workflow<I, O> = (ctx: Ctx, input: I) => Promise<O>;
 export interface RunMeta {
   name: string;
   definitionVersion?: string;
+  target?: string | null;
 }
 
 export interface RunHandle<O> {
@@ -69,11 +71,13 @@ export class Kernel {
 
   /** Start a fresh run. */
   async run<I, O>(workflow: Workflow<I, O>, input: I, meta: RunMeta): Promise<RunHandle<O>> {
+    const runTarget = optionalRunTarget(meta.target, "Kernel.run");
     const runId = this.idgen();
     this.store.insertRun({
       runId,
       workflowName: meta.name,
       definitionVersion: meta.definitionVersion ?? "v0",
+      runTarget,
       status: "running",
       parentRunId: null,
       tenantId: null,
@@ -109,7 +113,8 @@ export class Kernel {
     workflow: Workflow<I, O>,
     input: I,
   ): Promise<RunHandle<O>> {
-    const ctx = new WorkflowCtx(this.store, runId, this.host);
+    const runTarget = this.store.getRun(runId)?.runTarget ?? null;
+    const ctx = new WorkflowCtx(this.store, runId, this.host, undefined, undefined, runTarget);
     try {
       const output = await workflow(ctx, input);
       this.store.updateRun(runId, {

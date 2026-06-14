@@ -81,7 +81,10 @@ describe("trusted-local agent isolation controls", () => {
       idgen: () => "r",
       agents: new AgentProviderRegistry().register(provider),
     });
-    const handle = await kernel.run<string>(readPlusBashUrl, null, { name: "w" });
+    const handle = await kernel.run<string>(readPlusBashUrl, null, {
+      name: "w",
+      target: process.cwd(),
+    });
     expect(handle.status).toBe("finished");
     expect(handle.output).toBe("inspected");
     expect(called).toBe(true);
@@ -104,7 +107,10 @@ describe("trusted-local agent isolation controls", () => {
       agents: new AgentProviderRegistry().register(provider),
       secrets,
     });
-    const handle = await kernel.run<string>(writeSecretLooseUrl, null, { name: "ws" });
+    const handle = await kernel.run<string>(writeSecretLooseUrl, null, {
+      name: "ws",
+      target: process.cwd(),
+    });
     expect(handle.status).toBe("finished");
     expect(handle.output).toBe("saw file-secret-abc");
     expect(invocation?.cwd).toBe(process.cwd());
@@ -129,7 +135,10 @@ describe("trusted-local agent isolation controls", () => {
       agents: new AgentProviderRegistry().register(provider),
       secrets,
     });
-    const handle = await kernel.run<string>(readPlusBashSecretUrl, null, { name: "ws" });
+    const handle = await kernel.run<string>(readPlusBashSecretUrl, null, {
+      name: "ws",
+      target: process.cwd(),
+    });
     expect(handle.status).toBe("finished");
     expect(handle.output).toBe("tool saw tool-secret-abc");
     expect(invocation?.allowTools).toContain("bash");
@@ -234,7 +243,10 @@ describe("secret lifecycle", () => {
       secrets,
       liveEvent: (_runId, type, payload) => liveFrames.push({ type, payload }),
     });
-    const handle = await kernel.run<string>(streamUrl, null, { name: "s" });
+    const handle = await kernel.run<string>(streamUrl, null, {
+      name: "s",
+      target: process.cwd(),
+    });
     expect(handle.status).toBe("finished");
 
     expect(JSON.stringify(liveFrames)).toContain("leaky-secret-xyz");
@@ -266,7 +278,10 @@ describe("secret lifecycle", () => {
       agents: new AgentProviderRegistry().register(streamer),
       secrets,
     });
-    const handle = await kernel.run<string>(streamUrl, null, { name: "s" });
+    const handle = await kernel.run<string>(streamUrl, null, {
+      name: "s",
+      target: process.cwd(),
+    });
     expect(handle.status).toBe("finished");
 
     const agentEvents = store.listEvents("r").filter((event) => event.type.startsWith("agent."));

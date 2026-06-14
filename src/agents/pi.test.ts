@@ -54,7 +54,10 @@ describe("session-resume four-branch table (through the realm)", () => {
   test("branch 1: a completed agent replays — no provider call on resume", async () => {
     const store = JournalStore.memory();
     const vendor = new FakeVendor();
-    const r1 = await kernel(store, vendor).run<{ value: number }>(onceUrl, null, { name: "t" });
+    const r1 = await kernel(store, vendor).run<{ value: number }>(onceUrl, null, {
+      name: "t",
+      target: process.cwd(),
+    });
     expect(r1.output).toEqual({ value: 1 });
     expect(vendor.calls).toHaveLength(1);
 
@@ -72,7 +75,7 @@ describe("session-resume four-branch table (through the realm)", () => {
         if (p === "before-commit" && key === "ask") throw new Error("CRASH after token");
       },
     });
-    await k1.run(onceUrl, null, { name: "t" }).catch(() => null);
+    await k1.run(onceUrl, null, { name: "t", target: process.cwd() }).catch(() => null);
     expect(store.getJournalRow("r", "ask", 1)?.status).toBe("pending");
     expect(store.getJournalRow("r", "ask", 1)?.sessionToken).toBe("sess-abc");
 
@@ -91,7 +94,7 @@ describe("session-resume four-branch table (through the realm)", () => {
         if (p === "after-pending" && key === "ask") throw new Error("CRASH before token");
       },
     });
-    await k1.run(onceUrl, null, { name: "t" }).catch(() => null);
+    await k1.run(onceUrl, null, { name: "t", target: process.cwd() }).catch(() => null);
     expect(store.getJournalRow("r", "ask", 1)?.sessionToken).toBeNull();
 
     await kernel(store, vendor).resume("r");
@@ -106,7 +109,7 @@ describe("session-resume four-branch table (through the realm)", () => {
         if (p === "before-commit" && key === "ask") throw new Error("CRASH");
       },
     });
-    await k1.run(onceUrl, null, { name: "t" }).catch(() => null);
+    await k1.run(onceUrl, null, { name: "t", target: process.cwd() }).catch(() => null);
     await kernel(store, vendor).resume("r");
     // the kernel forwards the carried token; Pi maps a missing --session to fresh
     expect(vendor.calls.at(-1)?.resumeToken).toBe("sess-stale");

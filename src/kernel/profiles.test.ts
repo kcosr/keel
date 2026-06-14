@@ -60,7 +60,10 @@ describe("profiles through the realm", () => {
       agents: new AgentProviderRegistry().register(recordingProvider("reviewerProvider", seen)),
       agentProfiles: { reviewer: { provider: "reviewerProvider", model: "opus" } },
     });
-    const handle = await kernel.run<string>(profiledUrl, null, { name: "p" });
+    const handle = await kernel.run<string>(profiledUrl, null, {
+      name: "p",
+      target: process.cwd(),
+    });
     expect(handle.status).toBe("finished");
     expect(seen).toEqual(["reviewerProvider"]); // provider came from the profile
   });
@@ -75,7 +78,7 @@ describe("profiles through the realm", () => {
         agents: new AgentProviderRegistry().register(recordingProvider("p", seen)),
         agentProfiles: { reviewer: { provider: "p", model } },
       })
-        .run(profiledUrl, null, { name: "p" })
+        .run(profiledUrl, null, { name: "p", target: process.cwd() })
         .then(() => store.getJournalRow("r", "review", 1)?.version ?? "");
     };
     const [vA, vB] = await Promise.all([v("opus"), v("haiku")]);

@@ -197,6 +197,7 @@ function normalizeLaunch(req: ExecuteLaunchRequest, cwd: string): LaunchRequest 
     return {
       source: readFileSync(path, "utf8"),
       input: {},
+      target: cwd,
       name: workflowName(path),
       provenance: { kind: "clientPath", path },
     };
@@ -206,6 +207,7 @@ function normalizeLaunch(req: ExecuteLaunchRequest, cwd: string): LaunchRequest 
     return {
       source: readFileSync(path, "utf8"),
       input: req.input ?? {},
+      target: cwd,
       name: req.name ?? workflowName(path),
       provenance: { kind: "clientPath", path },
     };
@@ -213,6 +215,7 @@ function normalizeLaunch(req: ExecuteLaunchRequest, cwd: string): LaunchRequest 
   return {
     source: req.workflow.source,
     input: req.input ?? {},
+    target: cwd,
     name: req.name ?? req.workflow.name ?? null,
     provenance: { kind: "stdin" },
   };

@@ -94,7 +94,7 @@ describe("ctx.agent stall-retry through the realm", () => {
     const handle = await kernel(store, wrapped as MockProvider).run<{ value: number }>(
       stallUrl,
       {},
-      { name: "stall" },
+      { name: "stall", target: process.cwd() },
     );
     expect(handle.status).toBe("finished");
     expect(handle.output).toEqual({ value: 7 });
@@ -108,9 +108,9 @@ describe("ctx.agent stall-retry through the realm", () => {
     const mock = new MockProvider({
       responses: { slow: { outputs: ['{"value":1}'], delayMs: 5000 } },
     });
-    await expect(kernel(store, mock).run(stallUrl, {}, { name: "stall" })).rejects.toThrow(
-      /stalled past/,
-    );
+    await expect(
+      kernel(store, mock).run(stallUrl, {}, { name: "stall", target: process.cwd() }),
+    ).rejects.toThrow(/stalled past/);
     expect(store.getRun("r")?.status).toBe("failed");
   }, 20000);
 
@@ -122,7 +122,7 @@ describe("ctx.agent stall-retry through the realm", () => {
     const handle = await kernel(store, mock).run<{ value: number } | null>(
       stallUrl,
       { onFailure: "null" },
-      { name: "stall" },
+      { name: "stall", target: process.cwd() },
     );
     expect(handle.status).toBe("finished");
     expect(handle.output).toBeNull();

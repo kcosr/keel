@@ -23,6 +23,7 @@ import {
 } from "../../agents/defaults.ts";
 import { type AgentProfiles, resolveProfile } from "../../agents/profiles.ts";
 import { type Json, hashJson } from "../../hash.ts";
+import { resolveAgentTarget } from "../../target.ts";
 import type { Schema } from "../schema.ts";
 import { closureOfHelpers, computeVersion } from "../version.ts";
 import {
@@ -341,8 +342,8 @@ function sessionStableKey(agentKey: string, turnKey: string): string {
   return `${SESSION_STABLE_KEY_PREFIX}${agentKey}.${turnKey}`;
 }
 
-function resolvedTarget(specTarget: string | undefined): string | null {
-  return specTarget ?? runTarget;
+function resolvedTarget(specTarget: string | undefined, description: string): string {
+  return resolveAgentTarget(specTarget, runTarget, description);
 }
 
 function tag<T>(result: T, stepKey: string, contentHash: string): T {
@@ -477,7 +478,7 @@ const ctx = Object.freeze({
       ...(spec.denyTools ? { denyTools: spec.denyTools } : {}),
     });
     const caps = tools.capabilities;
-    const target = resolvedTarget(spec.target);
+    const target = resolvedTarget(spec.target, `agent "${spec.key}"`);
     const version =
       spec.version ??
       computeVersion({
@@ -592,7 +593,7 @@ const ctx = Object.freeze({
       ...(sessionSpec.denyTools ? { denyTools: sessionSpec.denyTools } : {}),
     });
     const caps = tools.capabilities;
-    const target = resolvedTarget(sessionSpec.target);
+    const target = resolvedTarget(sessionSpec.target, `agent session "${sessionSpec.key}"`);
     const identity = {
       agentKey: sessionSpec.key,
       provider,

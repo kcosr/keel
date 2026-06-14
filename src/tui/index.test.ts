@@ -217,6 +217,26 @@ describe("runTui orchestration", () => {
     }
   });
 
+  test("buffers split CSI input chunks before reducing prompt keys", async () => {
+    const client = new FakeTuiClient();
+    const io = fakeIo();
+    const done = runTui({ ...io, clientFactory: async () => client, process: new FakeProcess() });
+    try {
+      await waitFor(() => client.listCalls === 1, "initial browser refresh");
+
+      io.stdin.emit("/");
+      await waitFor(() => io.stdout.text().includes("> filter runs:"), "filter prompt");
+
+      io.stdin.emit("\u001b[20");
+      io.stdin.emit("0~a");
+      await waitFor(() => io.stdout.text().includes("> filter runs: a"), "split csi consumed");
+      expect(io.stdout.text()).not.toContain("0~a");
+    } finally {
+      io.stdin.emit("\u0003");
+      await done;
+    }
+  });
+
   test("action success refreshes and reattaches while rejection leaves detail intact", async () => {
     const client = new FakeTuiClient();
     const io = fakeIo();

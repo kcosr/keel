@@ -45,6 +45,9 @@
 ### Changed
 - `keel list` and the TUI run browser now show newest runs first by default, and
   the browser keeps the selected row visible while moving through long lists.
+- The TUI detail view keeps live watch output visible in constrained terminals and
+  ignores unrecognized escape/CSI input sequences without leaking their bytes into
+  prompts or navigation.
 - Agent provider `cwd` is now the resolved run/agent target for non-isolated
   agents; isolated agents require the target to be a git repository root and no
   longer use daemon cwd or `KEEL_WORKSPACE_ROOT` fallback. Raw daemon/RPC launch

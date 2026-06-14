@@ -14,9 +14,10 @@ keel launch --detach workflows/spec-author-review-loop/spec-author-review-loop.w
   --input '{
     "specPath": "/home/kevin/worktrees/keel/.specs/new-feature.md",
     "request": "Design a durable feature and preserve reviewer correspondence",
-    "creatorIdentity": "Creator: pi/default",
+    "creatorIdentity": "Creator: pi/openai-codex/gpt-5.5",
     "reviewerIdentity": "Reviewer: pi/default",
     "creatorProvider": "pi",
+    "creatorModel": "openai-codex/gpt-5.5",
     "creatorReasoning": "xhigh",
     "creatorToolPolicy": "workspace-write",
     "reviewerProvider": "pi",
@@ -42,10 +43,12 @@ No round label is required; the timestamp and identity preserve history.
 
 - Both creator and reviewer are write-capable.
 - Keel does not currently enforce that the reviewer only appends correspondence.
-- Pi/Codex is the default reviewer provider because it can write correspondence
-  in the normal local workflow setup. If you use Claude for this role, configure
-  Claude to permit `Edit`/`Write`; otherwise it may return findings without
-  appending to the file.
+- Pi/Codex is the default writer/reviewer provider because it can write
+  correspondence in the normal local workflow setup. Prefer
+  `creatorModel: "openai-codex/gpt-5.5"` for Pi-authored specs unless a task has
+  a reason to use the provider default. If you use Claude for either role,
+  configure Claude to permit `Edit`/`Write`; otherwise it may return findings
+  without appending to the file.
 - `ctx.agentSession` does not support `workspaceIsolation: true` yet, so this
   workflow edits the target spec directly.
 - Keep `maxRounds` small. The workflow caps it at `10`.

@@ -23,6 +23,7 @@ keel launch --detach workflows/implement-review-loop/implement-review-loop.workf
     "task": "Implement the feature described by the spec",
     "maxRounds": 3,
     "implementerProvider": "pi",
+    "implementerModel": "openai-codex/gpt-5.5",
     "implementerReasoning": "xhigh",
     "implementerToolPolicy": "workspace-write",
     "reviewerProvider": "claude",
@@ -36,6 +37,8 @@ keel launch --detach workflows/implement-review-loop/implement-review-loop.workf
 ## Safety Notes
 
 - The implementer is write-capable and edits the target repository directly.
+- Prefer `implementerModel: "openai-codex/gpt-5.5"` for Pi implementers unless
+  a task has a reason to use the provider default.
 - If `verificationCommand` is set, the implementer receives shell capability
   with workspace write access so it can run that command. Otherwise it uses
   `implementerToolPolicy`, defaulting to `workspace-write` without shell.

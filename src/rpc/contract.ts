@@ -71,6 +71,26 @@ export interface SavedWorkflowSourceView {
   files: Array<{ path: string; code: string; entry: boolean }>;
 }
 
+export type WorkflowDefinitionSourceLookup =
+  | { kind: "run"; runId: string }
+  | { kind: "definition"; definitionHash: string };
+
+export interface GetWorkflowDefinitionSourceRequest {
+  lookup: WorkflowDefinitionSourceLookup;
+  file?: string;
+  all?: boolean;
+}
+
+export interface WorkflowDefinitionSourceView {
+  kind: "workflow-definition-source";
+  lookup: WorkflowDefinitionSourceLookup;
+  definitionHash: string;
+  definitionName: string | null;
+  createdAtMs: number;
+  entry: string;
+  files: Array<{ path: string; code: string; entry: boolean }>;
+}
+
 export type PutScheduleBaseRequest = {
   name: string;
   input?: unknown;
@@ -266,6 +286,9 @@ export interface KeelApi {
     all?: boolean;
     allowDeprecated?: boolean;
   }): Promise<SavedWorkflowSourceView> | SavedWorkflowSourceView;
+  getWorkflowDefinitionSource(
+    req: GetWorkflowDefinitionSourceRequest,
+  ): Promise<WorkflowDefinitionSourceView> | WorkflowDefinitionSourceView;
   launchSavedWorkflow(req: LaunchSavedWorkflowRequest): Promise<RunLaunchResult>;
   setSavedWorkflowDisabled(
     name: string,

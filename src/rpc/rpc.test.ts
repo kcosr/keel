@@ -21,6 +21,10 @@ import { RUN_FINISHED_INLINE_OUTPUT_BYTES } from "../kernel/output.ts";
 import { RealmKernel } from "../kernel/realm/realm-host.ts";
 import { captureWorkflowFile } from "../workflow-definitions/capture.ts";
 import {
+  WORKFLOW_SDK_ABI_VERSION,
+  materializeWorkflowDefinition,
+} from "../workflow-definitions/snapshot.ts";
+import {
   classifyCloneSource,
   createRetainedCopy,
   createRetainedWorktree,
@@ -67,6 +71,35 @@ function keel(store: JournalStore, mock?: MockProvider): InProcessKeel {
     ...(mock ? { agents: new AgentProviderRegistry().register(mock) } : {}),
   });
   return new TestInProcessKeel(kernel, store);
+}
+
+function putDisplayableWorkflowDefinition(
+  store: JournalStore,
+  hash: string,
+  source: string,
+  createdAtMs: number,
+): void {
+  store.putWorkflowDefinition({
+    hash,
+    name: "displayable",
+    kind: "source",
+    code: source,
+    sourceMap: null,
+    manifestJson: JSON.stringify({
+      format: "keel.workflow-definition.v1",
+      entry: "entry.ts",
+      modules: [{ path: "entry.ts", code: source }],
+      externalImports: [],
+      externalPackages: [],
+      sourceRoot: "client-captured://source",
+      runtime: {
+        bunVersion: Bun.version,
+        keelDefinitionAbi: 1,
+        workflowSdkAbi: WORKFLOW_SDK_ABI_VERSION,
+      },
+    }),
+    createdAtMs,
+  });
 }
 
 function streamingKeel(store: JournalStore, provider: AgentProvider): InProcessKeel {
@@ -248,6 +281,38 @@ describe("saved workflow RPC", () => {
     expect(
       source.files.some((file) => file.code.includes("export default async function chain")),
     ).toBe(true);
+    const definitionSource = api.getWorkflowDefinitionSource({
+      lookup: { kind: "definition", definitionHash: saved.definitionHash },
+      all: true,
+    });
+    expect(definitionSource).toMatchObject({
+      kind: "workflow-definition-source",
+      lookup: { kind: "definition", definitionHash: saved.definitionHash },
+      definitionHash: saved.definitionHash,
+      definitionName: "review-loop",
+    });
+    expect(definitionSource.createdAtMs).toBeGreaterThan(0);
+    expect(definitionSource.files).toEqual(source.files);
+    expect(() =>
+      api.getWorkflowDefinitionSource({
+        lookup: { kind: "definition", definitionHash: saved.definitionHash },
+        file: "missing.ts",
+      }),
+    ).toThrow(/workflow source file missing\.ts does not exist/);
+
+    const unsaved = await api.launchRun({
+      source: chainUrl.source,
+      input: { n: 3 },
+      target: process.cwd(),
+      name: "ad-hoc",
+    });
+    const runSource = api.getWorkflowDefinitionSource({
+      lookup: { kind: "run", runId: unsaved.runId },
+    });
+    expect(runSource.lookup).toEqual({ kind: "run", runId: unsaved.runId });
+    expect(runSource.files).toHaveLength(1);
+    expect(runSource.files[0]?.entry).toBe(true);
+    expect((await api.waitForRun(unsaved.runId)).output).toBe(3);
     const launched = await api.launchSavedWorkflow({ ref: { name: "review-loop" } });
     const out = await api.waitForRun(launched.runId);
     expect(out.output).toBe(2);
@@ -316,6 +381,109 @@ describe("saved workflow RPC", () => {
     expect(api.getSavedWorkflowSource({ name: "legacy-source" }).files).toEqual([
       { path: "entry.ts", code: "export default async () => 7;\n", entry: true },
     ]);
+    expect(
+      api.getWorkflowDefinitionSource({
+        lookup: { kind: "definition", definitionHash: "wf_sha256_emptymodules" },
+      }).files,
+    ).toEqual([{ path: "entry.ts", code: "export default async () => 7;\n", entry: true }]);
+
+    store.putWorkflowDefinition({
+      hash: "wf_sha256_codeonly_rpc",
+      name: "legacy-code",
+      kind: "source",
+      code: "export default async () => 8;\n",
+      sourceMap: null,
+      manifestJson: null,
+      createdAtMs: 2,
+    });
+    store.insertRun({
+      runId: "run_codeonly",
+      workflowName: "legacy-code",
+      definitionVersion: "wf_sha256_codeonly_rpc",
+      workflowRef: null,
+      runTarget: process.cwd(),
+      status: "finished",
+      parentRunId: null,
+      tenantId: null,
+      inputRef: null,
+      outputRef: null,
+      errorJson: null,
+      heartbeatAtMs: null,
+      runtimeOwnerId: null,
+      createdAtMs: 2,
+      finishedAtMs: 2,
+    });
+    expect(
+      api.getWorkflowDefinitionSource({ lookup: { kind: "run", runId: "run_codeonly" } }).files,
+    ).toEqual([{ path: "entry.ts", code: "export default async () => 8;\n", entry: true }]);
+    expect(() =>
+      api.getWorkflowDefinitionSource({ lookup: { kind: "run", runId: "run_missing" } }),
+    ).toThrow(/run run_missing not found/);
+    expect(() =>
+      api.getWorkflowDefinitionSource({
+        lookup: { kind: "definition", definitionHash: "wf_sha256_missing" },
+      }),
+    ).toThrow(/workflow definition wf_sha256_missing not found/);
+  });
+
+  test("definition source display remains journal-backed across cache deletion and GC", async () => {
+    const store = JournalStore.memory();
+    const api = keel(store);
+    const retainedHash = `wf_sha256_${"1".repeat(64)}`;
+    const prunedHash = `wf_sha256_${"2".repeat(64)}`;
+    const cacheHash = `wf_sha256_${"3".repeat(64)}`;
+    const cacheRoot = mkdtempSync(join(tmpdir(), "keel-source-cache-delete-"));
+    try {
+      putDisplayableWorkflowDefinition(store, cacheHash, "export default async () => 9;\n", 1);
+      materializeWorkflowDefinition(store, cacheHash, cacheRoot);
+      rmSync(join(cacheRoot, cacheHash), { recursive: true, force: true });
+      expect(
+        api.getWorkflowDefinitionSource({
+          lookup: { kind: "definition", definitionHash: cacheHash },
+        }).files,
+      ).toEqual([{ path: "entry.ts", code: "export default async () => 9;\n", entry: true }]);
+
+      putDisplayableWorkflowDefinition(store, retainedHash, "export default async () => 10;\n", 1);
+      putDisplayableWorkflowDefinition(store, prunedHash, "export default async () => 11;\n", 1);
+      store.insertRun({
+        runId: "run_retains_definition",
+        workflowName: "retained",
+        definitionVersion: retainedHash,
+        workflowRef: null,
+        runTarget: process.cwd(),
+        status: "finished",
+        parentRunId: null,
+        tenantId: null,
+        inputRef: null,
+        outputRef: null,
+        errorJson: null,
+        heartbeatAtMs: null,
+        runtimeOwnerId: null,
+        createdAtMs: 1,
+        finishedAtMs: 1,
+      });
+
+      const gc = await api.gcDefinitions({ ttlMs: 0 });
+      expect(gc.workflowDefinitionsRemoved).toBe(2);
+      expect(() =>
+        api.getWorkflowDefinitionSource({
+          lookup: { kind: "definition", definitionHash: prunedHash },
+        }),
+      ).toThrow(`workflow definition ${prunedHash} not found`);
+      expect(
+        api.getWorkflowDefinitionSource({
+          lookup: { kind: "run", runId: "run_retains_definition" },
+        }).files,
+      ).toEqual([{ path: "entry.ts", code: "export default async () => 10;\n", entry: true }]);
+      expect(
+        api.getWorkflowDefinitionSource({
+          lookup: { kind: "definition", definitionHash: retainedHash },
+        }).files,
+      ).toEqual([{ path: "entry.ts", code: "export default async () => 10;\n", entry: true }]);
+    } finally {
+      store.close();
+      rmSync(cacheRoot, { recursive: true, force: true });
+    }
   });
 });
 

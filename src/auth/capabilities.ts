@@ -11,6 +11,7 @@ export type CapabilityResource =
 
 export type CapabilityAction =
   | "run:read"
+  | "run:source"
   | "run:watch"
   | "run:events"
   | "run:output"
@@ -46,6 +47,7 @@ export class AuthorizationError extends Error {
 
 export const DEFAULT_RUN_CAPABILITY_ACTIONS: readonly CapabilityAction[] = [
   "run:read",
+  "run:source",
   "run:watch",
   "run:events",
   "run:output",

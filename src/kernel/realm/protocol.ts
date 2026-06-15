@@ -7,6 +7,7 @@
 // for the host's reply. log/phase are fire-and-forget.
 
 import type { Capabilities, ToolPolicy } from "../../agents/capabilities.ts";
+import type { ProviderConfigValue } from "../../agents/types.ts";
 import type { InputDep, WorkspaceRetention } from "../../journal/types.ts";
 
 /** SAB layout: Int32 control[0] is the ambient handshake flag; Float64 holds
@@ -43,6 +44,7 @@ export type WorkerRequest =
       key: string;
       prompt: string;
       provider: string;
+      providerConfig: ProviderConfigValue | null;
       model: string | null;
       reasoning: string | null;
       toolPolicy: ToolPolicy;
@@ -71,6 +73,7 @@ export type WorkerRequest =
       identityJson: string;
       prompt: string;
       provider: string;
+      providerConfig: ProviderConfigValue | null;
       model: string | null;
       reasoning: string | null;
       toolPolicy: ToolPolicy;

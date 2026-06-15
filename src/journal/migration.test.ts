@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RealmKernel } from "../kernel/realm/realm-host.ts";
 import {
+  WORKFLOW_SDK_ABI_VERSION,
   materializeWorkflowDefinition,
   snapshotWorkflowSource,
 } from "../workflow-definitions/snapshot.ts";
@@ -560,11 +561,11 @@ describe("schema migrations", () => {
       expect(store.getWorkflowDefinition(newHash)).not.toBeNull();
 
       expect(() => materializeWorkflowDefinition(store, newHash, cacheRoot)).toThrow(
-        /requires workflow SDK ABI 1, but this daemon supports ABI 4/,
+        `requires workflow SDK ABI 1, but this daemon supports ABI ${WORKFLOW_SDK_ABI_VERSION}`,
       );
       const kernel = new RealmKernel(store, { clock: () => 2, definitionCacheRoot: cacheRoot });
       await expect(kernel.resume("r_active")).rejects.toThrow(
-        /requires workflow SDK ABI 1, but this daemon supports ABI 4/,
+        `requires workflow SDK ABI 1, but this daemon supports ABI ${WORKFLOW_SDK_ABI_VERSION}`,
       );
       store.close();
     } finally {

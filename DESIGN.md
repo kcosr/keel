@@ -46,11 +46,13 @@ Postgres-dialect discipline).
   live run against the original aw-gateway repo is unblocked but unrun only because
   that target repo is absent on this machine; shape + durability + crash-resume are
   proven at scale on mock and live at reduced fan-out.
-- **`ctx.agent` gained `reasoning`** (Pi `--thinking`), **`lenient`**, and
-  **`profile`** (named agent profiles — reviewer/verifier/synthesizer presets
-  resolved into concrete fields *before* versioning, so the resolved fields, not
-  the profile name, enter the hash). Capabilities + secrets are folded into both
-  the version AND the input hash, identically across the realm and in-process paths.
+- **`ctx.agent` gained `reasoning`** (Pi `--thinking`), **`lenient`**,
+  **`profile`**, and provider-keyed **`providerConfig`**. Named profiles resolve
+  into concrete fields *before* versioning, so resolved fields, not the profile
+  name, enter the hash. Provider config is strict JSON; only the selected
+  provider's entry is folded into identity and passed to the adapter. Capabilities
+  + secrets are folded into both the version AND the input hash, identically
+  across the realm and in-process paths.
 - **Journal ordering uses an explicit `seq` column** (not SQLite `rowid`) so
   rewind/fork cuts stay Postgres-portable, and an **additive forward migration
   ladder** upgrades older journals in place rather than refusing to open.
@@ -245,7 +247,10 @@ step<T, I extends Json>(key: string, schema: Schema<T>, inputs: I,
   envelope contributes its recorded `contentHash` and any artifact-backed value
   contributes its ref hash — never raw blobs.
 - For `ctx.agent`, the inputs are the spec itself: the **resolved prompt
-  string**, schema structural hash, capabilities, provider, and model. Whatever
+  string**, schema structural hash, capabilities, provider, model, workspace id,
+  secret names, and selected provider config when present. Unselected provider
+  config is validated but omitted from identity and invocation; no
+  `providerConfig` key is added when no selected config exists. Whatever
   upstream data matters is already interpolated into the prompt — so the hash
   captures exactly the influence that matters, and nothing else.
 - The realm acceptance test proves the distinction: explicit inputs hash and
@@ -606,6 +611,7 @@ interface Ctx {
 interface AgentSpec<T> {
   key: string;                      // stable step key (use ctx.stepKey for fan-out)
   provider?: string;                // 'pi' (default, v0) | 'claude' | ...
+  providerConfig?: Record<string, { [key: string]: Json }>;
   prompt: string;
   schema?: Schema<T>;               // Zod or raw JSON Schema (§9.3), enforced (§10.3)
   model?: string;
@@ -617,7 +623,6 @@ interface AgentSpec<T> {
   capabilities?: Capabilities;      // §11.1; used when toolPolicy is omitted
   // note: no memo mode — agents are always memoized (L18); re-think is
   // expressed via retry(stableKey), rerun with a source override, or iteration loops
-  // provider-specific session opts (e.g. Pi sessionDir) live in the adapter config
 }
 ```
 
@@ -628,7 +633,10 @@ exactly three parameters); `ctx.agent` carries `key` in its option bag.
 to add or remove a specific backend tool. Workspace selection is explicit via
 `ctx.workspace` handles, scoped with `ctx.withWorkspace`, or defaults to the run
 `__default` direct workspace at `ctx.run.target`; the resolved workspace id
-participates in agent identity. If both `toolPolicy` and `capabilities` are set,
+participates in agent identity. `providerConfig` is provider-owned JSON config,
+not a cwd/workspace/secret mechanism; an explicit selected provider object
+replaces profile config as a unit and is deep-cloned/frozen before adapter use.
+If both `toolPolicy` and `capabilities` are set,
 `toolPolicy` controls provider tools. `toolPolicy:'unrestricted'` cannot be combined with
 `allowTools` or `denyTools` until provider-native deny semantics are supported.
 
@@ -733,8 +741,9 @@ object identity**.
 ### 10.1 One contract
 
 `AgentLike.generate()` is the single adapter boundary: spawn the vendor CLI/SDK,
-apply capabilities, parse the stream, enforce the output schema, capture
-transcript + session token, return the result for journaling. Adding a provider =
+apply capabilities, consume only the selected provider's immutable
+`providerConfig` when present, parse the stream, enforce the output schema,
+capture transcript + session token, return the result for journaling. Adding a provider =
 implementing this interface.
 
 ### 10.2 Pi and Claude providers
@@ -839,8 +848,9 @@ __session.<agentKey>.<turnKey>
 
 Participant and turn key components are limited to `[A-Za-z0-9_-]+`; ordinary
 author keys may not use the `__session.` prefix. The worker resolves profiles,
-tool policy, provider-native tool lists, capabilities, resolved workspace id,
-and secret names before hashing participant identity. The realm host stores that
+selected provider config, tool policy, provider-native tool lists, capabilities,
+resolved workspace id, and secret names before hashing participant identity. The
+realm host stores that
 hash in `agent_sessions` and rejects drift. Turn identity reuses the journal
 row's `(version, input_hash)` for the derived key and is append-only within a
 participant.

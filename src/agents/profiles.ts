@@ -1,4 +1,5 @@
 import type { ToolPolicy } from "./capabilities.ts";
+import type { ProviderConfigMap } from "./types.ts";
 
 // Named agent profiles — daemon/kernel-configured presets
 // (e.g. reviewer / verifier / synthesizer) so workflows don't repeat
@@ -22,6 +23,7 @@ export interface AgentProfile {
   onFailure?: "throw" | "null";
   timeoutMs?: number;
   stallRetries?: number;
+  providerConfig?: ProviderConfigMap;
 }
 
 export type AgentProfiles = Record<string, AgentProfile>;

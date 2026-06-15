@@ -4,6 +4,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { resolveProfile } from "../agents/profiles.ts";
+import { resolveSelectedProviderConfig } from "../agents/provider-config.ts";
 import type { AgentInvocation, AgentProvider, AgentResult } from "../agents/types.ts";
 import { AgentProviderRegistry } from "../agents/types.ts";
 import { JournalStore } from "../journal/store.ts";
@@ -52,6 +53,38 @@ describe("resolveProfile", () => {
       ),
     ).toThrow(/no longer accepts target/);
   });
+
+  test("provider config uses selected-provider replacement semantics", () => {
+    const profileProviderConfig = {
+      codex: { transport: { type: "uds", path: "/tmp/codex.sock" }, effort: "high" },
+      pi: { mode: "profile-pi" },
+    };
+    const inherited = resolveSelectedProviderConfig({
+      context: 'ctx.agent("review")',
+      selectedProvider: "codex",
+      profileName: "reviewer",
+      profileProviderConfig,
+    });
+    expect(inherited).toEqual(profileProviderConfig.codex);
+
+    const replaced = resolveSelectedProviderConfig({
+      context: 'ctx.agent("review")',
+      selectedProvider: "codex",
+      explicitProviderConfig: { codex: { transport: { type: "stdio" } } },
+      profileName: "reviewer",
+      profileProviderConfig,
+    });
+    expect(replaced).toEqual({ transport: { type: "stdio" } });
+
+    const unselectedDoesNotBlock = resolveSelectedProviderConfig({
+      context: 'ctx.agent("review")',
+      selectedProvider: "codex",
+      explicitProviderConfig: { pi: { mode: "unused" } },
+      profileName: "reviewer",
+      profileProviderConfig,
+    });
+    expect(unselectedDoesNotBlock).toEqual(profileProviderConfig.codex);
+  });
 });
 
 describe("profiles through the realm", () => {
@@ -80,6 +113,19 @@ describe("profiles through the realm", () => {
     });
     expect(handle.status).toBe("finished");
     expect(seen).toEqual(["reviewerProvider"]); // provider came from the profile
+  });
+
+  test("invalid profile provider config fails with a path before realm transmission", () => {
+    expect(
+      () =>
+        new RealmKernel(JournalStore.memory(), {
+          idgen: () => "r",
+          agents: new AgentProviderRegistry().register(recordingProvider("p", [])),
+          agentProfiles: {
+            reviewer: { provider: "p", providerConfig: { p: { bad: () => null } } as never },
+          },
+        }),
+    ).toThrow(/agent profile "reviewer" providerConfig\.p\.bad/);
   });
 
   test("changing a profile's config changes the agent step version (re-runs)", async () => {

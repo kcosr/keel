@@ -4,7 +4,11 @@
 // events, surface a session token (Phase 10), and return the final output. The
 // daemon (host) — never the realm worker — runs providers (L4).
 
+import type { Json } from "../hash.ts";
 import type { Capabilities, ToolPolicy } from "./capabilities.ts";
+
+export type ProviderConfigValue = { readonly [key: string]: Json };
+export type ProviderConfigMap = Record<string, ProviderConfigValue>;
 
 export interface TraceEvent {
   type:
@@ -26,6 +30,8 @@ export interface AgentInvocation {
   key: string;
   provider: string;
   prompt: string;
+  /** Selected provider's immutable provider-owned JSON config, if any. */
+  providerConfig?: ProviderConfigValue;
   model?: string;
   /** Normalized tool baseline; adapters map it to provider-native flags. */
   toolPolicy?: ToolPolicy;

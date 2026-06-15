@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- Provider-keyed `providerConfig` for `ctx.agent`, `ctx.agentSession`, and agent profiles. Keel validates the full map as strict JSON, includes only the selected provider's config in replay identity, and passes only that immutable selected config to provider adapters.
 - Workflow-scoped `ctx.workspace`/`ctx.withWorkspace` with direct and git-worktree modes, `WorkspaceHandle` sharing across agents/sessions, and a lazy `__default` direct workspace at `ctx.run.target`.
 - Workspace lifecycle metadata now distinguishes `mode`, `ownerKind`, source path, provider cwd, ownership, retention, and active worktree holders in RPC/CLI/execute views.
 - `keel execute` control scripts can list/get/diff/merge/discard/GC run workspaces through the daemon client.
@@ -60,6 +61,7 @@
   CLI/client wrappers still capture their own cwd as the default target. The
   supervisor disables persisted schedules with invalid targets instead of letting
   one bad schedule break a tick.
+- Workflow SDK ABI bumped to 5 for workflow-visible provider-specific agent config. Pre-bump workflow definitions must be re-registered, and suspended/non-terminal runs pinned to older SDK ABIs must be drained before upgrade or will fail resume with the existing unsupported-ABI error. The journal schema is unchanged for this provider-config change.
 - Workflow SDK ABI bumped to 4 and journal schema to v15 for the workflow workspace API; non-terminal runs captured with older SDK ABIs must be drained before upgrade or will fail resume with the existing unsupported-ABI error.
 - Public `workspaceIsolation`, `workspaceRetention`, and per-agent/profile `target` options were removed. Use `ctx.workspace({ key, mode: "worktree", retention })` and pass the returned handle to agents/sessions.
 - Worktree retention names are now `"remove"`, `"retain-on-failure"`, and `"retain"`; retention applies only to Keel-owned worktrees, never direct workspaces.

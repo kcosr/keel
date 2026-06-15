@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { DaemonClient } from "../daemon/client.ts";
 import type {

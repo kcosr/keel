@@ -13,7 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { JournalStore } from "../journal/store.ts";
-import { captureWorkflowFile } from "./capture.ts";
+import { captureWorkflowBundleFromFile, captureWorkflowFile } from "./capture.ts";
 import {
   WORKFLOW_SDK_ABI_VERSION,
   evictWorkflowDefinitionCache,
@@ -162,6 +162,142 @@ describe("workflow definition snapshots", () => {
       ).toBe("export const task = 'review';\n");
     } finally {
       store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("file capture includes static value and side-effect imports but excludes type-only edges", () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-snapshot-import-kinds-"));
+    try {
+      const workflow = join(dir, "workflow.ts");
+      writeFileSync(
+        workflow,
+        [
+          'import type { Only } from "./types";',
+          'export type { Only } from "./types";',
+          'import { unused } from "./unused";',
+          'import "./side-effect";',
+          'export { value } from "./re-export";',
+          'export * from "./star";',
+          "export default async function wf() { return 1; }",
+          "",
+        ].join("\n"),
+      );
+      writeFileSync(join(dir, "types.ts"), "export type Only = { n: number };\n");
+      writeFileSync(join(dir, "unused.ts"), "export const unused = 1;\n");
+      writeFileSync(join(dir, "side-effect.ts"), "export const touched = true;\n");
+      writeFileSync(join(dir, "re-export.ts"), "export const value = 2;\n");
+      writeFileSync(join(dir, "star.ts"), "export const star = 3;\n");
+
+      expect(captureWorkflowBundleFromFile(workflow).modules.map((module) => module.path)).toEqual([
+        "re-export.ts",
+        "side-effect.ts",
+        "star.ts",
+        "unused.ts",
+        "workflow.ts",
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("file capture allows static import cycles without duplicate modules", () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-snapshot-cycle-"));
+    try {
+      const workflow = join(dir, "workflow.ts");
+      writeFileSync(
+        workflow,
+        'import { b } from "./b";\nexport const a = 1;\nexport default async () => b;\n',
+      );
+      writeFileSync(
+        join(dir, "b.ts"),
+        'import { a } from "./workflow";\nexport const b = a + 1;\n',
+      );
+
+      expect(captureWorkflowBundleFromFile(workflow).modules.map((module) => module.path)).toEqual([
+        "b.ts",
+        "workflow.ts",
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("file capture resolves extensionless tsx and index modules", () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-snapshot-resolution-"));
+    try {
+      const workflow = join(dir, "workflow.ts");
+      mkdirSync(join(dir, "helpers"));
+      mkdirSync(join(dir, "widgets"));
+      writeFileSync(
+        workflow,
+        [
+          'import { component } from "./component";',
+          'import { helper } from "./helpers";',
+          'import { widget } from "./widgets";',
+          "export default async () => component + helper + widget;",
+          "",
+        ].join("\n"),
+      );
+      writeFileSync(join(dir, "component.tsx"), "export const component = 1;\n");
+      writeFileSync(join(dir, "helpers", "index.ts"), "export const helper = 2;\n");
+      writeFileSync(join(dir, "widgets", "index.tsx"), "export const widget = 3;\n");
+
+      expect(captureWorkflowBundleFromFile(workflow).modules.map((module) => module.path)).toEqual([
+        "component.tsx",
+        "helpers/index.ts",
+        "widgets/index.tsx",
+        "workflow.ts",
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("file capture rejects ambiguous extensionless imports", () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-snapshot-ambiguous-"));
+    try {
+      const workflow = join(dir, "workflow.ts");
+      writeFileSync(
+        workflow,
+        'import { value } from "./helper";\nexport default async () => value;\n',
+      );
+      writeFileSync(join(dir, "helper.ts"), "export const value = 1;\n");
+      writeFileSync(join(dir, "helper.tsx"), "export const value = 2;\n");
+
+      expect(() => captureWorkflowBundleFromFile(workflow)).toThrow(/ambiguous/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("file capture rejects symlinked bundle segments but allows symlinked ancestors", () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-snapshot-symlink-"));
+    try {
+      const realRoot = join(dir, "real-root");
+      const linkedRoot = join(dir, "linked-root");
+      mkdirSync(realRoot);
+      writeFileSync(join(realRoot, "workflow.ts"), "export default async () => 1;\n");
+      symlinkSync(realRoot, linkedRoot, "dir");
+      expect(captureWorkflowBundleFromFile(join(linkedRoot, "workflow.ts")).entry).toBe(
+        "workflow.ts",
+      );
+
+      const bundleRoot = join(dir, "bundle");
+      const realHelpers = join(dir, "real-helpers");
+      mkdirSync(bundleRoot);
+      mkdirSync(realHelpers);
+      writeFileSync(
+        join(bundleRoot, "workflow.ts"),
+        'import { helper } from "./helpers/helper";\nexport default async () => helper;\n',
+      );
+      writeFileSync(join(realHelpers, "helper.ts"), "export const helper = 1;\n");
+      symlinkSync(realHelpers, join(bundleRoot, "helpers"), "dir");
+
+      expect(() => captureWorkflowBundleFromFile(join(bundleRoot, "workflow.ts"))).toThrow(
+        /symlink segment/,
+      );
+    } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });

@@ -1,42 +1,30 @@
 import { isAbsolute, posix } from "node:path";
-import { parse } from "acorn";
 import {
   WORKFLOW_INDEX_MODULES,
   WORKFLOW_MODULE_EXTENSIONS,
   type WorkflowSourceModule,
 } from "./source.ts";
 
-type AnyNode = { type: string } & Record<string, unknown>;
-
-const tsTranspiler = new Bun.Transpiler({ loader: "tsx" });
-
 export function staticWorkflowImports(source: string, filename: string): string[] {
-  let ast: AnyNode;
-  try {
-    ast = parse(tsTranspiler.transformSync(source), {
-      ecmaVersion: "latest",
-      sourceType: "module",
-    }) as unknown as AnyNode;
-  } catch (err) {
-    throw new Error(
-      `could not parse workflow imports in ${filename}: ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
-
   const imports: string[] = [];
-  walk(ast, (node) => {
-    if (node.type === "ImportExpression") {
-      throw new Error(`dynamic import(...) is not allowed in workflow code: ${filename}`);
+  let i = 0;
+  while (i < source.length) {
+    i = skipTrivia(source, i);
+    const token = readIdentifier(source, i);
+    if (!token) {
+      i = skipNonCodeToken(source, i, filename);
+      continue;
     }
-    if (
-      node.type === "ImportDeclaration" ||
-      node.type === "ExportNamedDeclaration" ||
-      node.type === "ExportAllDeclaration"
-    ) {
-      const src = (node.source as AnyNode | undefined)?.value;
-      if (typeof src === "string") imports.push(src);
+    if (token.value === "import") {
+      i = parseImportDeclaration(source, token.end, filename, imports);
+      continue;
     }
-  });
+    if (token.value === "export") {
+      i = parseExportDeclaration(source, token.end, filename, imports);
+      continue;
+    }
+    i = token.end;
+  }
   return imports;
 }
 
@@ -115,32 +103,165 @@ export function assertAllowedExternalWorkflowImport(specifier: string, importerP
   }
 }
 
-function walk(root: AnyNode, fn: (node: AnyNode) => void): void {
-  const visit = (node: AnyNode): void => {
-    fn(node);
-    for (const child of childNodes(node)) visit(child);
-  };
-  visit(root);
-}
-
-function childNodes(node: AnyNode): AnyNode[] {
-  const out: AnyNode[] = [];
-  for (const key of Object.keys(node)) {
-    if (key === "loc" || key === "start" || key === "end" || key === "type") continue;
-    const value = node[key];
-    if (Array.isArray(value)) {
-      for (const v of value) if (isNode(v)) out.push(v);
-    } else if (isNode(value)) {
-      out.push(value);
-    }
+function parseImportDeclaration(
+  source: string,
+  pos: number,
+  filename: string,
+  imports: string[],
+): number {
+  const next = skipTrivia(source, pos);
+  if (source[next] === "(") {
+    throw new Error(`dynamic import(...) is not allowed in workflow code: ${filename}`);
   }
-  return out;
+  const first = readIdentifier(source, next);
+  if (first?.value === "type") return skipStatement(source, first.end, filename);
+
+  const sideEffect = readStringLiteral(source, next);
+  if (sideEffect) {
+    imports.push(sideEffect.value);
+    return sideEffect.end;
+  }
+
+  const spec = findFromSpecifier(source, next, filename);
+  if (spec) {
+    imports.push(spec.value);
+    return spec.end;
+  }
+  return skipStatement(source, next, filename);
 }
 
-function isNode(value: unknown): value is AnyNode {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    typeof (value as { type?: unknown }).type === "string"
-  );
+function parseExportDeclaration(
+  source: string,
+  pos: number,
+  filename: string,
+  imports: string[],
+): number {
+  const next = skipTrivia(source, pos);
+  const first = readIdentifier(source, next);
+  if (first?.value === "type") return skipStatement(source, first.end, filename);
+
+  const spec = findFromSpecifier(source, next, filename);
+  if (spec) {
+    imports.push(spec.value);
+    return spec.end;
+  }
+  return skipStatement(source, next, filename);
+}
+
+function findFromSpecifier(
+  source: string,
+  pos: number,
+  filename: string,
+): { value: string; end: number } | null {
+  let i = pos;
+  while (i < source.length) {
+    i = skipTrivia(source, i);
+    const ch = source[i];
+    if (ch === ";") return null;
+    const token = readIdentifier(source, i);
+    if (token) {
+      if (token.value === "from") {
+        const literal = readStringLiteral(source, skipTrivia(source, token.end));
+        return literal ? { value: literal.value, end: literal.end } : null;
+      }
+      i = token.end;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === "`") {
+      i = skipStringLiteral(source, i, filename);
+      continue;
+    }
+    i += 1;
+  }
+  return null;
+}
+
+function skipStatement(source: string, pos: number, filename: string): number {
+  let i = pos;
+  while (i < source.length) {
+    const ch = source[i];
+    if (ch === ";" || ch === "\n" || ch === "\r") return i + 1;
+    if (ch === "'" || ch === '"' || ch === "`") {
+      i = skipStringLiteral(source, i, filename);
+      continue;
+    }
+    if (ch === "/" && (source[i + 1] === "/" || source[i + 1] === "*")) {
+      i = skipTrivia(source, i);
+      continue;
+    }
+    i += 1;
+  }
+  return i;
+}
+
+function skipTrivia(source: string, pos: number): number {
+  let i = pos;
+  while (i < source.length) {
+    const ch = source[i];
+    if (/\s/.test(ch ?? "")) {
+      i += 1;
+      continue;
+    }
+    if (ch === "/" && source[i + 1] === "/") {
+      i += 2;
+      while (i < source.length && source[i] !== "\n") i += 1;
+      continue;
+    }
+    if (ch === "/" && source[i + 1] === "*") {
+      i += 2;
+      while (i < source.length && !(source[i] === "*" && source[i + 1] === "/")) i += 1;
+      i = Math.min(i + 2, source.length);
+      continue;
+    }
+    break;
+  }
+  return i;
+}
+
+function skipNonCodeToken(source: string, pos: number, filename: string): number {
+  const ch = source[pos];
+  if (ch === "'" || ch === '"' || ch === "`") return skipStringLiteral(source, pos, filename);
+  return pos + 1;
+}
+
+function readIdentifier(source: string, pos: number): { value: string; end: number } | null {
+  const first = source[pos];
+  if (!first || !/[A-Za-z_$]/.test(first)) return null;
+  let end = pos + 1;
+  while (end < source.length && /[A-Za-z0-9_$]/.test(source[end] as string)) end += 1;
+  return { value: source.slice(pos, end), end };
+}
+
+function readStringLiteral(source: string, pos: number): { value: string; end: number } | null {
+  const quote = source[pos];
+  if (quote !== "'" && quote !== '"') return null;
+  let out = "";
+  let i = pos + 1;
+  while (i < source.length) {
+    const ch = source[i];
+    if (ch === quote) return { value: out, end: i + 1 };
+    if (ch === "\\") {
+      out += source.slice(i, i + 2);
+      i += 2;
+      continue;
+    }
+    out += ch;
+    i += 1;
+  }
+  return null;
+}
+
+function skipStringLiteral(source: string, pos: number, filename: string): number {
+  const quote = source[pos];
+  let i = pos + 1;
+  while (i < source.length) {
+    const ch = source[i];
+    if (ch === "\\") {
+      i += 2;
+      continue;
+    }
+    if (ch === quote) return i + 1;
+    i += 1;
+  }
+  throw new Error(`could not parse workflow imports in ${filename}: unterminated string literal`);
 }

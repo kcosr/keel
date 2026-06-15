@@ -69,6 +69,7 @@ export function captureWorkflowBundleFromFile(entryPath: string): WorkflowSource
   visit(entryAbs);
 
   const root = lowestCommonAncestor([...visited.keys()].map((path) => dirname(path)));
+  for (const { abs } of visited.values()) assertNoSymlinkSegmentsInBundle(root, abs);
   const modules: WorkflowSourceModule[] = [];
   const normalizedPaths = new Set<string>();
   for (const { abs, code } of visited.values()) {
@@ -84,6 +85,21 @@ export function captureWorkflowBundleFromFile(entryPath: string): WorkflowSource
   const entry = relative(root, entryAbs).split(sep).join("/");
   validateWorkflowModulePath(entry, "workflow entry path");
   return { kind: "bundle", entry, modules };
+}
+
+function assertNoSymlinkSegmentsInBundle(root: string, path: string): void {
+  const rel = relative(root, path);
+  if (rel === "" || rel.startsWith("..") || resolve(root, rel) !== path) {
+    throw new Error(`workflow source path ${path} is outside inferred bundle root ${root}`);
+  }
+  let current = root;
+  const segments = rel.split(sep).filter(Boolean);
+  for (const segment of segments) {
+    current = join(current, segment);
+    if (lstatSync(current).isSymbolicLink()) {
+      throw new Error(`workflow source path ${path} contains symlink segment ${current}`);
+    }
+  }
 }
 
 function resolveLocalFileImport(importerPath: string, specifier: string): string {
@@ -120,21 +136,10 @@ function assertRegularWorkflowFile(path: string, label: string): void {
   if (!WORKFLOW_MODULE_EXTENSIONS.includes(extname(path) as ".ts" | ".tsx")) {
     throw new Error(`${label} ${path} must be a .ts or .tsx file`);
   }
-  assertNoSymlinkSegments(path);
+  const lstat = lstatSync(path);
+  if (lstat.isSymbolicLink()) throw new Error(`${label} ${path} must not be a symlink`);
   const stat = statSync(path);
   if (!stat.isFile()) throw new Error(`${label} ${path} must be a regular file`);
-}
-
-function assertNoSymlinkSegments(path: string): void {
-  const resolved = resolve(path);
-  const parts = resolved.split(sep).filter(Boolean);
-  let current = resolved.startsWith(sep) ? sep : "";
-  for (const part of parts) {
-    current = current === sep ? join(current, part) : join(current, part);
-    if (lstatSync(current).isSymbolicLink()) {
-      throw new Error(`workflow source path ${path} contains symlink segment ${current}`);
-    }
-  }
 }
 
 function lowestCommonAncestor(paths: string[]): string {

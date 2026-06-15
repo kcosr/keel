@@ -238,7 +238,7 @@ async function dispatch(argv: string[]): Promise<number> {
       if (!launchOpts.detach && output === "json") {
         throw new Error("--output json is not available for attached launch");
       }
-      const captured = await readCommandSource(launchOpts.file, "workflow");
+      const captured = await readWorkflowSource(launchOpts.file);
       const client = await openClient();
       const launched = await client.launchRun({
         source: captured.source,
@@ -287,7 +287,7 @@ async function dispatch(argv: string[]): Promise<number> {
       const runOpts = parseRunArgs(rest);
       const output = runOpts.output ?? "json";
       assertToolsAllowed("run", runOpts.tools, output, false);
-      const captured = await readCommandSource(runOpts.file, "workflow");
+      const captured = await readWorkflowSource(runOpts.file);
       const client = await openClient();
       const launched = await client.launchRun({
         source: captured.source,
@@ -405,7 +405,7 @@ async function dispatch(argv: string[]): Promise<number> {
       if (sub !== "put") return usage("schedule needs put <name> [workflow.ts]");
       const parsed = parseSchedulePutArgs(scheduleArgs);
       if (!parsed.name) return usage("schedule needs put <name> [workflow.ts]");
-      const captured = await readCommandSource(parsed.file, "workflow");
+      const captured = await readWorkflowSource(parsed.file);
       const client = await openClient();
       await client.putSchedule({
         name: parsed.name,
@@ -910,28 +910,18 @@ interface CapturedCommandSource {
   provenance: WorkflowProvenance;
 }
 
-async function readCommandSource(
-  file: string | undefined,
-  label: "workflow" | "control script",
-): Promise<CapturedCommandSource> {
+async function readWorkflowSource(file: string | undefined): Promise<CapturedCommandSource> {
   if (file) {
     const path = resolveWorkflowPath(file);
-    if (label === "workflow") {
-      const captured = captureWorkflowFile(path);
-      return {
-        source: captured.source,
-        defaultName: captured.name,
-        provenance: captured.provenance,
-      };
-    }
+    const captured = captureWorkflowFile(path);
     return {
-      source: readFileSync(path, "utf8"),
-      defaultName: null,
-      provenance: { kind: "clientPath", path },
+      source: captured.source,
+      defaultName: captured.name,
+      provenance: captured.provenance,
     };
   }
   if (process.stdin.isTTY) {
-    throw new Error(`no ${label} source: pass a file or pipe stdin`);
+    throw new Error("no workflow source: pass a file or pipe stdin");
   }
   return {
     source: await new Response(Bun.stdin.stream()).text(),

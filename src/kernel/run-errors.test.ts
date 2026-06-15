@@ -1,0 +1,59 @@
+import { describe, expect, test } from "bun:test";
+import { JournalStore } from "../journal/store.ts";
+import { failRunWithError } from "./run-errors.ts";
+
+describe("failRunWithError", () => {
+  test("applies workspace retention cleanup for terminal failures", () => {
+    const store = JournalStore.memory();
+    try {
+      store.insertRun({
+        runId: "r",
+        workflowName: "wf",
+        definitionVersion: "v",
+        status: "running",
+        parentRunId: null,
+        tenantId: null,
+        inputRef: null,
+        outputRef: null,
+        errorJson: null,
+        heartbeatAtMs: null,
+        runtimeOwnerId: null,
+        createdAtMs: 1,
+      });
+      store.insertAgentWorkspace({
+        runId: "r",
+        workspaceId: "ws_agent",
+        kind: "agent",
+        key: "agent",
+        lastAttempt: 1,
+        retentionPolicy: "never",
+        workspacePath: "/tmp/keel-missing-workspace-for-run-error-test",
+        target: "/tmp/keel-missing-repo-for-run-error-test",
+        baseCommit: "abc",
+        status: "idle",
+        failureSeen: false,
+        lastTurnKey: null,
+        lastTurnAttempt: null,
+        lastDiffEventSeq: null,
+        lastErrorEventSeq: null,
+        cleanupErrorJson: null,
+        createdAtMs: 1,
+        updatedAtMs: 1,
+        mergedAtMs: null,
+        discardedAtMs: null,
+        removedAtMs: null,
+      });
+
+      failRunWithError(store, "r", new Error("boom"), 10);
+
+      expect(store.getRun("r")?.status).toBe("failed");
+      expect(store.getAgentWorkspace("r", "ws_agent")?.status).toBe("removed");
+      expect(store.listEvents("r").map((event) => event.type)).toEqual([
+        "run.failed",
+        "workspace.removed",
+      ]);
+    } finally {
+      store.close();
+    }
+  });
+});

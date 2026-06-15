@@ -42,7 +42,10 @@ import {
 } from "./projection.ts";
 
 const WORKSPACE_RECONCILE_STALE_MS = 30_000;
-const WORKSPACE_MERGEABLE_STATUSES = new Set<AgentWorkspaceRow["status"]>(["pending_review"]);
+const WORKSPACE_MERGEABLE_STATUSES = new Set<AgentWorkspaceRow["status"]>([
+  "pending_review",
+  "diff_error",
+]);
 const WORKSPACE_DISCARDABLE_STATUSES = new Set<AgentWorkspaceRow["status"]>([
   "pending_review",
   "diff_error",

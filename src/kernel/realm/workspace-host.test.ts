@@ -3,7 +3,7 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SecretStore } from "../../agents/secrets.ts";
@@ -234,6 +234,56 @@ describe("durable diff + worktree cleanup", () => {
     const workspace = store.listAgentWorkspaces("r")[0];
     expect(workspace).toMatchObject({ kind: "agent", key: "edit", status: "pending_review" });
     expect(existsSync(workspace?.workspacePath ?? "")).toBe(true);
+  });
+
+  test("workspaceRetention on-failure keeps a one-shot workspace after fail-then-retry-success", async () => {
+    const store = JournalStore.memory();
+    const workflow = {
+      source: `
+        import { type Ctx } from "@kcosr/keel";
+        export default async function wf(ctx: Ctx): Promise<string> {
+          return await ctx.agent({
+            key: "edit",
+            prompt: "make a change",
+            provider: "writer",
+            workspaceIsolation: true,
+            workspaceRetention: "on-failure",
+            capabilities: { fs: "workspace-write" },
+          });
+        }
+      `,
+      name: "one-shot-retain-on-failure",
+    };
+    let calls = 0;
+    const failsThenSucceeds: AgentProvider = {
+      name: "writer",
+      async generate(inv: AgentInvocation): Promise<AgentResult> {
+        calls += 1;
+        if (inv.cwd) writeFileSync(join(inv.cwd, `attempt-${calls}.txt`), `attempt ${calls}\n`);
+        if (calls === 1) throw new Error("transient write failure");
+        return { text: "ok", transcript: [] };
+      },
+    };
+    const kernel = new RealmKernel(store, {
+      idgen: () => "r",
+      agents: new AgentProviderRegistry().register(failsThenSucceeds),
+      workspaceStore: mkdtempSync(join(tmpdir(), "keel-workspaces-")),
+    });
+
+    await kernel.run<string>(workflow, null, { name: "w", target: repo }).catch(() => null);
+    expect(store.getRun("r")?.status).toBe("failed");
+    expect(store.listAgentWorkspaces("r")[0]?.failureSeen).toBe(true);
+
+    const retried = await kernel.retry<string>("r");
+    expect(retried.status).toBe("finished");
+    const workspace = store.listAgentWorkspaces("r")[0];
+    expect(workspace).toMatchObject({ status: "pending_review", failureSeen: true });
+    expect(readFileSync(join(workspace?.workspacePath ?? "", "attempt-1.txt"), "utf8")).toBe(
+      "attempt 1\n",
+    );
+    expect(readFileSync(join(workspace?.workspacePath ?? "", "attempt-2.txt"), "utf8")).toBe(
+      "attempt 2\n",
+    );
   });
 
   test("one-shot oversized diff emits diff_error without failing the agent step", async () => {

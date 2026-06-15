@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { AgentFailure } from "../../agents/execute.ts";
 import type {
   AgentHooks,
   AgentInvocation,
@@ -459,6 +460,67 @@ describe("ctx.agentSession", () => {
       expect(readFileSync(join(workspace?.workspacePath ?? "", "state.txt"), "utf8")).toBe(
         "__session.primary.draft\n__session.primary.revise\n__session.primary.revise\n",
       );
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+      rmSync(workspaceStore, { recursive: true, force: true });
+    }
+  });
+
+  test("on-failure retention stays sticky when a later session turn succeeds", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "keel-session-sticky-failure-target-"));
+    const workspaceStore = mkdtempSync(join(tmpdir(), "keel-session-sticky-failure-store-"));
+    try {
+      initGitRepo(repo);
+      const workflow = {
+        source: `
+          import { type Ctx } from "@kcosr/keel";
+          export default async function wf(ctx: Ctx): Promise<string> {
+            const primary = ctx.agentSession({ key: "primary", provider: "session", workspaceIsolation: true, workspaceRetention: "on-failure", capabilities: { fs: "workspace-write" } });
+            await primary.turn({ key: "optional", prompt: "optional", onFailure: "null" });
+            await primary.turn({ key: "repair", prompt: "repair" });
+            return "done";
+          }
+        `,
+        name: "isolated-sticky-session-failure",
+      };
+      const provider: AgentProvider = {
+        name: "session",
+        supportsSessions: true,
+        async generate(invocation, hooks) {
+          const token = invocation.resumeToken ?? "sess-1";
+          hooks.onSessionToken?.(token);
+          if (invocation.cwd) {
+            writeFileSync(join(invocation.cwd, `${invocation.key}.txt`), `${invocation.key}\n`);
+          }
+          if (invocation.key === "__session.primary.optional") {
+            throw new AgentFailure("optional failure");
+          }
+          return { text: "ok", transcript: [], sessionToken: token };
+        },
+      };
+
+      const store = JournalStore.memory();
+      const result = await kernel(store, provider, { workspaceStore }).run<string>(workflow, null, {
+        target: repo,
+      });
+      expect(result.status).toBe("finished");
+      const workspace = store.listAgentWorkspaces("run-1")[0];
+      expect(workspace).toMatchObject({
+        kind: "agent_session",
+        key: "primary",
+        status: "pending_review",
+        failureSeen: true,
+        retentionPolicy: "on-failure",
+      });
+      expect(
+        readFileSync(
+          join(workspace?.workspacePath ?? "", "__session.primary.optional.txt"),
+          "utf8",
+        ),
+      ).toBe("__session.primary.optional\n");
+      expect(
+        readFileSync(join(workspace?.workspacePath ?? "", "__session.primary.repair.txt"), "utf8"),
+      ).toBe("__session.primary.repair\n");
     } finally {
       rmSync(repo, { recursive: true, force: true });
       rmSync(workspaceStore, { recursive: true, force: true });

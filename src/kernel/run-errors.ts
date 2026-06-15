@@ -1,4 +1,5 @@
 import type { JournalStore } from "../journal/store.ts";
+import { cleanupTerminalRunWorkspaces } from "../workspace/retention.ts";
 import { serializeError } from "./step-engine.ts";
 
 export function serializedErrorJson(err: unknown): string {
@@ -19,6 +20,6 @@ export function failRunWithError(
       finishedAtMs: atMs,
     });
     store.appendEvent(runId, "run.failed", error, atMs);
-    store.markRunWorkspacesPendingReview(runId, atMs);
   });
+  cleanupTerminalRunWorkspaces(store, runId, "failed", atMs);
 }

@@ -959,7 +959,7 @@ export class RealmKernel {
       }
       this.store.updateAgentWorkspace(runId, workspaceId, {
         status,
-        failureSeen: failureSeen || status === "diff_error",
+        ...(failureSeen || status === "diff_error" ? { failureSeen: true } : {}),
         ...(lastDiffEventSeq !== null ? { lastDiffEventSeq } : {}),
         ...(lastErrorEventSeq !== null ? { lastErrorEventSeq } : {}),
         updatedAtMs: atMs,
@@ -1124,7 +1124,7 @@ export class RealmKernel {
       if (begun.workspacePath) {
         this.store.updateAgentSessionWorkspace(runId, m.agentKey, {
           status: workspaceStatus,
-          failureSeen: failureSeen || workspaceStatus === "diff_error",
+          ...(failureSeen || workspaceStatus === "diff_error" ? { failureSeen: true } : {}),
           lastTurnKey: m.turnKey,
           lastTurnAttempt: begun.attempt,
           ...(lastDiffEventSeq !== null ? { lastDiffEventSeq } : {}),

@@ -831,8 +831,29 @@ describe("workspace lifecycle operations", () => {
         workspaceStatus: "diff_error",
       });
 
+      const diffErrorMergePath = retainedWorkspacePath(
+        workspaceStore,
+        "r-diff-error-merge",
+        "agent",
+      );
+      createRetainedWorktree(repo, diffErrorMergePath, baseCommit);
+      writeFileSync(join(diffErrorMergePath, "diff-error-merged.txt"), "merged from diff_error\n");
+      insertWorkspaceFixture(store, {
+        runId: "r-diff-error-merge",
+        agentKey: "agent",
+        repo,
+        baseCommit,
+        workspacePath: diffErrorMergePath,
+        runStatus: "finished",
+        workspaceStatus: "diff_error",
+      });
+      expect(api.mergeRunWorkspace("r-diff-error-merge", "ws_agent").status).toBe("merged");
+      expect(readFileSync(join(repo, "diff-error-merged.txt"), "utf8")).toBe(
+        "merged from diff_error\n",
+      );
+
       const firstGc = api.gcWorkspaces({ olderThanMs: 0 });
-      expect(firstGc.removed.map((w) => w.runId).sort()).toEqual(["r-merge"]);
+      expect(firstGc.removed.map((w) => w.runId).sort()).toEqual(["r-diff-error-merge", "r-merge"]);
       expect(store.getAgentSessionWorkspace("r-merge", "agent")).toBeNull();
       expect(store.getAgentSessionWorkspace("r-discard", "agent")).toBeNull();
       expect(store.getAgentSessionWorkspace("r-pending", "agent")?.status).toBe("pending_review");

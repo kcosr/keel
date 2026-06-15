@@ -35,6 +35,7 @@ import {
   materializeWorkflowDefinition,
   snapshotWorkflowSource,
 } from "../workflow-definitions/snapshot.ts";
+import { workflowDefinitionSourceSelection } from "../workflow-definitions/source-view.ts";
 import type { WorkflowSourceInput } from "../workflow-definitions/source.ts";
 import { cleanupTerminalRunWorkspaces } from "../workspace/retention.ts";
 import {
@@ -46,6 +47,7 @@ import {
 } from "../workspace/worktree.ts";
 import type {
   EventEnvelope,
+  GetWorkflowDefinitionSourceRequest,
   KeelApi,
   LaunchRequest,
   LaunchSavedWorkflowRequest,
@@ -56,6 +58,7 @@ import type {
   RunWorkspaceView,
   SaveWorkflowRequest,
   SavedWorkflowSourceView,
+  WorkflowDefinitionSourceView,
   WorkflowProvenance,
   WorkspaceGcResult,
 } from "./contract.ts";
@@ -180,40 +183,10 @@ export class InProcessKeel implements KeelApi {
     const definition = this.store.getWorkflowDefinition(version.definitionHash);
     if (!definition)
       throw new Error(`workflow definition ${version.definitionHash} does not exist`);
-    const manifest = definition.manifestJson
-      ? (JSON.parse(definition.manifestJson) as {
-          entry?: unknown;
-          modules?: Array<{ path?: unknown; code?: unknown }>;
-        })
-      : null;
-    let entry = "entry.ts";
-    let files: Array<{ path: string; code: string; entry: boolean }>;
-    if (manifest?.modules && Array.isArray(manifest.modules)) {
-      if (manifest.modules.length === 0) {
-        files = [{ path: "entry.ts", code: definition.code, entry: true }];
-      } else if (typeof manifest.entry !== "string") {
-        throw new Error(`workflow definition ${definition.hash} is missing manifest entry`);
-      } else {
-        entry = manifest.entry;
-        files = manifest.modules.map((module) => {
-          if (typeof module.path !== "string" || typeof module.code !== "string") {
-            throw new Error(`workflow definition ${definition.hash} has invalid source module`);
-          }
-          return { path: module.path, code: module.code, entry: module.path === entry };
-        });
-      }
-    } else if (definition.code) {
-      files = [{ path: "entry.ts", code: definition.code, entry: true }];
-    } else {
-      throw new Error(`workflow definition ${definition.hash} cannot display source`);
-    }
-    if (req.file) {
-      const file = files.find((candidate) => candidate.path === req.file);
-      if (!file) throw new Error(`workflow source file ${req.file} does not exist`);
-      files = [file];
-    } else if (!req.all) {
-      files = [files.find((candidate) => candidate.entry) ?? (files[0] as (typeof files)[number])];
-    }
+    const { entry, files } = workflowDefinitionSourceSelection(definition, {
+      ...(req.file !== undefined ? { file: req.file } : {}),
+      ...(req.all !== undefined ? { all: req.all } : {}),
+    });
     return {
       name: version.name,
       version: version.version,
@@ -221,6 +194,36 @@ export class InProcessKeel implements KeelApi {
       entry,
       files,
     };
+  }
+
+  getWorkflowDefinitionSource(
+    req: GetWorkflowDefinitionSourceRequest,
+  ): WorkflowDefinitionSourceView {
+    const definitionHash =
+      req.lookup.kind === "run"
+        ? this.definitionHashForRunSourceLookup(req.lookup.runId)
+        : req.lookup.definitionHash;
+    const definition = this.store.getWorkflowDefinition(definitionHash);
+    if (!definition) throw new Error(`workflow definition ${definitionHash} not found`);
+    const { entry, files } = workflowDefinitionSourceSelection(definition, {
+      ...(req.file !== undefined ? { file: req.file } : {}),
+      ...(req.all !== undefined ? { all: req.all } : {}),
+    });
+    return {
+      kind: "workflow-definition-source",
+      lookup: req.lookup,
+      definitionHash,
+      definitionName: definition.name,
+      createdAtMs: definition.createdAtMs,
+      entry,
+      files,
+    };
+  }
+
+  private definitionHashForRunSourceLookup(runId: string): string {
+    const run = this.store.getRun(runId);
+    if (!run) throw new Error(`run ${runId} not found`);
+    return run.definitionVersion;
   }
 
   async launchSavedWorkflow(req: LaunchSavedWorkflowRequest): Promise<{ runId: string }> {

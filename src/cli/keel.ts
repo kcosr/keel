@@ -58,6 +58,7 @@ const KEEL_DIR = process.env.KEEL_DIR ?? join(homedir(), ".keel");
 const SOCKET = process.env.KEEL_SOCKET ?? join(KEEL_DIR, "keel.sock");
 const DB = process.env.KEEL_DB ?? join(KEEL_DIR, "keel.db");
 const CAP_DIR = process.env.KEEL_CAP_DIR ?? join(KEEL_DIR, "caps");
+const WORKFLOW_DEFINITION_HASH_RE = /^wf_sha256_[0-9a-f]{64}$/;
 export { formatDuration, formatListRuns, formatUtcTimestamp } from "./run-display.ts";
 
 export const OUTPUT_FORMATS = ["json", "text", "ndjson"] as const;
@@ -1429,12 +1430,17 @@ function parseTextJsonOutput(value: string): "text" | "json" {
 
 async function handleWorkflow(args: string[]): Promise<number> {
   const [sub, ...rest] = args;
-  const client = await openClient();
+  let client: DaemonClient | null = null;
+  const getClient = async (): Promise<DaemonClient> => {
+    client ??= await openClient();
+    return client;
+  };
   switch (sub) {
     case "save": {
       const parsed = parseWorkflowSaveArgs(rest);
       if (!parsed.name) return usage("workflow needs save <name> [workflow.ts]");
       const captured = await readWorkflowSource(parsed.file);
+      const client = await getClient();
       const saved = await client.saveWorkflow({
         name: parsed.name,
         source: captured.source,
@@ -1464,6 +1470,7 @@ async function handleWorkflow(args: string[]): Promise<number> {
     }
     case "list": {
       const parsed = parseWorkflowListArgs(rest);
+      const client = await getClient();
       const workflows = await client.listSavedWorkflows({
         includeDisabled: parsed.all,
         includeDeleted: parsed.all,
@@ -1476,7 +1483,9 @@ async function handleWorkflow(args: string[]): Promise<number> {
     case "show": {
       const parsed = parseWorkflowShowArgs(rest);
       if (!parsed.name) return usage("workflow needs show <name>");
-      if (parsed.source) return printWorkflowSource(client, parsed.name, parsed);
+      const client = await getClient();
+      if (parsed.source)
+        return printWorkflowSource(client, { kind: "saved", name: parsed.name }, parsed);
       const workflow = await client.getSavedWorkflow(parsed.name);
       if (!workflow) throw new Error(`saved workflow "${parsed.name}" does not exist`);
       if (parsed.output === "json") process.stdout.write(`${JSON.stringify(workflow, null, 2)}\n`);
@@ -1485,14 +1494,15 @@ async function handleWorkflow(args: string[]): Promise<number> {
     }
     case "source": {
       const parsed = parseWorkflowSourceArgs(rest);
-      if (!parsed.name) return usage("workflow needs source <name>");
-      return printWorkflowSource(client, parsed.name, parsed);
+      const client = await getClient();
+      return printWorkflowSource(client, parsed.selector, parsed);
     }
     case "run": {
       const parsed = parseWorkflowRunArgs(rest);
       if (!parsed.name) return usage("workflow needs run <name>");
       const output = parsed.output ?? "json";
       assertToolsAllowed("workflow run", parsed.tools, output, false);
+      const client = await getClient();
       const launched = await client.launchSavedWorkflow({
         ref: {
           name: parsed.name,
@@ -1521,6 +1531,7 @@ async function handleWorkflow(args: string[]): Promise<number> {
     case "enable": {
       const [name] = rest;
       if (!name) return usage(`workflow needs ${sub} <name>`);
+      const client = await getClient();
       process.stdout.write(
         `${JSON.stringify(await client.setSavedWorkflowDisabled(name, sub === "disable"))}\n`,
       );
@@ -1531,6 +1542,7 @@ async function handleWorkflow(args: string[]): Promise<number> {
       const [name, versionText] = rest;
       if (!name || !versionText) return usage(`workflow needs ${sub} <name> <version>`);
       const version = parsePositiveInteger(versionText, "version");
+      const client = await getClient();
       process.stdout.write(
         `${JSON.stringify(await client.setSavedWorkflowVersionEnabled(name, version, sub === "enable-version"))}\n`,
       );
@@ -1541,6 +1553,7 @@ async function handleWorkflow(args: string[]): Promise<number> {
       if (!name || !versionText)
         return usage("workflow needs deprecate <name> <version> [message]");
       const version = parsePositiveInteger(versionText, "version");
+      const client = await getClient();
       process.stdout.write(
         `${JSON.stringify(await client.deprecateSavedWorkflowVersion({ name, version, message: message.join(" ") || null }))}\n`,
       );
@@ -1555,6 +1568,7 @@ async function handleWorkflow(args: string[]): Promise<number> {
         return usage(
           `workflow needs ${sub} <name> ${sub === "delete-version" ? "<version> " : ""}--yes`,
         );
+      const client = await getClient();
       if (sub === "delete")
         process.stdout.write(`${JSON.stringify(await client.deleteSavedWorkflow(name))}\n`);
       else {
@@ -1679,25 +1693,63 @@ function parseWorkflowShowArgs(args: string[]): {
 }
 
 function parseWorkflowSourceArgs(args: string[]): {
-  name?: string;
+  selector:
+    | { kind: "saved"; name: string }
+    | { kind: "run"; runId: string }
+    | { kind: "definition"; definitionHash: string };
   version?: number | "latest";
   file?: string;
   all?: boolean;
-  output?: "text" | "json";
+  output: "text" | "json";
 } {
-  const out: ReturnType<typeof parseWorkflowSourceArgs> = {};
+  let version: number | "latest" | undefined;
+  let file: string | undefined;
+  let all = false;
+  let output: "text" | "json" = "text";
+  let runId: string | undefined;
+  let definitionHash: string | undefined;
   const positional: string[] = [];
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i] as string;
     if (arg === "--version")
-      out.version = parseWorkflowVersion(requireFlagValue(args, i++, "--version"));
-    else if (arg === "--file") out.file = requireFlagValue(args, i++, "--file");
-    else if (arg === "--all") out.all = true;
+      version = parseWorkflowVersion(requireFlagValue(args, i++, "--version"));
+    else if (arg === "--file") file = requireFlagValue(args, i++, "--file");
+    else if (arg === "--all") all = true;
+    else if (arg === "--run") runId = requireFlagValue(args, i++, "--run");
+    else if (arg === "--definition") definitionHash = requireFlagValue(args, i++, "--definition");
+    else if (arg === "--output")
+      output = parseTextJsonOutput(requireFlagValue(args, i++, "--output"));
     else if (arg.startsWith("--")) throw new Error(`unknown workflow source flag ${arg}`);
     else positional.push(arg);
   }
-  out.name = positional[0];
-  return out;
+  if (file !== undefined && all) throw new Error("--file and --all are mutually exclusive");
+  if (runId !== undefined && runId.length === 0) {
+    throw new Error("workflow source --run needs a non-empty run id");
+  }
+  if (definitionHash !== undefined && !WORKFLOW_DEFINITION_HASH_RE.test(definitionHash)) {
+    throw new Error("workflow definition hash must match wf_sha256_<64 hex chars>");
+  }
+  const selectorCount =
+    positional.length + (runId !== undefined ? 1 : 0) + (definitionHash !== undefined ? 1 : 0);
+  if (selectorCount === 0)
+    throw new Error("workflow source requires a saved name, --run, or --definition");
+  if (selectorCount !== 1) throw new Error("workflow source accepts exactly one selector");
+  if (version !== undefined && (runId !== undefined || definitionHash !== undefined)) {
+    throw new Error("--version is only valid with a saved workflow name");
+  }
+  const selector =
+    runId !== undefined
+      ? ({ kind: "run", runId } as const)
+      : definitionHash !== undefined
+        ? ({ kind: "definition", definitionHash } as const)
+        : ({ kind: "saved", name: positional[0] as string } as const);
+  return {
+    selector,
+    ...(version !== undefined ? { version } : {}),
+    ...(file !== undefined ? { file } : {}),
+    ...(all ? { all } : {}),
+    output,
+  };
 }
 
 function parseWorkflowRunArgs(args: string[]): {
@@ -1743,15 +1795,28 @@ function parseWorkflowRunArgs(args: string[]): {
 
 async function printWorkflowSource(
   client: DaemonClient,
-  name: string,
+  selector:
+    | { kind: "saved"; name: string }
+    | { kind: "run"; runId: string }
+    | { kind: "definition"; definitionHash: string },
   opts: { version?: number | "latest"; file?: string; all?: boolean; output?: "text" | "json" },
 ): Promise<number> {
-  const source = await client.getSavedWorkflowSource({
-    name,
-    version: opts.version,
-    file: opts.file,
-    all: opts.all,
-  });
+  const source =
+    selector.kind === "saved"
+      ? await client.getSavedWorkflowSource({
+          name: selector.name,
+          version: opts.version,
+          file: opts.file,
+          all: opts.all,
+        })
+      : await client.getWorkflowDefinitionSource({
+          lookup:
+            selector.kind === "run"
+              ? { kind: "run", runId: selector.runId }
+              : { kind: "definition", definitionHash: selector.definitionHash },
+          ...(opts.file !== undefined ? { file: opts.file } : {}),
+          ...(opts.all !== undefined ? { all: opts.all } : {}),
+        });
   if (opts.output === "json") process.stdout.write(`${JSON.stringify(source, null, 2)}\n`);
   else if (source.files.length === 1 && !opts.all)
     process.stdout.write(source.files[0]?.code ?? "");

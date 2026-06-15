@@ -7,6 +7,10 @@
   for saving captured workflow bundles as `name@version`, listing/showing
   metadata, printing exact stored source, launching pinned saved versions, and
   enable/disable/deprecate/tombstone lifecycle operations.
+- `keel workflow source` can now display exact retained workflow definition
+  source by `--run <runId>` or admin-only `--definition <wf_sha256_hash>`, with
+  text and JSON output. Launch-minted run capabilities now include explicit
+  `run:source`; existing run capabilities without that action fail closed.
 - Saved-ref schedule creation (`keel schedule put <name> --workflow saved-name`)
   resolves the saved version once at schedule creation and persists the immutable
   definition hash. Schedule creation remains admin-only.

@@ -140,7 +140,7 @@ bun src/cli/keel.ts <command> [args]
 | `output <runId> [--output json\|text]` | Print the terminal workflow output. |
 | `report <runId> [--output json\|text]` | Print a journaled per-node result digest. |
 | `list [--output text\|json]` | List runs as an aligned table or JSON envelope. Requires admin. |
-| `workflow save/list/show/source/run/disable/enable/...` | Manage saved workflow names and immutable versions. |
+| `workflow save/list/show/source/run/disable/enable/...` | Manage saved workflow names and immutable versions, and display retained workflow definition source. |
 | `schedule put <name> [workflow.ts\|--workflow saved-name] --interval-ms ms [--target dir]` | Create or replace a pinned workflow schedule. Requires admin. |
 | `profiles list/get/set/delete/check ...` | Manage daemon-wide persistent agent profiles. Requires admin. |
 | `settings list/get/set/unset/check ...` | Manage typed daemon settings. Requires admin. |
@@ -1164,6 +1164,8 @@ keel workflow save review-loop ./review.workflow.ts \
 keel workflow list --output json
 keel workflow show review-loop --output text
 keel workflow source review-loop --all
+keel workflow source --run run_123 --output json
+keel workflow source --definition wf_sha256_<64-hex-chars> --all
 keel workflow run review-loop --input '{"n":3}' --allow-deprecated
 keel workflow disable review-loop
 keel workflow enable review-loop
@@ -1177,15 +1179,50 @@ resolves to the highest enabled, non-deprecated, non-deleted version. Deprecated
 versions require an explicit version or `--allow-deprecated`; disabled or deleted
 rows are not launchable.
 
-`workflow source` prints exact stored TypeScript source. Single-file definitions
-default to the entry file; `--all` prints every captured module with stable
-`--- path` headers. The command never reads the original client path or the
-materialized cache.
+`workflow source` prints exact stored TypeScript source from retained
+`workflow_definitions` rows. It supports exactly one selector:
+
+```bash
+keel workflow source <saved-name> [--version N|latest] [--file path|--all] [--output text|json]
+keel workflow source --run <runId> [--file path|--all] [--output text|json]
+keel workflow source --definition <wf_sha256_hash> [--file path|--all] [--output text|json]
+```
+
+Single-file definitions default to the entry file; `--all` prints every captured
+module with stable `--- path` headers. `--file` selects one exact POSIX bundle
+path and is mutually exclusive with `--all`. A bare positional
+`wf_sha256_...` is treated as a saved workflow name; direct hash lookup requires
+`--definition` and the hash must match `wf_sha256_<64 hex chars>`.
+
+`--output json` for saved-name lookup returns `SavedWorkflowSourceView`. Run and
+definition selectors return:
+
+```ts
+interface WorkflowDefinitionSourceView {
+  kind: "workflow-definition-source";
+  lookup:
+    | { kind: "run"; runId: string }
+    | { kind: "definition"; definitionHash: string };
+  definitionHash: string;
+  definitionName: string | null;
+  createdAtMs: number;
+  entry: string;
+  files: Array<{ path: string; code: string; entry: boolean }>;
+}
+```
+
+Source display is a journal view. It never reads the original client path,
+branch/worktree paths, managed workspaces, or the materialized definition cache,
+and it does not redact source bytes. Keep raw secrets out of workflow source and
+helper modules.
 
 Auth: `workflow:save` can save versions and update non-delete lifecycle metadata
 for its scoped workflow. `workflow:run` can launch saved workflows. `workflow:read`
-can show/source scoped workflows. `workflow list`, `delete`, `delete-version`,
-and all schedule creation remain admin-only in v1.
+can show/source scoped saved workflows. Launch-minted run capabilities include
+`run:source` for `--run` source lookup; older run capabilities without
+`run:source` fail closed. Direct `--definition` lookup is admin-only because it
+is daemon-wide. `workflow list`, `delete`, `delete-version`, and all schedule
+creation remain admin-only in v1.
 
 ## API Reference
 
@@ -1230,6 +1267,13 @@ interface KeelApi {
     all?: boolean;
     allowDeprecated?: boolean;
   }): SavedWorkflowSourceView;
+  getWorkflowDefinitionSource(req: {
+    lookup:
+      | { kind: "run"; runId: string }
+      | { kind: "definition"; definitionHash: string };
+    file?: string;
+    all?: boolean;
+  }): WorkflowDefinitionSourceView;
   launchSavedWorkflow(req: {
     ref: { name: string; version?: number | "latest"; allowDeprecated?: boolean };
     input?: unknown;

@@ -323,6 +323,17 @@ export class KeelDaemon {
         );
         return this.api.getSavedWorkflowSource(p as never);
       }
+      case "getWorkflowDefinitionSource": {
+        const lookup = (p.lookup ?? {}) as Record<string, unknown>;
+        if (lookup.kind === "run") {
+          this.authorizeRun(conn, lookup.runId as string, "run:source");
+        } else if (lookup.kind === "definition") {
+          this.authorizeAdmin(conn);
+        } else {
+          throw new Error("workflow definition source lookup must be run or definition");
+        }
+        return this.api.getWorkflowDefinitionSource(p as never);
+      }
       case "launchSavedWorkflow": {
         const ref = (p.ref ?? {}) as SavedWorkflowRef;
         this.authorizeWorkflow(

@@ -693,9 +693,10 @@ describe("daemon multi-client over the socket", () => {
 describe("capability auth", () => {
   test("a run capability scopes access to one run; admin is required for daemon-wide list", async () => {
     const socketPath = join(dir, "auth.sock");
+    const dbPath = join(dir, "auth.db");
     const daemon = new KeelDaemon({
       socketPath,
-      dbPath: join(dir, "auth.db"),
+      dbPath,
       agents: new AgentProviderRegistry().register(new MockProvider()),
       adminToken: ADMIN_TOKEN,
     });
@@ -727,7 +728,19 @@ describe("capability auth", () => {
       const scoped = await DaemonClient.connect(socketPath);
       await scoped.authenticate(first.capability as string);
       expect((await scoped.getRun(first.runId))?.status).toBe("finished");
+      const firstSource = await scoped.getWorkflowDefinitionSource({
+        lookup: { kind: "run", runId: first.runId },
+      });
+      expect(firstSource.files[0]?.entry).toBe(true);
       await expect(scoped.getRun(second.runId)).rejects.toThrow(/different resource/);
+      await expect(
+        scoped.getWorkflowDefinitionSource({ lookup: { kind: "run", runId: second.runId } }),
+      ).rejects.toThrow(/different resource/);
+      await expect(
+        scoped.getWorkflowDefinitionSource({
+          lookup: { kind: "definition", definitionHash: firstSource.definitionHash },
+        }),
+      ).rejects.toThrow(/admin/);
       await expect(scoped.getBlockage(second.runId)).rejects.toThrow(/different resource/);
       await expect(scoped.waitForRun(second.runId)).rejects.toThrow(/different resource/);
       await expect(scoped.resumeRun(second.runId)).rejects.toThrow(/different resource/);
@@ -751,17 +764,52 @@ describe("capability auth", () => {
         scoped.checkSetting({ key: "agent.defaultTimeoutMs", value: 7200000 }),
       ).rejects.toThrow(/admin/);
 
+      const capStore = JournalStore.open(dbPath);
+      const readOnlyToken = "kc_run_read_only_source";
+      try {
+        const capRow = capStore.getCapabilityByHash(
+          hashCapabilityToken(first.capability as string),
+        );
+        expect(JSON.parse(capRow?.actionsJson ?? "[]")).toContain("run:source");
+        capStore.putCapability({
+          id: "cap_run_read_only_source",
+          secretHash: hashCapabilityToken(readOnlyToken),
+          resourceJson: JSON.stringify({ kind: "run", runId: first.runId }),
+          actionsJson: JSON.stringify(["run:read"]),
+          createdAtMs: 1,
+          expiresAtMs: null,
+          revokedAtMs: null,
+          note: null,
+        });
+      } finally {
+        capStore.close();
+      }
+      const readOnly = await DaemonClient.connect(socketPath);
+      await readOnly.authenticate(readOnlyToken);
+      expect((await readOnly.getRun(first.runId))?.runId).toBe(first.runId);
+      await expect(
+        readOnly.getWorkflowDefinitionSource({ lookup: { kind: "run", runId: first.runId } }),
+      ).rejects.toThrow(/run:source/);
+
       const admin = await DaemonClient.connect(socketPath);
       await admin.authenticate(ADMIN_TOKEN);
       expect((await admin.listRuns()).map((r) => r.runId).sort()).toEqual(
         [first.runId, second.runId].sort(),
       );
+      expect(
+        (
+          await admin.getWorkflowDefinitionSource({
+            lookup: { kind: "definition", definitionHash: firstSource.definitionHash },
+          })
+        ).definitionHash,
+      ).toBe(firstSource.definitionHash);
       expect(await admin.getSetting("agent.defaultTimeoutMs")).toMatchObject({
         key: "agent.defaultTimeoutMs",
         value: 3600000,
       });
       launcher.close();
       scoped.close();
+      readOnly.close();
       admin.close();
     } finally {
       daemon.stop();

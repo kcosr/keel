@@ -9,6 +9,7 @@ import type {
   DeleteAgentProfileRequest,
   DeleteSettingRequest,
   EventEnvelope,
+  GetWorkflowDefinitionSourceRequest,
   LaunchRequest,
   LaunchSavedWorkflowRequest,
   PutAgentProfileRequest,
@@ -26,6 +27,7 @@ import type {
   SavedWorkflowView,
   SettingView,
   SettingsDiagnostic,
+  WorkflowDefinitionSourceView,
   WorkspaceGcResult,
 } from "../rpc/contract.ts";
 import type { RunProjection, RunReport, RunSummary } from "../rpc/projection.ts";
@@ -155,6 +157,11 @@ export class DaemonClient {
     allowDeprecated?: boolean;
   }): Promise<SavedWorkflowSourceView> {
     return this.rpc("getSavedWorkflowSource", req);
+  }
+  getWorkflowDefinitionSource(
+    req: GetWorkflowDefinitionSourceRequest,
+  ): Promise<WorkflowDefinitionSourceView> {
+    return this.rpc("getWorkflowDefinitionSource", req);
   }
   launchSavedWorkflow(req: LaunchSavedWorkflowRequest): Promise<RunLaunchResult> {
     return this.rpc("launchSavedWorkflow", {

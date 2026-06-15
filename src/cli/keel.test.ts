@@ -1252,10 +1252,86 @@ describe("keel CLI", () => {
         expect(source.code).toBe(0);
         expect(source.stdout).toContain("--- chain.workflow.ts");
         expect(source.stdout).toContain("export default async function chain");
+        const savedJson = await runCli(
+          ["workflow", "source", "review-loop", "--output", "json"],
+          dir,
+          env,
+        );
+        expect(savedJson.code).toBe(0);
+        expect(JSON.parse(savedJson.stdout)).toMatchObject({
+          name: "review-loop",
+          version: 1,
+          definitionHash: payload.definitionHash,
+        });
 
         const run = await runCli(["workflow", "run", "review-loop"], dir, env);
         expect(run.code).toBe(0);
-        expect(JSON.parse(run.stdout).output).toBe(2);
+        const runPayload = JSON.parse(run.stdout) as { runId: string; output: unknown };
+        expect(runPayload.output).toBe(2);
+        const runSource = await runCli(["workflow", "source", "--run", runPayload.runId], dir, env);
+        expect(runSource.code).toBe(0);
+        expect(runSource.stdout).toContain("export default async function chain");
+        const runSourceJson = await runCli(
+          ["workflow", "source", "--run", runPayload.runId, "--output", "json"],
+          dir,
+          env,
+        );
+        expect(runSourceJson.code).toBe(0);
+        expect(JSON.parse(runSourceJson.stdout)).toMatchObject({
+          kind: "workflow-definition-source",
+          lookup: { kind: "run", runId: runPayload.runId },
+          definitionHash: payload.definitionHash,
+        });
+        const definitionSource = await runCli(
+          ["workflow", "source", "--definition", payload.definitionHash, "--all"],
+          dir,
+          env,
+        );
+        expect(definitionSource.code).toBe(0);
+        expect(definitionSource.stdout).toContain("--- chain.workflow.ts");
+        const definitionSourceJson = await runCli(
+          ["workflow", "source", "--definition", payload.definitionHash, "--output", "json"],
+          dir,
+          env,
+        );
+        expect(definitionSourceJson.code).toBe(0);
+        expect(JSON.parse(definitionSourceJson.stdout)).toMatchObject({
+          kind: "workflow-definition-source",
+          lookup: { kind: "definition", definitionHash: payload.definitionHash },
+          definitionName: "chain.workflow.ts",
+        });
+        const conflict = await runCli(
+          ["workflow", "source", "review-loop", "--run", runPayload.runId],
+          dir,
+          env,
+        );
+        expect(conflict.code).toBe(1);
+        expect(conflict.stderr).toContain("workflow source accepts exactly one selector");
+        const invalidHash = await runCli(
+          ["workflow", "source", "--definition", "wf_sha256_nothex"],
+          dir,
+          env,
+        );
+        expect(invalidHash.code).toBe(1);
+        expect(invalidHash.stderr).toContain(
+          "workflow definition hash must match wf_sha256_<64 hex chars>",
+        );
+        const invalidVersion = await runCli(
+          ["workflow", "source", "--run", runPayload.runId, "--version", "1"],
+          dir,
+          env,
+        );
+        expect(invalidVersion.code).toBe(1);
+        expect(invalidVersion.stderr).toContain(
+          "--version is only valid with a saved workflow name",
+        );
+        const invalidFileAll = await runCli(
+          ["workflow", "source", "review-loop", "--file", "chain.workflow.ts", "--all"],
+          dir,
+          env,
+        );
+        expect(invalidFileAll.code).toBe(1);
+        expect(invalidFileAll.stderr).toContain("--file and --all are mutually exclusive");
 
         const deprecated = await runCli(
           ["workflow", "deprecate", "review-loop", "1", "audit"],
@@ -1522,6 +1598,38 @@ describe("keel CLI", () => {
       const runTools = await runCli(["run", "--tools", "wf.ts"], dir, env);
       expect(runTools.code).toBe(1);
       expect(runTools.stderr).toContain("--tools is only available for attached run --output text");
+
+      const workflowSourceMissing = await runCli(["workflow", "source"], dir, env);
+      expect(workflowSourceMissing.code).toBe(1);
+      expect(workflowSourceMissing.stderr).toContain(
+        "workflow source requires a saved name, --run, or --definition",
+      );
+
+      const workflowSourceInvalidHash = await runCli(
+        ["workflow", "source", "--definition", "wf_sha256_nothex"],
+        dir,
+        env,
+      );
+      expect(workflowSourceInvalidHash.code).toBe(1);
+      expect(workflowSourceInvalidHash.stderr).toContain(
+        "workflow definition hash must match wf_sha256_<64 hex chars>",
+      );
+
+      const workflowSourceEmptyHash = await runCli(
+        ["workflow", "source", "--definition", ""],
+        dir,
+        env,
+      );
+      expect(workflowSourceEmptyHash.code).toBe(1);
+      expect(workflowSourceEmptyHash.stderr).toContain(
+        "workflow definition hash must match wf_sha256_<64 hex chars>",
+      );
+
+      const workflowSourceEmptyRun = await runCli(["workflow", "source", "--run", ""], dir, env);
+      expect(workflowSourceEmptyRun.code).toBe(1);
+      expect(workflowSourceEmptyRun.stderr).toContain(
+        "workflow source --run needs a non-empty run id",
+      );
 
       const attached = await runCli(["launch", "--output", "json", "wf.ts"], dir, env);
       expect(attached.code).toBe(1);

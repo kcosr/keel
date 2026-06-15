@@ -175,15 +175,17 @@ describe("workflow definition snapshots", () => {
         [
           'import type { Only } from "./types";',
           'export type { Only } from "./types";',
+          'import type from "./type-default";',
           'import { unused } from "./unused";',
           'import "./side-effect";',
           'export { value } from "./re-export";',
           'export * from "./star";',
-          "export default async function wf() { return 1; }",
+          "export default async function wf() { return type; }",
           "",
         ].join("\n"),
       );
       writeFileSync(join(dir, "types.ts"), "export type Only = { n: number };\n");
+      writeFileSync(join(dir, "type-default.ts"), "export default 4;\n");
       writeFileSync(join(dir, "unused.ts"), "export const unused = 1;\n");
       writeFileSync(join(dir, "side-effect.ts"), "export const touched = true;\n");
       writeFileSync(join(dir, "re-export.ts"), "export const value = 2;\n");
@@ -193,7 +195,35 @@ describe("workflow definition snapshots", () => {
         "re-export.ts",
         "side-effect.ts",
         "star.ts",
+        "type-default.ts",
         "unused.ts",
+        "workflow.ts",
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("file capture ignores import-looking text and quotes inside regex literals", () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-snapshot-regex-"));
+    try {
+      const workflow = join(dir, "workflow.ts");
+      writeFileSync(
+        workflow,
+        'import { clean } from "./sanitize";\nexport default async () => clean("a");\n',
+      );
+      writeFileSync(
+        join(dir, "sanitize.ts"),
+        [
+          "export function clean(str: string) {",
+          '  return str.replace(/\'/g, "").replace(/"/g, "\\\\\\"").replace(/import x from "pkg"/g, "");',
+          "}",
+          "",
+        ].join("\n"),
+      );
+
+      expect(captureWorkflowBundleFromFile(workflow).modules.map((module) => module.path)).toEqual([
+        "sanitize.ts",
         "workflow.ts",
       ]);
     } finally {

@@ -114,7 +114,10 @@ function parseImportDeclaration(
     throw new Error(`dynamic import(...) is not allowed in workflow code: ${filename}`);
   }
   const first = readIdentifier(source, next);
-  if (first?.value === "type") return skipStatement(source, first.end, filename);
+  if (first?.value === "type") {
+    const afterType = readIdentifier(source, skipTrivia(source, first.end));
+    if (afterType?.value !== "from") return skipStatement(source, first.end, filename);
+  }
 
   const sideEffect = readStringLiteral(source, next);
   if (sideEffect) {
@@ -171,6 +174,10 @@ function findFromSpecifier(
       i = skipStringLiteral(source, i, filename);
       continue;
     }
+    if (ch === "/") {
+      i = skipRegexLiteral(source, i);
+      continue;
+    }
     i += 1;
   }
   return null;
@@ -187,6 +194,10 @@ function skipStatement(source: string, pos: number, filename: string): number {
     }
     if (ch === "/" && (source[i + 1] === "/" || source[i + 1] === "*")) {
       i = skipTrivia(source, i);
+      continue;
+    }
+    if (ch === "/") {
+      i = skipRegexLiteral(source, i);
       continue;
     }
     i += 1;
@@ -221,6 +232,7 @@ function skipTrivia(source: string, pos: number): number {
 function skipNonCodeToken(source: string, pos: number, filename: string): number {
   const ch = source[pos];
   if (ch === "'" || ch === '"' || ch === "`") return skipStringLiteral(source, pos, filename);
+  if (ch === "/") return skipRegexLiteral(source, pos);
   return pos + 1;
 }
 
@@ -264,4 +276,34 @@ function skipStringLiteral(source: string, pos: number, filename: string): numbe
     i += 1;
   }
   throw new Error(`could not parse workflow imports in ${filename}: unterminated string literal`);
+}
+
+function skipRegexLiteral(source: string, pos: number): number {
+  let i = pos + 1;
+  let inClass = false;
+  while (i < source.length) {
+    const ch = source[i];
+    if (ch === "\\") {
+      i += 2;
+      continue;
+    }
+    if (ch === "[") {
+      inClass = true;
+      i += 1;
+      continue;
+    }
+    if (ch === "]") {
+      inClass = false;
+      i += 1;
+      continue;
+    }
+    if (ch === "/" && !inClass) {
+      i += 1;
+      while (i < source.length && /[A-Za-z]/.test(source[i] as string)) i += 1;
+      return i;
+    }
+    if (ch === "\n" || ch === "\r") return pos + 1;
+    i += 1;
+  }
+  return pos + 1;
 }

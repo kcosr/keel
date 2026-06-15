@@ -63,7 +63,12 @@ export function workflowDefinitionSourceFiles(
       return { path: module.path, code: module.code, entry };
     });
     if (entryCount !== 1) throw new Error(`manifest entry ${manifest.entry} is missing`);
-    return { entry: manifest.entry, files };
+    const entryFile = files.find((file) => file.entry);
+    if (!entryFile) throw new Error(`manifest entry ${manifest.entry} is missing`);
+    const helpers = files
+      .filter((file) => !file.entry)
+      .sort((a, b) => a.path.localeCompare(b.path));
+    return { entry: manifest.entry, files: [entryFile, ...helpers] };
   } catch (err) {
     throw invalidDefinition(row.hash, err instanceof Error ? err.message : String(err));
   }

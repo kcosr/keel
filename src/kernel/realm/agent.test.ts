@@ -3,7 +3,16 @@
 // and crash consistency through the realm.
 
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { MockProvider } from "../../agents/mock.ts";
+import type {
+  AgentHooks,
+  AgentInvocation,
+  AgentProvider,
+  AgentResult,
+} from "../../agents/types.ts";
 import { AgentProviderRegistry } from "../../agents/types.ts";
 import { JournalStore } from "../../journal/store.ts";
 import { captureWorkflowFile } from "../../workflow-definitions/capture.ts";
@@ -12,10 +21,17 @@ import { RealmKernel } from "./realm-host.ts";
 const FIX = new URL("./fixtures/", import.meta.url);
 const reviewUrl = captureWorkflowFile(new URL("agent-review.workflow.ts", FIX).pathname);
 const singleUrl = captureWorkflowFile(new URL("agent-single.workflow.ts", FIX).pathname);
+const TASK_REVIEW = new URL("../../../workflows/task-review-guidance/", import.meta.url);
+const taskCodeReviewUrl = captureWorkflowFile(
+  new URL("code-review.workflow.ts", TASK_REVIEW).pathname,
+);
+const taskPlanReviewUrl = captureWorkflowFile(
+  new URL("plan-review.workflow.ts", TASK_REVIEW).pathname,
+);
 
 function kernel(
   store: JournalStore,
-  mock: MockProvider,
+  mock: AgentProvider,
   extra: Record<string, unknown> = {},
 ): RealmKernel {
   let id = 0;
@@ -27,6 +43,29 @@ function kernel(
     ...extra,
   });
 }
+
+class RecordingProvider implements AgentProvider {
+  readonly name = "mock";
+  readonly calls: AgentInvocation[] = [];
+
+  constructor(private readonly outputs: Record<string, unknown>) {}
+
+  async generate(invocation: AgentInvocation, _hooks: AgentHooks): Promise<AgentResult> {
+    this.calls.push(invocation);
+    const output = this.outputs[invocation.key];
+    if (output === undefined) {
+      throw new Error(`recording provider: no output for ${invocation.key}`);
+    }
+    return {
+      text: typeof output === "string" ? output : JSON.stringify(output),
+      transcript: [],
+    };
+  }
+}
+
+const mockProfiles = {
+  "claude-default": { provider: "mock" },
+};
 
 describe("ctx.agent — structured output + fan-out", () => {
   test("a fan-out of agents validates output and aggregates", async () => {
@@ -48,6 +87,245 @@ describe("ctx.agent — structured output + fan-out", () => {
     const rows = store.listJournalRows("run_0");
     const agents = rows.filter((r) => r.effectType === "effectful");
     expect(agents.map((r) => r.stableKey).sort()).toEqual(["review:auth", "review:net"]);
+  });
+});
+
+describe("task review guidance workflows", () => {
+  test("code review validates clean and changes-requested output with read-only tools", async () => {
+    const store = JournalStore.memory();
+    const target = mkdtempSync(join(tmpdir(), "keel-task-code-review-"));
+    const provider = new RecordingProvider({
+      review: {
+        status: "clean",
+        findings: [],
+        summary: "No findings.",
+      },
+    });
+    try {
+      const clean = await kernel(store, provider, { agentProfiles: mockProfiles }).run<{
+        status: string;
+        findings: unknown[];
+        summary: string;
+      }>(
+        taskCodeReviewUrl,
+        { repository: ".", task: "review", focus: ["capability"], maxFindings: 2 },
+        { name: "task-code-review", target },
+      );
+      expect(clean.status).toBe("finished");
+      expect(clean.output).toEqual({ status: "clean", findings: [], summary: "No findings." });
+      expect(provider.calls[0]?.toolPolicy).toBe("read-only");
+      expect(provider.calls[0]?.cwd).toBe(target);
+      expect(provider.calls[0]?.prompt).toContain(`Repository: ${target}`);
+      expect(provider.calls[0]?.prompt).toContain("code.capabilities");
+      expect(provider.calls[0]?.prompt).toContain("Advisory finding cap: 2");
+    } finally {
+      rmSync(target, { recursive: true, force: true });
+    }
+
+    const store2 = JournalStore.memory();
+    const provider2 = new RecordingProvider({
+      review: {
+        status: "changes-requested",
+        summary: "Needs fixes and does not exceed scope.",
+        findings: [
+          {
+            severity: "high",
+            file: "src/a.ts",
+            line: 12,
+            title: "Broken replay",
+            evidence: "The durable key changes between resumes.",
+            recommendation: "Keep the key stable.",
+          },
+          {
+            severity: "low",
+            title: "Missing docs",
+            evidence: "USAGE.md does not mention the output shape.",
+            recommendation: "Document the saved workflow behavior.",
+          },
+        ],
+      },
+    });
+    const changes = await kernel(store2, provider2, { agentProfiles: mockProfiles }).run<{
+      status: string;
+      findings: unknown[];
+      summary: string;
+    }>(
+      taskCodeReviewUrl,
+      { repository: process.cwd(), task: "review", maxFindings: 1 },
+      { name: "task-code-review", target: process.cwd() },
+    );
+    expect(changes.status).toBe("finished");
+    expect(changes.output?.status).toBe("changes-requested");
+    expect(changes.output?.findings).toHaveLength(2);
+    expect(changes.output?.summary).toContain("exceeding the advisory cap of 1");
+  });
+
+  test("code review retries structurally malformed output through the agent schema", async () => {
+    const store = JournalStore.memory();
+    const provider = new MockProvider({
+      responses: {
+        review: {
+          outputs: [
+            "{}",
+            JSON.stringify({
+              status: "clean",
+              findings: [],
+              summary: "Valid after retry.",
+            }),
+          ],
+        },
+      },
+    });
+    const handle = await kernel(store, provider, { agentProfiles: mockProfiles }).run<{
+      status: string;
+      findings: unknown[];
+      summary: string;
+    }>(
+      taskCodeReviewUrl,
+      { repository: process.cwd(), task: "review" },
+      { name: "task-code-review", target: process.cwd() },
+    );
+    expect(handle.status).toBe("finished");
+    expect(handle.output).toEqual({
+      status: "clean",
+      findings: [],
+      summary: "Valid after retry.",
+    });
+  });
+
+  test("code review fails malformed reviewer output in workflow validation", async () => {
+    const store = JournalStore.memory();
+    const provider = new RecordingProvider({
+      review: {
+        status: "changes-requested",
+        summary: "bad",
+        findings: [],
+      },
+    });
+    await expect(
+      kernel(store, provider, { agentProfiles: mockProfiles }).run(
+        taskCodeReviewUrl,
+        { repository: process.cwd(), task: "review" },
+        { name: "task-code-review", target: process.cwd() },
+      ),
+    ).rejects.toThrow(/requires one or more findings/);
+    expect(store.getRun("run_0")?.status).toBe("failed");
+  });
+
+  test("plan review uses read-only by default and workspace-write only for append mode", async () => {
+    const readonlyStore = JournalStore.memory();
+    const readonlyProvider = new RecordingProvider({
+      review: {
+        status: "clean",
+        findings: [],
+        summary: "Plan is ready.",
+      },
+    });
+    const readonlyRun = await kernel(readonlyStore, readonlyProvider, {
+      agentProfiles: mockProfiles,
+    }).run<{ appended: boolean }>(
+      taskPlanReviewUrl,
+      { specPath: ".specs/plan.md", request: "review plan", focus: ["migrations"] },
+      { name: "task-plan-review", target: process.cwd() },
+    );
+    expect(readonlyRun.status).toBe("finished");
+    expect(readonlyRun.output?.appended).toBe(false);
+    expect(readonlyProvider.calls.map((call) => call.toolPolicy)).toEqual(["read-only"]);
+    expect(readonlyProvider.calls[0]?.prompt).toContain("plan.migrations");
+
+    const appendStore = JournalStore.memory();
+    const appendProvider = new RecordingProvider({
+      review: {
+        status: "clean",
+        findings: [],
+        summary: "Correspondence appended.",
+      },
+      "confirm-correspondence": {
+        present: true,
+        summary: "Header found.",
+      },
+    });
+    const appendRun = await kernel(appendStore, appendProvider, {
+      agentProfiles: mockProfiles,
+    }).run<{ appended: boolean }>(
+      taskPlanReviewUrl,
+      {
+        specPath: ".specs/plan.md",
+        request: "review plan",
+        appendCorrespondence: true,
+        correspondenceHeader: "### 2026-06-15T00:00:00.000Z - Reviewer: mock",
+      },
+      { name: "task-plan-review", target: process.cwd() },
+    );
+    expect(appendRun.status).toBe("finished");
+    expect(appendRun.output?.appended).toBe(true);
+    expect(appendProvider.calls.map((call) => call.toolPolicy)).toEqual([
+      "workspace-write",
+      "read-only",
+    ]);
+    expect(appendProvider.calls[0]?.prompt).toContain(
+      "Correspondence header to add exactly: ### 2026-06-15T00:00:00.000Z - Reviewer: mock",
+    );
+    expect(appendProvider.calls[1]?.prompt).toContain("under a ## Correspondence section");
+  });
+
+  test("plan review append mode requires and confirms correspondence", async () => {
+    const missingHeaderStore = JournalStore.memory();
+    await expect(
+      kernel(missingHeaderStore, new RecordingProvider({}), { agentProfiles: mockProfiles }).run(
+        taskPlanReviewUrl,
+        { specPath: ".specs/plan.md", request: "review", appendCorrespondence: true },
+        { name: "task-plan-review", target: process.cwd() },
+      ),
+    ).rejects.toThrow(/requires correspondenceHeader/);
+
+    const emptySpecPathStore = JournalStore.memory();
+    await expect(
+      kernel(emptySpecPathStore, new RecordingProvider({}), { agentProfiles: mockProfiles }).run(
+        taskPlanReviewUrl,
+        { specPath: " ", request: "review" },
+        { name: "task-plan-review", target: process.cwd() },
+      ),
+    ).rejects.toThrow(/specPath must be non-empty/);
+
+    const escapingSpecPathStore = JournalStore.memory();
+    await expect(
+      kernel(escapingSpecPathStore, new RecordingProvider({}), { agentProfiles: mockProfiles }).run(
+        taskPlanReviewUrl,
+        {
+          specPath: "../outside.md",
+          request: "review",
+          appendCorrespondence: true,
+          correspondenceHeader: "### 2026-06-15T00:00:00.000Z - Reviewer: mock",
+        },
+        { name: "task-plan-review", target: process.cwd() },
+      ),
+    ).rejects.toThrow(/specPath must stay inside the run target/);
+
+    const confirmationStore = JournalStore.memory();
+    const provider = new RecordingProvider({
+      review: {
+        status: "clean",
+        findings: [],
+        summary: "Correspondence appended.",
+      },
+      "confirm-correspondence": {
+        present: false,
+        summary: "Header missing.",
+      },
+    });
+    await expect(
+      kernel(confirmationStore, provider, { agentProfiles: mockProfiles }).run(
+        taskPlanReviewUrl,
+        {
+          specPath: ".specs/plan.md",
+          request: "review",
+          appendCorrespondence: true,
+          correspondenceHeader: "### 2026-06-15T00:00:00.000Z - Reviewer: mock",
+        },
+        { name: "task-plan-review", target: process.cwd() },
+      ),
+    ).rejects.toThrow(/correspondence confirmation failed/);
   });
 });
 

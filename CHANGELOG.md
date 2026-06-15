@@ -36,6 +36,10 @@
   preserves reviewer correspondence while the invoking agent owns the main spec,
   and a fully orchestrated `spec-author-review-loop` that loops a spec creator
   with a correspondence reviewer.
+- Reusable `workflows/task-review-guidance/` package with shared TypeScript
+  checklist/rubric/prompt helpers, one-shot `task-code-review` and
+  `task-plan-review` saved workflow packaging examples, strict in-workflow
+  review-output validation, and captured helper source display coverage.
 - `ctx.agentSession({ key, ... }).turn({ key, prompt, ... })` for realm
   workflows that need one logical Pi/Codex or Claude backend conversation across
   multiple durable turns in the same run. Session runs fail closed for

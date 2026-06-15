@@ -47,7 +47,13 @@ The body runs in a sandbox. Stay inside it or the run is rejected:
   rubrics, task lists, and render functions. Keep them pure and deterministic,
   and keep raw secrets out of workflow source and helper modules.
 - Saved workflows capture those helper modules as TypeScript source in the
-  immutable bundle. Do not import agent-pack YAML or mutable task state directly.
+  immutable bundle. Prefer these Keel-native helpers for reusable guidance. Do
+  not import agent-pack YAML, mutable task state, task-note files, or external
+  runtime guidance packages.
+- Bump and save a new workflow version when prompt text, reusable rubrics,
+  severity rules, output contracts, or workflow input/output contracts change.
+  Pure helper refactors that render byte-identical prompts can keep the same
+  saved version.
 - **A `ctx.step` callback must use only its `inputs`** — don't read outer variables
   inside a `step` function; pass them in through `inputs`. (Agent prompts can use
   any variable freely.)

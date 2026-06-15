@@ -1173,6 +1173,35 @@ keel workflow deprecate review-loop 2 "use v3"
 keel workflow delete-version review-loop 1 --yes
 ```
 
+Multi-file workflow packages are saved the same way. For the reusable task
+review guidance package:
+
+```bash
+keel workflow save task-code-review workflows/task-review-guidance/code-review.workflow.ts --version 1
+keel workflow save task-plan-review workflows/task-review-guidance/plan-review.workflow.ts --version 1
+keel workflow run task-code-review --version 1 \
+  --input '{"repository":".","task":"review the current change"}'
+keel workflow source task-plan-review --version 1 --all
+```
+
+The `workflow source --all` text output lists captured files with one stable
+header per file. The entry file appears first, followed by helper paths in
+lexical order:
+
+```text
+--- plan-review.workflow.ts
+...
+--- guidance/checklist.ts
+...
+--- guidance/finding.ts
+...
+```
+
+For scripts, use `--output json` and read `files`, an array of `{ path, code,
+entry }` objects in the same order. Saved workflow source reads the registry
+bundle; path-based launch previews and new saves read the current filesystem
+capture.
+
 Names must be lowercase identifiers such as `review-loop`; `wf_` and
 `wf_sha256...` prefixes are reserved for definition hashes. Omitting a version
 resolves to the highest enabled, non-deprecated, non-deleted version. Deprecated
@@ -1189,8 +1218,9 @@ keel workflow source --definition <wf_sha256_hash> [--file path|--all] [--output
 ```
 
 Single-file definitions default to the entry file; `--all` prints every captured
-module with stable `--- path` headers. `--file` selects one exact POSIX bundle
-path and is mutually exclusive with `--all`. A bare positional
+module with stable `--- path` headers, entry first and then non-entry files in
+lexical order. `--file` selects one exact POSIX bundle path and is mutually
+exclusive with `--all`. A bare positional
 `wf_sha256_...` is treated as a saved workflow name; direct hash lookup requires
 `--definition` and the hash must match `wf_sha256_<64 hex chars>`.
 

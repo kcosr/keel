@@ -167,6 +167,59 @@ describe("workflow definition snapshots", () => {
     }
   });
 
+  test("task review guidance workflows capture all helper modules", () => {
+    const workflow = resolve(
+      import.meta.dir,
+      "..",
+      "..",
+      "workflows",
+      "task-review-guidance",
+      "code-review.workflow.ts",
+    );
+    const captured = captureWorkflowBundleFromFile(workflow);
+    expect(captured.entry).toBe("code-review.workflow.ts");
+    expect(captured.modules.map((module) => module.path)).toEqual([
+      "code-review.workflow.ts",
+      "guidance/checklist.ts",
+      "guidance/finding.ts",
+      "guidance/prompt.ts",
+      "guidance/rubric.ts",
+      "guidance/types.ts",
+    ]);
+
+    const planWorkflow = resolve(
+      import.meta.dir,
+      "..",
+      "..",
+      "workflows",
+      "task-review-guidance",
+      "plan-review.workflow.ts",
+    );
+    const store = JournalStore.memory();
+    try {
+      const { snapshot } = snapshotWorkflowSource(store, captureWorkflowFile(planWorkflow).source, {
+        name: "task-plan-review",
+        nowMs: 1,
+      });
+      const row = store.getWorkflowDefinition(snapshot.hash);
+      expect(row).not.toBeNull();
+      expect(
+        workflowDefinitionSourceSelection(row as NonNullable<typeof row>, { all: true }).files.map(
+          (file) => file.path,
+        ),
+      ).toEqual([
+        "plan-review.workflow.ts",
+        "guidance/checklist.ts",
+        "guidance/finding.ts",
+        "guidance/prompt.ts",
+        "guidance/rubric.ts",
+        "guidance/types.ts",
+      ]);
+    } finally {
+      store.close();
+    }
+  });
+
   test("file capture includes static value and side-effect imports but excludes type-only edges", () => {
     const dir = mkdtempSync(join(tmpdir(), "keel-snapshot-import-kinds-"));
     try {
@@ -624,12 +677,12 @@ describe("workflow definition snapshots", () => {
       expect(
         workflowDefinitionSourceSelection(row as NonNullable<typeof row>, { all: true }).files,
       ).toEqual([
-        { path: "shared/helper.ts", code: "export const value = 1;\n", entry: false },
         {
           path: "workflows/main.workflow.ts",
           code: 'import { value } from "../shared/helper";\nexport default async () => value;\n',
           entry: true,
         },
+        { path: "shared/helper.ts", code: "export const value = 1;\n", entry: false },
       ]);
       expect(
         workflowDefinitionSourceSelection(row as NonNullable<typeof row>, {

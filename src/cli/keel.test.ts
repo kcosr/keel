@@ -37,6 +37,9 @@ const FIX = new URL("../kernel/realm/fixtures/", import.meta.url);
 const chainUrl = new URL("chain.workflow.ts", FIX).pathname;
 const flakyUrl = new URL("flaky.workflow.ts", FIX).pathname;
 const gateUrl = new URL("gate.workflow.ts", FIX).pathname;
+const TASK_REVIEW = new URL("../../workflows/task-review-guidance/", import.meta.url);
+const taskCodeReviewUrl = new URL("code-review.workflow.ts", TASK_REVIEW).pathname;
+const taskPlanReviewUrl = new URL("plan-review.workflow.ts", TASK_REVIEW).pathname;
 const DAEMON_TEST_TIMEOUT_MS = 20_000;
 
 async function runCli(
@@ -1263,6 +1266,52 @@ describe("keel CLI", () => {
           version: 1,
           definitionHash: payload.definitionHash,
         });
+
+        const codeReviewSaved = await runCli(
+          ["workflow", "save", "task-code-review", taskCodeReviewUrl, "--version", "1"],
+          dir,
+          env,
+        );
+        expect(codeReviewSaved.code).toBe(0);
+        const planReviewSaved = await runCli(
+          ["workflow", "save", "task-plan-review", taskPlanReviewUrl, "--version", "1"],
+          dir,
+          env,
+        );
+        expect(planReviewSaved.code).toBe(0);
+        const planSource = await runCli(
+          ["workflow", "source", "task-plan-review", "--version", "1", "--all"],
+          dir,
+          env,
+        );
+        expect(planSource.code).toBe(0);
+        const planFiles = [...planSource.stdout.matchAll(/^--- (.+)$/gm)].map((match) => match[1]);
+        expect(planFiles).toEqual([
+          "plan-review.workflow.ts",
+          "guidance/checklist.ts",
+          "guidance/finding.ts",
+          "guidance/prompt.ts",
+          "guidance/rubric.ts",
+          "guidance/types.ts",
+        ]);
+        const codeSourceJson = await runCli(
+          ["workflow", "source", "task-code-review", "--version", "1", "--all", "--output", "json"],
+          dir,
+          env,
+        );
+        expect(codeSourceJson.code).toBe(0);
+        expect(
+          (JSON.parse(codeSourceJson.stdout) as { files: Array<{ path: string }> }).files.map(
+            (file) => file.path,
+          ),
+        ).toEqual([
+          "code-review.workflow.ts",
+          "guidance/checklist.ts",
+          "guidance/finding.ts",
+          "guidance/prompt.ts",
+          "guidance/rubric.ts",
+          "guidance/types.ts",
+        ]);
 
         const run = await runCli(["workflow", "run", "review-loop"], dir, env);
         expect(run.code).toBe(0);

@@ -96,7 +96,11 @@ export class KeelDaemon {
       definitionCacheRoot: opts.definitionCacheRoot ?? join(dirname(opts.dbPath), "definitions"),
       clock: this.clock,
     });
-    this.api = new InProcessKeel(this.kernel, this.store, this.eventHub);
+    this.assertNoDuplicateProfileSources();
+    this.api = new InProcessKeel(this.kernel, this.store, this.eventHub, {
+      ...(opts.agents ? { agents: opts.agents } : {}),
+      clock: this.clock,
+    });
     this.supervisor = new Supervisor({
       store: this.store,
       kernel: this.kernel,
@@ -464,6 +468,21 @@ export class KeelDaemon {
           ...(p.includePending === true ? { includePending: true } : {}),
           ...(p.includeRemoved === true ? { includeRemoved: true } : {}),
         });
+      case "listAgentProfiles":
+        this.authorizeAdmin(conn);
+        return this.api.listAgentProfiles(p as { source?: "all" | "catalog" | "programmatic" });
+      case "getAgentProfile":
+        this.authorizeAdmin(conn);
+        return this.api.getAgentProfile(p.name as string);
+      case "putAgentProfile":
+        this.authorizeAdmin(conn);
+        return this.api.putAgentProfile(p as never);
+      case "deleteAgentProfile":
+        this.authorizeAdmin(conn);
+        return this.api.deleteAgentProfile(p as never);
+      case "checkAgentProfile":
+        this.authorizeAdmin(conn);
+        return this.api.checkAgentProfile(p as never);
       case "gcDefinitions": {
         this.authorizeAdmin(conn);
         const ttlMs = typeof p.ttlMs === "number" ? p.ttlMs : definitionTtlMsFromEnv();
@@ -487,6 +506,17 @@ export class KeelDaemon {
         return { ok: true, ownerId: this.ownerId };
       default:
         throw new Error(`unknown method ${method}`);
+    }
+  }
+
+  private assertNoDuplicateProfileSources(): void {
+    const programmatic = this.kernel.getProgrammaticAgentProfiles();
+    for (const row of this.store.listAgentProfileCatalogRows()) {
+      if (programmatic[row.name]) {
+        throw new Error(
+          `duplicate agent profile "${row.name}" exists in programmatic and catalog sources`,
+        );
+      }
     }
   }
 

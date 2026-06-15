@@ -234,3 +234,30 @@ export interface CapabilityRow {
 }
 
 export type NewCapabilityRow = CapabilityRow;
+
+export type AgentProfileSource = "catalog" | "programmatic";
+
+export interface AgentProfileCatalogRow {
+  name: string;
+  configJson: string;
+  configHash: string;
+  generation: number;
+  createdAtMs: number;
+  updatedAtMs: number;
+}
+
+export interface RunProfileSnapshotSetRow {
+  runId: string;
+  catalogHash: string;
+  capturedAtMs: number;
+}
+
+export interface RunProfileSnapshotRow {
+  runId: string;
+  name: string;
+  source: AgentProfileSource;
+  configJson: string;
+  configHash: string;
+  catalogGeneration: number | null;
+  capturedAtMs: number;
+}

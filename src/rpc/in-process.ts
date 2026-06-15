@@ -4,8 +4,18 @@
 // this same logic behind a Unix socket; clients see the identical KeelApi.
 
 import { existsSync } from "node:fs";
+import {
+  type AgentProfileView,
+  agentProfileConfigHash,
+  assertValidAgentProfileName,
+  checkAgentProfileConfig,
+  compareAgentProfileNames,
+  normalizeAgentProfileConfig,
+} from "../agents/profiles.ts";
+import type { AgentProviderRegistry } from "../agents/types.ts";
+import { canonicalJson } from "../hash.ts";
 import type { JournalStore } from "../journal/store.ts";
-import type { AgentWorkspaceRow, RunStatus } from "../journal/types.ts";
+import type { AgentProfileCatalogRow, AgentWorkspaceRow, RunStatus } from "../journal/types.ts";
 import type { RealmKernel, RunHandle } from "../kernel/realm/realm-host.ts";
 import { requireRunTarget } from "../target.ts";
 import {
@@ -61,6 +71,7 @@ export class InProcessKeel implements KeelApi {
     private readonly kernel: RealmKernel,
     private readonly store: JournalStore,
     private readonly eventHub: EventHub = new EventHub(),
+    private readonly opts: { agents?: AgentProviderRegistry; clock?: () => number } = {},
   ) {
     this.kernel.setLiveEventSink((runId, type, payload, atMs) =>
       this.eventHub.publishEphemeral(runId, type, payload, atMs),
@@ -299,6 +310,122 @@ export class InProcessKeel implements KeelApi {
     return { removed: removed.map(workspaceView) };
   }
 
+  listAgentProfiles(
+    opts: { source?: "all" | "catalog" | "programmatic" } = {},
+  ): AgentProfileView[] {
+    const source = opts.source ?? "all";
+    const views: AgentProfileView[] = [];
+    if (source === "all" || source === "programmatic") {
+      for (const [name, config] of Object.entries(this.kernel.getProgrammaticAgentProfiles())) {
+        views.push({
+          name,
+          source: "programmatic",
+          config,
+          configHash: agentProfileConfigHash(config),
+          generation: null,
+          createdAtMs: null,
+          updatedAtMs: null,
+        });
+      }
+    }
+    if (source === "all" || source === "catalog") {
+      for (const row of this.store.listAgentProfileCatalogRows()) views.push(catalogRowView(row));
+    }
+    return views.sort(
+      (a, b) =>
+        compareAgentProfileNames(a.name, b.name) ||
+        (a.source < b.source ? -1 : a.source > b.source ? 1 : 0),
+    );
+  }
+
+  getAgentProfile(name: string): AgentProfileView | null {
+    assertValidAgentProfileName(name);
+    const programmatic = this.kernel.getProgrammaticAgentProfiles()[name];
+    if (programmatic) {
+      return {
+        name,
+        source: "programmatic",
+        config: programmatic,
+        configHash: agentProfileConfigHash(programmatic),
+        generation: null,
+        createdAtMs: null,
+        updatedAtMs: null,
+      };
+    }
+    const row = this.store.getAgentProfileCatalogRow(name);
+    return row ? catalogRowView(row) : null;
+  }
+
+  putAgentProfile(req: {
+    name: string;
+    config: unknown;
+    ifGeneration?: number;
+    createOnly?: boolean;
+    updateOnly?: boolean;
+  }): AgentProfileView {
+    assertValidAgentProfileName(req.name);
+    if (req.createOnly && req.updateOnly)
+      throw new Error("createOnly and updateOnly are mutually exclusive");
+    if (req.createOnly && req.ifGeneration !== undefined) {
+      throw new Error("createOnly cannot be combined with ifGeneration");
+    }
+    if (this.kernel.getProgrammaticAgentProfiles()[req.name]) {
+      throw new Error(`agent profile "${req.name}" is programmatic`);
+    }
+    const config = normalizeAgentProfileConfig(req.config, {
+      path: `profile.${req.name}`,
+      providerRegistry: this.opts.agents,
+    });
+    const configJson = canonicalJson(config);
+    const row = this.store.putAgentProfileCatalogRow({
+      name: req.name,
+      configJson,
+      configHash: agentProfileConfigHash(config),
+      nowMs: (this.opts.clock ?? Date.now)(),
+      ...(req.ifGeneration !== undefined ? { ifGeneration: req.ifGeneration } : {}),
+      ...(req.createOnly ? { createOnly: true } : {}),
+      ...(req.updateOnly ? { updateOnly: true } : {}),
+    });
+    return catalogRowView(row);
+  }
+
+  deleteAgentProfile(req: { name: string; ifGeneration?: number }): {
+    name: string;
+    deleted: true;
+  } {
+    assertValidAgentProfileName(req.name);
+    if (this.kernel.getProgrammaticAgentProfiles()[req.name]) {
+      throw new Error(`agent profile "${req.name}" is programmatic`);
+    }
+    const deleted = this.store.deleteAgentProfileCatalogRow(req.name, req.ifGeneration);
+    if (!deleted) throw new Error(`agent profile "${req.name}" does not exist`);
+    return { name: req.name, deleted: true };
+  }
+
+  checkAgentProfile(req: { name?: string; config?: unknown; connect?: boolean }): ReturnType<
+    typeof checkAgentProfileConfig
+  > {
+    const hasName = req.name !== undefined;
+    const hasConfig = req.config !== undefined;
+    if (hasName === hasConfig) {
+      throw new Error("checkAgentProfile requires exactly one of name or config");
+    }
+    if (hasName) {
+      const view = this.getAgentProfile(req.name as string);
+      if (!view) throw new Error(`agent profile "${req.name}" does not exist`);
+      return checkAgentProfileConfig(view.config, {
+        path: `profile.${view.name}`,
+        providerRegistry: this.opts.agents,
+        connect: req.connect === true,
+      });
+    }
+    return checkAgentProfileConfig(req.config, {
+      path: "profile",
+      providerRegistry: this.opts.agents,
+      connect: req.connect === true,
+    });
+  }
+
   async waitForRun(runId: string): Promise<RunOutcome> {
     const pending = this.running.get(runId);
     if (pending) {
@@ -419,6 +546,18 @@ export class InProcessKeel implements KeelApi {
       );
     }
   }
+}
+
+function catalogRowView(row: AgentProfileCatalogRow): AgentProfileView {
+  return {
+    name: row.name,
+    source: "catalog",
+    config: JSON.parse(row.configJson),
+    configHash: row.configHash,
+    generation: row.generation,
+    createdAtMs: row.createdAtMs,
+    updatedAtMs: row.updatedAtMs,
+  };
 }
 
 function isTerminalRunStatus(status: RunStatus): boolean {

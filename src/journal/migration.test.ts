@@ -195,7 +195,7 @@ function insertOldWorkflowDefinition(
 }
 
 describe("schema migrations", () => {
-  test("a v4 DB migrates forward to v15 in place and idempotently", () => {
+  test("a v4 DB migrates forward to v16 in place and idempotently", () => {
     const dir = mkdtempSync(join(tmpdir(), "keel-mig-"));
     try {
       const path = join(dir, "old.db");
@@ -208,7 +208,7 @@ describe("schema migrations", () => {
       const ver = store.db
         .query<{ value: string }, []>("SELECT value FROM schema_meta WHERE key='schema_version'")
         .get();
-      expect(ver?.value).toBe("15");
+      expect(ver?.value).toBe("16");
 
       // new columns exist
       const jcols = store.db.query<{ name: string }, []>("PRAGMA table_info(journal)").all();
@@ -441,12 +441,70 @@ describe("schema migrations", () => {
     }
   });
 
+  test("v15 databases receive explicit empty profile snapshots and warnings", () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-mig-v15-"));
+    try {
+      const path = join(dir, "old.db");
+      const db = new Database(path, { create: true });
+      db.exec(`
+        CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE runs (
+          run_id TEXT PRIMARY KEY,
+          workflow_name TEXT,
+          definition_version TEXT NOT NULL,
+          workflow_ref TEXT,
+          run_target TEXT,
+          status TEXT NOT NULL,
+          parent_run_id TEXT,
+          tenant_id TEXT,
+          input_ref TEXT,
+          output_ref TEXT,
+          error_json TEXT,
+          heartbeat_at_ms INTEGER,
+          runtime_owner_id TEXT,
+          created_at_ms INTEGER NOT NULL,
+          finished_at_ms INTEGER
+        );
+        CREATE TABLE events (
+          run_id TEXT NOT NULL,
+          seq INTEGER NOT NULL,
+          type TEXT NOT NULL,
+          payload_json TEXT NOT NULL,
+          emitted_at_ms INTEGER NOT NULL,
+          PRIMARY KEY (run_id, seq)
+        );
+      `);
+      db.query("INSERT INTO schema_meta (key, value) VALUES ('schema_version', '15')").run();
+      db.query(
+        `INSERT INTO runs (run_id, definition_version, status, created_at_ms)
+         VALUES ('r_running', 'wf_sha256_x', 'running', 1), ('r_finished', 'wf_sha256_x', 'finished', 2)`,
+      ).run();
+      db.close();
+
+      const store = JournalStore.open(path);
+      expect(store.getRunProfileSnapshotSet("r_running")).not.toBeNull();
+      expect(store.getRunProfileSnapshotSet("r_finished")).not.toBeNull();
+      expect(store.listRunProfileSnapshots("r_running")).toEqual([]);
+      const warning = store.db
+        .query<{ type: string }, []>("SELECT type FROM events WHERE run_id = 'r_running'")
+        .get();
+      expect(warning?.type).toBe("run.profileSnapshot.emptyMigration");
+      const finishedWarning = store.db
+        .query<{ type: string }, []>("SELECT type FROM events WHERE run_id = 'r_finished'")
+        .get();
+      expect(finishedWarning).toBeNull();
+      store.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("a fresh DB initializes at the current version with no migration", () => {
     const store = JournalStore.memory();
     const ver = store.db
       .query<{ value: string }, []>("SELECT value FROM schema_meta WHERE key='schema_version'")
       .get();
-    expect(ver?.value).toBe("15");
+    expect(ver?.value).toBe("16");
     store.close();
   });
 
@@ -460,7 +518,7 @@ describe("schema migrations", () => {
       const ver = store.db
         .query<{ value: string }, []>("SELECT value FROM schema_meta WHERE key='schema_version'")
         .get();
-      expect(ver?.value).toBe("15");
+      expect(ver?.value).toBe("16");
 
       const schedule = store.db
         .query<{ enabled: number; workflow_ref: string }, []>(

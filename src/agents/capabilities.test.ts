@@ -2,7 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { resolveInvocationToolPolicy, resolvedToolPolicyToCodexParams } from "./capabilities.ts";
+import {
+  resolveInvocationToolPolicy,
+  resolvedToolPolicyToCodexParams,
+  validateCapabilitiesDeclaration,
+} from "./capabilities.ts";
 
 describe("Codex capability mapping", () => {
   test("default read-only rejects with unrestricted guidance", () => {
@@ -106,5 +110,16 @@ describe("Codex capability mapping", () => {
     expect(() =>
       resolvedToolPolicyToCodexParams(resolved, join(tmpdir(), "keel-codex-missing-cwd")),
     ).toThrow(/cwd is not an existing directory/);
+  });
+
+  test("capability array validation rejects sparse holes", () => {
+    const sparseNetwork = new Array(1);
+    expect(() => validateCapabilitiesDeclaration({ network: sparseNetwork })).toThrow(
+      /network\[0\]/,
+    );
+    const sparseSecrets = new Array(1);
+    expect(() => validateCapabilitiesDeclaration({ secrets: sparseSecrets })).toThrow(
+      /secrets\[0\]/,
+    );
   });
 });

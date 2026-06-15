@@ -9,6 +9,7 @@ import type { AgentInvocation, AgentProvider, AgentResult } from "../agents/type
 import { AgentProviderRegistry } from "../agents/types.ts";
 import { JournalStore } from "../journal/store.ts";
 import { captureWorkflowFile } from "../workflow-definitions/capture.ts";
+import { snapshotWorkflowSource } from "../workflow-definitions/snapshot.ts";
 import { RealmKernel } from "./realm/realm-host.ts";
 
 const profiledUrl = captureWorkflowFile(
@@ -126,6 +127,38 @@ describe("profiles through the realm", () => {
           },
         }),
     ).toThrow(/agent profile "reviewer" providerConfig\.p\.bad/);
+  });
+
+  test("missing run profile snapshot set fails the run terminally", async () => {
+    const store = JournalStore.memory();
+    const { snapshot } = snapshotWorkflowSource(
+      store,
+      "export default async function workflow() { return 'ok'; }",
+      { name: "missing-snapshot", nowMs: 1 },
+    );
+    store.insertRun({
+      runId: "missing_snapshot",
+      workflowName: "missing-snapshot",
+      definitionVersion: snapshot.hash,
+      workflowRef: "stdin",
+      runTarget: process.cwd(),
+      status: "running",
+      parentRunId: null,
+      tenantId: null,
+      inputRef: "null",
+      outputRef: null,
+      errorJson: null,
+      heartbeatAtMs: null,
+      runtimeOwnerId: null,
+      createdAtMs: 1,
+    });
+    const kernel = new RealmKernel(store, { idgen: () => "unused" });
+
+    await expect(kernel.startResume("missing_snapshot").done).rejects.toThrow(
+      /missing agent profile snapshot set/,
+    );
+    expect(store.getRun("missing_snapshot")?.status).toBe("failed");
+    expect(store.getRun("missing_snapshot")?.errorJson).toContain("ProfileSnapshotIntegrityError");
   });
 
   test("changing a profile's config changes the agent step version (re-runs)", async () => {

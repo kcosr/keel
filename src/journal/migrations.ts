@@ -13,7 +13,8 @@
 // → v12 workflow SDK ABI manifests and schedule failure state
 // → v13 run targets and retained agent session workspaces
 // → v14 unified agent workspace retention policy table
-// → v15 workflow-scoped direct/worktree workspace rows.
+// → v15 workflow-scoped direct/worktree workspace rows
+// → v16 persistent agent profile catalog and run profile snapshots.
 
 import type { Database } from "bun:sqlite";
 import { parse } from "acorn";
@@ -318,8 +319,69 @@ export function applyMigration(db: Database, fromVersion: number): void {
       FROM agent_workspaces_old`);
       db.exec("DROP TABLE agent_workspaces_old");
       break;
+    case 15: // → v16: persistent agent profile catalog and frozen run snapshots.
+      migrateAgentProfileCatalogToV16(db);
+      break;
     default:
       throw new Error(`no migration defined from schema version ${fromVersion}`);
+  }
+}
+
+function migrateAgentProfileCatalogToV16(db: Database): void {
+  db.exec(`CREATE TABLE IF NOT EXISTS agent_profiles (
+    name          TEXT PRIMARY KEY,
+    config_json   TEXT NOT NULL,
+    config_hash   TEXT NOT NULL,
+    generation    INTEGER NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+  )`);
+  db.exec(`CREATE TABLE IF NOT EXISTS run_profile_snapshot_sets (
+    run_id          TEXT PRIMARY KEY,
+    catalog_hash    TEXT NOT NULL,
+    captured_at_ms  INTEGER NOT NULL
+  )`);
+  db.exec(`CREATE TABLE IF NOT EXISTS run_profile_snapshots (
+    run_id             TEXT NOT NULL,
+    name               TEXT NOT NULL,
+    source             TEXT NOT NULL,
+    config_json         TEXT NOT NULL,
+    config_hash         TEXT NOT NULL,
+    catalog_generation  INTEGER,
+    captured_at_ms      INTEGER NOT NULL,
+    PRIMARY KEY (run_id, name)
+  )`);
+  db.exec(`CREATE INDEX IF NOT EXISTS run_profile_snapshots_by_run
+    ON run_profile_snapshots (run_id)`);
+
+  const emptyCatalogHash = sha256Hex(canonicalJson([]));
+  db.exec(`INSERT OR IGNORE INTO run_profile_snapshot_sets (run_id, catalog_hash, captured_at_ms)
+    SELECT run_id, '${emptyCatalogHash}', 0 FROM runs`);
+
+  const active = db
+    .query<{ run_id: string; status: string }, []>(
+      `SELECT run_id, status FROM runs
+       WHERE status NOT IN ('finished', 'failed', 'cancelled', 'continued')`,
+    )
+    .all();
+  const nextSeq = db.query<{ seq: number | null }, [string]>(
+    "SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM events WHERE run_id = ?",
+  );
+  const insertEvent = db.query(
+    `INSERT INTO events (run_id, seq, type, payload_json, emitted_at_ms)
+     VALUES (?, ?, 'run.profileSnapshot.emptyMigration', ?, 0)`,
+  );
+  for (const run of active) {
+    const seq = nextSeq.get(run.run_id)?.seq ?? 1;
+    insertEvent.run(
+      run.run_id,
+      seq,
+      canonicalJson({
+        runId: run.run_id,
+        message:
+          "Migrated pre-v16 run with an explicit empty agent profile snapshot; historical profile catalog state was not durable.",
+      }),
+    );
   }
 }
 

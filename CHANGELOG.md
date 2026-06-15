@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 ### Added
+- Persistent daemon-owned agent profile catalog with admin RPC/CLI management (`keel profiles ...`), validation/check diagnostics, programmatic-profile coexistence, and frozen per-run profile snapshots for deterministic replay.
+- Journal schema v16 stores catalog profiles plus immutable run profile snapshot sets; migrating older journals backfills explicit empty snapshots and warning events for non-terminal pre-v16 runs.
 - First-cut `codex` app-server agent provider with stdio, WebSocket, and WebSocket-over-Unix-socket transports via `providerConfig.codex.transport`. Codex requires explicit unrestricted tools (`toolPolicy: "unrestricted"`), uses Keel's resolved workspace cwd, captures app-server thread ids as session tokens, and supports opt-in raw protocol logging with `KEEL_CODEX_RAW_LOG`.
 - Provider-keyed `providerConfig` for `ctx.agent`, `ctx.agentSession`, and agent profiles. Keel validates the full map as strict JSON, includes only the selected provider's config in replay identity, and passes only that immutable selected config to provider adapters.
 - Workflow-scoped `ctx.workspace`/`ctx.withWorkspace` with direct and git-worktree modes, `WorkspaceHandle` sharing across agents/sessions, and a lazy `__default` direct workspace at `ctx.run.target`.

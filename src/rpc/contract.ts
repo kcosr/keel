@@ -5,6 +5,12 @@
 // a Unix socket, so the extraction is a transport swap, not a redesign. Adding
 // methods is allowed; changing an existing method's shape is a breaking change.
 
+import type {
+  AgentProfileCheckResult,
+  AgentProfileSource,
+  AgentProfileView,
+  PersistentAgentProfileConfig,
+} from "../agents/profiles.ts";
 import type { Blockage, RunProjection, RunReport, RunSummary } from "./projection.ts";
 
 export type WorkflowProvenance = { kind: "stdin" } | { kind: "clientPath"; path: string };
@@ -111,6 +117,27 @@ export interface EphemeralEventEnvelope {
 
 export type EventEnvelope = DurableEventEnvelope | EphemeralEventEnvelope;
 
+export interface PutAgentProfileRequest {
+  name: string;
+  config: PersistentAgentProfileConfig;
+  ifGeneration?: number;
+  createOnly?: boolean;
+  updateOnly?: boolean;
+}
+
+export interface DeleteAgentProfileRequest {
+  name: string;
+  ifGeneration?: number;
+}
+
+export interface CheckAgentProfileRequest {
+  name?: string;
+  config?: PersistentAgentProfileConfig;
+  connect?: boolean;
+}
+
+export type { AgentProfileCheckResult, AgentProfileSource, AgentProfileView };
+
 export interface KeelApi {
   /** Start a run; returns its id immediately (the run executes in the background). */
   launchRun(req: LaunchRequest): Promise<RunLaunchResult>;
@@ -167,6 +194,17 @@ export interface KeelApi {
     includePending?: boolean;
     includeRemoved?: boolean;
   }): Promise<WorkspaceGcResult> | WorkspaceGcResult;
+  listAgentProfiles(opts?: {
+    source?: "all" | "catalog" | "programmatic";
+  }): Promise<AgentProfileView[]> | AgentProfileView[];
+  getAgentProfile(name: string): Promise<AgentProfileView | null> | AgentProfileView | null;
+  putAgentProfile(req: PutAgentProfileRequest): Promise<AgentProfileView> | AgentProfileView;
+  deleteAgentProfile(
+    req: DeleteAgentProfileRequest,
+  ): Promise<{ name: string; deleted: true }> | { name: string; deleted: true };
+  checkAgentProfile(
+    req: CheckAgentProfileRequest,
+  ): Promise<AgentProfileCheckResult> | AgentProfileCheckResult;
   /** Await a run's next terminal or parked status and return its outcome. */
   waitForRun(runId: string): Promise<RunOutcome>;
   /** Return a run's terminal output without subscribing to events. */

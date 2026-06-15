@@ -76,8 +76,14 @@ Postgres-dialect discipline).
   is the content-addressed definition hash; `runs.workflow_ref` is provenance.
   Resume/retry/rewind/fork use the stored definition, while rerun with a source
   override snapshots new source intentionally.
-- **Two surfaces are programmatic-only on the bundled daemon:** secret injection
-  (`SecretStore`) and agent profiles (`agentProfiles`) require constructing the
+- **Secret injection remains programmatic-only on the bundled daemon**, while
+  agent profiles now support both constructor-supplied programmatic profiles and
+  an admin-managed persistent catalog. Durable runs freeze the complete effective
+  profile catalog in `run_profile_snapshot_sets`/`run_profile_snapshots` so
+  replay/resume never reads mutable catalog state. Profile catalog RPC/CLI
+  operations require daemon admin authorization.
+- **One surface is programmatic-only on the bundled daemon:** secret injection
+  (`SecretStore`) requires constructing the
   daemon/kernel in code; the CLI wires capability credentials
   (`KEEL_ADMIN_TOKEN`, `KEEL_RUN_CAP`, `KEEL_CAP_FILE`) and the retained
   workspace store (`KEEL_WORKSPACE_STORE`).

@@ -33,11 +33,17 @@ import { redactCapabilityTokens } from "../auth/redaction.ts";
 import { DaemonClient } from "../daemon/client.ts";
 import { KeelDaemon } from "../daemon/server.ts";
 import { runExecuteScript } from "../execute/runtime.ts";
-import type { RunOutcome, WorkflowProvenance } from "../rpc/contract.ts";
+import type {
+  AgentProfileCheckResult,
+  AgentProfileView,
+  RunOutcome,
+  WorkflowProvenance,
+} from "../rpc/contract.ts";
 import type { RunReport } from "../rpc/projection.ts";
 import { cliTargetPath } from "../target.ts";
 import { runTui } from "../tui/index.ts";
 import { displayName, formatDuration, formatListRuns, formatUtcTimestamp } from "./run-display.ts";
+import { formatTable, tableCell } from "./table.ts";
 import { compactTerminalText } from "./terminal-text.ts";
 import { createTextWatchFormatter, formatNdjsonWatchEvent } from "./watch-format.ts";
 import type { WatchFormatOptions } from "./watch-format.ts";
@@ -100,6 +106,7 @@ const COMMANDS: [string, string, string][] = [
     "put <name> [workflow.ts] --interval-ms ms [--target dir]",
     "create or replace a cron schedule",
   ],
+  ["profiles", "list|get|set|delete|check ...", "manage persistent agent profile catalog"],
   [
     "workspace",
     "list|show|diff|merge|discard|gc ...",
@@ -387,6 +394,9 @@ async function dispatch(argv: string[]): Promise<number> {
           : formatListRuns(runs, Date.now()),
       );
       return 0;
+    }
+    case "profiles": {
+      return handleProfiles(rest);
     }
     case "schedule": {
       const [sub, ...scheduleArgs] = rest;
@@ -1040,6 +1050,247 @@ export function parseWatchArgs(args: string[]): {
 }
 
 type WatchStatus = RunOutcome["status"];
+
+async function handleProfiles(args: string[]): Promise<number> {
+  const [sub, ...rest] = args;
+  const client = await openClient();
+  switch (sub) {
+    case "list": {
+      const parsed = parseProfilesListArgs(rest);
+      const profiles = await client.listAgentProfiles({ source: parsed.source });
+      if (parsed.output === "json") process.stdout.write(`${JSON.stringify(profiles, null, 2)}\n`);
+      else process.stdout.write(formatProfileList(profiles));
+      return 0;
+    }
+    case "get": {
+      const parsed = parseProfileNameOutputArgs(rest, "profiles get");
+      if (!parsed.name) return usage("profiles needs get <name> [--output text|json]");
+      const profile = await client.getAgentProfile(parsed.name);
+      if (!profile) throw new Error(`agent profile "${parsed.name}" does not exist`);
+      if (parsed.output === "json") process.stdout.write(`${JSON.stringify(profile, null, 2)}\n`);
+      else process.stdout.write(formatProfileGet(profile));
+      return 0;
+    }
+    case "set": {
+      const parsed = parseProfilesSetArgs(rest);
+      if (!parsed.name || !parsed.file) {
+        return usage(
+          "profiles needs set <name> --file <path|-> [--if-generation n] [--create] [--update]",
+        );
+      }
+      const config = JSON.parse(await readJsonInput(parsed.file));
+      const saved = await client.putAgentProfile({
+        name: parsed.name,
+        config,
+        ...(parsed.ifGeneration !== undefined ? { ifGeneration: parsed.ifGeneration } : {}),
+        ...(parsed.createOnly ? { createOnly: true } : {}),
+        ...(parsed.updateOnly ? { updateOnly: true } : {}),
+      });
+      process.stdout.write(`${JSON.stringify(saved, null, 2)}\n`);
+      return 0;
+    }
+    case "delete": {
+      const parsed = parseProfilesDeleteArgs(rest);
+      if (!parsed.name) return usage("profiles needs delete <name> [--if-generation n]");
+      const deleted = await client.deleteAgentProfile({
+        name: parsed.name,
+        ...(parsed.ifGeneration !== undefined ? { ifGeneration: parsed.ifGeneration } : {}),
+      });
+      process.stdout.write(`${JSON.stringify(deleted)}\n`);
+      return 0;
+    }
+    case "check": {
+      const parsed = parseProfilesCheckArgs(rest);
+      if ((parsed.name === undefined) === (parsed.file === undefined)) {
+        return usage("profiles needs check <name> OR check --file <path|->");
+      }
+      const result = await client.checkAgentProfile(
+        parsed.file !== undefined
+          ? { config: JSON.parse(await readJsonInput(parsed.file)), connect: parsed.connect }
+          : { name: parsed.name, connect: parsed.connect },
+      );
+      if (parsed.output === "json") process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      else process.stdout.write(formatProfileCheck(result));
+      return result.ok ? 0 : 1;
+    }
+    default:
+      return usage("profiles needs list|get|set|delete|check");
+  }
+}
+
+function parseProfilesListArgs(args: string[]): {
+  source: "all" | "catalog" | "programmatic";
+  output: "text" | "json";
+} {
+  let source: "all" | "catalog" | "programmatic" = "all";
+  let output: "text" | "json" = "text";
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i] as string;
+    if (arg === "--source") {
+      const value = requireFlagValue(args, i, "--source");
+      if (value !== "all" && value !== "catalog" && value !== "programmatic") {
+        throw new Error("--source must be all, catalog, or programmatic");
+      }
+      source = value;
+      i += 1;
+    } else if (arg === "--output") {
+      output = parseTextJsonOutput(requireFlagValue(args, i, "--output"));
+      i += 1;
+    } else {
+      throw new Error(`unknown profiles list flag ${arg}`);
+    }
+  }
+  return { source, output };
+}
+
+function parseProfileNameOutputArgs(
+  args: string[],
+  command: string,
+): { name?: string; output: "text" | "json" } {
+  let output: "text" | "json" = "text";
+  const positional: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i] as string;
+    if (arg === "--output") {
+      output = parseTextJsonOutput(requireFlagValue(args, i, "--output"));
+      i += 1;
+    } else if (arg.startsWith("--")) throw new Error(`unknown ${command} flag ${arg}`);
+    else positional.push(arg);
+  }
+  if (positional.length > 1) throw new Error(`unexpected argument ${positional[1]} for ${command}`);
+  return { name: positional[0], output };
+}
+
+function parseProfilesSetArgs(args: string[]): {
+  name?: string;
+  file?: string;
+  ifGeneration?: number;
+  createOnly?: boolean;
+  updateOnly?: boolean;
+} {
+  const positional: string[] = [];
+  let file: string | undefined;
+  let ifGeneration: number | undefined;
+  let createOnly = false;
+  let updateOnly = false;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i] as string;
+    if (arg === "--file") {
+      file = requireFlagValue(args, i, "--file");
+      i += 1;
+    } else if (arg === "--if-generation") {
+      ifGeneration = parseNonnegativeInteger(
+        requireFlagValue(args, i, "--if-generation"),
+        "--if-generation",
+      );
+      i += 1;
+    } else if (arg === "--create") createOnly = true;
+    else if (arg === "--update") updateOnly = true;
+    else if (arg.startsWith("--")) throw new Error(`unknown profiles set flag ${arg}`);
+    else positional.push(arg);
+  }
+  if (positional.length > 1)
+    throw new Error(`unexpected argument ${positional[1]} for profiles set`);
+  return { name: positional[0], file, ifGeneration, createOnly, updateOnly };
+}
+
+function parseProfilesDeleteArgs(args: string[]): { name?: string; ifGeneration?: number } {
+  const positional: string[] = [];
+  let ifGeneration: number | undefined;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i] as string;
+    if (arg === "--if-generation") {
+      ifGeneration = parseNonnegativeInteger(
+        requireFlagValue(args, i, "--if-generation"),
+        "--if-generation",
+      );
+      i += 1;
+    } else if (arg.startsWith("--")) throw new Error(`unknown profiles delete flag ${arg}`);
+    else positional.push(arg);
+  }
+  if (positional.length > 1)
+    throw new Error(`unexpected argument ${positional[1]} for profiles delete`);
+  return { name: positional[0], ifGeneration };
+}
+
+function parseProfilesCheckArgs(args: string[]): {
+  name?: string;
+  file?: string;
+  connect: boolean;
+  output: "text" | "json";
+} {
+  const positional: string[] = [];
+  let file: string | undefined;
+  let connect = false;
+  let output: "text" | "json" = "text";
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i] as string;
+    if (arg === "--file") {
+      file = requireFlagValue(args, i, "--file");
+      i += 1;
+    } else if (arg === "--connect") connect = true;
+    else if (arg === "--output") {
+      output = parseTextJsonOutput(requireFlagValue(args, i, "--output"));
+      i += 1;
+    } else if (arg.startsWith("--")) throw new Error(`unknown profiles check flag ${arg}`);
+    else positional.push(arg);
+  }
+  if (positional.length > 1)
+    throw new Error(`unexpected argument ${positional[1]} for profiles check`);
+  return { name: positional[0], file, connect, output };
+}
+
+function parseTextJsonOutput(value: string): "text" | "json" {
+  if (value === "text" || value === "json") return value;
+  throw new Error("--output must be text or json");
+}
+
+function parseNonnegativeInteger(value: string, flag: string): number {
+  const n = Number(value);
+  if (!Number.isSafeInteger(n) || n < 0) throw new Error(`${flag} must be a non-negative integer`);
+  return n;
+}
+
+async function readJsonInput(path: string): Promise<string> {
+  return path === "-" ? await Bun.stdin.text() : readFileSync(path, "utf8");
+}
+
+function formatProfileList(profiles: AgentProfileView[]): string {
+  return formatTable(
+    ["NAME", "SOURCE", "PROVIDER", "MODEL", "TOOL POLICY", "GENERATION", "UPDATED AT"],
+    profiles.map((profile) => [
+      profile.name,
+      profile.source,
+      profile.config.provider ?? "-",
+      tableCell(profile.config.model ?? "-", { maxWidth: 40 }),
+      profile.config.toolPolicy ?? "-",
+      profile.generation == null ? "-" : String(profile.generation),
+      profile.updatedAtMs == null ? "-" : formatUtcTimestamp(profile.updatedAtMs),
+    ]),
+  );
+}
+
+function formatProfileGet(profile: AgentProfileView): string {
+  return [
+    `name: ${profile.name}`,
+    `source: ${profile.source}`,
+    `configHash: ${profile.configHash}`,
+    `generation: ${profile.generation ?? "-"}`,
+    `createdAt: ${profile.createdAtMs == null ? "-" : formatUtcTimestamp(profile.createdAtMs)}`,
+    `updatedAt: ${profile.updatedAtMs == null ? "-" : formatUtcTimestamp(profile.updatedAtMs)}`,
+    "config:",
+    JSON.stringify(profile.config, null, 2),
+    "",
+  ].join("\n");
+}
+
+function formatProfileCheck(result: AgentProfileCheckResult): string {
+  const lines = [result.ok ? "ok" : "failed"];
+  for (const diagnostic of result.diagnostics) {
+    lines.push(`${diagnostic.level.toUpperCase()} ${diagnostic.path}: ${diagnostic.message}`);
+  }
+  return `${lines.join("\n")}\n`;
+}
 
 async function workspaceCommand(args: string[]): Promise<number> {
   const [sub, runId, workspaceId, ...rest] = args;

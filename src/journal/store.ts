@@ -9,6 +9,7 @@ import { Database } from "bun:sqlite";
 import { applyMigration } from "./migrations.ts";
 import { DDL, SCHEMA_VERSION } from "./schema.ts";
 import type {
+  AgentProfileCatalogRow,
   AgentSessionRow,
   AgentSessionTurnRow,
   AgentSessionWorkspaceRow,
@@ -23,6 +24,8 @@ import type {
   NewJournalRow,
   NewRunRow,
   NewWorkflowDefinitionRow,
+  RunProfileSnapshotRow,
+  RunProfileSnapshotSetRow,
   RunRow,
   WorkflowDefinitionRow,
 } from "./types.ts";
@@ -1088,6 +1091,154 @@ export class JournalStore {
       .run(errorJson, atMs, name);
   }
 
+  // ---- agent profile catalog and run snapshots --------------------------
+
+  listAgentProfileCatalogRows(): AgentProfileCatalogRow[] {
+    return this.db
+      .query<RawAgentProfileCatalogRow, []>("SELECT * FROM agent_profiles ORDER BY name ASC")
+      .all()
+      .map(mapAgentProfileCatalogRow);
+  }
+
+  getAgentProfileCatalogRow(name: string): AgentProfileCatalogRow | null {
+    const row = this.db
+      .query<RawAgentProfileCatalogRow, [string]>("SELECT * FROM agent_profiles WHERE name = ?")
+      .get(name);
+    return row ? mapAgentProfileCatalogRow(row) : null;
+  }
+
+  putAgentProfileCatalogRow(row: {
+    name: string;
+    configJson: string;
+    configHash: string;
+    nowMs: number;
+    ifGeneration?: number;
+    createOnly?: boolean;
+    updateOnly?: boolean;
+  }): AgentProfileCatalogRow {
+    return this.transaction(() => {
+      const existing = this.getAgentProfileCatalogRow(row.name);
+      if (row.createOnly && existing) throw new Error(`agent profile "${row.name}" already exists`);
+      if (row.updateOnly && !existing)
+        throw new Error(`agent profile "${row.name}" does not exist`);
+      if (row.ifGeneration !== undefined) {
+        if (!existing)
+          throw new Error(`agent profile "${row.name}" generation precondition failed`);
+        if (existing.generation !== row.ifGeneration) {
+          throw new Error(
+            `agent profile "${row.name}" generation precondition failed (expected ${row.ifGeneration}, got ${existing.generation})`,
+          );
+        }
+      }
+      if (existing) {
+        this.db
+          .query(
+            `UPDATE agent_profiles
+             SET config_json = ?, config_hash = ?, generation = generation + 1, updated_at_ms = ?
+             WHERE name = ?`,
+          )
+          .run(row.configJson, row.configHash, row.nowMs, row.name);
+      } else {
+        this.db
+          .query(
+            `INSERT INTO agent_profiles (name, config_json, config_hash, generation, created_at_ms, updated_at_ms)
+             VALUES (?, ?, ?, 1, ?, ?)`,
+          )
+          .run(row.name, row.configJson, row.configHash, row.nowMs, row.nowMs);
+      }
+      const saved = this.getAgentProfileCatalogRow(row.name);
+      if (!saved) throw new Error(`agent profile "${row.name}" was not saved`);
+      return saved;
+    });
+  }
+
+  deleteAgentProfileCatalogRow(name: string, ifGeneration?: number): boolean {
+    return this.transaction(() => {
+      const existing = this.getAgentProfileCatalogRow(name);
+      if (!existing) return false;
+      if (ifGeneration !== undefined && existing.generation !== ifGeneration) {
+        throw new Error(
+          `agent profile "${name}" generation precondition failed (expected ${ifGeneration}, got ${existing.generation})`,
+        );
+      }
+      this.db.query("DELETE FROM agent_profiles WHERE name = ?").run(name);
+      return true;
+    });
+  }
+
+  replaceRunProfileSnapshot(
+    runId: string,
+    set: { catalogHash: string; capturedAtMs: number },
+    rows: Array<{
+      name: string;
+      source: "catalog" | "programmatic";
+      configJson: string;
+      configHash: string;
+      catalogGeneration: number | null;
+    }>,
+  ): void {
+    this.transaction(() => {
+      this.db.query("DELETE FROM run_profile_snapshots WHERE run_id = ?").run(runId);
+      this.db.query("DELETE FROM run_profile_snapshot_sets WHERE run_id = ?").run(runId);
+      this.db
+        .query(
+          `INSERT INTO run_profile_snapshot_sets (run_id, catalog_hash, captured_at_ms)
+         VALUES (?, ?, ?)`,
+        )
+        .run(runId, set.catalogHash, set.capturedAtMs);
+      const insert = this.db.query(
+        `INSERT INTO run_profile_snapshots (
+         run_id, name, source, config_json, config_hash, catalog_generation, captured_at_ms
+       ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      );
+      for (const row of rows) {
+        insert.run(
+          runId,
+          row.name,
+          row.source,
+          row.configJson,
+          row.configHash,
+          row.catalogGeneration,
+          set.capturedAtMs,
+        );
+      }
+    });
+  }
+
+  getRunProfileSnapshotSet(runId: string): RunProfileSnapshotSetRow | null {
+    const row = this.db
+      .query<RawRunProfileSnapshotSetRow, [string]>(
+        "SELECT * FROM run_profile_snapshot_sets WHERE run_id = ?",
+      )
+      .get(runId);
+    return row ? mapRunProfileSnapshotSet(row) : null;
+  }
+
+  listRunProfileSnapshots(runId: string): RunProfileSnapshotRow[] {
+    return this.db
+      .query<RawRunProfileSnapshotRow, [string]>(
+        "SELECT * FROM run_profile_snapshots WHERE run_id = ? ORDER BY name ASC",
+      )
+      .all(runId)
+      .map(mapRunProfileSnapshotRow);
+  }
+
+  copyRunProfileSnapshot(srcRunId: string, dstRunId: string): void {
+    const set = this.getRunProfileSnapshotSet(srcRunId);
+    if (!set) throw new Error(`run ${srcRunId} is missing agent profile snapshot set`);
+    this.replaceRunProfileSnapshot(
+      dstRunId,
+      { catalogHash: set.catalogHash, capturedAtMs: set.capturedAtMs },
+      this.listRunProfileSnapshots(srcRunId).map((row) => ({
+        name: row.name,
+        source: row.source,
+        configJson: row.configJson,
+        configHash: row.configHash,
+        catalogGeneration: row.catalogGeneration,
+      })),
+    );
+  }
+
   // ---- time travel (retry/rewind/fork, §18) ------------------------------
 
   /** Delete the failed rows of a run (retry: the failed step re-executes). */
@@ -1167,6 +1318,7 @@ export class JournalStore {
         runtimeOwnerId: null,
         createdAtMs: atMs,
       });
+      this.copyRunProfileSnapshot(srcRunId, newRunId);
       const cutoff = atStableKey
         ? (this.db
             .query<{ m: number | null }, [string, string]>(
@@ -1531,6 +1683,62 @@ interface RawCapabilityRow {
   expires_at_ms: number | null;
   revoked_at_ms: number | null;
   note: string | null;
+}
+
+interface RawAgentProfileCatalogRow {
+  name: string;
+  config_json: string;
+  config_hash: string;
+  generation: number;
+  created_at_ms: number;
+  updated_at_ms: number;
+}
+
+interface RawRunProfileSnapshotSetRow {
+  run_id: string;
+  catalog_hash: string;
+  captured_at_ms: number;
+}
+
+interface RawRunProfileSnapshotRow {
+  run_id: string;
+  name: string;
+  source: string;
+  config_json: string;
+  config_hash: string;
+  catalog_generation: number | null;
+  captured_at_ms: number;
+}
+
+function mapAgentProfileCatalogRow(r: RawAgentProfileCatalogRow): AgentProfileCatalogRow {
+  return {
+    name: r.name,
+    configJson: r.config_json,
+    configHash: r.config_hash,
+    generation: r.generation,
+    createdAtMs: r.created_at_ms,
+    updatedAtMs: r.updated_at_ms,
+  };
+}
+
+function mapRunProfileSnapshotSet(r: RawRunProfileSnapshotSetRow): RunProfileSnapshotSetRow {
+  return {
+    runId: r.run_id,
+    catalogHash: r.catalog_hash,
+    capturedAtMs: r.captured_at_ms,
+  };
+}
+
+function mapRunProfileSnapshotRow(r: RawRunProfileSnapshotRow): RunProfileSnapshotRow {
+  return {
+    runId: r.run_id,
+    name: r.name,
+    source: r.source as RunProfileSnapshotRow["source"],
+    configJson: r.config_json,
+    configHash: r.config_hash,
+    catalogGeneration: r.catalog_generation,
+    capturedAtMs: r.captured_at_ms,
+  };
 }
 
 function mapRun(r: RawRunRow): RunRow {

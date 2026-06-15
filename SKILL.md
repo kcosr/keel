@@ -78,6 +78,8 @@ Filter tolerated failures out with `.filter(Boolean)`. Do not use `onFailure:
 "null"` for required agents; let those failures fail the run so the run can be
 retried.
 
+Use `profile: "name"` when an operator has configured reusable defaults in the daemon profile catalog. Your explicit `ctx.agent` fields override profile fields. Profile edits affect only future launches/reruns because each run uses a frozen catalog snapshot.
+
 `toolPolicy` is only `"none"`, `"read-only"`, `"workspace-write"`, or
 `"unrestricted"`. Use `providerConfig` only for provider-owned JSON settings;
 Keel validates the full provider-keyed map, but only the selected provider's

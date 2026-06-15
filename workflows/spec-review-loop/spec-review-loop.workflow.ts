@@ -1,4 +1,4 @@
-import { type Ctx, type ToolPolicy, jsonSchema } from "@kcosr/keel";
+import { type Ctx, jsonSchema } from "@kcosr/keel";
 
 type Finding = {
   severity: "critical" | "high" | "medium" | "low";
@@ -20,10 +20,7 @@ type SpecReviewInput = {
   specPath: string;
   task: string;
   reviewerIdentity?: string;
-  reviewerProvider?: string;
-  reviewerModel?: string;
   reviewerReasoning?: string;
-  reviewerToolPolicy?: ToolPolicy;
   maxReviews?: number;
   signalName?: string;
   completionMode?: "auto" | "park-before-complete";
@@ -75,6 +72,7 @@ const SpecReviewSchema = jsonSchema<SpecReview>({
 
 const DEFAULT_MAX_REVIEWS = 3;
 const HARD_MAX_REVIEWS = 20;
+const REVIEWER_PROFILE = "claude-default";
 
 export default async function specReviewLoop(
   ctx: Ctx,
@@ -88,13 +86,12 @@ export default async function specReviewLoop(
   const signalName = input.signalName ?? "spec-review-cycle";
   const completionSignalName = input.completionSignalName ?? "spec-review-completion";
   const stopWhenClean = input.stopWhenClean ?? true;
-  const identity = input.reviewerIdentity ?? reviewerIdentity(input);
+  const identity = input.reviewerIdentity ?? `Reviewer: ${REVIEWER_PROFILE}`;
   const reviewer = ctx.agentSession({
     key: "spec_reviewer",
-    provider: input.reviewerProvider ?? "pi",
-    ...(input.reviewerModel ? { model: input.reviewerModel } : {}),
-    reasoning: input.reviewerReasoning ?? "xhigh",
-    toolPolicy: input.reviewerToolPolicy ?? "workspace-write",
+    profile: REVIEWER_PROFILE,
+    ...(input.reviewerReasoning ? { reasoning: input.reviewerReasoning } : {}),
+    toolPolicy: "workspace-write",
   });
 
   const reviews: ReviewEntry[] = [];
@@ -172,12 +169,6 @@ section, creating that section if needed. Do not rewrite the main design content
 Your entry must use the exact correspondence header above and preserve previous
 history. Return structured findings that the creator should address. If the spec
 is ready, return status "clean" and an empty findings array.`;
-}
-
-function reviewerIdentity(input: SpecReviewInput): string {
-  const provider = input.reviewerProvider ?? "pi";
-  const model = input.reviewerModel ?? "default";
-  return `Reviewer: ${provider}/${model}`;
 }
 
 function timestampFrom(ms: number): string {

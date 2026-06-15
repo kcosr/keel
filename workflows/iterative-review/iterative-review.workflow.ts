@@ -1,4 +1,4 @@
-import { type Ctx, type ToolPolicy, jsonSchema } from "@kcosr/keel";
+import { type Ctx, jsonSchema } from "@kcosr/keel";
 
 type Finding = {
   severity: "critical" | "high" | "medium" | "low";
@@ -19,10 +19,7 @@ type IterativeReviewInput = {
   task: string;
   spec?: string;
   focus?: string;
-  provider?: string;
-  model?: string;
   reasoning?: string;
-  toolPolicy?: ToolPolicy;
   maxRounds?: number;
   signalName?: string;
   stopWhenClean?: boolean;
@@ -69,6 +66,7 @@ const ReviewSchema = jsonSchema<Review>({
 
 const DEFAULT_MAX_ROUNDS = 3;
 const HARD_MAX_ROUNDS = 20;
+const REVIEWER_PROFILE = "claude-default";
 
 export default async function iterativeReview(
   ctx: Ctx,
@@ -84,10 +82,9 @@ export default async function iterativeReview(
 
   const reviewer = ctx.agentSession({
     key: "reviewer",
-    provider: input.provider ?? "claude",
-    ...(input.model ? { model: input.model } : {}),
-    reasoning: input.reasoning ?? "xhigh",
-    toolPolicy: input.toolPolicy ?? "read-only",
+    profile: REVIEWER_PROFILE,
+    ...(input.reasoning ? { reasoning: input.reasoning } : {}),
+    toolPolicy: "read-only",
   });
 
   ctx.phase("Initial review");

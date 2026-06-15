@@ -22,14 +22,8 @@ keel launch --detach workflows/implement-review-loop/implement-review-loop.workf
     "spec": "/home/kevin/worktrees/keel/.specs/some-feature.md",
     "task": "Implement the feature described by the spec",
     "maxRounds": 3,
-    "implementerProvider": "pi",
-    "implementerModel": "openai-codex/gpt-5.5",
-    "implementerReasoning": "xhigh",
-    "implementerToolPolicy": "workspace-write",
-    "reviewerProvider": "claude",
-    "reviewerModel": "claude-opus-4-8",
-    "reviewerReasoning": "xhigh",
-    "reviewerToolPolicy": "read-only",
+    "implementerReasoning": "high",
+    "reviewerReasoning": "high",
     "verificationCommand": "bun test src/kernel/realm/agent-session.test.ts"
   }'
 ```
@@ -64,13 +58,12 @@ KEEL_RUN_CAP=kc_run_... keel signal <run-id> implementation-completion '{
 
 ## Safety Notes
 
-- The implementer is write-capable and edits the target repository directly.
-- Prefer `implementerModel: "openai-codex/gpt-5.5"` for Pi implementers unless
-  a task has a reason to use the provider default.
-- If `verificationCommand` is set, the implementer receives shell capability
-  with workspace write access so it can run that command. Otherwise it uses
-  `implementerToolPolicy`, defaulting to `workspace-write` without shell.
-- The reviewer is read-only and is prompted not to modify files.
+- The implementer uses the daemon `codex-default` profile and edits the target
+  repository directly.
+- The reviewer uses the daemon `claude-default` profile with read-only tools and
+  is prompted not to modify files.
+- If `verificationCommand` is set, the implementer is asked to run it when
+  practical; the `codex-default` profile supplies the tool access.
 - This workflow uses the run default direct workspace, so do not use it when
   edits must be confined to a disposable worktree.
 - Keep `maxRounds` small. The workflow caps it at `10`.
@@ -87,14 +80,8 @@ KEEL_RUN_CAP=kc_run_... keel signal <run-id> implementation-completion '{
 | `maxRounds` | no | Maximum implement/review rounds. Defaults to `3`, capped at `10`. |
 | `completionMode` | no | `"auto"` by default. Use `"park-before-complete"` to wait for a final completion/continue signal after a clean review. |
 | `completionSignalName` | no | Signal name for parked clean completion. Defaults to `implementation-completion`. |
-| `implementerProvider` | no | Implementer provider. Defaults to `pi`. |
-| `implementerModel` | no | Implementer model name. |
-| `implementerReasoning` | no | Implementer reasoning effort. Defaults to `xhigh`. |
-| `implementerToolPolicy` | no | Implementer tool policy when `verificationCommand` is absent. Defaults to `workspace-write`. |
-| `reviewerProvider` | no | Reviewer provider. Defaults to `claude`. |
-| `reviewerModel` | no | Reviewer model name. |
-| `reviewerReasoning` | no | Reviewer reasoning effort. Defaults to `xhigh`. |
-| `reviewerToolPolicy` | no | Reviewer tool policy. Defaults to `read-only`. |
+| `implementerReasoning` | no | Override reasoning effort for the `codex-default` implementer profile. |
+| `reviewerReasoning` | no | Override reasoning effort for the `claude-default` reviewer profile. |
 | `reviewFocus` | no | Optional focus for the reviewer. |
 | `verificationCommand` | no | Optional command the implementer should run when practical. |
 

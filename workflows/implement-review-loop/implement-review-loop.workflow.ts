@@ -1,4 +1,4 @@
-import { type Ctx, type ToolPolicy, jsonSchema } from "@kcosr/keel";
+import { type Ctx, jsonSchema } from "@kcosr/keel";
 
 type Finding = {
   severity: "critical" | "high" | "medium" | "low";
@@ -29,14 +29,8 @@ type ImplementReviewInput = {
   maxRounds?: number;
   completionMode?: "auto" | "park-before-complete";
   completionSignalName?: string;
-  implementerProvider?: string;
-  implementerModel?: string;
   implementerReasoning?: string;
-  implementerToolPolicy?: ToolPolicy;
-  reviewerProvider?: string;
-  reviewerModel?: string;
   reviewerReasoning?: string;
-  reviewerToolPolicy?: ToolPolicy;
   reviewFocus?: string;
   verificationCommand?: string;
 };
@@ -95,6 +89,8 @@ const ReviewSchema = jsonSchema<Review>({
 
 const DEFAULT_MAX_ROUNDS = 3;
 const HARD_MAX_ROUNDS = 10;
+const IMPLEMENTER_PROFILE = "codex-default";
+const REVIEWER_PROFILE = "claude-default";
 
 export default async function implementReviewLoop(
   ctx: Ctx,
@@ -109,19 +105,14 @@ export default async function implementReviewLoop(
   const completionSignalName = input.completionSignalName ?? "implementation-completion";
   const implementer = ctx.agentSession({
     key: "implementer",
-    provider: input.implementerProvider ?? "pi",
-    ...(input.implementerModel ? { model: input.implementerModel } : {}),
-    reasoning: input.implementerReasoning ?? "xhigh",
-    ...(input.verificationCommand
-      ? { capabilities: { fs: "workspace-write", network: "none", shell: true, secrets: [] } }
-      : { toolPolicy: input.implementerToolPolicy ?? "workspace-write" }),
+    profile: IMPLEMENTER_PROFILE,
+    ...(input.implementerReasoning ? { reasoning: input.implementerReasoning } : {}),
   });
   const reviewer = ctx.agentSession({
     key: "reviewer",
-    provider: input.reviewerProvider ?? "claude",
-    ...(input.reviewerModel ? { model: input.reviewerModel } : {}),
-    reasoning: input.reviewerReasoning ?? "xhigh",
-    toolPolicy: input.reviewerToolPolicy ?? "read-only",
+    profile: REVIEWER_PROFILE,
+    ...(input.reviewerReasoning ? { reasoning: input.reviewerReasoning } : {}),
+    toolPolicy: "read-only",
   });
 
   const rounds: Round[] = [];

@@ -14,15 +14,8 @@ keel launch --detach workflows/spec-author-review-loop/spec-author-review-loop.w
   --input '{
     "specPath": "/home/kevin/worktrees/keel/.specs/new-feature.md",
     "request": "Design a durable feature and preserve reviewer correspondence",
-    "creatorIdentity": "Creator: pi/openai-codex/gpt-5.5",
-    "reviewerIdentity": "Reviewer: pi/default",
-    "creatorProvider": "pi",
-    "creatorModel": "openai-codex/gpt-5.5",
-    "creatorReasoning": "xhigh",
-    "creatorToolPolicy": "workspace-write",
-    "reviewerProvider": "pi",
+    "creatorReasoning": "high",
     "reviewerReasoning": "xhigh",
-    "reviewerToolPolicy": "workspace-write",
     "maxRounds": 3
   }'
 ```
@@ -33,22 +26,18 @@ Both agents receive an ISO timestamp from `ctx.now()` and are instructed to appe
 under `## Correspondence` with headers like:
 
 ```md
-### 2026-06-13T23:00:00.000Z - Creator: pi/default
-### 2026-06-13T23:01:00.000Z - Reviewer: claude/claude-opus-4-8
+### 2026-06-13T23:00:00.000Z - Creator: codex-default
+### 2026-06-13T23:01:00.000Z - Reviewer: claude-default
 ```
 
 No round label is required; the timestamp and identity preserve history.
 
 ## Safety Notes
 
+- The creator uses the daemon `codex-default` profile, and the reviewer uses the
+  daemon `claude-default` profile with workspace-write tools.
 - Both creator and reviewer are write-capable.
 - Keel does not currently enforce that the reviewer only appends correspondence.
-- Pi/Codex is the default writer/reviewer provider because it can write
-  correspondence in the normal local workflow setup. Prefer
-  `creatorModel: "openai-codex/gpt-5.5"` for Pi-authored specs unless a task has
-  a reason to use the provider default. If you use Claude for either role,
-  configure Claude to permit `Edit`/`Write`; otherwise it may return findings
-  without appending to the file.
 - This workflow uses the run default direct workspace, so it edits the target
   spec directly.
 - Keep `maxRounds` small. The workflow caps it at `10`.
@@ -63,12 +52,6 @@ No round label is required; the timestamp and identity preserve history.
 | `request` | yes | High-level user request for the spec. |
 | `creatorIdentity` | no | Header identity string for creator correspondence. |
 | `reviewerIdentity` | no | Header identity string for reviewer correspondence. |
-| `creatorProvider` | no | Creator provider. Defaults to `pi`. |
-| `creatorModel` | no | Creator model name. |
-| `creatorReasoning` | no | Creator reasoning effort. Defaults to `xhigh`. |
-| `creatorToolPolicy` | no | Defaults to `workspace-write`. |
-| `reviewerProvider` | no | Reviewer provider. Defaults to `pi`. |
-| `reviewerModel` | no | Reviewer model name. |
-| `reviewerReasoning` | no | Reviewer reasoning effort. Defaults to `xhigh`. |
-| `reviewerToolPolicy` | no | Defaults to `workspace-write`. |
+| `creatorReasoning` | no | Override reasoning effort for the `codex-default` creator profile. |
+| `reviewerReasoning` | no | Override reasoning effort for the `claude-default` reviewer profile. |
 | `maxRounds` | no | Maximum creator/reviewer rounds. Defaults to `3`, capped at `10`. |

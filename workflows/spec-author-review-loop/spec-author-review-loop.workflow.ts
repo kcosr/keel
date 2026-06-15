@@ -1,4 +1,4 @@
-import { type Ctx, type ToolPolicy, jsonSchema } from "@kcosr/keel";
+import { type Ctx, jsonSchema } from "@kcosr/keel";
 
 type Finding = {
   severity: "critical" | "high" | "medium" | "low";
@@ -29,14 +29,8 @@ type SpecAuthorReviewInput = {
   request: string;
   creatorIdentity?: string;
   reviewerIdentity?: string;
-  creatorProvider?: string;
-  creatorModel?: string;
   creatorReasoning?: string;
-  creatorToolPolicy?: ToolPolicy;
-  reviewerProvider?: string;
-  reviewerModel?: string;
   reviewerReasoning?: string;
-  reviewerToolPolicy?: ToolPolicy;
   maxRounds?: number;
 };
 
@@ -88,6 +82,8 @@ const SpecReviewSchema = jsonSchema<SpecReview>({
 
 const DEFAULT_MAX_ROUNDS = 3;
 const HARD_MAX_ROUNDS = 10;
+const CREATOR_PROFILE = "codex-default";
+const REVIEWER_PROFILE = "claude-default";
 
 export default async function specAuthorReviewLoop(
   ctx: Ctx,
@@ -99,25 +95,18 @@ export default async function specAuthorReviewLoop(
   blockedAuthor?: AuthorResult;
 }> {
   const maxRounds = clampCount(input.maxRounds ?? DEFAULT_MAX_ROUNDS);
-  const creatorIdentity =
-    input.creatorIdentity ??
-    agentIdentity("Creator", input.creatorProvider ?? "pi", input.creatorModel);
-  const reviewerIdentity =
-    input.reviewerIdentity ??
-    agentIdentity("Reviewer", input.reviewerProvider ?? "pi", input.reviewerModel);
+  const creatorIdentity = input.creatorIdentity ?? `Creator: ${CREATOR_PROFILE}`;
+  const reviewerIdentity = input.reviewerIdentity ?? `Reviewer: ${REVIEWER_PROFILE}`;
   const creator = ctx.agentSession({
     key: "spec_creator",
-    provider: input.creatorProvider ?? "pi",
-    ...(input.creatorModel ? { model: input.creatorModel } : {}),
-    reasoning: input.creatorReasoning ?? "xhigh",
-    toolPolicy: input.creatorToolPolicy ?? "workspace-write",
+    profile: CREATOR_PROFILE,
+    ...(input.creatorReasoning ? { reasoning: input.creatorReasoning } : {}),
   });
   const reviewer = ctx.agentSession({
     key: "spec_reviewer",
-    provider: input.reviewerProvider ?? "pi",
-    ...(input.reviewerModel ? { model: input.reviewerModel } : {}),
-    reasoning: input.reviewerReasoning ?? "xhigh",
-    toolPolicy: input.reviewerToolPolicy ?? "workspace-write",
+    profile: REVIEWER_PROFILE,
+    ...(input.reviewerReasoning ? { reasoning: input.reviewerReasoning } : {}),
+    toolPolicy: "workspace-write",
   });
 
   const rounds: SpecRound[] = [];
@@ -221,14 +210,6 @@ implementation risks.
 Append your reviewer entry under "## Correspondence" using the exact header above.
 Return actionable findings the creator should address. If the spec is ready,
 return status "clean" and an empty findings array.`;
-}
-
-function agentIdentity(
-  role: string,
-  provider: string | undefined,
-  model: string | undefined,
-): string {
-  return `${role}: ${provider ?? "default"}/${model ?? "default"}`;
 }
 
 function timestampFrom(ms: number): string {

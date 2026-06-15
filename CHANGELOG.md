@@ -120,6 +120,9 @@
 - Reusable implement/review and spec-review workflows can now park after a clean
   review with `completionMode: "park-before-complete"`, allowing an orchestrator
   to request another round or explicitly signal final completion.
+- Reusable review/spec/implementation workflows now default to the
+  `codex-default` and `claude-default` agent profiles, exposing only reasoning
+  overrides for normal launches.
 - Long-lived waits/event streams re-check capability validity and fail when a
   presented capability is revoked or expires; each wait/subscription is bound to
   the credential presented when it was started.

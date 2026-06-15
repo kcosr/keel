@@ -15,10 +15,7 @@ keel launch --detach workflows/iterative-review/iterative-review.workflow.ts \
     "repository": "/home/kevin/worktrees/keel",
     "task": "Review the durable agent sessions implementation",
     "spec": "/home/kevin/worktrees/keel/.specs/durable-agent-sessions.md",
-    "provider": "claude",
-    "model": "claude-opus-4-8",
-    "reasoning": "xhigh",
-    "toolPolicy": "read-only",
+    "reasoning": "high",
     "maxRounds": 10,
     "stopWhenClean": false
   }'
@@ -56,13 +53,11 @@ KEEL_RUN_CAP=kc_run_... keel signal <run-id> review-cycle '{
 | `task` | yes | The concrete implementation, design, or change to review. |
 | `spec` | no | Optional absolute path to a spec, design note, or acceptance criteria. |
 | `focus` | no | Optional review focus such as security, replay semantics, or docs. |
-| `provider` | no | Agent provider. Defaults to `claude`. |
-| `model` | no | Provider model name. |
-| `reasoning` | no | Reasoning effort. Defaults to `xhigh`. |
-| `toolPolicy` | no | Tool policy. Defaults to `read-only`. |
+| `reasoning` | no | Override reasoning effort for the `claude-default` reviewer profile. |
 | `maxRounds` | no | Maximum follow-up review turns. Defaults to `3`, capped at `20`. |
 | `signalName` | no | Signal name for follow-up payloads. Defaults to `review-cycle`. |
 | `stopWhenClean` | no | Defaults to `true`. Set `false` to keep parking for more cycles even after a clean review. |
 
 The reviewer participant key is `reviewer`; turn keys are `initial`,
-`followup-1`, `followup-2`, and so on.
+`followup-1`, `followup-2`, and so on. The reviewer uses the daemon
+`claude-default` profile with read-only tools.

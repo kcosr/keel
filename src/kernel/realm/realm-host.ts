@@ -632,7 +632,10 @@ export class RealmKernel {
       if (!retentionPolicy) throw new Error("workspaceRetention resolution failed");
       const gitTarget = resolveGitRootTarget(target);
       const workspaceId = agentWorkspaceId("agent_session", m.agentKey);
-      const path = retainedWorkspacePath(this.workspaceStore, runId, workspaceId);
+      const defaultPath = retainedWorkspacePath(this.workspaceStore, runId, workspaceId);
+      let path = defaultPath;
+      let persistedTarget = gitTarget.target;
+      let persistedBaseCommit = gitTarget.baseCommit;
       let needsCreate = false;
       this.store.transaction(() => {
         const existingWorkspace = this.store.getAgentWorkspace(runId, workspaceId);
@@ -644,7 +647,7 @@ export class RealmKernel {
             key: m.agentKey,
             lastAttempt: null,
             retentionPolicy,
-            workspacePath: path,
+            workspacePath: defaultPath,
             target: gitTarget.target,
             baseCommit: gitTarget.baseCommit,
             status: "creating",
@@ -663,12 +666,19 @@ export class RealmKernel {
           needsCreate = true;
           return;
         }
+        path = existingWorkspace.workspacePath;
+        persistedTarget = existingWorkspace.target;
+        persistedBaseCommit = existingWorkspace.baseCommit;
         if (existingWorkspace.target !== gitTarget.target) {
           throw new Error(
             `agent session "${m.agentKey}" workspace target changed from ${existingWorkspace.target} to ${gitTarget.target}`,
           );
         }
-        if (existingWorkspace.retentionPolicy !== retentionPolicy) {
+        const migratedAlwaysDefault =
+          existingWorkspace.retentionPolicy === "always" &&
+          retentionPolicy === "never" &&
+          existingWorkspace.workspacePath !== defaultPath;
+        if (existingWorkspace.retentionPolicy !== retentionPolicy && !migratedAlwaysDefault) {
           throw new Error(
             `agent session "${m.agentKey}" workspaceRetention changed; use a new participant key or a fresh run`,
           );
@@ -688,7 +698,7 @@ export class RealmKernel {
       });
       if (needsCreate) {
         try {
-          createRetainedWorktree(gitTarget.repoRoot, path, gitTarget.baseCommit);
+          createRetainedWorktree(gitTarget.repoRoot, defaultPath, gitTarget.baseCommit);
         } catch (err) {
           this.store.updateAgentSessionWorkspace(runId, m.agentKey, {
             status: "abandoned",
@@ -708,8 +718,8 @@ export class RealmKernel {
       }
       cwd = path;
       workspacePath = path;
-      workspaceTarget = gitTarget.target;
-      workspaceBaseCommit = gitTarget.baseCommit;
+      workspaceTarget = persistedTarget;
+      workspaceBaseCommit = persistedBaseCommit;
     } else {
       assertUsableTargetDirectory(target);
       cwd = target;
@@ -800,7 +810,10 @@ export class RealmKernel {
     if (!retentionPolicy) throw new Error("workspaceRetention resolution failed");
     const gitTarget = resolveGitRootTarget(target);
     const workspaceId = agentWorkspaceId("agent", m.key);
-    const path = retainedWorkspacePath(this.workspaceStore, runId, workspaceId);
+    const defaultPath = retainedWorkspacePath(this.workspaceStore, runId, workspaceId);
+    let path = defaultPath;
+    let persistedTarget = gitTarget.target;
+    let persistedBaseCommit = gitTarget.baseCommit;
     let needsCreate = false;
     this.store.transaction(() => {
       const existingWorkspace = this.store.getAgentWorkspace(runId, workspaceId);
@@ -812,7 +825,7 @@ export class RealmKernel {
           key: m.key,
           lastAttempt: attempt,
           retentionPolicy,
-          workspacePath: path,
+          workspacePath: defaultPath,
           target: gitTarget.target,
           baseCommit: gitTarget.baseCommit,
           status: "creating",
@@ -831,13 +844,30 @@ export class RealmKernel {
         needsCreate = true;
         return;
       }
+      path = existingWorkspace.workspacePath;
+      persistedTarget = existingWorkspace.target;
+      persistedBaseCommit = existingWorkspace.baseCommit;
       if (existingWorkspace.target !== gitTarget.target) {
         throw new Error(
           `agent "${m.key}" workspace target changed from ${existingWorkspace.target} to ${gitTarget.target}`,
         );
       }
       if (existingWorkspace.status === "removed") {
-        throw new Error(`agent "${m.key}" workspace was removed and cannot be reused`);
+        this.store.updateAgentWorkspace(runId, workspaceId, {
+          status: "creating",
+          lastAttempt: attempt,
+          retentionPolicy,
+          failureSeen: false,
+          lastDiffEventSeq: null,
+          lastErrorEventSeq: null,
+          cleanupErrorJson: null,
+          updatedAtMs: startedAtMs,
+          mergedAtMs: null,
+          discardedAtMs: null,
+          removedAtMs: null,
+        });
+        needsCreate = true;
+        return;
       }
       if (
         existingWorkspace.status !== "idle" &&
@@ -858,7 +888,7 @@ export class RealmKernel {
     });
     if (needsCreate) {
       try {
-        createRetainedWorktree(gitTarget.repoRoot, path, gitTarget.baseCommit);
+        createRetainedWorktree(gitTarget.repoRoot, path, persistedBaseCommit);
       } catch (err) {
         this.store.updateAgentWorkspace(runId, workspaceId, {
           status: "abandoned",
@@ -884,8 +914,8 @@ export class RealmKernel {
       cwd: path,
       workspaceId,
       workspacePath: path,
-      target: gitTarget.target,
-      baseCommit: gitTarget.baseCommit,
+      target: persistedTarget,
+      baseCommit: persistedBaseCommit,
     };
   }
 

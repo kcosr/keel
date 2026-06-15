@@ -804,6 +804,79 @@ describe("ctx.agentSession", () => {
     expect(provider.calls).toHaveLength(1);
   });
 
+  test("resume uses a migrated session workspace persisted path and retention policy", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "keel-session-migrated-target-"));
+    const workspaceStore = mkdtempSync(join(tmpdir(), "keel-session-migrated-store-"));
+    try {
+      initGitRepo(repo);
+      const waitThenContinue = {
+        source: `
+          import { type Ctx } from "@kcosr/keel";
+          export default async function wf(ctx: Ctx): Promise<string> {
+            const primary = ctx.agentSession({
+              key: "primary",
+              provider: "session",
+              workspaceIsolation: true,
+              capabilities: { fs: "workspace-write" },
+            });
+            await primary.turn({ key: "draft", prompt: "draft" });
+            await ctx.signal("go");
+            await primary.turn({ key: "revise", prompt: "revise" });
+            return "done";
+          }
+        `,
+        name: "migrated-isolated-session",
+      };
+      const calls: AgentInvocation[] = [];
+      const provider: AgentProvider = {
+        name: "session",
+        supportsSessions: true,
+        async generate(invocation, hooks) {
+          calls.push({ ...invocation });
+          const token = invocation.resumeToken ?? "sess-1";
+          hooks.onSessionToken?.(token);
+          const state = join(invocation.cwd ?? "", "state.txt");
+          const prior = existsSync(state) ? readFileSync(state, "utf8") : "";
+          writeFileSync(state, `${prior}${invocation.key}\n`);
+          return { text: "ok", transcript: [], sessionToken: token };
+        },
+      };
+
+      const store = JournalStore.memory();
+      const k = kernel(store, provider, { workspaceStore });
+      const parked = await k.run<string>(waitThenContinue, null, { target: repo });
+      expect(parked.status).toBe("waiting-signal");
+      expect(calls).toHaveLength(1);
+      const workspace = store.listAgentWorkspaces("run-1")[0];
+      if (!workspace) throw new Error("missing workspace row");
+      const migratedPath = join(workspaceStore, "run-1", "primary");
+      renameSync(workspace.workspacePath, migratedPath);
+      store.db
+        .query(
+          "UPDATE agent_workspaces SET workspace_path = ?, retention_policy = 'always' WHERE run_id = ? AND workspace_id = ?",
+        )
+        .run(migratedPath, "run-1", workspace.workspaceId);
+
+      store.putSignal("run-1", "go", {}, 1);
+      const resumed = await k.resume<string>("run-1");
+      expect(resumed.status).toBe("finished");
+      expect(resumed.output).toBe("done");
+      expect(calls).toHaveLength(2);
+      expect(calls[1]?.cwd).toBe(migratedPath);
+      expect(readFileSync(join(migratedPath, "state.txt"), "utf8")).toBe(
+        "__session.primary.draft\n__session.primary.revise\n",
+      );
+      expect(store.getAgentWorkspace("run-1", workspace.workspaceId)).toMatchObject({
+        workspacePath: migratedPath,
+        retentionPolicy: "always",
+        status: "pending_review",
+      });
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+      rmSync(workspaceStore, { recursive: true, force: true });
+    }
+  });
+
   test("a resumed turn fails if the provider reports a different token", async () => {
     const mismatch: AgentProvider = {
       name: "session",

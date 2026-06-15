@@ -902,12 +902,16 @@ interface KeelApi {
   getRunReport(runId: string): RunReport | null;
   getBlockage(runId: string): Blockage;
   listRuns(): RunSummary[];
-  listRunWorkspaces(runId: string): RunWorkspaceView[];
-  getRunWorkspace(runId: string, agentKey: string): RunWorkspaceView | null;
-  getRunWorkspaceDiff(runId: string, agentKey: string): RunWorkspaceDiff;
-  mergeRunWorkspace(runId: string, agentKey: string): RunWorkspaceView;
-  discardRunWorkspace(runId: string, agentKey: string): RunWorkspaceView;
-  gcWorkspaces(opts?: { olderThanMs?: number; includePending?: boolean }): WorkspaceGcResult;
+  listRunWorkspaces(runId: string, opts?: { includeRemoved?: boolean }): RunWorkspaceView[];
+  getRunWorkspace(runId: string, workspaceId: string): RunWorkspaceView | null;
+  getRunWorkspaceDiff(runId: string, workspaceId: string): RunWorkspaceDiff;
+  mergeRunWorkspace(runId: string, workspaceId: string): RunWorkspaceView;
+  discardRunWorkspace(runId: string, workspaceId: string): RunWorkspaceView;
+  gcWorkspaces(opts?: {
+    olderThanMs?: number;
+    includePending?: boolean;
+    includeRemoved?: boolean;
+  }): WorkspaceGcResult;
   waitForRun(runId: string): Promise<RunOutcome>;
   getRunOutput(runId: string): Promise<RunOutcome>;
   gcDefinitions(opts?: { ttlMs?: number; cacheMinAgeMs?: number }): Promise<{

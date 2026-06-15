@@ -286,6 +286,60 @@ describe("durable diff + worktree cleanup", () => {
     );
   });
 
+  test("default-retention one-shot retry recreates a removed workspace", async () => {
+    const store = JournalStore.memory();
+    const workflow = {
+      source: `
+        import { type Ctx } from "@kcosr/keel";
+        export default async function wf(ctx: Ctx): Promise<string> {
+          return await ctx.agent({
+            key: "edit",
+            prompt: "make a change",
+            provider: "writer",
+            workspaceIsolation: true,
+            capabilities: { fs: "workspace-write" },
+          });
+        }
+      `,
+      name: "one-shot-default-retry",
+    };
+    let calls = 0;
+    let firstCwd: string | undefined;
+    let secondSawFirstAttempt = true;
+    const failsThenSucceeds: AgentProvider = {
+      name: "writer",
+      async generate(inv: AgentInvocation): Promise<AgentResult> {
+        calls += 1;
+        if (calls === 1) {
+          firstCwd = inv.cwd;
+          if (inv.cwd) writeFileSync(join(inv.cwd, "attempt-1.txt"), "attempt 1\n");
+          throw new Error("transient write failure");
+        }
+        expect(inv.cwd).toBe(firstCwd);
+        secondSawFirstAttempt = inv.cwd ? existsSync(join(inv.cwd, "attempt-1.txt")) : true;
+        if (inv.cwd) writeFileSync(join(inv.cwd, "attempt-2.txt"), "attempt 2\n");
+        return { text: "ok", transcript: [] };
+      },
+    };
+    const kernel = new RealmKernel(store, {
+      idgen: () => "r",
+      agents: new AgentProviderRegistry().register(failsThenSucceeds),
+      workspaceStore: mkdtempSync(join(tmpdir(), "keel-workspaces-")),
+    });
+
+    await kernel.run<string>(workflow, null, { name: "w", target: repo }).catch(() => null);
+    expect(store.getRun("r")?.status).toBe("failed");
+    expect(store.listAgentWorkspaces("r", { includeRemoved: true })[0]?.status).toBe("removed");
+    expect(firstCwd ? existsSync(firstCwd) : true).toBe(false);
+
+    const retried = await kernel.retry<string>("r");
+    expect(retried.status).toBe("finished");
+    expect(retried.output).toBe("ok");
+    expect(calls).toBe(2);
+    expect(secondSawFirstAttempt).toBe(false);
+    expect(store.listAgentWorkspaces("r", { includeRemoved: true })[0]?.status).toBe("removed");
+  });
+
   test("one-shot oversized diff emits diff_error without failing the agent step", async () => {
     const store = JournalStore.memory();
     const largeWriter: AgentProvider = {

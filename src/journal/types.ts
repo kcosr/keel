@@ -98,7 +98,11 @@ export interface AgentSessionTurnRow {
   finishedAtMs: number | null;
 }
 
-export type AgentSessionWorkspaceStatus =
+export type WorkspaceRetention = "never" | "on-failure" | "always";
+
+export type AgentWorkspaceKind = "agent" | "agent_session";
+
+export type AgentWorkspaceStatus =
   | "creating"
   | "active"
   | "idle"
@@ -106,7 +110,35 @@ export type AgentSessionWorkspaceStatus =
   | "merged"
   | "discarded"
   | "diff_error"
-  | "abandoned";
+  | "abandoned"
+  | "removed"
+  | "cleanup_error";
+
+export interface AgentWorkspaceRow {
+  runId: string;
+  workspaceId: string;
+  kind: AgentWorkspaceKind;
+  key: string;
+  lastAttempt: number | null;
+  retentionPolicy: WorkspaceRetention;
+  workspacePath: string;
+  target: string;
+  baseCommit: string;
+  status: AgentWorkspaceStatus;
+  failureSeen: boolean;
+  lastTurnKey: string | null;
+  lastTurnAttempt: number | null;
+  lastDiffEventSeq: number | null;
+  lastErrorEventSeq: number | null;
+  cleanupErrorJson: string | null;
+  createdAtMs: number;
+  updatedAtMs: number;
+  mergedAtMs: number | null;
+  discardedAtMs: number | null;
+  removedAtMs: number | null;
+}
+
+export type AgentSessionWorkspaceStatus = AgentWorkspaceStatus;
 
 export interface AgentSessionWorkspaceRow {
   runId: string;

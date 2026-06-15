@@ -38,6 +38,7 @@ export type WorkerRequest =
       allowTools: string[];
       denyTools: string[];
       workspaceIsolation: boolean;
+      workspaceRetention: "never" | "on-failure" | "always" | null;
       target: string | null;
       capabilities: Capabilities | null;
       secrets: string[];
@@ -67,6 +68,7 @@ export type WorkerRequest =
       allowTools: string[];
       denyTools: string[];
       workspaceIsolation: boolean;
+      workspaceRetention: "never" | "on-failure" | "always" | null;
       target: string | null;
       capabilities: Capabilities | null;
       secrets: string[];

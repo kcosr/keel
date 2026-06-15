@@ -304,7 +304,7 @@ describe("ctx.agentSession", () => {
         source: `
           import { type Ctx } from "@kcosr/keel";
           export default async function wf(ctx: Ctx): Promise<string> {
-            const primary = ctx.agentSession({ key: "primary", provider: "session", workspaceIsolation: true, capabilities: { fs: "workspace-write" } });
+            const primary = ctx.agentSession({ key: "primary", provider: "session", workspaceIsolation: true, workspaceRetention: "always", capabilities: { fs: "workspace-write" } });
             await primary.turn({ key: "draft", prompt: "draft" });
             await primary.turn({ key: "revise", prompt: "revise" });
             return "done";
@@ -364,8 +364,8 @@ describe("ctx.agentSession", () => {
         source: `
           import { type Ctx } from "@kcosr/keel";
           export default async function wf(ctx: Ctx, input: { a: string; b: string }): Promise<string> {
-            await ctx.agentSession({ key: "a", provider: "session", workspaceIsolation: true, target: input.a, capabilities: { fs: "workspace-write" } }).turn({ key: "one", prompt: "one" });
-            await ctx.agentSession({ key: "b", provider: "session", workspaceIsolation: true, target: input.b, capabilities: { fs: "workspace-write" } }).turn({ key: "one", prompt: "one" });
+            await ctx.agentSession({ key: "a", provider: "session", workspaceIsolation: true, workspaceRetention: "always", target: input.a, capabilities: { fs: "workspace-write" } }).turn({ key: "one", prompt: "one" });
+            await ctx.agentSession({ key: "b", provider: "session", workspaceIsolation: true, workspaceRetention: "always", target: input.b, capabilities: { fs: "workspace-write" } }).turn({ key: "one", prompt: "one" });
             return "done";
           }
         `,
@@ -417,7 +417,7 @@ describe("ctx.agentSession", () => {
         source: `
           import { type Ctx } from "@kcosr/keel";
           export default async function wf(ctx: Ctx): Promise<string> {
-            const primary = ctx.agentSession({ key: "primary", provider: "session", workspaceIsolation: true, capabilities: { fs: "workspace-write" } });
+            const primary = ctx.agentSession({ key: "primary", provider: "session", workspaceIsolation: true, workspaceRetention: "always", capabilities: { fs: "workspace-write" } });
             await primary.turn({ key: "draft", prompt: "draft" });
             await primary.turn({ key: "revise", prompt: "revise" });
             return "done";
@@ -474,7 +474,7 @@ describe("ctx.agentSession", () => {
         source: `
           import { type Ctx } from "@kcosr/keel";
           export default async function wf(ctx: Ctx): Promise<string> {
-            const primary = ctx.agentSession({ key: "primary", provider: "session", workspaceIsolation: true, capabilities: { fs: "workspace-write" } });
+            const primary = ctx.agentSession({ key: "primary", provider: "session", workspaceIsolation: true, workspaceRetention: "always", capabilities: { fs: "workspace-write" } });
             await primary.turn({ key: "huge", prompt: "huge" });
             return "done";
           }
@@ -523,7 +523,7 @@ describe("ctx.agentSession", () => {
         source: `
           import { type Ctx } from "@kcosr/keel";
           export default async function wf(ctx: Ctx): Promise<string> {
-            const primary = ctx.agentSession({ key: "primary", provider: "session", workspaceIsolation: true, capabilities: { fs: "workspace-write" } });
+            const primary = ctx.agentSession({ key: "primary", provider: "session", workspaceIsolation: true, workspaceRetention: "always", capabilities: { fs: "workspace-write" } });
             await primary.turn({ key: "break", prompt: "break" });
             await primary.turn({ key: "repair", prompt: "repair" });
             return "done";

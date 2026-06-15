@@ -442,24 +442,27 @@ export class KeelDaemon {
       }
       case "listRunWorkspaces":
         this.authorizeRun(conn, p.runId as string, "run:read");
-        return this.api.listRunWorkspaces(p.runId as string);
+        return this.api.listRunWorkspaces(p.runId as string, {
+          ...(p.includeRemoved === true ? { includeRemoved: true } : {}),
+        });
       case "getRunWorkspace":
         this.authorizeRun(conn, p.runId as string, "run:read");
-        return this.api.getRunWorkspace(p.runId as string, p.agentKey as string);
+        return this.api.getRunWorkspace(p.runId as string, p.workspaceId as string);
       case "getRunWorkspaceDiff":
         this.authorizeRun(conn, p.runId as string, "run:read");
-        return this.api.getRunWorkspaceDiff(p.runId as string, p.agentKey as string);
+        return this.api.getRunWorkspaceDiff(p.runId as string, p.workspaceId as string);
       case "mergeRunWorkspace":
         this.authorizeAdmin(conn);
-        return this.api.mergeRunWorkspace(p.runId as string, p.agentKey as string);
+        return this.api.mergeRunWorkspace(p.runId as string, p.workspaceId as string);
       case "discardRunWorkspace":
         this.authorizeAdmin(conn);
-        return this.api.discardRunWorkspace(p.runId as string, p.agentKey as string);
+        return this.api.discardRunWorkspace(p.runId as string, p.workspaceId as string);
       case "gcWorkspaces":
         this.authorizeAdmin(conn);
         return this.api.gcWorkspaces({
           ...(typeof p.olderThanMs === "number" ? { olderThanMs: p.olderThanMs } : {}),
           ...(p.includePending === true ? { includePending: true } : {}),
+          ...(p.includeRemoved === true ? { includeRemoved: true } : {}),
         });
       case "gcDefinitions": {
         this.authorizeAdmin(conn);

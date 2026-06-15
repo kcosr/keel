@@ -3,7 +3,7 @@
 ## [Unreleased]
 
 ### Added
-- Retained isolated workspaces for `ctx.agentSession({ workspaceIsolation: true })`: one workspace per `(runId, agentKey)`, reused across turns/retries and retained for explicit inspect, merge, discard, or GC.
+- `workspaceRetention: "never" | "on-failure" | "always"` for isolated `ctx.agent` and `ctx.agentSession` workspaces, with profile inheritance, workspace CLI/RPC metadata, and unified `workspaceId` selectors.
 - Run/schedule agent targets via `--target`, per-agent/profile `target`, and workspace lifecycle RPC/CLI commands (`keel workspace ...`).
 - Top-level `workflows/` directory for reusable operational workflows, starting
   with `iterative-review.workflow.ts`, a signal-driven multi-turn review loop,
@@ -58,8 +58,8 @@
   wrappers still capture their own cwd as the default target. The supervisor
   disables persisted schedules with invalid targets instead of letting one bad
   schedule break a tick.
-- Workflow SDK ABI bumped to 2 because agent target resolution participates in agent/session identity.
-- Workspace startup/GC reconciliation now clears stale `creating` rows, reconciles terminal `active`/`creating` rows, makes workspace GC idempotent, and rejects invalid workspace merge/discard transitions after terminal workspace statuses.
+- Workflow SDK ABI bumped to 3 because workspace retention participates in agent/session identity and terminal workspace lifecycle.
+- Isolated workspaces now default to terminal cleanup (`workspaceRetention: "never"`); retained workspaces require `"on-failure"` or `"always"`, and workspace RPC/CLI show/diff/merge/discard now use `workspaceId` instead of session `agentKey`.
 - Durable workspace diff payloads now cap `agent.diff.contentDiff` and changed
   path arrays with retained-workspace truncation/omission metadata, and
   oversized `git status`/`git diff` output crosses explicit buffer limits into

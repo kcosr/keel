@@ -118,12 +118,15 @@ from that token rather than starting a fresh session. Changing a participant's
 resolved provider/model/tool/capability/target identity or changing a completed/pending
 turn's prompt/schema/options for the same turn key fails closed.
 
-Use `workspaceIsolation: true` for write-capable session participants whose
-filesystem changes should be staged for review. Keel creates one retained git
-worktree per `(runId, agentKey)`, reuses it for all turns/retries, and leaves it
-for explicit `keel workspace diff|merge|discard` after the run. The target must
-be the git repository root; Keel does not auto-merge or delete retained
-workspaces.
+Use `workspaceIsolation: true` when write-capable one-shot agents or session
+participants should stage filesystem changes in a reviewable git worktree. Set
+`workspaceRetention` intentionally: `"never"` removes clean terminal workspaces
+(default), `"on-failure"` keeps failed/abnormal workspaces for diagnosis, and
+`"always"` keeps every terminal workspace for explicit `keel workspace diff|merge|discard`.
+Session workspaces are still reused across turns/retries while the run can
+continue, even with `"never"`. The target must be the git repository root.
+Workspace isolation is not a secret or network security boundary, and Keel never
+auto-merges retained workspaces.
 
 ## 5. Schemas
 

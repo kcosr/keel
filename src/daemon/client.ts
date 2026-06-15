@@ -177,23 +177,26 @@ export class DaemonClient {
       target: clientRunTargetOrCwd(req.target, "putSchedule"),
     });
   }
-  listRunWorkspaces(runId: string): Promise<RunWorkspaceView[]> {
-    return this.rpc("listRunWorkspaces", { runId });
+  listRunWorkspaces(
+    runId: string,
+    opts: { includeRemoved?: boolean } = {},
+  ): Promise<RunWorkspaceView[]> {
+    return this.rpc("listRunWorkspaces", { runId, ...opts });
   }
-  getRunWorkspace(runId: string, agentKey: string): Promise<RunWorkspaceView | null> {
-    return this.rpc("getRunWorkspace", { runId, agentKey });
+  getRunWorkspace(runId: string, workspaceId: string): Promise<RunWorkspaceView | null> {
+    return this.rpc("getRunWorkspace", { runId, workspaceId });
   }
-  getRunWorkspaceDiff(runId: string, agentKey: string): Promise<RunWorkspaceDiff> {
-    return this.rpc("getRunWorkspaceDiff", { runId, agentKey });
+  getRunWorkspaceDiff(runId: string, workspaceId: string): Promise<RunWorkspaceDiff> {
+    return this.rpc("getRunWorkspaceDiff", { runId, workspaceId });
   }
-  mergeRunWorkspace(runId: string, agentKey: string): Promise<RunWorkspaceView> {
-    return this.rpc("mergeRunWorkspace", { runId, agentKey });
+  mergeRunWorkspace(runId: string, workspaceId: string): Promise<RunWorkspaceView> {
+    return this.rpc("mergeRunWorkspace", { runId, workspaceId });
   }
-  discardRunWorkspace(runId: string, agentKey: string): Promise<RunWorkspaceView> {
-    return this.rpc("discardRunWorkspace", { runId, agentKey });
+  discardRunWorkspace(runId: string, workspaceId: string): Promise<RunWorkspaceView> {
+    return this.rpc("discardRunWorkspace", { runId, workspaceId });
   }
   gcWorkspaces(
-    req: { olderThanMs?: number; includePending?: boolean } = {},
+    req: { olderThanMs?: number; includePending?: boolean; includeRemoved?: boolean } = {},
   ): Promise<WorkspaceGcResult> {
     return this.rpc("gcWorkspaces", req);
   }

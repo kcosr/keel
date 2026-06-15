@@ -752,8 +752,10 @@ describe("workspace lifecycle operations", () => {
         runStatus: "running",
         workspaceStatus: "pending_review",
       });
-      expect(() => api.mergeRunWorkspace("r-running", "agent")).toThrow(/while run is running/);
-      expect(() => api.discardRunWorkspace("r-running", "agent")).toThrow(/while run is running/);
+      expect(() => api.mergeRunWorkspace("r-running", "ws_agent")).toThrow(/while run is running/);
+      expect(() => api.discardRunWorkspace("r-running", "ws_agent")).toThrow(
+        /while run is running/,
+      );
       store.deleteAgentSessionWorkspace("r-running", "agent");
       rmSync(nonTerminalPath, { recursive: true, force: true });
 
@@ -769,7 +771,7 @@ describe("workspace lifecycle operations", () => {
         workspaceStatus: "pending_review",
         activeTurn: true,
       });
-      expect(() => api.discardRunWorkspace("r-active", "agent")).toThrow(/turn is active/);
+      expect(() => api.discardRunWorkspace("r-active", "ws_agent")).toThrow(/turn is active/);
       store.deleteAgentSessionWorkspace("r-active", "agent");
       rmSync(activePath, { recursive: true, force: true });
 
@@ -785,10 +787,10 @@ describe("workspace lifecycle operations", () => {
         runStatus: "finished",
         workspaceStatus: "pending_review",
       });
-      expect(api.mergeRunWorkspace("r-merge", "agent").status).toBe("merged");
+      expect(api.mergeRunWorkspace("r-merge", "ws_agent").status).toBe("merged");
       expect(readFileSync(join(repo, "merged.txt"), "utf8")).toBe("merged\n");
-      expect(() => api.mergeRunWorkspace("r-merge", "agent")).toThrow(/status merged/);
-      expect(() => api.discardRunWorkspace("r-merge", "agent")).toThrow(/status merged/);
+      expect(() => api.mergeRunWorkspace("r-merge", "ws_agent")).toThrow(/status merged/);
+      expect(() => api.discardRunWorkspace("r-merge", "ws_agent")).toThrow(/status merged/);
 
       const discardPath = retainedWorkspacePath(workspaceStore, "r-discard", "agent");
       createRetainedWorktree(repo, discardPath, baseCommit);
@@ -801,10 +803,10 @@ describe("workspace lifecycle operations", () => {
         runStatus: "finished",
         workspaceStatus: "pending_review",
       });
-      expect(api.discardRunWorkspace("r-discard", "agent").status).toBe("discarded");
+      expect(api.discardRunWorkspace("r-discard", "ws_agent").status).toBe("discarded");
       expect(existsSync(discardPath)).toBe(false);
-      expect(() => api.mergeRunWorkspace("r-discard", "agent")).toThrow(/status discarded/);
-      expect(() => api.discardRunWorkspace("r-discard", "agent")).toThrow(/status discarded/);
+      expect(() => api.mergeRunWorkspace("r-discard", "ws_agent")).toThrow(/status discarded/);
+      expect(() => api.discardRunWorkspace("r-discard", "ws_agent")).toThrow(/status discarded/);
 
       const pendingPath = retainedWorkspacePath(workspaceStore, "r-pending", "agent");
       createRetainedWorktree(repo, pendingPath, baseCommit);

@@ -46,19 +46,26 @@ export interface RunLaunchResult {
 
 export interface RunWorkspaceView {
   runId: string;
-  agentKey: string;
+  workspaceId: string;
+  kind: "agent" | "agent_session";
+  key: string;
+  lastAttempt: number | null;
+  retentionPolicy: "never" | "on-failure" | "always";
   workspacePath: string;
   target: string;
   baseCommit: string;
   status: string;
+  failureSeen: boolean;
   lastTurnKey: string | null;
   lastTurnAttempt: number | null;
   lastDiffEventSeq: number | null;
   lastErrorEventSeq: number | null;
+  cleanupError: unknown | null;
   createdAtMs: number;
   updatedAtMs: number;
   mergedAtMs: number | null;
   discardedAtMs: number | null;
+  removedAtMs: number | null;
 }
 
 export interface RunWorkspaceDiff {
@@ -127,23 +134,30 @@ export interface KeelApi {
   getBlockage(runId: string): Blockage;
   /** Summaries of all runs. */
   listRuns(): RunSummary[];
-  listRunWorkspaces(runId: string): Promise<RunWorkspaceView[]> | RunWorkspaceView[];
+  listRunWorkspaces(
+    runId: string,
+    opts?: { includeRemoved?: boolean },
+  ): Promise<RunWorkspaceView[]> | RunWorkspaceView[];
   getRunWorkspace(
     runId: string,
-    agentKey: string,
+    workspaceId: string,
   ): Promise<RunWorkspaceView | null> | RunWorkspaceView | null;
   getRunWorkspaceDiff(
     runId: string,
-    agentKey: string,
+    workspaceId: string,
   ): Promise<RunWorkspaceDiff> | RunWorkspaceDiff;
-  mergeRunWorkspace(runId: string, agentKey: string): Promise<RunWorkspaceView> | RunWorkspaceView;
+  mergeRunWorkspace(
+    runId: string,
+    workspaceId: string,
+  ): Promise<RunWorkspaceView> | RunWorkspaceView;
   discardRunWorkspace(
     runId: string,
-    agentKey: string,
+    workspaceId: string,
   ): Promise<RunWorkspaceView> | RunWorkspaceView;
   gcWorkspaces(opts?: {
     olderThanMs?: number;
     includePending?: boolean;
+    includeRemoved?: boolean;
   }): Promise<WorkspaceGcResult> | WorkspaceGcResult;
   /** Await a run's next terminal or parked status and return its outcome. */
   waitForRun(runId: string): Promise<RunOutcome>;

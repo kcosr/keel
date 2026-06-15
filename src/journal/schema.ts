@@ -4,7 +4,7 @@
 // or tricks. Integers are epoch-ms; JSON travels as TEXT. Reserved tables
 // (approvals/signals/timers) are created now though their effects land later.
 
-export const SCHEMA_VERSION = 13;
+export const SCHEMA_VERSION = 14;
 
 export const DDL = /* sql */ `
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -85,22 +85,29 @@ CREATE TABLE IF NOT EXISTS agent_session_turns (
   UNIQUE (run_id, stable_key, attempt)
 );
 
-CREATE TABLE IF NOT EXISTS agent_session_workspaces (
-  run_id              TEXT NOT NULL,
-  agent_key           TEXT NOT NULL,
-  workspace_path      TEXT NOT NULL,
-  target              TEXT NOT NULL,
-  base_commit         TEXT NOT NULL,
-  status              TEXT NOT NULL,
-  last_turn_key       TEXT,
-  last_turn_attempt   INTEGER,
-  last_diff_event_seq INTEGER,
+CREATE TABLE IF NOT EXISTS agent_workspaces (
+  run_id               TEXT NOT NULL,
+  workspace_id         TEXT NOT NULL,
+  kind                 TEXT NOT NULL,
+  key                  TEXT NOT NULL,
+  last_attempt         INTEGER,
+  retention_policy     TEXT NOT NULL,
+  workspace_path       TEXT NOT NULL,
+  target               TEXT NOT NULL,
+  base_commit          TEXT NOT NULL,
+  status               TEXT NOT NULL,
+  failure_seen         INTEGER NOT NULL DEFAULT 0,
+  last_turn_key        TEXT,
+  last_turn_attempt    INTEGER,
+  last_diff_event_seq  INTEGER,
   last_error_event_seq INTEGER,
-  created_at_ms       INTEGER NOT NULL,
-  updated_at_ms       INTEGER NOT NULL,
-  merged_at_ms        INTEGER,
-  discarded_at_ms     INTEGER,
-  PRIMARY KEY (run_id, agent_key)
+  cleanup_error_json   TEXT,
+  created_at_ms        INTEGER NOT NULL,
+  updated_at_ms        INTEGER NOT NULL,
+  merged_at_ms         INTEGER,
+  discarded_at_ms      INTEGER,
+  removed_at_ms        INTEGER,
+  PRIMARY KEY (run_id, workspace_id)
 );
 
 CREATE TABLE IF NOT EXISTS artifacts (

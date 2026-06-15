@@ -1,3 +1,4 @@
+import type { WorkspaceRetention } from "../kernel/ctx.ts";
 import type { ToolPolicy } from "./capabilities.ts";
 
 // Named agent profiles — daemon/kernel-configured presets
@@ -17,6 +18,7 @@ export interface AgentProfile {
   allowTools?: string[];
   denyTools?: string[];
   workspaceIsolation?: boolean;
+  workspaceRetention?: WorkspaceRetention;
   target?: string;
   capabilities?: Record<string, unknown>;
   maxRetries?: number;
@@ -37,6 +39,7 @@ const INHERITED = [
   "allowTools",
   "denyTools",
   "workspaceIsolation",
+  "workspaceRetention",
   "target",
   "capabilities",
   "maxRetries",

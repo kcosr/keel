@@ -59,6 +59,7 @@ describe("trusted-local agent isolation controls", () => {
     const kernel = new RealmKernel(store, {
       idgen: () => "r",
       agents: new AgentProviderRegistry().register(provider),
+      workspaceStore: mkdtempSync(join(tmpdir(), "keel-workspaces-")),
     });
     await expect(kernel.run(writeUrl, null, { name: "w", target })).rejects.toThrow(
       /git repository root/,
@@ -66,6 +67,26 @@ describe("trusted-local agent isolation controls", () => {
     rmSync(target, { recursive: true, force: true });
     expect(called).toBe(false); // provider never invoked — failed closed
     expect(store.getRun("r")?.status).toBe("failed");
+  });
+
+  test("workspaceRetention requires workspaceIsolation", async () => {
+    const store = JournalStore.memory();
+    const workflow = {
+      source: `
+        import { type Ctx } from "@kcosr/keel";
+        export default async function wf(ctx: Ctx): Promise<string> {
+          return await ctx.agent({ key: "edit", prompt: "x", provider: "writer", workspaceRetention: "always" });
+        }
+      `,
+      name: "retention-without-isolation",
+    };
+    const kernel = new RealmKernel(store, {
+      idgen: () => "r",
+      agents: new AgentProviderRegistry().register(writerProvider),
+    });
+    await expect(kernel.run(workflow, null, { name: "w", target: process.cwd() })).rejects.toThrow(
+      /workspaceRetention requires workspaceIsolation/,
+    );
   });
 
   test("an explicitly allowed shell tool does not imply workspace isolation", async () => {
@@ -81,6 +102,7 @@ describe("trusted-local agent isolation controls", () => {
     const kernel = new RealmKernel(store, {
       idgen: () => "r",
       agents: new AgentProviderRegistry().register(provider),
+      workspaceStore: mkdtempSync(join(tmpdir(), "keel-workspaces-")),
     });
     const handle = await kernel.run<string>(readPlusBashUrl, null, {
       name: "w",
@@ -106,6 +128,7 @@ describe("trusted-local agent isolation controls", () => {
     const kernel = new RealmKernel(store, {
       idgen: () => "r",
       agents: new AgentProviderRegistry().register(provider),
+      workspaceStore: mkdtempSync(join(tmpdir(), "keel-workspaces-")),
       secrets,
     });
     const handle = await kernel.run<string>(writeSecretLooseUrl, null, {
@@ -134,6 +157,7 @@ describe("trusted-local agent isolation controls", () => {
     const kernel = new RealmKernel(store, {
       idgen: () => "r",
       agents: new AgentProviderRegistry().register(provider),
+      workspaceStore: mkdtempSync(join(tmpdir(), "keel-workspaces-")),
       secrets,
     });
     const handle = await kernel.run<string>(readPlusBashSecretUrl, null, {
@@ -166,6 +190,7 @@ describe("durable diff + worktree cleanup", () => {
     const kernel = new RealmKernel(store, {
       idgen: () => "r",
       agents: new AgentProviderRegistry().register(writerProvider),
+      workspaceStore: mkdtempSync(join(tmpdir(), "keel-workspaces-")),
     });
     const handle = await kernel.run<string>(writeUrl, null, { name: "w", target: repo });
     expect(handle.status).toBe("finished");
@@ -177,6 +202,38 @@ describe("durable diff + worktree cleanup", () => {
     expect(payload.contentDiff).toContain("AGENT WAS HERE"); // durable reviewable patch content
     // the real tree is untouched (changes stay in the worktree until approval)
     expect(existsSync(join(repo, "added-by-agent.txt"))).toBe(false);
+    expect(store.listAgentWorkspaces("r")).toEqual([]);
+    expect(store.listAgentWorkspaces("r", { includeRemoved: true })[0]?.status).toBe("removed");
+  });
+
+  test("workspaceRetention always keeps a one-shot success workspace for review", async () => {
+    const store = JournalStore.memory();
+    const workflow = {
+      source: `
+        import { type Ctx } from "@kcosr/keel";
+        export default async function wf(ctx: Ctx): Promise<string> {
+          return await ctx.agent({
+            key: "edit",
+            prompt: "make a change",
+            provider: "writer",
+            workspaceIsolation: true,
+            workspaceRetention: "always",
+            capabilities: { fs: "workspace-write" },
+          });
+        }
+      `,
+      name: "one-shot-retain-always",
+    };
+    const kernel = new RealmKernel(store, {
+      idgen: () => "r",
+      agents: new AgentProviderRegistry().register(writerProvider),
+      workspaceStore: mkdtempSync(join(tmpdir(), "keel-workspaces-")),
+    });
+    const handle = await kernel.run<string>(workflow, null, { name: "w", target: repo });
+    expect(handle.status).toBe("finished");
+    const workspace = store.listAgentWorkspaces("r")[0];
+    expect(workspace).toMatchObject({ kind: "agent", key: "edit", status: "pending_review" });
+    expect(existsSync(workspace?.workspacePath ?? "")).toBe(true);
   });
 
   test("one-shot oversized diff emits diff_error without failing the agent step", async () => {
@@ -196,6 +253,7 @@ describe("durable diff + worktree cleanup", () => {
     const kernel = new RealmKernel(store, {
       idgen: () => "r",
       agents: new AgentProviderRegistry().register(largeWriter),
+      workspaceStore: mkdtempSync(join(tmpdir(), "keel-workspaces-")),
     });
 
     const handle = await kernel.run<string>(writeUrl, null, { name: "w", target: repo });
@@ -224,6 +282,7 @@ describe("durable diff + worktree cleanup", () => {
     const kernel = new RealmKernel(store, {
       idgen: () => "r",
       agents: new AgentProviderRegistry().register(writer),
+      workspaceStore: mkdtempSync(join(tmpdir(), "keel-workspaces-")),
       secrets,
     });
     const writeSecretUrl = captureWorkflowFile(
@@ -246,6 +305,7 @@ describe("durable diff + worktree cleanup", () => {
     const kernel = new RealmKernel(store, {
       idgen: () => "r",
       agents: new AgentProviderRegistry().register(failing),
+      workspaceStore: mkdtempSync(join(tmpdir(), "keel-workspaces-")),
     });
     await kernel.run(writeUrl, null, { name: "w", target: repo }).catch(() => null);
     // git worktree list should show only the main worktree (no leaked temp ones)

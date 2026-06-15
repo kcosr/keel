@@ -5,13 +5,14 @@
 
 import { existsSync } from "node:fs";
 import type { JournalStore } from "../journal/store.ts";
-import type { AgentSessionWorkspaceRow, RunStatus } from "../journal/types.ts";
+import type { AgentWorkspaceRow, RunStatus } from "../journal/types.ts";
 import type { RealmKernel, RunHandle } from "../kernel/realm/realm-host.ts";
 import { requireRunTarget } from "../target.ts";
 import {
   DEFAULT_WORKFLOW_DEFINITION_TTL_MS,
   evictWorkflowDefinitionCache,
 } from "../workflow-definitions/snapshot.ts";
+import { cleanupTerminalRunWorkspaces } from "../workspace/retention.ts";
 import {
   diffWorkspace,
   mergeWorkspaceIntoTarget,
@@ -41,12 +42,12 @@ import {
 } from "./projection.ts";
 
 const WORKSPACE_RECONCILE_STALE_MS = 30_000;
-const WORKSPACE_MERGEABLE_STATUSES = new Set<AgentSessionWorkspaceRow["status"]>([
-  "pending_review",
-]);
-const WORKSPACE_DISCARDABLE_STATUSES = new Set<AgentSessionWorkspaceRow["status"]>([
+const WORKSPACE_MERGEABLE_STATUSES = new Set<AgentWorkspaceRow["status"]>(["pending_review"]);
+const WORKSPACE_DISCARDABLE_STATUSES = new Set<AgentWorkspaceRow["status"]>([
   "pending_review",
   "diff_error",
+  "cleanup_error",
+  "abandoned",
 ]);
 
 export class InProcessKeel implements KeelApi {
@@ -142,19 +143,19 @@ export class InProcessKeel implements KeelApi {
     return listRunSummaries(this.store);
   }
 
-  listRunWorkspaces(runId: string): RunWorkspaceView[] {
-    return this.store.listAgentSessionWorkspaces(runId).map(workspaceView);
+  listRunWorkspaces(runId: string, opts: { includeRemoved?: boolean } = {}): RunWorkspaceView[] {
+    return this.store.listAgentWorkspaces(runId, opts).map(workspaceView);
   }
 
-  getRunWorkspace(runId: string, agentKey: string): RunWorkspaceView | null {
-    const row = this.store.getAgentSessionWorkspace(runId, agentKey);
+  getRunWorkspace(runId: string, workspaceId: string): RunWorkspaceView | null {
+    const row = this.store.getAgentWorkspace(runId, workspaceId);
     return row ? workspaceView(row) : null;
   }
 
-  getRunWorkspaceDiff(runId: string, agentKey: string): RunWorkspaceDiff {
-    const row = this.requireWorkspace(runId, agentKey);
+  getRunWorkspaceDiff(runId: string, workspaceId: string): RunWorkspaceDiff {
+    const row = this.requireWorkspace(runId, workspaceId);
     if (!existsSync(row.workspacePath)) {
-      throw new Error(`workspace ${runId}/${agentKey} is missing at ${row.workspacePath}`);
+      throw new Error(`workspace ${runId}/${workspaceId} is missing at ${row.workspacePath}`);
     }
     const diff = diffWorkspace(row.workspacePath);
     return { workspace: workspaceView(row), ...diff };
@@ -168,18 +169,12 @@ export class InProcessKeel implements KeelApi {
     const staleBeforeMs = opts.staleBeforeMs ?? nowMs - WORKSPACE_RECONCILE_STALE_MS;
     const updated: RunWorkspaceView[] = [];
     const deleted: RunWorkspaceView[] = [];
-    for (const row of this.store.listAllAgentSessionWorkspaces()) {
+    for (const row of this.store.listAllAgentWorkspaces()) {
       const run = this.store.getRun(row.runId);
       if (!run || isTerminalRunStatus(run.status)) {
-        if (row.status === "idle" || row.status === "active" || row.status === "creating") {
-          const status = existsSync(row.workspacePath) ? "pending_review" : "abandoned";
-          this.store.updateAgentSessionWorkspace(row.runId, row.agentKey, {
-            status,
-            updatedAtMs: nowMs,
-          });
-          const next = this.store.getAgentSessionWorkspace(row.runId, row.agentKey);
-          if (next) updated.push(workspaceView(next));
-        }
+        if (run) cleanupTerminalRunWorkspaces(this.store, row.runId, run.status, nowMs);
+        const next = this.store.getAgentWorkspace(row.runId, row.workspaceId);
+        if (next && next.updatedAtMs === nowMs) updated.push(workspaceView(next));
         continue;
       }
 
@@ -190,28 +185,28 @@ export class InProcessKeel implements KeelApi {
       if (
         row.status === "creating" &&
         !hasLiveOwner &&
-        !this.store.hasPendingAgentSessionTurn(row.runId, row.agentKey)
+        (row.kind !== "agent_session" || !this.store.hasPendingAgentSessionTurn(row.runId, row.key))
       ) {
         if (existsSync(row.workspacePath)) {
           removeRetainedWorkspace(row.target, row.workspacePath, row.baseCommit);
         }
-        this.store.deleteAgentSessionWorkspace(row.runId, row.agentKey);
+        this.store.deleteAgentWorkspace(row.runId, row.workspaceId);
         deleted.push(workspaceView(row));
       }
     }
     return { updated, deleted };
   }
 
-  mergeRunWorkspace(runId: string, agentKey: string): RunWorkspaceView {
-    const row = this.requireWorkspace(runId, agentKey);
+  mergeRunWorkspace(runId: string, workspaceId: string): RunWorkspaceView {
+    const row = this.requireWorkspace(runId, workspaceId);
     this.assertWorkspaceOperatorAllowed(row, "merge");
     if (!existsSync(row.workspacePath)) {
-      throw new Error(`workspace ${runId}/${agentKey} is missing at ${row.workspacePath}`);
+      throw new Error(`workspace ${runId}/${workspaceId} is missing at ${row.workspacePath}`);
     }
     mergeWorkspaceIntoTarget(row.workspacePath, row.target);
     const at = Date.now();
     this.store.transaction(() => {
-      this.store.updateAgentSessionWorkspace(runId, agentKey, {
+      this.store.updateAgentWorkspace(runId, workspaceId, {
         status: "merged",
         mergedAtMs: at,
         updatedAtMs: at,
@@ -220,7 +215,9 @@ export class InProcessKeel implements KeelApi {
         runId,
         "workspace.merged",
         {
-          agentKey,
+          workspaceId,
+          kind: row.kind,
+          key: row.key,
           workspacePath: row.workspacePath,
           target: row.target,
           baseCommit: row.baseCommit,
@@ -228,16 +225,16 @@ export class InProcessKeel implements KeelApi {
         at,
       );
     });
-    return workspaceView(this.requireWorkspace(runId, agentKey));
+    return workspaceView(this.requireWorkspace(runId, workspaceId));
   }
 
-  discardRunWorkspace(runId: string, agentKey: string): RunWorkspaceView {
-    const row = this.requireWorkspace(runId, agentKey);
+  discardRunWorkspace(runId: string, workspaceId: string): RunWorkspaceView {
+    const row = this.requireWorkspace(runId, workspaceId);
     this.assertWorkspaceOperatorAllowed(row, "discard");
     removeRetainedWorkspace(row.target, row.workspacePath, row.baseCommit);
     const at = Date.now();
     this.store.transaction(() => {
-      this.store.updateAgentSessionWorkspace(runId, agentKey, {
+      this.store.updateAgentWorkspace(runId, workspaceId, {
         status: "discarded",
         discardedAtMs: at,
         updatedAtMs: at,
@@ -245,29 +242,48 @@ export class InProcessKeel implements KeelApi {
       this.store.appendEvent(
         runId,
         "workspace.discarded",
-        { agentKey, workspacePath: row.workspacePath, target: row.target },
+        {
+          workspaceId,
+          kind: row.kind,
+          key: row.key,
+          workspacePath: row.workspacePath,
+          target: row.target,
+        },
         at,
       );
     });
-    return workspaceView(this.requireWorkspace(runId, agentKey));
+    return workspaceView(this.requireWorkspace(runId, workspaceId));
   }
 
-  gcWorkspaces(opts: { olderThanMs?: number; includePending?: boolean } = {}): WorkspaceGcResult {
+  gcWorkspaces(
+    opts: { olderThanMs?: number; includePending?: boolean; includeRemoved?: boolean } = {},
+  ): WorkspaceGcResult {
     const now = Date.now();
     this.reconcileWorkspaces({ nowMs: now });
     const cutoff = now - (opts.olderThanMs ?? 0);
     const statuses = opts.includePending
-      ? (["merged", "discarded", "abandoned", "pending_review"] as const)
-      : (["merged", "discarded", "abandoned"] as const);
+      ? ([
+          "merged",
+          "discarded",
+          "abandoned",
+          "pending_review",
+          ...(opts.includeRemoved ? ["removed" as const] : []),
+        ] as const)
+      : ([
+          "merged",
+          "discarded",
+          "abandoned",
+          ...(opts.includeRemoved ? ["removed" as const] : []),
+        ] as const);
     const rows = this.store.gcWorkspaceRows([...statuses], cutoff);
-    const removed: AgentSessionWorkspaceRow[] = [];
+    const removed: AgentWorkspaceRow[] = [];
     for (const row of rows) {
       const existed = existsSync(row.workspacePath);
       if (existed) {
         removeRetainedWorkspace(row.target, row.workspacePath, row.baseCommit);
         removed.push(row);
       }
-      this.store.deleteAgentSessionWorkspace(row.runId, row.agentKey);
+      this.store.deleteAgentWorkspace(row.runId, row.workspaceId);
     }
     return { removed: removed.map(workspaceView) };
   }
@@ -352,34 +368,35 @@ export class InProcessKeel implements KeelApi {
     };
   }
 
-  private requireWorkspace(runId: string, agentKey: string) {
-    const row = this.store.getAgentSessionWorkspace(runId, agentKey);
-    if (!row) throw new Error(`workspace ${runId}/${agentKey} not found`);
+  private requireWorkspace(runId: string, workspaceId: string) {
+    const row = this.store.getAgentWorkspace(runId, workspaceId);
+    if (!row) throw new Error(`workspace ${runId}/${workspaceId} not found`);
     return row;
   }
 
   private assertWorkspaceOperatorAllowed(
-    row: AgentSessionWorkspaceRow,
+    row: AgentWorkspaceRow,
     operation: "merge" | "discard",
   ): void {
     const run = this.store.getRun(row.runId);
     if (!run) throw new Error(`run ${row.runId} not found`);
     if (!["finished", "failed", "cancelled", "continued"].includes(run.status)) {
       throw new Error(
-        `cannot ${operation} workspace ${row.runId}/${row.agentKey} while run is ${run.status}`,
+        `cannot ${operation} workspace ${row.runId}/${row.workspaceId} while run is ${run.status}`,
       );
     }
-    const session = this.store.getAgentSession(row.runId, row.agentKey);
+    const session =
+      row.kind === "agent_session" ? this.store.getAgentSession(row.runId, row.key) : null;
     if (session?.activeTurnKey) {
       throw new Error(
-        `cannot ${operation} workspace ${row.runId}/${row.agentKey} while a turn is active`,
+        `cannot ${operation} workspace ${row.runId}/${row.workspaceId} while a turn is active`,
       );
     }
     const allowedStatuses =
       operation === "merge" ? WORKSPACE_MERGEABLE_STATUSES : WORKSPACE_DISCARDABLE_STATUSES;
     if (!allowedStatuses.has(row.status)) {
       throw new Error(
-        `cannot ${operation} workspace ${row.runId}/${row.agentKey} with status ${row.status}`,
+        `cannot ${operation} workspace ${row.runId}/${row.workspaceId} with status ${row.status}`,
       );
     }
   }
@@ -391,21 +408,28 @@ function isTerminalRunStatus(status: RunStatus): boolean {
   );
 }
 
-function workspaceView(row: AgentSessionWorkspaceRow): RunWorkspaceView {
+function workspaceView(row: AgentWorkspaceRow): RunWorkspaceView {
   return {
     runId: row.runId,
-    agentKey: row.agentKey,
+    workspaceId: row.workspaceId,
+    kind: row.kind,
+    key: row.key,
+    lastAttempt: row.lastAttempt,
+    retentionPolicy: row.retentionPolicy,
     workspacePath: row.workspacePath,
     target: row.target,
     baseCommit: row.baseCommit,
     status: row.status,
+    failureSeen: row.failureSeen,
     lastTurnKey: row.lastTurnKey,
     lastTurnAttempt: row.lastTurnAttempt,
     lastDiffEventSeq: row.lastDiffEventSeq,
     lastErrorEventSeq: row.lastErrorEventSeq,
+    cleanupError: row.cleanupErrorJson ? JSON.parse(row.cleanupErrorJson) : null,
     createdAtMs: row.createdAtMs,
     updatedAtMs: row.updatedAtMs,
     mergedAtMs: row.mergedAtMs,
     discardedAtMs: row.discardedAtMs,
+    removedAtMs: row.removedAtMs,
   };
 }

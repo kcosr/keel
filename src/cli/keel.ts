@@ -1040,25 +1040,26 @@ export function parseWatchArgs(args: string[]): {
 type WatchStatus = RunOutcome["status"];
 
 async function workspaceCommand(args: string[]): Promise<number> {
-  const [sub, runId, agentKey, ...rest] = args;
+  const [sub, runId, workspaceId, ...rest] = args;
   const client = await openClient();
   switch (sub) {
     case "list": {
-      if (!runId) return usage("workspace needs list <runId>");
-      const workspaces = await client.listRunWorkspaces(runId);
+      if (!runId) return usage("workspace needs list <runId> [--all]");
+      const all = rest.includes("--all") || args.slice(2).includes("--all");
+      const workspaces = await client.listRunWorkspaces(runId, { includeRemoved: all });
       process.stdout.write(`${JSON.stringify({ workspaces })}\n`);
       return 0;
     }
     case "show": {
-      if (!runId || !agentKey) return usage("workspace needs show <runId> <agentKey>");
+      if (!runId || !workspaceId) return usage("workspace needs show <runId> <workspaceId>");
       process.stdout.write(
-        `${JSON.stringify(await client.getRunWorkspace(runId, agentKey), null, 2)}\n`,
+        `${JSON.stringify(await client.getRunWorkspace(runId, workspaceId), null, 2)}\n`,
       );
       return 0;
     }
     case "diff": {
-      if (!runId || !agentKey) return usage("workspace needs diff <runId> <agentKey>");
-      const out = await client.getRunWorkspaceDiff(runId, agentKey);
+      if (!runId || !workspaceId) return usage("workspace needs diff <runId> <workspaceId>");
+      const out = await client.getRunWorkspaceDiff(runId, workspaceId);
       const json = rest[0] === "--output" && rest[1] === "json";
       if (rest.length > 0 && !json) throw new Error("workspace diff supports only --output json");
       if (json) process.stdout.write(`${JSON.stringify(out)}\n`);
@@ -1066,23 +1067,27 @@ async function workspaceCommand(args: string[]): Promise<number> {
       return 0;
     }
     case "merge": {
-      if (!runId || !agentKey) return usage("workspace needs merge <runId> <agentKey>");
-      process.stdout.write(`${JSON.stringify(await client.mergeRunWorkspace(runId, agentKey))}\n`);
+      if (!runId || !workspaceId) return usage("workspace needs merge <runId> <workspaceId>");
+      process.stdout.write(
+        `${JSON.stringify(await client.mergeRunWorkspace(runId, workspaceId))}\n`,
+      );
       return 0;
     }
     case "discard": {
-      if (!runId || !agentKey) return usage("workspace needs discard <runId> <agentKey>");
+      if (!runId || !workspaceId) return usage("workspace needs discard <runId> <workspaceId>");
       process.stdout.write(
-        `${JSON.stringify(await client.discardRunWorkspace(runId, agentKey))}\n`,
+        `${JSON.stringify(await client.discardRunWorkspace(runId, workspaceId))}\n`,
       );
       return 0;
     }
     case "gc": {
       let includePending = false;
+      let includeRemoved = false;
       let olderThanMs: number | undefined;
       for (let i = 0; i < args.slice(1).length; i += 1) {
         const arg = args.slice(1)[i];
         if (arg === "--include-pending") includePending = true;
+        else if (arg === "--include-removed") includeRemoved = true;
         else if (arg === "--older-than-ms") {
           const value = Number(args.slice(1)[i + 1]);
           if (!Number.isFinite(value) || value < 0)
@@ -1092,7 +1097,7 @@ async function workspaceCommand(args: string[]): Promise<number> {
         } else if (arg?.startsWith("--")) throw new Error(`unknown workspace gc flag ${arg}`);
       }
       process.stdout.write(
-        `${JSON.stringify(await client.gcWorkspaces({ ...(olderThanMs !== undefined ? { olderThanMs } : {}), ...(includePending ? { includePending } : {}) }))}\n`,
+        `${JSON.stringify(await client.gcWorkspaces({ ...(olderThanMs !== undefined ? { olderThanMs } : {}), ...(includePending ? { includePending } : {}), ...(includeRemoved ? { includeRemoved } : {}) }))}\n`,
       );
       return 0;
     }

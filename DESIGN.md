@@ -59,9 +59,9 @@ Postgres-dialect discipline).
   reordering/inserting waits doesn't reattach a persisted wait to the wrong site.
 - **Capability *enforcement* landed (§11):** provider tool policies map to vendor
   flags; worktree isolation is an explicit `workspaceIsolation` opt-in requiring
-  a resolved target (git repo root for isolated agents); retained session
-  workspaces persist for review, secrets are injected as trusted-local provider
-  env, `continueAsNew` is
+  a resolved target (git repo root for isolated agents); unified agent/session
+  workspaces follow explicit `workspaceRetention`, secrets are injected as
+  trusted-local provider env, `continueAsNew` is
   an atomic transactional handoff with lineage, and fork is fenced to terminal
   runs. The OS-sandbox capability backstop remains the one unimplemented
   hardening.
@@ -607,6 +607,7 @@ interface AgentSpec<T> {
   allowTools?: string[];            // provider-native additions on top of toolPolicy
   denyTools?: string[];             // provider-native removals from the final allowlist
   workspaceIsolation?: boolean;     // explicit worktree + diff capture opt-in
+  workspaceRetention?: 'never' | 'on-failure' | 'always'; // terminal cleanup policy
   target?: string;                  // daemon-resolvable cwd; defaults to run target
   capabilities?: Capabilities;      // §11.1; used when toolPolicy is omitted
   // note: no memo mode — agents are always memoized (L18); re-think is
@@ -620,7 +621,9 @@ exactly three parameters); `ctx.agent` carries `key` in its option bag.
 `toolPolicy` is the public shorthand over the capability enum; `allowTools` and
 `denyTools` are provider-native adjustments when a workflow intentionally needs
 to add or remove a specific backend tool. `workspaceIsolation` is intentionally
-separate: it chooses the isolated worktree/diff-capture execution mode. `target`
+separate: it chooses the isolated worktree/diff-capture execution mode;
+`workspaceRetention` is valid only with isolation and chooses terminal cleanup
+(`never`, `on-failure`, or `always`). `target`
 selects the provider cwd, must be non-empty when supplied, and participates in
 agent identity. If both `toolPolicy` and `capabilities` are set, `toolPolicy`
 controls provider tools. `toolPolicy:'unrestricted'` cannot be combined with
@@ -834,7 +837,7 @@ __session.<agentKey>.<turnKey>
 Participant and turn key components are limited to `[A-Za-z0-9_-]+`; ordinary
 author keys may not use the `__session.` prefix. The worker resolves profiles,
 tool policy, provider-native tool lists, capabilities, workspace isolation,
-target, and secret names before hashing participant identity. The realm host stores that
+workspace retention, target, and secret names before hashing participant identity. The realm host stores that
 hash in `agent_sessions` and rejects drift. Turn identity reuses the journal
 row's `(version, input_hash)` for the derived key and is append-only within a
 participant.
@@ -947,11 +950,13 @@ Non-isolated agents run with `cwd = target`. Agents that set
 `workspaceIsolation: true` require the target to be the git repo
 root and run with `cwd` in an **isolated git worktree** checked out at the run's
 base commit, seeing their own writes (v1's jj/CoW "union read" semantics don't exist in plain git and are dropped as a
-claim). One-shot isolated `ctx.agent` worktrees are removed after the call.
-Isolated `ctx.agentSession` participants retain one worktree per `(runId,
-agentKey)` in a Keel workspace store, reuse it across turns/retries, and mark it
-`pending_review` when the run is terminal. Changes are never auto-merged or
-auto-deleted; operator merge/discard/GC commands act on the retained workspace.
+claim). Isolated `ctx.agent` and `ctx.agentSession` calls create unified `agent_workspaces`
+rows in a Keel workspace store. One-shot agents reuse the workspace for retries of
+the same logical step while the run can continue; sessions retain one workspace
+per `(runId, agentKey)` across turns/retries. Terminal cleanup evaluates
+`workspaceRetention`: `never` removes, `on-failure` retains failed/abnormal or
+failure-bearing workspaces, and `always` retains. Changes are never auto-merged;
+operator merge/discard/GC commands act on retained workspaces by `workspaceId`.
 The VCS lives behind an interface — git worktrees now; jj or container overlays
 swappable later (§17 L9).
 

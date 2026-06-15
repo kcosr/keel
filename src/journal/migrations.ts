@@ -11,7 +11,8 @@
 // → v7 workflow_definitions → v8 capabilities → v9 schedule definitions
 // → v10 nullable display names → v11 durable agent session tables
 // → v12 workflow SDK ABI manifests and schedule failure state
-// → v13 run targets and retained agent session workspaces.
+// → v13 run targets and retained agent session workspaces
+// → v14 unified agent workspace retention policy table.
 
 import type { Database } from "bun:sqlite";
 import { parse } from "acorn";
@@ -31,6 +32,19 @@ function addColumn(db: Database, table: string, column: string, type: string): v
   if (!hasColumn(db, table, column)) {
     db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
   }
+}
+
+function tableExists(db: Database, table: string): boolean {
+  const row = db
+    .query<{ name: string }, [string]>(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+    )
+    .get(table);
+  return row !== null;
+}
+
+function workspaceIdForMigration(kind: "agent" | "agent_session", key: string): string {
+  return `ws_${sha256Hex(canonicalJson({ kind, key })).slice(0, 32)}`;
 }
 
 function rebuildTable(db: Database, table: string, createSql: string, columns: string[]): void {
@@ -154,9 +168,85 @@ export function applyMigration(db: Database, fromVersion: number): void {
         PRIMARY KEY (run_id, agent_key)
       )`);
       break;
+    case 13: // → v14: unified workspace retention policy metadata.
+      db.exec(`CREATE TABLE IF NOT EXISTS agent_workspaces (
+        run_id               TEXT NOT NULL,
+        workspace_id         TEXT NOT NULL,
+        kind                 TEXT NOT NULL,
+        key                  TEXT NOT NULL,
+        last_attempt         INTEGER,
+        retention_policy     TEXT NOT NULL,
+        workspace_path       TEXT NOT NULL,
+        target               TEXT NOT NULL,
+        base_commit          TEXT NOT NULL,
+        status               TEXT NOT NULL,
+        failure_seen         INTEGER NOT NULL DEFAULT 0,
+        last_turn_key        TEXT,
+        last_turn_attempt    INTEGER,
+        last_diff_event_seq  INTEGER,
+        last_error_event_seq INTEGER,
+        cleanup_error_json   TEXT,
+        created_at_ms        INTEGER NOT NULL,
+        updated_at_ms        INTEGER NOT NULL,
+        merged_at_ms         INTEGER,
+        discarded_at_ms      INTEGER,
+        removed_at_ms        INTEGER,
+        PRIMARY KEY (run_id, workspace_id)
+      )`);
+      if (tableExists(db, "agent_session_workspaces")) {
+        const rows = db
+          .query<RawAgentSessionWorkspaceV13, []>("SELECT * FROM agent_session_workspaces")
+          .all();
+        const insert = db.query(
+          `INSERT OR REPLACE INTO agent_workspaces (
+            run_id, workspace_id, kind, key, last_attempt, retention_policy,
+            workspace_path, target, base_commit, status, failure_seen,
+            last_turn_key, last_turn_attempt, last_diff_event_seq, last_error_event_seq,
+            cleanup_error_json, created_at_ms, updated_at_ms, merged_at_ms, discarded_at_ms, removed_at_ms
+          ) VALUES (?, ?, 'agent_session', ?, NULL, 'always', ?, ?, ?, ?, 0, ?, ?, ?, ?, NULL, ?, ?, ?, ?, NULL)`,
+        );
+        for (const row of rows) {
+          insert.run(
+            row.run_id,
+            workspaceIdForMigration("agent_session", row.agent_key),
+            row.agent_key,
+            row.workspace_path,
+            row.target,
+            row.base_commit,
+            row.status,
+            row.last_turn_key,
+            row.last_turn_attempt,
+            row.last_diff_event_seq,
+            row.last_error_event_seq,
+            row.created_at_ms,
+            row.updated_at_ms,
+            row.merged_at_ms,
+            row.discarded_at_ms,
+          );
+        }
+        db.exec("DROP TABLE agent_session_workspaces");
+      }
+      break;
     default:
       throw new Error(`no migration defined from schema version ${fromVersion}`);
   }
+}
+
+interface RawAgentSessionWorkspaceV13 {
+  run_id: string;
+  agent_key: string;
+  workspace_path: string;
+  target: string;
+  base_commit: string;
+  status: string;
+  last_turn_key: string | null;
+  last_turn_attempt: number | null;
+  last_diff_event_seq: number | null;
+  last_error_event_seq: number | null;
+  created_at_ms: number;
+  updated_at_ms: number;
+  merged_at_ms: number | null;
+  discarded_at_ms: number | null;
 }
 
 interface RawWorkflowDefinitionV11 {

@@ -16,7 +16,15 @@ const profiledUrl = captureWorkflowFile(
 
 describe("resolveProfile", () => {
   test("inherits profile fields, explicit spec wins, unknown profile throws", () => {
-    const profiles = { reviewer: { provider: "pi", model: "opus", reasoning: "high" } };
+    const profiles = {
+      reviewer: {
+        provider: "pi",
+        model: "opus",
+        reasoning: "high",
+        workspaceIsolation: true,
+        workspaceRetention: "always" as const,
+      },
+    };
     const resolved = resolveProfile(
       { key: "k", prompt: "p", profile: "reviewer" },
       profiles,
@@ -27,6 +35,8 @@ describe("resolveProfile", () => {
       provider: "pi",
       model: "opus",
       reasoning: "high",
+      workspaceIsolation: true,
+      workspaceRetention: "always",
     });
     // explicit field wins over the profile
     expect(

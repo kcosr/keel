@@ -13,6 +13,7 @@ import type { AgentProviderRegistry } from "../agents/types.ts";
 import type { Json } from "../hash.ts";
 import type { JournalStore } from "../journal/store.ts";
 import { resolveAgentTarget } from "../target.ts";
+import { resolveWorkspaceRetention } from "../workspace/retention.ts";
 import { finalAgentMessageEvents } from "./agent-events.ts";
 import type { Schema } from "./schema.ts";
 import { StepEngine } from "./step-engine.ts";
@@ -55,6 +56,8 @@ export interface AgentSpec<T> {
   denyTools?: string[];
   /** Run the provider in an isolated git worktree and journal its diff. Realm-only. */
   workspaceIsolation?: boolean;
+  /** Terminal cleanup policy for isolated workspaces. */
+  workspaceRetention?: WorkspaceRetention;
   /** Daemon-resolvable working target; defaults to the run target. */
   target?: string;
   /** Explicit capabilities; overrides the default read-only policy (§11). */
@@ -103,6 +106,8 @@ export interface AgentTurnSpec<T> {
   bump?: string | number;
   version?: string;
 }
+
+export type WorkspaceRetention = "never" | "on-failure" | "always";
 
 export interface AgentSession {
   turn<T>(spec: AgentTurnSpec<T>): Promise<T>;
@@ -260,7 +265,12 @@ export class WorkflowCtx implements Ctx {
     if (spec.secrets?.length) {
       throw new Error("ctx.agent({ secrets }) requires the realm kernel (secret side-channel)");
     }
-    if (spec.workspaceIsolation) {
+    const workspaceIsolation = spec.workspaceIsolation === true;
+    const workspaceRetention = resolveWorkspaceRetention({
+      workspaceIsolation,
+      workspaceRetention: spec.workspaceRetention,
+    });
+    if (workspaceIsolation) {
       throw new Error("ctx.agent({ workspaceIsolation }) requires the realm kernel");
     }
     const provider = spec.provider ?? DEFAULT_AGENT_PROVIDER;
@@ -286,6 +296,7 @@ export class WorkflowCtx implements Ctx {
           allowTools: tools.allowTools,
           denyTools: tools.denyTools,
           workspaceIsolation: false,
+          workspaceRetention,
           target,
           capabilities: caps,
           secrets: spec.secrets ?? [],
@@ -302,6 +313,7 @@ export class WorkflowCtx implements Ctx {
       allowTools: tools.allowTools,
       denyTools: tools.denyTools,
       workspaceIsolation: false,
+      workspaceRetention,
       target,
       capabilities: caps,
       secrets: spec.secrets ?? [],

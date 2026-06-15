@@ -12,7 +12,8 @@ import type {
   AgentSessionRow,
   AgentSessionTurnRow,
   AgentSessionWorkspaceRow,
-  AgentSessionWorkspaceStatus,
+  AgentWorkspaceRow,
+  AgentWorkspaceStatus,
   ArtifactRow,
   CapabilityRow,
   EventRow,
@@ -521,31 +522,42 @@ export class JournalStore {
     this.updateAgentSessionActive(runId, agentKey, null, null, atMs);
   }
 
-  getAgentSessionWorkspace(runId: string, agentKey: string): AgentSessionWorkspaceRow | null {
+  getAgentWorkspace(runId: string, workspaceId: string): AgentWorkspaceRow | null {
     const r = this.db
-      .query<RawAgentSessionWorkspaceRow, [string, string]>(
-        "SELECT * FROM agent_session_workspaces WHERE run_id = ? AND agent_key = ?",
+      .query<RawAgentWorkspaceRow, [string, string]>(
+        "SELECT * FROM agent_workspaces WHERE run_id = ? AND workspace_id = ?",
       )
-      .get(runId, agentKey);
-    return r ? mapAgentSessionWorkspace(r) : null;
+      .get(runId, workspaceId);
+    return r ? mapAgentWorkspace(r) : null;
   }
 
-  listAgentSessionWorkspaces(runId: string): AgentSessionWorkspaceRow[] {
-    return this.db
-      .query<RawAgentSessionWorkspaceRow, [string]>(
-        "SELECT * FROM agent_session_workspaces WHERE run_id = ? ORDER BY agent_key ASC",
+  getAgentWorkspaceByKey(
+    runId: string,
+    kind: AgentWorkspaceRow["kind"],
+    key: string,
+  ): AgentWorkspaceRow | null {
+    const r = this.db
+      .query<RawAgentWorkspaceRow, [string, string, string]>(
+        "SELECT * FROM agent_workspaces WHERE run_id = ? AND kind = ? AND key = ?",
       )
-      .all(runId)
-      .map(mapAgentSessionWorkspace);
+      .get(runId, kind, key);
+    return r ? mapAgentWorkspace(r) : null;
   }
 
-  listAllAgentSessionWorkspaces(): AgentSessionWorkspaceRow[] {
+  listAgentWorkspaces(runId: string, opts: { includeRemoved?: boolean } = {}): AgentWorkspaceRow[] {
+    const sql = opts.includeRemoved
+      ? "SELECT * FROM agent_workspaces WHERE run_id = ? ORDER BY kind ASC, key ASC, workspace_id ASC"
+      : "SELECT * FROM agent_workspaces WHERE run_id = ? AND status != 'removed' ORDER BY kind ASC, key ASC, workspace_id ASC";
+    return this.db.query<RawAgentWorkspaceRow, [string]>(sql).all(runId).map(mapAgentWorkspace);
+  }
+
+  listAllAgentWorkspaces(): AgentWorkspaceRow[] {
     return this.db
-      .query<RawAgentSessionWorkspaceRow, []>(
-        "SELECT * FROM agent_session_workspaces ORDER BY run_id ASC, agent_key ASC",
+      .query<RawAgentWorkspaceRow, []>(
+        "SELECT * FROM agent_workspaces ORDER BY run_id ASC, kind ASC, key ASC, workspace_id ASC",
       )
       .all()
-      .map(mapAgentSessionWorkspace);
+      .map(mapAgentWorkspace);
   }
 
   hasPendingAgentSessionTurn(runId: string, agentKey: string): boolean {
@@ -558,64 +570,81 @@ export class JournalStore {
     return (row?.c ?? 0) > 0;
   }
 
-  insertAgentSessionWorkspace(row: AgentSessionWorkspaceRow): void {
+  insertAgentWorkspace(row: AgentWorkspaceRow): void {
     this.db
       .query(
-        `INSERT INTO agent_session_workspaces (
-          run_id, agent_key, workspace_path, target, base_commit, status,
+        `INSERT INTO agent_workspaces (
+          run_id, workspace_id, kind, key, last_attempt, retention_policy,
+          workspace_path, target, base_commit, status, failure_seen,
           last_turn_key, last_turn_attempt, last_diff_event_seq, last_error_event_seq,
-          created_at_ms, updated_at_ms, merged_at_ms, discarded_at_ms
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          cleanup_error_json, created_at_ms, updated_at_ms, merged_at_ms, discarded_at_ms, removed_at_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         row.runId,
-        row.agentKey,
+        row.workspaceId,
+        row.kind,
+        row.key,
+        row.lastAttempt,
+        row.retentionPolicy,
         row.workspacePath,
         row.target,
         row.baseCommit,
         row.status,
+        row.failureSeen ? 1 : 0,
         row.lastTurnKey,
         row.lastTurnAttempt,
         row.lastDiffEventSeq,
         row.lastErrorEventSeq,
+        row.cleanupErrorJson,
         row.createdAtMs,
         row.updatedAtMs,
         row.mergedAtMs,
         row.discardedAtMs,
+        row.removedAtMs,
       );
   }
 
-  deleteAgentSessionWorkspace(runId: string, agentKey: string): void {
+  deleteAgentWorkspace(runId: string, workspaceId: string): void {
     this.db
-      .query("DELETE FROM agent_session_workspaces WHERE run_id = ? AND agent_key = ?")
-      .run(runId, agentKey);
+      .query("DELETE FROM agent_workspaces WHERE run_id = ? AND workspace_id = ?")
+      .run(runId, workspaceId);
   }
 
-  updateAgentSessionWorkspace(
+  updateAgentWorkspace(
     runId: string,
-    agentKey: string,
+    workspaceId: string,
     patch: Partial<
       Pick<
-        AgentSessionWorkspaceRow,
+        AgentWorkspaceRow,
         | "status"
+        | "lastAttempt"
+        | "retentionPolicy"
+        | "failureSeen"
         | "lastTurnKey"
         | "lastTurnAttempt"
         | "lastDiffEventSeq"
         | "lastErrorEventSeq"
+        | "cleanupErrorJson"
         | "updatedAtMs"
         | "mergedAtMs"
         | "discardedAtMs"
+        | "removedAtMs"
       >
     >,
   ): void {
     const sets: string[] = [];
     type Bind = string | number | bigint | boolean | null | Uint8Array;
-    const params: Record<string, Bind> = { $runId: runId, $agentKey: agentKey };
+    const params: Record<string, Bind> = { $runId: runId, $workspaceId: workspaceId };
     const add = (col: string, key: string, val: Bind) => {
       sets.push(`${col} = $${key}`);
       params[`$${key}`] = val;
     };
     if ("status" in patch) add("status", "status", patch.status ?? null);
+    if ("lastAttempt" in patch) add("last_attempt", "lastAttempt", patch.lastAttempt ?? null);
+    if ("retentionPolicy" in patch)
+      add("retention_policy", "retentionPolicy", patch.retentionPolicy ?? null);
+    if ("failureSeen" in patch) add("failure_seen", "failureSeen", patch.failureSeen ? 1 : 0);
     if ("lastTurnKey" in patch) add("last_turn_key", "lastTurnKey", patch.lastTurnKey ?? null);
     if ("lastTurnAttempt" in patch)
       add("last_turn_attempt", "lastTurnAttempt", patch.lastTurnAttempt ?? null);
@@ -623,14 +652,17 @@ export class JournalStore {
       add("last_diff_event_seq", "lastDiffEventSeq", patch.lastDiffEventSeq ?? null);
     if ("lastErrorEventSeq" in patch)
       add("last_error_event_seq", "lastErrorEventSeq", patch.lastErrorEventSeq ?? null);
+    if ("cleanupErrorJson" in patch)
+      add("cleanup_error_json", "cleanupErrorJson", patch.cleanupErrorJson ?? null);
     if ("updatedAtMs" in patch) add("updated_at_ms", "updatedAtMs", patch.updatedAtMs ?? null);
     if ("mergedAtMs" in patch) add("merged_at_ms", "mergedAtMs", patch.mergedAtMs ?? null);
     if ("discardedAtMs" in patch)
       add("discarded_at_ms", "discardedAtMs", patch.discardedAtMs ?? null);
+    if ("removedAtMs" in patch) add("removed_at_ms", "removedAtMs", patch.removedAtMs ?? null);
     if (sets.length === 0) return;
     this.db
       .query(
-        `UPDATE agent_session_workspaces SET ${sets.join(", ")} WHERE run_id = $runId AND agent_key = $agentKey`,
+        `UPDATE agent_workspaces SET ${sets.join(", ")} WHERE run_id = $runId AND workspace_id = $workspaceId`,
       )
       .run(params);
   }
@@ -638,7 +670,7 @@ export class JournalStore {
   markRunWorkspacesPendingReview(runId: string, atMs: number): void {
     this.db
       .query(
-        `UPDATE agent_session_workspaces
+        `UPDATE agent_workspaces
          SET status = 'pending_review', updated_at_ms = ?
          WHERE run_id = ? AND status IN ('idle', 'active', 'creating')`,
       )
@@ -648,28 +680,60 @@ export class JournalStore {
   reopenPendingReviewWorkspaces(runId: string, atMs: number): void {
     this.db
       .query(
-        `UPDATE agent_session_workspaces
+        `UPDATE agent_workspaces
          SET status = 'idle', updated_at_ms = ?
          WHERE run_id = ? AND status = 'pending_review'`,
       )
       .run(atMs, runId);
   }
 
-  gcWorkspaceRows(
-    statuses: AgentSessionWorkspaceStatus[],
-    olderThanMs: number,
-  ): AgentSessionWorkspaceRow[] {
+  gcWorkspaceRows(statuses: AgentWorkspaceStatus[], olderThanMs: number): AgentWorkspaceRow[] {
     if (statuses.length === 0) return [];
     const placeholders = statuses.map(() => "?").join(", ");
-    const query = this.db.query<RawAgentSessionWorkspaceRow, never>(
-      `SELECT * FROM agent_session_workspaces
+    const query = this.db.query<RawAgentWorkspaceRow, never>(
+      `SELECT * FROM agent_workspaces
        WHERE status IN (${placeholders}) AND updated_at_ms <= ?
        ORDER BY updated_at_ms ASC`,
     );
-    return (query.all as (...args: unknown[]) => RawAgentSessionWorkspaceRow[])(
+    return (query.all as (...args: unknown[]) => RawAgentWorkspaceRow[])(
       ...statuses,
       olderThanMs,
-    ).map(mapAgentSessionWorkspace);
+    ).map(mapAgentWorkspace);
+  }
+
+  getAgentSessionWorkspace(runId: string, agentKey: string): AgentSessionWorkspaceRow | null {
+    const row = this.getAgentWorkspaceByKey(runId, "agent_session", agentKey);
+    return row ? sessionWorkspaceView(row) : null;
+  }
+
+  listAgentSessionWorkspaces(runId: string): AgentSessionWorkspaceRow[] {
+    return this.listAgentWorkspaces(runId)
+      .filter((row) => row.kind === "agent_session")
+      .map(sessionWorkspaceView);
+  }
+
+  listAllAgentSessionWorkspaces(): AgentSessionWorkspaceRow[] {
+    return this.listAllAgentWorkspaces()
+      .filter((row) => row.kind === "agent_session")
+      .map(sessionWorkspaceView);
+  }
+
+  insertAgentSessionWorkspace(row: AgentSessionWorkspaceRow): void {
+    this.insertAgentWorkspace(agentWorkspaceFromSession(row));
+  }
+
+  deleteAgentSessionWorkspace(runId: string, agentKey: string): void {
+    const row = this.getAgentWorkspaceByKey(runId, "agent_session", agentKey);
+    if (row) this.deleteAgentWorkspace(runId, row.workspaceId);
+  }
+
+  updateAgentSessionWorkspace(
+    runId: string,
+    agentKey: string,
+    patch: Parameters<JournalStore["updateAgentWorkspace"]>[2],
+  ): void {
+    const row = this.getAgentWorkspaceByKey(runId, "agent_session", agentKey);
+    if (row) this.updateAgentWorkspace(runId, row.workspaceId, patch);
   }
 
   /** Append an event; returns the assigned per-run sequence number. */
@@ -1356,21 +1420,28 @@ interface RawAgentSessionTurnRow {
   finished_at_ms: number | null;
 }
 
-interface RawAgentSessionWorkspaceRow {
+interface RawAgentWorkspaceRow {
   run_id: string;
-  agent_key: string;
+  workspace_id: string;
+  kind: string;
+  key: string;
+  last_attempt: number | null;
+  retention_policy: string;
   workspace_path: string;
   target: string;
   base_commit: string;
   status: string;
+  failure_seen: number;
   last_turn_key: string | null;
   last_turn_attempt: number | null;
   last_diff_event_seq: number | null;
   last_error_event_seq: number | null;
+  cleanup_error_json: string | null;
   created_at_ms: number;
   updated_at_ms: number;
   merged_at_ms: number | null;
   discarded_at_ms: number | null;
+  removed_at_ms: number | null;
 }
 
 interface RawEventRow {
@@ -1482,22 +1553,74 @@ function mapAgentSessionTurn(r: RawAgentSessionTurnRow): AgentSessionTurnRow {
   };
 }
 
-function mapAgentSessionWorkspace(r: RawAgentSessionWorkspaceRow): AgentSessionWorkspaceRow {
+function mapAgentWorkspace(r: RawAgentWorkspaceRow): AgentWorkspaceRow {
   return {
     runId: r.run_id,
-    agentKey: r.agent_key,
+    workspaceId: r.workspace_id,
+    kind: r.kind as AgentWorkspaceRow["kind"],
+    key: r.key,
+    lastAttempt: r.last_attempt,
+    retentionPolicy: r.retention_policy as AgentWorkspaceRow["retentionPolicy"],
     workspacePath: r.workspace_path,
     target: r.target,
     baseCommit: r.base_commit,
-    status: r.status as AgentSessionWorkspaceStatus,
+    status: r.status as AgentWorkspaceStatus,
+    failureSeen: r.failure_seen !== 0,
     lastTurnKey: r.last_turn_key,
     lastTurnAttempt: r.last_turn_attempt,
     lastDiffEventSeq: r.last_diff_event_seq,
     lastErrorEventSeq: r.last_error_event_seq,
+    cleanupErrorJson: r.cleanup_error_json,
     createdAtMs: r.created_at_ms,
     updatedAtMs: r.updated_at_ms,
     mergedAtMs: r.merged_at_ms,
     discardedAtMs: r.discarded_at_ms,
+    removedAtMs: r.removed_at_ms,
+  };
+}
+
+function sessionWorkspaceView(row: AgentWorkspaceRow): AgentSessionWorkspaceRow {
+  return {
+    runId: row.runId,
+    agentKey: row.key,
+    workspacePath: row.workspacePath,
+    target: row.target,
+    baseCommit: row.baseCommit,
+    status: row.status,
+    lastTurnKey: row.lastTurnKey,
+    lastTurnAttempt: row.lastTurnAttempt,
+    lastDiffEventSeq: row.lastDiffEventSeq,
+    lastErrorEventSeq: row.lastErrorEventSeq,
+    createdAtMs: row.createdAtMs,
+    updatedAtMs: row.updatedAtMs,
+    mergedAtMs: row.mergedAtMs,
+    discardedAtMs: row.discardedAtMs,
+  };
+}
+
+function agentWorkspaceFromSession(row: AgentSessionWorkspaceRow): AgentWorkspaceRow {
+  return {
+    runId: row.runId,
+    workspaceId: `ws_${row.agentKey}`,
+    kind: "agent_session",
+    key: row.agentKey,
+    lastAttempt: null,
+    retentionPolicy: "always",
+    workspacePath: row.workspacePath,
+    target: row.target,
+    baseCommit: row.baseCommit,
+    status: row.status,
+    failureSeen: false,
+    lastTurnKey: row.lastTurnKey,
+    lastTurnAttempt: row.lastTurnAttempt,
+    lastDiffEventSeq: row.lastDiffEventSeq,
+    lastErrorEventSeq: row.lastErrorEventSeq,
+    cleanupErrorJson: null,
+    createdAtMs: row.createdAtMs,
+    updatedAtMs: row.updatedAtMs,
+    mergedAtMs: row.mergedAtMs,
+    discardedAtMs: row.discardedAtMs,
+    removedAtMs: null,
   };
 }
 

@@ -207,7 +207,7 @@ describe("schema migrations", () => {
       const ver = store.db
         .query<{ value: string }, []>("SELECT value FROM schema_meta WHERE key='schema_version'")
         .get();
-      expect(ver?.value).toBe("13");
+      expect(ver?.value).toBe("14");
 
       // new columns exist
       const jcols = store.db.query<{ name: string }, []>("PRAGMA table_info(journal)").all();
@@ -238,9 +238,10 @@ describe("schema migrations", () => {
         .all();
       expect(scheduleCols.some((c) => c.name === "schedule_target")).toBe(true);
       const workspaces = store.db
-        .query<{ name: string }, []>("PRAGMA table_info(agent_session_workspaces)")
+        .query<{ name: string }, []>("PRAGMA table_info(agent_workspaces)")
         .all();
-      expect(workspaces.some((c) => c.name === "workspace_path")).toBe(true);
+      expect(workspaces.some((c) => c.name === "workspace_id")).toBe(true);
+      expect(workspaces.some((c) => c.name === "retention_policy")).toBe(true);
 
       // existing rows preserved (additive) and seq backfilled per-run monotonic
       const rows = store.listJournalRows("r");
@@ -312,12 +313,60 @@ describe("schema migrations", () => {
     }
   });
 
+  test("v13 migration preserves session workspaces as always-retained unified rows", () => {
+    const db = new Database(":memory:");
+    try {
+      db.exec(`
+        CREATE TABLE agent_session_workspaces (
+          run_id              TEXT NOT NULL,
+          agent_key           TEXT NOT NULL,
+          workspace_path      TEXT NOT NULL,
+          target              TEXT NOT NULL,
+          base_commit         TEXT NOT NULL,
+          status              TEXT NOT NULL,
+          last_turn_key       TEXT,
+          last_turn_attempt   INTEGER,
+          last_diff_event_seq INTEGER,
+          last_error_event_seq INTEGER,
+          created_at_ms       INTEGER NOT NULL,
+          updated_at_ms       INTEGER NOT NULL,
+          merged_at_ms        INTEGER,
+          discarded_at_ms     INTEGER,
+          PRIMARY KEY (run_id, agent_key)
+        );
+        INSERT INTO agent_session_workspaces VALUES (
+          'r', 'primary', '/tmp/ws', '/repo', 'abc', 'pending_review', 'turn', 2, 3, NULL, 10, 20, NULL, NULL
+        );
+      `);
+      applyMigration(db, 13);
+      const row = db
+        .query<{ workspace_id: string; kind: string; key: string; retention_policy: string }, []>(
+          "SELECT workspace_id, kind, key, retention_policy FROM agent_workspaces",
+        )
+        .get();
+      expect(row).toEqual({
+        workspace_id: "ws_02462eede4cdc58d4a2d732a05e6f5c8",
+        kind: "agent_session",
+        key: "primary",
+        retention_policy: "always",
+      });
+      const oldTable = db
+        .query<{ name: string }, []>(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name='agent_session_workspaces'",
+        )
+        .get();
+      expect(oldTable).toBeNull();
+    } finally {
+      db.close();
+    }
+  });
+
   test("a fresh DB initializes at the current version with no migration", () => {
     const store = JournalStore.memory();
     const ver = store.db
       .query<{ value: string }, []>("SELECT value FROM schema_meta WHERE key='schema_version'")
       .get();
-    expect(ver?.value).toBe("13");
+    expect(ver?.value).toBe("14");
     store.close();
   });
 
@@ -331,7 +380,7 @@ describe("schema migrations", () => {
       const ver = store.db
         .query<{ value: string }, []>("SELECT value FROM schema_meta WHERE key='schema_version'")
         .get();
-      expect(ver?.value).toBe("13");
+      expect(ver?.value).toBe("14");
 
       const schedule = store.db
         .query<{ enabled: number; workflow_ref: string }, []>(
@@ -432,11 +481,11 @@ describe("schema migrations", () => {
       expect(store.getWorkflowDefinition(newHash)).not.toBeNull();
 
       expect(() => materializeWorkflowDefinition(store, newHash, cacheRoot)).toThrow(
-        /requires workflow SDK ABI 1, but this daemon supports ABI 2/,
+        /requires workflow SDK ABI 1, but this daemon supports ABI 3/,
       );
       const kernel = new RealmKernel(store, { clock: () => 2, definitionCacheRoot: cacheRoot });
       await expect(kernel.resume("r_active")).rejects.toThrow(
-        /requires workflow SDK ABI 1, but this daemon supports ABI 2/,
+        /requires workflow SDK ABI 1, but this daemon supports ABI 3/,
       );
       store.close();
     } finally {

@@ -71,6 +71,7 @@ const ISOLATED_SESSION_SECRET_WORKFLOW = {
         key: "primary",
         provider: "session",
         workspaceIsolation: true,
+        workspaceRetention: "always",
         capabilities: { fs: "workspace-write" },
         secrets: ["TOKEN"],
       });

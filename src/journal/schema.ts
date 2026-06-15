@@ -4,7 +4,7 @@
 // or tricks. Integers are epoch-ms; JSON travels as TEXT. Reserved tables
 // (approvals/signals/timers) are created now though their effects land later.
 
-export const SCHEMA_VERSION = 14;
+export const SCHEMA_VERSION = 15;
 
 export const DDL = /* sql */ `
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -86,27 +86,35 @@ CREATE TABLE IF NOT EXISTS agent_session_turns (
 );
 
 CREATE TABLE IF NOT EXISTS agent_workspaces (
-  run_id               TEXT NOT NULL,
-  workspace_id         TEXT NOT NULL,
-  kind                 TEXT NOT NULL,
-  key                  TEXT NOT NULL,
-  last_attempt         INTEGER,
-  retention_policy     TEXT NOT NULL,
-  workspace_path       TEXT NOT NULL,
-  target               TEXT NOT NULL,
-  base_commit          TEXT NOT NULL,
-  status               TEXT NOT NULL,
-  failure_seen         INTEGER NOT NULL DEFAULT 0,
-  last_turn_key        TEXT,
-  last_turn_attempt    INTEGER,
-  last_diff_event_seq  INTEGER,
-  last_error_event_seq INTEGER,
-  cleanup_error_json   TEXT,
-  created_at_ms        INTEGER NOT NULL,
-  updated_at_ms        INTEGER NOT NULL,
-  merged_at_ms         INTEGER,
-  discarded_at_ms      INTEGER,
-  removed_at_ms        INTEGER,
+  run_id                TEXT NOT NULL,
+  workspace_id          TEXT NOT NULL,
+  mode                  TEXT NOT NULL,
+  owner_kind            TEXT NOT NULL,
+  key                   TEXT NOT NULL,
+  last_attempt          INTEGER,
+  retention_policy      TEXT,
+  workspace_path        TEXT NOT NULL,
+  source_path           TEXT NOT NULL,
+  supplied_path         TEXT,
+  source_ref            TEXT,
+  base_commit           TEXT,
+  owned                 INTEGER NOT NULL DEFAULT 0,
+  status                TEXT NOT NULL,
+  failure_seen          INTEGER NOT NULL DEFAULT 0,
+  last_turn_key         TEXT,
+  last_turn_attempt     INTEGER,
+  active_holder_kind    TEXT,
+  active_holder_key     TEXT,
+  active_holder_attempt INTEGER,
+  active_started_at_ms  INTEGER,
+  last_diff_event_seq   INTEGER,
+  last_error_event_seq  INTEGER,
+  cleanup_error_json    TEXT,
+  created_at_ms         INTEGER NOT NULL,
+  updated_at_ms         INTEGER NOT NULL,
+  merged_at_ms          INTEGER,
+  discarded_at_ms       INTEGER,
+  removed_at_ms         INTEGER,
   PRIMARY KEY (run_id, workspace_id)
 );
 

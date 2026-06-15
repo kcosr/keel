@@ -58,10 +58,10 @@ Postgres-dialect discipline).
   (timer id `${key}#${ms}`); `ctx.signal` keys by name + per-name occurrence — so
   reordering/inserting waits doesn't reattach a persisted wait to the wrong site.
 - **Capability *enforcement* landed (§11):** provider tool policies map to vendor
-  flags; worktree isolation is an explicit `workspaceIsolation` opt-in requiring
-  a resolved target (git repo root for isolated agents); unified agent/session
-  workspaces follow explicit `workspaceRetention`, secrets are injected as
-  trusted-local provider env, `continueAsNew` is
+  flags; provider cwd always comes from a run workspace (explicit, scoped, or
+  the default direct workspace at `ctx.run.target`); Keel-owned worktrees are
+  explicit `ctx.workspace({ mode: "worktree" })` handles with retention, secrets
+  are injected as trusted-local provider env, `continueAsNew` is
   an atomic transactional handoff with lineage, and fork is fenced to terminal
   runs. The OS-sandbox capability backstop remains the one unimplemented
   hardening.
@@ -560,12 +560,19 @@ type Workflow<I, O> = (ctx: Ctx, input: I) => Promise<O>;
 
 // As-built (src/kernel/ctx.ts). The original v2 sketch differed; this matches code.
 interface Ctx {
+  readonly run: { readonly id: string; readonly target: string };
+
+  workspace(spec: WorkspaceSpec): Promise<WorkspaceHandle>;
+  withWorkspace<T>(specOrHandle: WorkspaceSpec | WorkspaceHandle, fn: () => Promise<T>): Promise<T>;
+
   // Pure, memoized, re-derivable. fn deterministic in its explicit inputs (§5.3).
   step<T, I>(key: string, schema: Schema<T>, inputs: I,
              fn: (inputs: I) => T | Promise<T>, opts?: StepOpts): Promise<T>;
 
   // Effectful: the real work. Journaled; completed results never re-run.
   agent<T>(spec: AgentSpec<T>): Promise<T>;
+
+  agentSession(spec: AgentSessionSpec): AgentSession;
 
   // Journaled non-determinism — the ONLY time/entropy in realm scope.
   now(): number;
@@ -606,9 +613,7 @@ interface AgentSpec<T> {
   toolPolicy?: 'none' | 'read-only' | 'workspace-write' | 'unrestricted';
   allowTools?: string[];            // provider-native additions on top of toolPolicy
   denyTools?: string[];             // provider-native removals from the final allowlist
-  workspaceIsolation?: boolean;     // explicit worktree + diff capture opt-in
-  workspaceRetention?: 'never' | 'on-failure' | 'always'; // terminal cleanup policy
-  target?: string;                  // daemon-resolvable cwd; defaults to run target
+  workspace?: WorkspaceHandle;      // explicit cwd/lifecycle handle; defaults scoped/direct
   capabilities?: Capabilities;      // §11.1; used when toolPolicy is omitted
   // note: no memo mode — agents are always memoized (L18); re-think is
   // expressed via retry(stableKey), rerun with a source override, or iteration loops
@@ -620,13 +625,11 @@ interface AgentSpec<T> {
 exactly three parameters); `ctx.agent` carries `key` in its option bag.
 `toolPolicy` is the public shorthand over the capability enum; `allowTools` and
 `denyTools` are provider-native adjustments when a workflow intentionally needs
-to add or remove a specific backend tool. `workspaceIsolation` is intentionally
-separate: it chooses the isolated worktree/diff-capture execution mode;
-`workspaceRetention` is valid only with isolation and chooses terminal cleanup
-(`never`, `on-failure`, or `always`). `target`
-selects the provider cwd, must be non-empty when supplied, and participates in
-agent identity. If both `toolPolicy` and `capabilities` are set, `toolPolicy`
-controls provider tools. `toolPolicy:'unrestricted'` cannot be combined with
+to add or remove a specific backend tool. Workspace selection is explicit via
+`ctx.workspace` handles, scoped with `ctx.withWorkspace`, or defaults to the run
+`__default` direct workspace at `ctx.run.target`; the resolved workspace id
+participates in agent identity. If both `toolPolicy` and `capabilities` are set,
+`toolPolicy` controls provider tools. `toolPolicy:'unrestricted'` cannot be combined with
 `allowTools` or `denyTools` until provider-native deny semantics are supported.
 
 **One step model.** Fan-out is plain `Promise.all(items.map(...))` — exactly how
@@ -836,8 +839,8 @@ __session.<agentKey>.<turnKey>
 
 Participant and turn key components are limited to `[A-Za-z0-9_-]+`; ordinary
 author keys may not use the `__session.` prefix. The worker resolves profiles,
-tool policy, provider-native tool lists, capabilities, workspace isolation,
-workspace retention, target, and secret names before hashing participant identity. The realm host stores that
+tool policy, provider-native tool lists, capabilities, resolved workspace id,
+and secret names before hashing participant identity. The realm host stores that
 hash in `agent_sessions` and rejects drift. Turn identity reuses the journal
 row's `(version, input_hash)` for the derived key and is append-only within a
 participant.
@@ -859,8 +862,8 @@ does not call the provider. Completing a turn without a token is an error,
 because future turns would not be able to continue.
 
 The session path is intentionally fail-closed: providers must declare stable
-session support; isolated sessions get one retained workspace per `(runId,
-agentKey)`; and runs with session rows cannot be rerun, rewound, or forked.
+session support; changing a participant workspace changes identity; and runs
+with session rows cannot be rerun, rewound, or forked.
 `continueAsNew` starts a fresh run and does
 not carry backend session tokens. Provider session-token trace events are
 consumed for write-ahead state only and are not persisted in the durable event
@@ -885,8 +888,8 @@ builds it **before** the first real adapter (Phase 7 vs 10).
 Trust boundary: orchestration code is **untrusted for side effects** (it runs in
 the realm and physically can't reach fs/net); vendor agent CLIs run in the
 trusted local development environment with the capabilities the workflow grants;
-`workspaceIsolation` is an optional worktree/diff-review mode, not a secret or
-network-exfiltration boundary; the daemon is trusted (owns journal, secret env
+workspace mode is cwd/lifecycle selection, not a secret or network-exfiltration
+boundary; the daemon is trusted (owns journal, secret env
 injection, capability resolution). This paragraph is the de-facto threat model;
 a standalone threat-model document is not yet written.
 
@@ -896,9 +899,8 @@ a standalone threat-model document is not yet written.
 > "enforcement later" framing below is historical. What is real now: the
 > normalized tool policies map to per-vendor tool flags in one place
 > (`resolvedToolPolicyToPiArgs`, `resolvedToolPolicyToClaudeArgs`);
-> `workspaceIsolation` is an explicit opt-in and fails closed without a target
-> that is a git repository root for isolated execution; the diff gate journals
-> review metadata; secrets are resolved
+> worktree workspaces are explicit handles and fail closed without a run target
+> inside a git repository; the diff gate journals review metadata; secrets are resolved
 > from the side channel and injected as provider env without requiring workspace
 > isolation or redacting agent-visible output; and **capabilities + secrets fold
 > into both the agent version AND the input hash, identically on the realm and
@@ -941,24 +943,31 @@ if an agent emits a secret value, Keel records it as-is. The side channel keeps
 secret values out of workflow source and agent options; it is not an output
 redaction system.
 
-### 11.3 Workspace isolation & the diff gate (plain git — jj dropped)
+### 11.3 Run workspaces & the diff gate (plain git — jj dropped)
 
-Agents resolve a daemon-visible **target** from the agent spec/profile or the
-run target captured by the client at launch. Server/low-level launch boundaries
-reject missing or blank targets instead of inventing a daemon-cwd fallback.
-Non-isolated agents run with `cwd = target`. Agents that set
-`workspaceIsolation: true` require the target to be the git repo
-root and run with `cwd` in an **isolated git worktree** checked out at the run's
-base commit, seeing their own writes (v1's jj/CoW "union read" semantics don't exist in plain git and are dropped as a
-claim). Isolated `ctx.agent` and `ctx.agentSession` calls create unified `agent_workspaces`
-rows in a Keel workspace store. One-shot agents reuse the workspace for retries of
-the same logical step while the run can continue; sessions retain one workspace
-per `(runId, agentKey)` across turns/retries. Terminal cleanup evaluates
-`workspaceRetention`: `never` removes, `on-failure` retains failed/abnormal or
-failure-bearing workspaces, and `always` retains. Changes are never auto-merged;
-operator merge/discard/GC commands act on retained workspaces by `workspaceId`.
-The VCS lives behind an interface — git worktrees now; jj or container overlays
-swappable later (§17 L9).
+Server/low-level launch boundaries reject missing or blank run targets instead
+of inventing a daemon-cwd fallback. Provider cwd always comes from a run-scoped
+workspace row: an explicit `WorkspaceHandle`, the innermost `ctx.withWorkspace`,
+or the lazy `__default` direct workspace at `ctx.run.target`.
+
+Direct workspaces point at existing directories, are not owned by Keel, permit
+parallel provider invocations, and are hidden from default workspace listings
+unless they have operator-actionable metadata. Worktree workspaces are
+Keel-owned git worktrees under the workspace store, keyed by `(runId,
+workspaceId)`, checked out from a resolved source repo/ref, and reused across
+retries, parks, interrupts, daemon restarts, and session turns while the run can
+continue. Only one provider invocation may actively use a Keel-owned worktree at
+a time; durable `active_holder_*` row fields fail concurrent use closed and are
+cleared on every provider end path or startup recovery.
+
+Terminal cleanup evaluates worktree retention: `remove`, `retain-on-failure`, or
+`retain`. Direct workspaces are never removed, diffed, merged, discarded, or GC'd
+by Keel. Changes are never auto-merged; operator merge/discard/GC commands act on
+retained worktrees by `(runId, workspaceId)`. Durable agent sessions fail closed
+if their worktree workspace was removed before retry/resume; workflows that need
+terminal failed session runs to be retryable should use `retain-on-failure` or
+`retain`. The VCS lives behind an interface — git worktrees now; jj or container
+overlays swappable later (§17 L9).
 
 ### 11.4 Approval as a first-class dataflow node
 
@@ -1133,12 +1142,12 @@ live gate (Phase 14). Every phase ends green and is one reviewable commit.
 
 Sequenced per L22: write-capable pipelines and scheduled runs are near-term;
 approval-gated human flows are not. Phase 15 captures reviewable diffs for
-workspace-isolated agents; the full durable `ctx.human` effect family follows in
+worktree workspace agents; the full durable `ctx.human` effect family follows in
 Phase 17.
 
 | # | Phase | Exit criteria |
 |---|---|---|
-| 15 | Write-capable agents: capability enforcement, worktree isolation, diff gate, secrets | `fs:none` agent cannot write; an agent that opts into workspace isolation has changes confined to its worktree until a journaled approval (via RPC/CLI) merges them; secrets are injected through the side channel and wiped at terminal cleanup. |
+| 15 | Write-capable agents: capability enforcement, worktree isolation, diff gate, secrets | `fs:none` agent cannot write; an agent using a worktree workspace has changes confined to that worktree until a journaled approval (via RPC/CLI) merges them; secrets are injected through the side channel and wiped at terminal cleanup. |
 | 16 | Scheduling & supervision: `ctx.sleep`, durable timers, supervisor, cron | A cron-scheduled mock workflow fires on time; a due timer fires correctly after a daemon restart (journal-rebuilt); orphaned runs are reclaimed via the heartbeat fence. |
 | 17 | Full HITL: `ctx.human`, `ctx.signal`, park/wake | A run parked `waiting-human` with the daemon stopped survives restart and resumes when approved from a second client; `ctx.signal` with timeout parks and wakes correctly. |
 | 18 | Time travel | Prompt edit mid-pipeline re-executes only the affected step + descendants with workspace restored; fork diverges with recorded lineage. |

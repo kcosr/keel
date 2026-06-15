@@ -45,6 +45,7 @@ export interface DiffBundle {
 }
 
 export interface GitTarget {
+  /** Resolved source repository root. Kept as target for legacy call sites. */
   target: string;
   repoRoot: string;
   baseCommit: string;
@@ -118,37 +119,48 @@ function canonicalPath(path: string): string {
   }
 }
 
-/** Validate that `target` is exactly a git repository root and return its HEAD. */
-export function resolveGitRootTarget(target: string): GitTarget {
+/** Resolve any path inside a git repository to its repository root and base commit. */
+export function resolveGitRootTarget(target: string, ref = "HEAD"): GitTarget {
   if (!isAbsolute(target)) {
-    throw new Error(`agent target must be an absolute daemon-resolvable path, got ${target}`);
+    throw new Error(`workspace path must be an absolute daemon-resolvable path, got ${target}`);
   }
   let repoRoot: string;
   try {
     repoRoot = git(target, ["rev-parse", "--show-toplevel"]).trim();
   } catch (err) {
-    throw new Error(`target ${target} is not a git repository root: ${gitErrorMessage(err)}`);
-  }
-  const targetReal = canonicalPath(target);
-  const repoReal = canonicalPath(repoRoot);
-  if (targetReal !== repoReal) {
     throw new Error(
-      `isolated agent target ${target} is inside git repository ${repoRoot}; pass the repository root as --target or set the agent target to ${repoRoot}`,
+      `workspace path ${target} is not inside a git repository: ${gitErrorMessage(err)}`,
     );
   }
-  const baseCommit = git(repoRoot, ["rev-parse", "HEAD"]).trim();
-  return { target, repoRoot, baseCommit };
+  const sourcePath = canonicalPath(repoRoot);
+  let baseCommit: string;
+  try {
+    baseCommit = git(sourcePath, ["rev-parse", ref]).trim();
+  } catch (err) {
+    throw new Error(
+      `workspace ref ${ref} cannot be resolved in ${sourcePath}: ${gitErrorMessage(err)}`,
+    );
+  }
+  return { target: sourcePath, repoRoot: sourcePath, baseCommit };
 }
 
 export function assertUsableTargetDirectory(target: string): void {
+  resolveUsableDirectory(target);
+}
+
+export function resolveUsableDirectory(target: string): string {
   if (!isAbsolute(target)) {
-    throw new Error(`agent target must be an absolute daemon-resolvable path, got ${target}`);
+    throw new Error(`workspace path must be an absolute daemon-resolvable path, got ${target}`);
   }
   try {
     const real = realpathSync(target);
     if (!existsSync(real)) throw new Error("missing");
+    if (!statSync(real).isDirectory()) throw new Error("not a directory");
+    return real;
   } catch (err) {
-    throw new Error(`agent target ${target} is not an existing directory: ${gitErrorMessage(err)}`);
+    throw new Error(
+      `workspace path ${target} is not an existing directory: ${gitErrorMessage(err)}`,
+    );
   }
 }
 

@@ -194,7 +194,7 @@ function insertOldWorkflowDefinition(
 }
 
 describe("schema migrations", () => {
-  test("a v4 DB migrates forward to v13 in place and idempotently", () => {
+  test("a v4 DB migrates forward to v15 in place and idempotently", () => {
     const dir = mkdtempSync(join(tmpdir(), "keel-mig-"));
     try {
       const path = join(dir, "old.db");
@@ -207,7 +207,7 @@ describe("schema migrations", () => {
       const ver = store.db
         .query<{ value: string }, []>("SELECT value FROM schema_meta WHERE key='schema_version'")
         .get();
-      expect(ver?.value).toBe("14");
+      expect(ver?.value).toBe("15");
 
       // new columns exist
       const jcols = store.db.query<{ name: string }, []>("PRAGMA table_info(journal)").all();
@@ -241,6 +241,11 @@ describe("schema migrations", () => {
         .query<{ name: string }, []>("PRAGMA table_info(agent_workspaces)")
         .all();
       expect(workspaces.some((c) => c.name === "workspace_id")).toBe(true);
+      expect(workspaces.some((c) => c.name === "mode")).toBe(true);
+      expect(workspaces.some((c) => c.name === "owner_kind")).toBe(true);
+      expect(workspaces.some((c) => c.name === "source_path")).toBe(true);
+      expect(workspaces.some((c) => c.name === "owned")).toBe(true);
+      expect(workspaces.some((c) => c.name === "active_holder_kind")).toBe(true);
       expect(workspaces.some((c) => c.name === "retention_policy")).toBe(true);
 
       // existing rows preserved (additive) and seq backfilled per-run monotonic
@@ -313,7 +318,7 @@ describe("schema migrations", () => {
     }
   });
 
-  test("v13 migration preserves session workspaces as always-retained unified rows", () => {
+  test("v13 migration preserves session workspaces as always-retained legacy unified rows", () => {
     const db = new Database(":memory:");
     try {
       db.exec(`
@@ -361,12 +366,86 @@ describe("schema migrations", () => {
     }
   });
 
+  test("v14 migration converts legacy workspaces to workflow workspace rows", () => {
+    const db = new Database(":memory:");
+    try {
+      db.exec(`
+        CREATE TABLE agent_workspaces (
+          run_id               TEXT NOT NULL,
+          workspace_id         TEXT NOT NULL,
+          kind                 TEXT NOT NULL,
+          key                  TEXT NOT NULL,
+          last_attempt         INTEGER,
+          retention_policy     TEXT NOT NULL,
+          workspace_path       TEXT NOT NULL,
+          target               TEXT NOT NULL,
+          base_commit          TEXT NOT NULL,
+          status               TEXT NOT NULL,
+          failure_seen         INTEGER NOT NULL DEFAULT 0,
+          last_turn_key        TEXT,
+          last_turn_attempt    INTEGER,
+          last_diff_event_seq  INTEGER,
+          last_error_event_seq INTEGER,
+          cleanup_error_json   TEXT,
+          created_at_ms        INTEGER NOT NULL,
+          updated_at_ms        INTEGER NOT NULL,
+          merged_at_ms         INTEGER,
+          discarded_at_ms      INTEGER,
+          removed_at_ms        INTEGER,
+          PRIMARY KEY (run_id, workspace_id)
+        );
+        INSERT INTO agent_workspaces VALUES (
+          'r', 'ws_agent', 'agent_session', 'primary', NULL, 'on-failure', '/tmp/ws', '/repo', 'abc', 'removed', 1, 'turn', 2, 3, 4, NULL, 10, 20, NULL, NULL, 30
+        );
+      `);
+      applyMigration(db, 14);
+      const row = db
+        .query<
+          {
+            mode: string;
+            owner_kind: string;
+            source_path: string;
+            source_ref: string | null;
+            base_commit: string | null;
+            retention_policy: string | null;
+            owned: number;
+            status: string;
+            removed_at_ms: number | null;
+            active_holder_kind: string | null;
+          },
+          []
+        >(
+          `SELECT mode, owner_kind, source_path, source_ref, base_commit, retention_policy, owned,
+                  status, removed_at_ms, active_holder_kind
+           FROM agent_workspaces`,
+        )
+        .get();
+      expect(row).toEqual({
+        mode: "worktree",
+        owner_kind: "agent_session",
+        source_path: "/repo",
+        source_ref: "HEAD",
+        base_commit: "abc",
+        retention_policy: "retain-on-failure",
+        owned: 1,
+        status: "removed",
+        removed_at_ms: 30,
+        active_holder_kind: null,
+      });
+      const cols = db.query<{ name: string }, []>("PRAGMA table_info(agent_workspaces)").all();
+      expect(cols.some((c) => c.name === "kind")).toBe(false);
+      expect(cols.some((c) => c.name === "target")).toBe(false);
+    } finally {
+      db.close();
+    }
+  });
+
   test("a fresh DB initializes at the current version with no migration", () => {
     const store = JournalStore.memory();
     const ver = store.db
       .query<{ value: string }, []>("SELECT value FROM schema_meta WHERE key='schema_version'")
       .get();
-    expect(ver?.value).toBe("14");
+    expect(ver?.value).toBe("15");
     store.close();
   });
 
@@ -380,7 +459,7 @@ describe("schema migrations", () => {
       const ver = store.db
         .query<{ value: string }, []>("SELECT value FROM schema_meta WHERE key='schema_version'")
         .get();
-      expect(ver?.value).toBe("14");
+      expect(ver?.value).toBe("15");
 
       const schedule = store.db
         .query<{ enabled: number; workflow_ref: string }, []>(
@@ -481,11 +560,11 @@ describe("schema migrations", () => {
       expect(store.getWorkflowDefinition(newHash)).not.toBeNull();
 
       expect(() => materializeWorkflowDefinition(store, newHash, cacheRoot)).toThrow(
-        /requires workflow SDK ABI 1, but this daemon supports ABI 3/,
+        /requires workflow SDK ABI 1, but this daemon supports ABI 4/,
       );
       const kernel = new RealmKernel(store, { clock: () => 2, definitionCacheRoot: cacheRoot });
       await expect(kernel.resume("r_active")).rejects.toThrow(
-        /requires workflow SDK ABI 1, but this daemon supports ABI 3/,
+        /requires workflow SDK ABI 1, but this daemon supports ABI 4/,
       );
       store.close();
     } finally {

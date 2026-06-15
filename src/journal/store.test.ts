@@ -39,7 +39,7 @@ function workspaceRow(
     runId,
     agentKey,
     workspacePath: `/tmp/${runId}/${agentKey}`,
-    target: `/repo/${runId}`,
+    sourcePath: `/repo/${runId}`,
     baseCommit: `base-${runId}`,
     status: "idle",
     lastTurnKey: null,

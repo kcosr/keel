@@ -71,7 +71,7 @@ Agent permissions should fail closed.
 - Do not let shell/write-capable agents run against the daemon cwd as a fallback.
   They need an explicit workspace root or an intentional, tested equivalent.
 - Secrets are trusted-local env injection through the side channel. They do not
-  require `workspaceIsolation`, and Keel does not redact exact secret values from
+  require worktree mode, and Keel does not redact exact secret values from
   agent outputs, events, errors, or diffs.
 - Network capability is advisory until a real network sandbox/backstop exists;
   do not describe workspace isolation or output handling as preventing network

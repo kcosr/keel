@@ -71,8 +71,8 @@ KEEL_RUN_CAP=kc_run_... keel signal <run-id> implementation-completion '{
   with workspace write access so it can run that command. Otherwise it uses
   `implementerToolPolicy`, defaulting to `workspace-write` without shell.
 - The reviewer is read-only and is prompted not to modify files.
-- `ctx.agentSession` does not support `workspaceIsolation: true` yet, so do not
-  use this workflow when edits must be confined to a disposable worktree.
+- This workflow uses the run default direct workspace, so do not use it when
+  edits must be confined to a disposable worktree.
 - Keep `maxRounds` small. The workflow caps it at `10`.
 - This workflow does not request Keel secret refs. Do not put raw secret values in
   prompts or input; agent outputs are journaled as-is.

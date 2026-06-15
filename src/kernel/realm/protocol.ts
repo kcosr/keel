@@ -7,7 +7,7 @@
 // for the host's reply. log/phase are fire-and-forget.
 
 import type { Capabilities, ToolPolicy } from "../../agents/capabilities.ts";
-import type { InputDep } from "../../journal/types.ts";
+import type { InputDep, WorkspaceRetention } from "../../journal/types.ts";
 
 /** SAB layout: Int32 control[0] is the ambient handshake flag; Float64 holds
  * the returned number. */
@@ -27,6 +27,17 @@ export type WorkerRequest =
       deps: InputDep[] | null;
     }
   | {
+      type: "workspace";
+      id: number;
+      spec: {
+        key: string;
+        mode?: string | null;
+        path?: string | null;
+        ref?: string | null;
+        retention?: WorkspaceRetention | null;
+      };
+    }
+  | {
       type: "agent";
       id: number;
       key: string;
@@ -37,9 +48,7 @@ export type WorkerRequest =
       toolPolicy: ToolPolicy;
       allowTools: string[];
       denyTools: string[];
-      workspaceIsolation: boolean;
-      workspaceRetention: "never" | "on-failure" | "always" | null;
-      target: string | null;
+      workspaceId: string;
       capabilities: Capabilities | null;
       secrets: string[];
       version: string;
@@ -67,9 +76,7 @@ export type WorkerRequest =
       toolPolicy: ToolPolicy;
       allowTools: string[];
       denyTools: string[];
-      workspaceIsolation: boolean;
-      workspaceRetention: "never" | "on-failure" | "always" | null;
-      target: string | null;
+      workspaceId: string;
       capabilities: Capabilities | null;
       secrets: string[];
       version: string;
@@ -150,6 +157,7 @@ export type HostReply =
       sab: SharedArrayBuffer;
       moduleHelpers: Record<string, string>;
       agentProfiles: Record<string, unknown>;
+      runId: string;
       runTarget: string | null;
     }
   | { type: "rpc-reply"; id: number; payload: unknown }

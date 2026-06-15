@@ -16,6 +16,9 @@ export type {
   HumanDecision,
   HumanSpec,
   StepOpts,
+  WorkspaceHandle,
+  WorkspaceMode,
   WorkspaceRetention,
+  WorkspaceSpec,
 } from "./kernel/ctx.ts";
 export type { Capabilities, ToolPolicy } from "./agents/capabilities.ts";

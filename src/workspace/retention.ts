@@ -8,11 +8,11 @@ import type {
 } from "../journal/types.ts";
 import { removeRetainedWorkspace } from "./worktree.ts";
 
-export const DEFAULT_WORKSPACE_RETENTION: WorkspaceRetention = "never";
+export const DEFAULT_WORKSPACE_RETENTION: WorkspaceRetention = "remove";
 export const WORKSPACE_RETENTIONS: readonly WorkspaceRetention[] = [
-  "never",
-  "on-failure",
-  "always",
+  "remove",
+  "retain-on-failure",
+  "retain",
 ];
 export const RUN_TERMINAL_STATUSES = new Set<RunStatus>([
   "finished",
@@ -25,26 +25,14 @@ export const RUN_FAILURE_STATUSES = new Set<RunStatus>(["failed", "cancelled"]);
 const RUN_LIFETIME_STATUSES = new Set<AgentWorkspaceStatus>(["creating", "active", "idle"]);
 
 export function validateWorkspaceRetention(value: unknown): WorkspaceRetention {
-  if (value === "never" || value === "on-failure" || value === "always") return value;
-  throw new Error(`workspaceRetention must be one of ${WORKSPACE_RETENTIONS.join(", ")}`);
-}
-
-export function resolveWorkspaceRetention(input: {
-  workspaceIsolation: boolean;
-  workspaceRetention?: unknown;
-}): WorkspaceRetention | null {
-  if (input.workspaceRetention !== undefined && !input.workspaceIsolation) {
-    throw new Error("workspaceRetention requires workspaceIsolation: true");
-  }
-  if (!input.workspaceIsolation) return null;
-  return input.workspaceRetention === undefined
-    ? DEFAULT_WORKSPACE_RETENTION
-    : validateWorkspaceRetention(input.workspaceRetention);
+  if (value === "remove" || value === "retain-on-failure" || value === "retain") return value;
+  throw new Error(`workspace retention must be one of ${WORKSPACE_RETENTIONS.join(", ")}`);
 }
 
 export function workspaceShouldRetain(row: AgentWorkspaceRow, terminalStatus: RunStatus): boolean {
-  if (row.retentionPolicy === "always") return true;
-  if (row.retentionPolicy === "never") return false;
+  if (!row.owned) return true;
+  if (row.retentionPolicy === "retain") return true;
+  if (row.retentionPolicy === "remove") return false;
   return (
     RUN_FAILURE_STATUSES.has(terminalStatus) ||
     row.failureSeen ||
@@ -62,7 +50,7 @@ export function cleanupTerminalRunWorkspaces(
   atMs: number,
 ): void {
   if (!RUN_TERMINAL_STATUSES.has(terminalStatus)) return;
-  for (const row of store.listAgentWorkspaces(runId)) {
+  for (const row of store.listAgentWorkspaces(runId, { includeRemoved: true })) {
     cleanupTerminalWorkspace(store, row, terminalStatus, atMs);
   }
 }
@@ -73,21 +61,31 @@ export function cleanupTerminalWorkspace(
   terminalStatus: RunStatus,
   atMs: number,
 ): void {
+  if (!row.owned) return;
   if (row.status === "merged" || row.status === "discarded" || row.status === "removed") return;
   if (workspaceShouldRetain(row, terminalStatus)) {
     if (RUN_LIFETIME_STATUSES.has(row.status)) {
       store.updateAgentWorkspace(row.runId, row.workspaceId, {
         status: existsSync(row.workspacePath) ? "pending_review" : "abandoned",
+        activeHolderKind: null,
+        activeHolderKey: null,
+        activeHolderAttempt: null,
+        activeStartedAtMs: null,
         updatedAtMs: atMs,
       });
     }
     return;
   }
   try {
-    removeRetainedWorkspace(row.target, row.workspacePath, row.baseCommit);
+    if (!row.baseCommit) throw new Error(`workspace ${row.workspaceId} has no base commit`);
+    removeRetainedWorkspace(row.sourcePath, row.workspacePath, row.baseCommit);
     store.transaction(() => {
       store.updateAgentWorkspace(row.runId, row.workspaceId, {
         status: "removed",
+        activeHolderKind: null,
+        activeHolderKey: null,
+        activeHolderAttempt: null,
+        activeStartedAtMs: null,
         removedAtMs: atMs,
         updatedAtMs: atMs,
       });
@@ -96,10 +94,11 @@ export function cleanupTerminalWorkspace(
         "workspace.removed",
         {
           workspaceId: row.workspaceId,
-          kind: row.kind,
+          mode: row.mode,
+          ownerKind: row.ownerKind,
           key: row.key,
           workspacePath: row.workspacePath,
-          target: row.target,
+          sourcePath: row.sourcePath,
         },
         atMs,
       );
@@ -110,6 +109,10 @@ export function cleanupTerminalWorkspace(
       store.updateAgentWorkspace(row.runId, row.workspaceId, {
         status: "cleanup_error",
         cleanupErrorJson: errorJson,
+        activeHolderKind: null,
+        activeHolderKey: null,
+        activeHolderAttempt: null,
+        activeStartedAtMs: null,
         updatedAtMs: atMs,
       });
       store.appendEvent(
@@ -117,7 +120,8 @@ export function cleanupTerminalWorkspace(
         "workspace.cleanup_error",
         {
           workspaceId: row.workspaceId,
-          kind: row.kind,
+          mode: row.mode,
+          ownerKind: row.ownerKind,
           key: row.key,
           workspacePath: row.workspacePath,
           error: JSON.parse(errorJson),

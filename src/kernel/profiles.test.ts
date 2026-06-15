@@ -21,8 +21,7 @@ describe("resolveProfile", () => {
         provider: "pi",
         model: "opus",
         reasoning: "high",
-        workspaceIsolation: true,
-        workspaceRetention: "always" as const,
+        toolPolicy: "read-only" as const,
       },
     };
     const resolved = resolveProfile(
@@ -35,8 +34,7 @@ describe("resolveProfile", () => {
       provider: "pi",
       model: "opus",
       reasoning: "high",
-      workspaceIsolation: true,
-      workspaceRetention: "always",
+      toolPolicy: "read-only",
     });
     // explicit field wins over the profile
     expect(
@@ -47,6 +45,12 @@ describe("resolveProfile", () => {
     expect(() => resolveProfile({ key: "k", prompt: "p", profile: "nope" }, profiles)).toThrow(
       /unknown agent profile/,
     );
+    expect(() =>
+      resolveProfile(
+        { key: "k", prompt: "p", profile: "old" },
+        { old: { target: "/tmp" } as never },
+      ),
+    ).toThrow(/no longer accepts target/);
   });
 });
 

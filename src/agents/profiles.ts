@@ -1,4 +1,3 @@
-import type { WorkspaceRetention } from "../kernel/ctx.ts";
 import type { ToolPolicy } from "./capabilities.ts";
 
 // Named agent profiles — daemon/kernel-configured presets
@@ -17,9 +16,6 @@ export interface AgentProfile {
   toolPolicy?: ToolPolicy;
   allowTools?: string[];
   denyTools?: string[];
-  workspaceIsolation?: boolean;
-  workspaceRetention?: WorkspaceRetention;
-  target?: string;
   capabilities?: Record<string, unknown>;
   maxRetries?: number;
   lenient?: boolean;
@@ -38,9 +34,6 @@ const INHERITED = [
   "toolPolicy",
   "allowTools",
   "denyTools",
-  "workspaceIsolation",
-  "workspaceRetention",
-  "target",
   "capabilities",
   "maxRetries",
   "lenient",
@@ -48,6 +41,8 @@ const INHERITED = [
   "timeoutMs",
   "stallRetries",
 ] as const;
+
+const REMOVED_WORKSPACE_FIELDS = ["workspaceIsolation", "workspaceRetention", "target"] as const;
 
 /**
  * Merge a named profile UNDER an explicit spec: explicit fields always win, a
@@ -64,6 +59,14 @@ export function resolveProfile<T extends { profile?: string }>(
   const preset = profiles?.[profile];
   if (!preset) {
     throw new Error(`unknown agent profile "${profile}" (configure it on the daemon/kernel)`);
+  }
+  const rawPreset = preset as Record<string, unknown>;
+  for (const field of REMOVED_WORKSPACE_FIELDS) {
+    if (rawPreset[field] !== undefined) {
+      throw new Error(
+        `agent profile "${profile}" no longer accepts ${field}; use ctx.workspace or ctx.withWorkspace`,
+      );
+    }
   }
   const merged = { ...rest } as Record<string, unknown>;
   for (const key of INHERITED) {

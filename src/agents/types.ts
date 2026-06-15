@@ -41,7 +41,7 @@ export interface AgentInvocation {
   reasoning?: string;
   /** Resolved capabilities (mapped to vendor enforcement; §11). */
   capabilities?: Capabilities;
-  /** Working directory (an isolated worktree when workspaceIsolation is enabled). */
+  /** Provider working directory resolved from the run workspace. */
   cwd?: string;
   /** Secret env injected at invocation (§11.2), wiped from the side channel after terminal cleanup. */
   env?: Record<string, string>;

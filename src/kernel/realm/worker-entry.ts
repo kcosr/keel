@@ -14,6 +14,7 @@
 
 /// <reference lib="webworker" />
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { type ToolPolicy, resolveToolPolicy } from "../../agents/capabilities.ts";
 import {
   DEFAULT_AGENT_LENIENT,
@@ -23,8 +24,9 @@ import {
 } from "../../agents/defaults.ts";
 import { type AgentProfiles, resolveProfile } from "../../agents/profiles.ts";
 import { type Json, hashJson } from "../../hash.ts";
-import { resolveAgentTarget } from "../../target.ts";
-import { resolveWorkspaceRetention } from "../../workspace/retention.ts";
+import type { WorkspaceRetention } from "../../journal/types.ts";
+import { requireRunTarget } from "../../target.ts";
+import { DEFAULT_WORKSPACE_ID } from "../../workspace/identity.ts";
 import type { Schema } from "../schema.ts";
 import { closureOfHelpers, computeVersion } from "../version.ts";
 import {
@@ -273,6 +275,7 @@ let control: Int32Array;
 let value: Float64Array;
 let moduleHelpers: Record<string, string> = {};
 let agentProfiles: AgentProfiles = {};
+let runId: string | null = null;
 let runTarget: string | null = null;
 let nextId = 1;
 const pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: unknown) => void }>();
@@ -320,6 +323,7 @@ class ContinueAsNew extends Error {
 // Per-name occurrence counter for ctx.signal stable keys (recomputed
 // deterministically each execution, so resume maps to the same wait site).
 const signalOccurrences = new Map<string, number>();
+const workspaceScope = new AsyncLocalStorage<WorkspaceHandle>();
 
 // ---- tagged-envelope edge detection ---------------------------------------
 
@@ -343,8 +347,56 @@ function sessionStableKey(agentKey: string, turnKey: string): string {
   return `${SESSION_STABLE_KEY_PREFIX}${agentKey}.${turnKey}`;
 }
 
-function resolvedTarget(specTarget: string | undefined, description: string): string {
-  return resolveAgentTarget(specTarget, runTarget, description);
+function currentRunTarget(context: string): string {
+  return requireRunTarget(runTarget, context);
+}
+
+interface WorkspaceHandle {
+  readonly id: string;
+}
+
+type WorkspaceSpec =
+  | { key: string; mode?: "direct"; path?: string }
+  | { key: string; mode: "worktree"; path?: string; ref?: string; retention?: WorkspaceRetention };
+
+function isWorkspaceHandle(value: WorkspaceSpec | WorkspaceHandle): value is WorkspaceHandle {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    "id" in value &&
+    typeof (value as { id?: unknown }).id === "string" &&
+    !("key" in value)
+  );
+}
+
+function resolveWorkspaceId(handle: WorkspaceHandle | undefined): string {
+  return (handle ?? workspaceScope.getStore())?.id ?? DEFAULT_WORKSPACE_ID;
+}
+
+async function resolveWorkspace(spec: WorkspaceSpec): Promise<WorkspaceHandle> {
+  const reply = await rpc<WorkspaceHandle>({
+    type: "workspace",
+    spec: {
+      key: (spec as { key?: string }).key ?? "",
+      mode: (spec as { mode?: string }).mode ?? null,
+      path: (spec as { path?: string }).path ?? null,
+      ref: (spec as { ref?: string }).ref ?? null,
+      retention: (spec as { retention?: WorkspaceRetention }).retention ?? null,
+    },
+  });
+  return Object.freeze({ id: reply.id });
+}
+
+function rejectRemovedWorkspaceFields(spec: unknown, context: string): void {
+  if (!spec || typeof spec !== "object") return;
+  const record = spec as Record<string, unknown>;
+  for (const field of ["workspaceIsolation", "workspaceRetention", "target"]) {
+    if (record[field] !== undefined) {
+      throw new Error(
+        `${context} no longer accepts ${field}; use ctx.workspace or ctx.withWorkspace`,
+      );
+    }
+  }
 }
 
 function tag<T>(result: T, stepKey: string, contentHash: string): T {
@@ -380,6 +432,24 @@ interface Schemaish<T> {
 }
 
 const ctx = Object.freeze({
+  get run(): { readonly id: string; readonly target: string } {
+    return Object.freeze({
+      id: requireRunTarget(runId, "ctx.run.id"),
+      target: currentRunTarget("ctx.run.target"),
+    });
+  },
+  async workspace(spec: WorkspaceSpec): Promise<WorkspaceHandle> {
+    return await resolveWorkspace(spec);
+  },
+  async withWorkspace<T>(
+    specOrHandle: WorkspaceSpec | WorkspaceHandle,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const handle = isWorkspaceHandle(specOrHandle)
+      ? specOrHandle
+      : await resolveWorkspace(specOrHandle);
+    return await workspaceScope.run(handle, fn);
+  },
   async step<T>(
     key: string,
     schema: Schemaish<T>,
@@ -454,9 +524,7 @@ const ctx = Object.freeze({
     toolPolicy?: ToolPolicy;
     allowTools?: string[];
     denyTools?: string[];
-    workspaceIsolation?: boolean;
-    workspaceRetention?: "never" | "on-failure" | "always";
-    target?: string;
+    workspace?: WorkspaceHandle;
     capabilities?: Record<string, unknown>;
     secrets?: string[];
     onFailure?: "throw" | "null";
@@ -480,12 +548,8 @@ const ctx = Object.freeze({
       ...(spec.denyTools ? { denyTools: spec.denyTools } : {}),
     });
     const caps = tools.capabilities;
-    const workspaceIsolation = spec.workspaceIsolation === true;
-    const workspaceRetention = resolveWorkspaceRetention({
-      workspaceIsolation,
-      workspaceRetention: spec.workspaceRetention,
-    });
-    const target = resolvedTarget(spec.target, `agent "${spec.key}"`);
+    rejectRemovedWorkspaceFields(rawSpec, `ctx.agent("${spec.key}")`);
+    const workspaceId = resolveWorkspaceId(spec.workspace);
     const version =
       spec.version ??
       computeVersion({
@@ -497,9 +561,7 @@ const ctx = Object.freeze({
           toolPolicy: tools.toolPolicy,
           allowTools: tools.allowTools,
           denyTools: tools.denyTools,
-          workspaceIsolation,
-          workspaceRetention,
-          target,
+          workspaceId,
           capabilities: caps,
           secrets: spec.secrets ?? [],
         },
@@ -516,9 +578,7 @@ const ctx = Object.freeze({
       toolPolicy: tools.toolPolicy,
       allowTools: tools.allowTools,
       denyTools: tools.denyTools,
-      workspaceIsolation,
-      workspaceRetention,
-      target,
+      workspaceId,
       capabilities: caps,
       secrets: spec.secrets ?? [],
     };
@@ -538,9 +598,7 @@ const ctx = Object.freeze({
       toolPolicy: tools.toolPolicy,
       allowTools: tools.allowTools,
       denyTools: tools.denyTools,
-      workspaceIsolation,
-      workspaceRetention,
-      target,
+      workspaceId,
       capabilities: caps,
       secrets: spec.secrets ?? [],
       version,
@@ -572,9 +630,7 @@ const ctx = Object.freeze({
     toolPolicy?: ToolPolicy;
     allowTools?: string[];
     denyTools?: string[];
-    workspaceIsolation?: boolean;
-    workspaceRetention?: "never" | "on-failure" | "always";
-    target?: string;
+    workspace?: WorkspaceHandle;
     capabilities?: Record<string, unknown>;
     secrets?: string[];
   }): {
@@ -604,12 +660,8 @@ const ctx = Object.freeze({
       ...(sessionSpec.denyTools ? { denyTools: sessionSpec.denyTools } : {}),
     });
     const caps = tools.capabilities;
-    const workspaceIsolation = sessionSpec.workspaceIsolation === true;
-    const workspaceRetention = resolveWorkspaceRetention({
-      workspaceIsolation,
-      workspaceRetention: sessionSpec.workspaceRetention,
-    });
-    const target = resolvedTarget(sessionSpec.target, `agent session "${sessionSpec.key}"`);
+    rejectRemovedWorkspaceFields(rawSessionSpec, `ctx.agentSession("${sessionSpec.key}")`);
+    const workspaceId = resolveWorkspaceId(sessionSpec.workspace);
     const identity = {
       agentKey: sessionSpec.key,
       provider,
@@ -618,9 +670,7 @@ const ctx = Object.freeze({
       toolPolicy: tools.toolPolicy,
       allowTools: tools.allowTools,
       denyTools: tools.denyTools,
-      workspaceIsolation,
-      workspaceRetention,
-      target,
+      workspaceId,
       capabilities: caps,
       secrets: sessionSpec.secrets ?? [],
     };
@@ -660,9 +710,7 @@ const ctx = Object.freeze({
               toolPolicy: tools.toolPolicy,
               allowTools: tools.allowTools,
               denyTools: tools.denyTools,
-              workspaceIsolation,
-              workspaceRetention,
-              target,
+              workspaceId,
               capabilities: caps,
               secrets: sessionSpec.secrets ?? [],
               participantIdentityHash: identityHash,
@@ -679,9 +727,7 @@ const ctx = Object.freeze({
           toolPolicy: tools.toolPolicy,
           allowTools: tools.allowTools,
           denyTools: tools.denyTools,
-          workspaceIsolation,
-          workspaceRetention,
-          target,
+          workspaceId,
           capabilities: caps,
           secrets: sessionSpec.secrets ?? [],
           participantIdentityHash: identityHash,
@@ -707,9 +753,7 @@ const ctx = Object.freeze({
           toolPolicy: tools.toolPolicy,
           allowTools: tools.allowTools,
           denyTools: tools.denyTools,
-          workspaceIsolation,
-          workspaceRetention,
-          target,
+          workspaceId,
           capabilities: caps,
           secrets: sessionSpec.secrets ?? [],
           version,
@@ -806,6 +850,7 @@ self.onmessage = (e: { data: HostReply }) => {
     value = new Float64Array(m.sab, VALUE_OFFSET, 1);
     moduleHelpers = m.moduleHelpers;
     agentProfiles = m.agentProfiles as AgentProfiles;
+    runId = m.runId;
     runTarget = m.runTarget;
     void start(m.workflowUrl, m.input);
     return;

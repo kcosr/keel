@@ -1,7 +1,15 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { DaemonClient } from "../daemon/client.ts";
-import type { EventEnvelope, LaunchRequest, RunOutcome, RunStart } from "../rpc/contract.ts";
+import type {
+  EventEnvelope,
+  LaunchRequest,
+  RunOutcome,
+  RunStart,
+  RunWorkspaceDiff,
+  RunWorkspaceView,
+  WorkspaceGcResult,
+} from "../rpc/contract.ts";
 import type { Blockage, RunProjection, RunReport } from "../rpc/projection.ts";
 
 export interface ExecuteKeel {
@@ -20,6 +28,19 @@ export interface ExecuteKeel {
   wait(runId: string, opts?: { timeoutMs?: number }): Promise<RunOutcome | ExecuteRunning>;
   output(runId: string): Promise<unknown>;
   events(runId: string, opts?: { afterSeq?: number }): AsyncIterable<EventEnvelope>;
+  listRunWorkspaces(
+    runId: string,
+    opts?: { includeRemoved?: boolean },
+  ): Promise<RunWorkspaceView[]>;
+  getRunWorkspace(runId: string, workspaceId: string): Promise<RunWorkspaceView | null>;
+  getRunWorkspaceDiff(runId: string, workspaceId: string): Promise<RunWorkspaceDiff>;
+  mergeRunWorkspace(runId: string, workspaceId: string): Promise<RunWorkspaceView>;
+  discardRunWorkspace(runId: string, workspaceId: string): Promise<RunWorkspaceView>;
+  gcWorkspaces(opts?: {
+    olderThanMs?: number;
+    includePending?: boolean;
+    includeRemoved?: boolean;
+  }): Promise<WorkspaceGcResult>;
   signal(runId: string, name: string, payload?: unknown): Promise<{ status: string }>;
   approve(
     runId: string,
@@ -175,6 +196,30 @@ export function createExecuteKeel(opts: ExecuteRuntimeOptions): ExecuteKeel {
       return eventIterable(opts.client, runId, eventOpts.afterSeq ?? 0, () =>
         authenticateKnownRun(runId),
       );
+    },
+    async listRunWorkspaces(runId, workspaceOpts = {}) {
+      await authenticateKnownRun(runId);
+      return opts.client.listRunWorkspaces(runId, workspaceOpts);
+    },
+    async getRunWorkspace(runId, workspaceId) {
+      await authenticateKnownRun(runId);
+      return opts.client.getRunWorkspace(runId, workspaceId);
+    },
+    async getRunWorkspaceDiff(runId, workspaceId) {
+      await authenticateKnownRun(runId);
+      return opts.client.getRunWorkspaceDiff(runId, workspaceId);
+    },
+    async mergeRunWorkspace(runId, workspaceId) {
+      await authenticateControlCredential();
+      return opts.client.mergeRunWorkspace(runId, workspaceId);
+    },
+    async discardRunWorkspace(runId, workspaceId) {
+      await authenticateControlCredential();
+      return opts.client.discardRunWorkspace(runId, workspaceId);
+    },
+    async gcWorkspaces(gcOpts = {}) {
+      await authenticateControlCredential();
+      return opts.client.gcWorkspaces(gcOpts);
     },
     async signal(runId, name, payload = null) {
       await authenticateKnownRun(runId);

@@ -5,6 +5,7 @@
 // front-end over the same StepEngine that runs fns in a Worker. agent/human/
 // signal/sleep/spawn land in later phases.
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { type Capabilities, type ToolPolicy, resolveToolPolicy } from "../agents/capabilities.ts";
 import { DEFAULT_AGENT_PROVIDER, DEFAULT_SCHEMA_MAX_RETRIES } from "../agents/defaults.ts";
 import { AgentFailure, executeAgent, runAgentWithStall } from "../agents/execute.ts";
@@ -12,8 +13,9 @@ import { type AgentProfiles, resolveProfile } from "../agents/profiles.ts";
 import type { AgentProviderRegistry } from "../agents/types.ts";
 import type { Json } from "../hash.ts";
 import type { JournalStore } from "../journal/store.ts";
-import { resolveAgentTarget } from "../target.ts";
-import { resolveWorkspaceRetention } from "../workspace/retention.ts";
+import { requireRunTarget } from "../target.ts";
+import { DEFAULT_WORKSPACE_ID } from "../workspace/identity.ts";
+import { resolveUsableDirectory } from "../workspace/worktree.ts";
 import { finalAgentMessageEvents } from "./agent-events.ts";
 import type { Schema } from "./schema.ts";
 import { StepEngine } from "./step-engine.ts";
@@ -54,12 +56,8 @@ export interface AgentSpec<T> {
   allowTools?: string[];
   /** Provider-native tools to remove from the final provider allowlist. */
   denyTools?: string[];
-  /** Run the provider in an isolated git worktree and journal its diff. Realm-only. */
-  workspaceIsolation?: boolean;
-  /** Terminal cleanup policy for isolated workspaces. */
-  workspaceRetention?: WorkspaceRetention;
-  /** Daemon-resolvable working target; defaults to the run target. */
-  target?: string;
+  /** Resolved workspace handle. Defaults to the scoped/default run workspace. */
+  workspace?: WorkspaceHandle;
   /** Explicit capabilities; overrides the default read-only policy (§11). */
   capabilities?: Partial<Capabilities>;
   /** Named secret refs to inject as env at invocation (§11.2). */
@@ -107,7 +105,27 @@ export interface AgentTurnSpec<T> {
   version?: string;
 }
 
-export type WorkspaceRetention = "never" | "on-failure" | "always";
+export type WorkspaceMode = "direct" | "worktree";
+
+export type WorkspaceRetention = "remove" | "retain-on-failure" | "retain";
+
+export type WorkspaceSpec =
+  | {
+      key: string;
+      mode?: "direct";
+      path?: string;
+    }
+  | {
+      key: string;
+      mode: "worktree";
+      path?: string;
+      ref?: string;
+      retention?: WorkspaceRetention;
+    };
+
+export interface WorkspaceHandle {
+  readonly id: string;
+}
 
 export interface AgentSession {
   turn<T>(spec: AgentTurnSpec<T>): Promise<T>;
@@ -129,6 +147,17 @@ export interface HumanDecision {
 }
 
 export interface Ctx {
+  readonly run: {
+    readonly id: string;
+    readonly target: string;
+  };
+
+  /** Resolve a run-scoped workspace handle for agents/sessions. */
+  workspace(spec: WorkspaceSpec): Promise<WorkspaceHandle>;
+
+  /** Bind a workspace as the scoped default for agents/sessions in `fn`. */
+  withWorkspace<T>(specOrHandle: WorkspaceSpec | WorkspaceHandle, fn: () => Promise<T>): Promise<T>;
+
   /** Pure, memoized step. `fn` must be deterministic in its explicit `inputs`.
    * `inputs` must be JSON-serializable at runtime (hashJson enforces it); the
    * type is left open so typed domain objects read cleanly. */
@@ -201,10 +230,11 @@ export class WorkflowCtx implements Ctx {
   private readonly engine: StepEngine;
   private readonly registry: AgentProviderRegistry | undefined;
   private readonly agentProfiles: Record<string, unknown> | undefined;
+  private readonly workspaceScope = new AsyncLocalStorage<WorkspaceHandle>();
 
   constructor(
-    store: JournalStore,
-    runId: string,
+    private readonly store: JournalStore,
+    private readonly runId: string,
     host: CtxHost,
     registry?: AgentProviderRegistry,
     agentProfiles?: Record<string, unknown>,
@@ -213,6 +243,81 @@ export class WorkflowCtx implements Ctx {
     this.engine = new StepEngine(store, runId, host);
     this.registry = registry;
     this.agentProfiles = agentProfiles;
+  }
+
+  get run(): { readonly id: string; readonly target: string } {
+    return Object.freeze({
+      id: this.runId,
+      target: requireRunTarget(this.runTarget, "ctx.run.target"),
+    });
+  }
+
+  async workspace(spec: WorkspaceSpec): Promise<WorkspaceHandle> {
+    const normalized = normalizeWorkspaceSpec(spec, this.runTarget);
+    if (normalized.key === DEFAULT_WORKSPACE_ID) {
+      throw new Error(
+        `workspace key ${DEFAULT_WORKSPACE_ID} is reserved for the run default workspace`,
+      );
+    }
+    if (normalized.mode !== "direct") {
+      throw new Error('ctx.workspace({ mode: "worktree" }) requires the realm kernel');
+    }
+    const now = Date.now();
+    const existing = this.store.getAgentWorkspace(this.runId, normalized.key);
+    if (existing) {
+      if (
+        existing.mode !== "direct" ||
+        existing.workspacePath !== normalized.path ||
+        existing.sourcePath !== normalized.path
+      ) {
+        throw new Error(
+          `workspace "${normalized.key}" identity changed; use a new workspace key or a fresh run`,
+        );
+      }
+      return Object.freeze({ id: existing.workspaceId });
+    }
+    this.store.insertAgentWorkspace({
+      runId: this.runId,
+      workspaceId: normalized.key,
+      mode: "direct",
+      ownerKind: "workflow",
+      key: normalized.key,
+      lastAttempt: null,
+      retentionPolicy: null,
+      workspacePath: normalized.path,
+      sourcePath: normalized.path,
+      suppliedPath: normalized.suppliedPath,
+      sourceRef: null,
+      baseCommit: null,
+      owned: false,
+      status: "idle",
+      failureSeen: false,
+      lastTurnKey: null,
+      lastTurnAttempt: null,
+      activeHolderKind: null,
+      activeHolderKey: null,
+      activeHolderAttempt: null,
+      activeStartedAtMs: null,
+      lastDiffEventSeq: null,
+      lastErrorEventSeq: null,
+      cleanupErrorJson: null,
+      createdAtMs: now,
+      updatedAtMs: now,
+      mergedAtMs: null,
+      discardedAtMs: null,
+      removedAtMs: null,
+    });
+    return Object.freeze({ id: normalized.key });
+  }
+
+  async withWorkspace<T>(
+    specOrHandle: WorkspaceSpec | WorkspaceHandle,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const handle = isWorkspaceHandle(specOrHandle)
+      ? specOrHandle
+      : await this.workspace(specOrHandle);
+    return await this.workspaceScope.run(handle, fn);
   }
 
   async step<T, I>(
@@ -265,14 +370,7 @@ export class WorkflowCtx implements Ctx {
     if (spec.secrets?.length) {
       throw new Error("ctx.agent({ secrets }) requires the realm kernel (secret side-channel)");
     }
-    const workspaceIsolation = spec.workspaceIsolation === true;
-    const workspaceRetention = resolveWorkspaceRetention({
-      workspaceIsolation,
-      workspaceRetention: spec.workspaceRetention,
-    });
-    if (workspaceIsolation) {
-      throw new Error("ctx.agent({ workspaceIsolation }) requires the realm kernel");
-    }
+    rejectRemovedWorkspaceFields(rawSpec, `ctx.agent("${spec.key}")`);
     const provider = spec.provider ?? DEFAULT_AGENT_PROVIDER;
     // Resolve capabilities identically to the realm path so the two front-ends
     // produce the same version hash for the same spec (identity parity, §11).
@@ -283,7 +381,8 @@ export class WorkflowCtx implements Ctx {
       ...(spec.denyTools ? { denyTools: spec.denyTools } : {}),
     });
     const caps = tools.capabilities;
-    const target = resolveAgentTarget(spec.target, this.runTarget, `agent "${spec.key}"`);
+    const workspaceId = this.resolveAgentWorkspaceId(spec.workspace);
+    const cwd = this.resolveInProcessWorkspace(workspaceId, spec.key);
     const version =
       spec.version ??
       computeVersion({
@@ -295,9 +394,7 @@ export class WorkflowCtx implements Ctx {
           toolPolicy: tools.toolPolicy,
           allowTools: tools.allowTools,
           denyTools: tools.denyTools,
-          workspaceIsolation: false,
-          workspaceRetention,
-          target,
+          workspaceId,
           capabilities: caps,
           secrets: spec.secrets ?? [],
         },
@@ -312,9 +409,7 @@ export class WorkflowCtx implements Ctx {
       toolPolicy: tools.toolPolicy,
       allowTools: tools.allowTools,
       denyTools: tools.denyTools,
-      workspaceIsolation: false,
-      workspaceRetention,
-      target,
+      workspaceId,
       capabilities: caps,
       secrets: spec.secrets ?? [],
     };
@@ -344,7 +439,7 @@ export class WorkflowCtx implements Ctx {
               allowTools: tools.allowTools,
               denyTools: tools.denyTools,
               capabilities: caps,
-              cwd: target,
+              cwd,
               ...(begun.resumeToken ? { resumeToken: begun.resumeToken } : {}),
               abortSignal: signal,
             },
@@ -409,6 +504,59 @@ export class WorkflowCtx implements Ctx {
     }
   }
 
+  private resolveAgentWorkspaceId(handle: WorkspaceHandle | undefined): string {
+    return (handle ?? this.workspaceScope.getStore())?.id ?? DEFAULT_WORKSPACE_ID;
+  }
+
+  private resolveInProcessWorkspace(workspaceId: string, agentKey: string): string {
+    if (workspaceId === DEFAULT_WORKSPACE_ID) {
+      const target = requireRunTarget(this.runTarget, `agent "${agentKey}" run target`);
+      const path = resolveUsableDirectory(target);
+      const existing = this.store.getAgentWorkspace(this.runId, DEFAULT_WORKSPACE_ID);
+      if (!existing) {
+        const now = Date.now();
+        this.store.insertAgentWorkspace({
+          runId: this.runId,
+          workspaceId: DEFAULT_WORKSPACE_ID,
+          mode: "direct",
+          ownerKind: "workflow",
+          key: DEFAULT_WORKSPACE_ID,
+          lastAttempt: null,
+          retentionPolicy: null,
+          workspacePath: path,
+          sourcePath: path,
+          suppliedPath: target,
+          sourceRef: null,
+          baseCommit: null,
+          owned: false,
+          status: "idle",
+          failureSeen: false,
+          lastTurnKey: null,
+          lastTurnAttempt: null,
+          activeHolderKind: null,
+          activeHolderKey: null,
+          activeHolderAttempt: null,
+          activeStartedAtMs: null,
+          lastDiffEventSeq: null,
+          lastErrorEventSeq: null,
+          cleanupErrorJson: null,
+          createdAtMs: now,
+          updatedAtMs: now,
+          mergedAtMs: null,
+          discardedAtMs: null,
+          removedAtMs: null,
+        });
+      }
+      return path;
+    }
+    const row = this.store.getAgentWorkspace(this.runId, workspaceId);
+    if (!row) throw new Error(`workspace handle "${workspaceId}" was not created in this run`);
+    if (row.mode !== "direct") {
+      throw new Error(`workspace "${workspaceId}" mode ${row.mode} requires the realm kernel`);
+    }
+    return resolveUsableDirectory(row.workspacePath);
+  }
+
   agentSession(_spec: AgentSessionSpec): AgentSession {
     throw new Error("ctx.agentSession requires the realm kernel");
   }
@@ -455,4 +603,84 @@ export class WorkflowCtx implements Ctx {
 /** Detect the cooperative abort signal by name (avoids importing kernel.ts). */
 function isAbort(err: unknown): boolean {
   return err instanceof Error && err.name === "KeelAbort";
+}
+
+function isWorkspaceHandle(value: WorkspaceSpec | WorkspaceHandle): value is WorkspaceHandle {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    "id" in value &&
+    typeof (value as { id?: unknown }).id === "string" &&
+    !("key" in value)
+  );
+}
+
+function normalizeWorkspaceSpec(
+  spec: WorkspaceSpec,
+  runTarget: string | null,
+):
+  | { key: string; mode: "direct"; path: string; suppliedPath: string | null }
+  | {
+      key: string;
+      mode: "worktree";
+      path: string;
+      suppliedPath: string | null;
+      ref: string;
+      retention: WorkspaceRetention;
+    } {
+  const raw = spec as Record<string, unknown>;
+  if (typeof raw.key !== "string" || raw.key.trim().length === 0) {
+    throw new Error("WorkspaceSpec.key is required and must be a non-empty string");
+  }
+  const mode = raw.mode === undefined ? "direct" : raw.mode;
+  if (mode === "copy" || mode === "clone") {
+    throw new Error(`workspace mode ${String(mode)} is reserved for a future Keel release`);
+  }
+  if (mode !== "direct" && mode !== "worktree") {
+    throw new Error(`workspace mode must be direct or worktree, got ${String(mode)}`);
+  }
+  const suppliedPath = raw.path === undefined ? null : String(raw.path);
+  const defaultPath = requireRunTarget(runTarget, `workspace "${raw.key}" run target`);
+  if (mode === "direct") {
+    if (raw.retention !== undefined) {
+      throw new Error(
+        "direct workspaces do not accept retention because Keel does not own the directory",
+      );
+    }
+    if (raw.ref !== undefined) {
+      throw new Error("direct workspaces do not accept ref");
+    }
+    return {
+      key: raw.key,
+      mode: "direct",
+      path: resolveUsableDirectory(suppliedPath ?? defaultPath),
+      suppliedPath,
+    };
+  }
+  return {
+    key: raw.key,
+    mode: "worktree",
+    path: suppliedPath ?? defaultPath,
+    suppliedPath,
+    ref: typeof raw.ref === "string" && raw.ref.length > 0 ? raw.ref : "HEAD",
+    retention:
+      raw.retention === undefined ? "remove" : validateWorkspaceRetentionForCtx(raw.retention),
+  };
+}
+
+function validateWorkspaceRetentionForCtx(value: unknown): WorkspaceRetention {
+  if (value === "remove" || value === "retain-on-failure" || value === "retain") return value;
+  throw new Error("workspace retention must be one of remove, retain-on-failure, retain");
+}
+
+function rejectRemovedWorkspaceFields(spec: unknown, context: string): void {
+  if (!spec || typeof spec !== "object") return;
+  const record = spec as Record<string, unknown>;
+  for (const field of ["workspaceIsolation", "workspaceRetention", "target"]) {
+    if (record[field] !== undefined) {
+      throw new Error(
+        `${context} no longer accepts ${field}; use ctx.workspace or ctx.withWorkspace`,
+      );
+    }
+  }
 }

@@ -79,9 +79,9 @@ Filter tolerated failures out with `.filter(Boolean)`. Do not use `onFailure:
 retried.
 
 `toolPolicy` is only `"none"`, `"read-only"`, `"workspace-write"`, or
-`"unrestricted"`. Agents run in the run target by default; use an absolute
-per-agent/profile `target` only when a workflow intentionally operates in a
-different directory. To let an agent run shell commands, use explicit capabilities:
+`"unrestricted"`. Agents run in a resolved workspace: explicit handle, scoped
+`ctx.withWorkspace`, or the run default direct workspace at `ctx.run.target`. To
+let an agent run shell commands, use explicit capabilities:
 
 ```ts
 capabilities: { fs: "none", network: "none", shell: true, secrets: [] }
@@ -115,18 +115,32 @@ Use separate participant keys for independent conversations.
 Session runs can resume and retry, but not rerun, rewind, or fork. If a session
 turn is interrupted after a backend token is observed, explicit resume continues
 from that token rather than starting a fresh session. Changing a participant's
-resolved provider/model/tool/capability/target identity or changing a completed/pending
+resolved provider/model/tool/capability/workspace identity or changing a completed/pending
 turn's prompt/schema/options for the same turn key fails closed.
 
-Use `workspaceIsolation: true` when write-capable one-shot agents or session
-participants should stage filesystem changes in a reviewable git worktree. Set
-`workspaceRetention` intentionally: `"never"` removes clean terminal workspaces
-(default), `"on-failure"` keeps failed/abnormal workspaces for diagnosis, and
-`"always"` keeps every terminal workspace for explicit `keel workspace diff|merge|discard`.
-Session workspaces are still reused across turns/retries while the run can
-continue, even with `"never"`. The target must be the git repository root.
-Workspace isolation is not a secret or network security boundary, and Keel never
-auto-merges retained workspaces.
+Use `ctx.workspace({ key, mode: "worktree" })` when write-capable one-shot agents
+or session participants should stage filesystem changes in a reviewable git
+worktree. Pass the returned handle explicitly or bind it with `ctx.withWorkspace`:
+
+```ts
+const workspace = await ctx.workspace({
+  key: "implementation",
+  mode: "worktree",
+  retention: "retain-on-failure",
+});
+await ctx.agent({ key: "impl", workspace, toolPolicy: "workspace-write", prompt });
+```
+
+Retention is `"remove"` (default), `"retain-on-failure"`, or `"retain"` and
+applies only to Keel-owned worktrees. Direct workspaces, including the default
+`__default` workspace at `ctx.run.target`, are never removed by Keel and are not
+review diff staging areas. Workspace mode is not a secret or network security
+boundary, and Keel never auto-merges retained workspaces.
+
+For `ctx.agentSession` worktree participants, use `"retain-on-failure"` or
+`"retain"` if a terminal failed run should be retryable. Once terminal cleanup
+removes a session worktree, Keel fails closed rather than resuming the existing
+backend conversation in a fresh empty worktree.
 
 ## 5. Schemas
 

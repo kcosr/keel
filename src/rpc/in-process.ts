@@ -157,6 +157,9 @@ export class InProcessKeel implements KeelApi {
 
   getRunWorkspaceDiff(runId: string, workspaceId: string): RunWorkspaceDiff {
     const row = this.requireWorkspace(runId, workspaceId);
+    if (!row.owned || row.mode === "direct") {
+      throw new Error(`workspace ${runId}/${workspaceId} is direct and does not support diff`);
+    }
     if (!existsSync(row.workspacePath)) {
       throw new Error(`workspace ${runId}/${workspaceId} is missing at ${row.workspacePath}`);
     }
@@ -186,12 +189,14 @@ export class InProcessKeel implements KeelApi {
         run.heartbeatAtMs !== null &&
         run.heartbeatAtMs >= staleBeforeMs;
       if (
+        row.owned &&
         row.status === "creating" &&
         !hasLiveOwner &&
-        (row.kind !== "agent_session" || !this.store.hasPendingAgentSessionTurn(row.runId, row.key))
+        (row.ownerKind !== "agent_session" ||
+          !this.store.hasPendingAgentSessionTurn(row.runId, row.key))
       ) {
-        if (existsSync(row.workspacePath)) {
-          removeRetainedWorkspace(row.target, row.workspacePath, row.baseCommit);
+        if (existsSync(row.workspacePath) && row.baseCommit) {
+          removeRetainedWorkspace(row.sourcePath, row.workspacePath, row.baseCommit);
         }
         this.store.deleteAgentWorkspace(row.runId, row.workspaceId);
         deleted.push(workspaceView(row));
@@ -206,7 +211,7 @@ export class InProcessKeel implements KeelApi {
     if (!existsSync(row.workspacePath)) {
       throw new Error(`workspace ${runId}/${workspaceId} is missing at ${row.workspacePath}`);
     }
-    mergeWorkspaceIntoTarget(row.workspacePath, row.target);
+    mergeWorkspaceIntoTarget(row.workspacePath, row.sourcePath);
     const at = Date.now();
     this.store.transaction(() => {
       this.store.updateAgentWorkspace(runId, workspaceId, {
@@ -219,10 +224,11 @@ export class InProcessKeel implements KeelApi {
         "workspace.merged",
         {
           workspaceId,
-          kind: row.kind,
+          mode: row.mode,
+          ownerKind: row.ownerKind,
           key: row.key,
           workspacePath: row.workspacePath,
-          target: row.target,
+          sourcePath: row.sourcePath,
           baseCommit: row.baseCommit,
         },
         at,
@@ -234,7 +240,8 @@ export class InProcessKeel implements KeelApi {
   discardRunWorkspace(runId: string, workspaceId: string): RunWorkspaceView {
     const row = this.requireWorkspace(runId, workspaceId);
     this.assertWorkspaceOperatorAllowed(row, "discard");
-    removeRetainedWorkspace(row.target, row.workspacePath, row.baseCommit);
+    if (!row.baseCommit) throw new Error(`workspace ${runId}/${workspaceId} has no base commit`);
+    removeRetainedWorkspace(row.sourcePath, row.workspacePath, row.baseCommit);
     const at = Date.now();
     this.store.transaction(() => {
       this.store.updateAgentWorkspace(runId, workspaceId, {
@@ -247,10 +254,11 @@ export class InProcessKeel implements KeelApi {
         "workspace.discarded",
         {
           workspaceId,
-          kind: row.kind,
+          mode: row.mode,
+          ownerKind: row.ownerKind,
           key: row.key,
           workspacePath: row.workspacePath,
-          target: row.target,
+          sourcePath: row.sourcePath,
         },
         at,
       );
@@ -282,8 +290,8 @@ export class InProcessKeel implements KeelApi {
     const removed: AgentWorkspaceRow[] = [];
     for (const row of rows) {
       const existed = existsSync(row.workspacePath);
-      if (existed) {
-        removeRetainedWorkspace(row.target, row.workspacePath, row.baseCommit);
+      if (existed && row.baseCommit) {
+        removeRetainedWorkspace(row.sourcePath, row.workspacePath, row.baseCommit);
         removed.push(row);
       }
       this.store.deleteAgentWorkspace(row.runId, row.workspaceId);
@@ -388,8 +396,16 @@ export class InProcessKeel implements KeelApi {
         `cannot ${operation} workspace ${row.runId}/${row.workspaceId} while run is ${run.status}`,
       );
     }
+    if (!row.owned || row.mode === "direct") {
+      throw new Error(`cannot ${operation} direct workspace ${row.runId}/${row.workspaceId}`);
+    }
+    if (row.activeHolderKind) {
+      throw new Error(
+        `cannot ${operation} workspace ${row.runId}/${row.workspaceId} while it is active`,
+      );
+    }
     const session =
-      row.kind === "agent_session" ? this.store.getAgentSession(row.runId, row.key) : null;
+      row.ownerKind === "agent_session" ? this.store.getAgentSession(row.runId, row.key) : null;
     if (session?.activeTurnKey) {
       throw new Error(
         `cannot ${operation} workspace ${row.runId}/${row.workspaceId} while a turn is active`,
@@ -415,17 +431,25 @@ function workspaceView(row: AgentWorkspaceRow): RunWorkspaceView {
   return {
     runId: row.runId,
     workspaceId: row.workspaceId,
-    kind: row.kind,
+    mode: row.mode,
+    ownerKind: row.ownerKind,
     key: row.key,
     lastAttempt: row.lastAttempt,
     retentionPolicy: row.retentionPolicy,
     workspacePath: row.workspacePath,
-    target: row.target,
+    sourcePath: row.sourcePath,
+    suppliedPath: row.suppliedPath,
+    sourceRef: row.sourceRef,
     baseCommit: row.baseCommit,
+    owned: row.owned,
     status: row.status,
     failureSeen: row.failureSeen,
     lastTurnKey: row.lastTurnKey,
     lastTurnAttempt: row.lastTurnAttempt,
+    activeHolderKind: row.activeHolderKind,
+    activeHolderKey: row.activeHolderKey,
+    activeHolderAttempt: row.activeHolderAttempt,
+    activeStartedAtMs: row.activeStartedAtMs,
     lastDiffEventSeq: row.lastDiffEventSeq,
     lastErrorEventSeq: row.lastErrorEventSeq,
     cleanupError: row.cleanupErrorJson ? JSON.parse(row.cleanupErrorJson) : null,

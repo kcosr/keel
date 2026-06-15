@@ -291,7 +291,7 @@ export function isWorkflowDefinitionHash(value: string): boolean {
   return value.startsWith(DEFINITION_PREFIX);
 }
 
-function createWorkflowDefinitionSnapshot(
+export function createWorkflowDefinitionSnapshot(
   source: WorkflowSourceInput,
   opts: SnapshotWorkflowOptions,
 ): WorkflowDefinitionSnapshot {

@@ -21,6 +21,7 @@ export type CapabilityAction =
   | "run:fork"
   | "run:signal"
   | "run:cancel"
+  | "workflow:read"
   | "workflow:run"
   | "workflow:save"
   | "task:run"
@@ -158,7 +159,7 @@ function sameResource(a: CapabilityResource, b: CapabilityResource): boolean {
       return (
         b.kind === "workflow" &&
         a.name === b.name &&
-        (a.version === undefined || b.version === undefined || a.version === b.version)
+        (a.version === undefined || (b.version !== undefined && a.version === b.version))
       );
   }
 }

@@ -233,6 +233,92 @@ describe("settings RPC", () => {
   });
 });
 
+describe("saved workflow RPC", () => {
+  test("saves source, displays captured source, launches by saved ref, and schedules by hash", async () => {
+    const store = JournalStore.memory();
+    const api = keel(store);
+    const saved = api.saveWorkflow({
+      name: "review-loop",
+      source: chainUrl.source,
+      defaultInput: { n: 2 },
+      defaultTarget: process.cwd(),
+    });
+    expect(saved.version).toBe(1);
+    const source = api.getSavedWorkflowSource({ name: "review-loop", all: true });
+    expect(
+      source.files.some((file) => file.code.includes("export default async function chain")),
+    ).toBe(true);
+    const launched = await api.launchSavedWorkflow({ ref: { name: "review-loop" } });
+    const out = await api.waitForRun(launched.runId);
+    expect(out.output).toBe(2);
+    api.putSchedule({
+      name: "hourly",
+      savedRef: { name: "review-loop" },
+      intervalMs: 60_000,
+    });
+    expect(() =>
+      api.putSchedule({
+        name: "bad",
+        savedRef: { name: "review-loop" },
+        workflowName: "ignored",
+        intervalMs: 60_000,
+      } as never),
+    ).toThrow(/workflowName/);
+    const row = store.db
+      .query<{ workflow_ref: string }, [string]>(
+        "SELECT workflow_ref FROM schedules WHERE name = ?",
+      )
+      .get("hourly");
+    expect(row?.workflow_ref).toBe(saved.definitionHash);
+
+    api.saveWorkflow({
+      name: "null-default",
+      source:
+        'import { passthrough } from "@kcosr/keel";\nexport default async (_ctx: unknown, input: unknown) => passthrough<unknown>().parse(input);\n',
+      defaultInput: null,
+      defaultTarget: process.cwd(),
+    });
+    const nullRun = await api.launchSavedWorkflow({ ref: { name: "null-default" } });
+    expect((await api.waitForRun(nullRun.runId)).output).toBeNull();
+
+    api.deprecateSavedWorkflowVersion({ name: "review-loop", version: 1, message: "audit" });
+    api.setSavedWorkflowVersionEnabled("review-loop", 1, false);
+    expect(
+      api.getSavedWorkflowSource({ name: "review-loop", version: 1 }).files[0]?.code,
+    ).toContain("export default async function chain");
+
+    store.putWorkflowDefinition({
+      hash: "wf_sha256_emptymodules",
+      name: "legacy",
+      kind: "source",
+      code: "export default async () => 7;\n",
+      sourceMap: null,
+      manifestJson: JSON.stringify({
+        format: "keel.workflow-definition.v1",
+        entry: "entry.ts",
+        modules: [],
+        externalImports: [],
+        externalPackages: [],
+        sourceRoot: "client-captured://source",
+        runtime: {
+          bunVersion: Bun.version,
+          keelDefinitionAbi: 1,
+          workflowSdkAbi: 7,
+        },
+      }),
+      createdAtMs: 1,
+    });
+    store.putSavedWorkflowVersion({
+      name: "legacy-source",
+      definitionHash: "wf_sha256_emptymodules",
+      createdAtMs: 1,
+    });
+    expect(api.getSavedWorkflowSource({ name: "legacy-source" }).files).toEqual([
+      { path: "entry.ts", code: "export default async () => 7;\n", entry: true },
+    ]);
+  });
+});
+
 describe("settings snapshots", () => {
   test("ctx.agent retry uses the original run settings snapshot", async () => {
     const store = JournalStore.memory();

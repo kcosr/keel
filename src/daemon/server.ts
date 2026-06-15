@@ -21,7 +21,12 @@ import { JournalStore } from "../journal/store.ts";
 import { RealmKernel } from "../kernel/realm/realm-host.ts";
 import { failRunWithError } from "../kernel/run-errors.ts";
 import { Supervisor } from "../kernel/supervisor.ts";
-import type { EventEnvelope, WorkflowProvenance } from "../rpc/contract.ts";
+import type {
+  EventEnvelope,
+  SaveWorkflowRequest,
+  SavedWorkflowRef,
+  WorkflowProvenance,
+} from "../rpc/contract.ts";
 import { EventHub } from "../rpc/event-hub.ts";
 import { InProcessKeel } from "../rpc/in-process.ts";
 import { effectiveOperationalSettings } from "../settings/catalog.ts";
@@ -30,6 +35,7 @@ import {
   evictWorkflowDefinitionCache,
   isUnsupportedWorkflowSdkAbiError,
   keelPackageRoot,
+  materializeWorkflowDefinition,
   snapshotWorkflowSource,
 } from "../workflow-definitions/snapshot.ts";
 import type { WorkflowSourceInput } from "../workflow-definitions/source.ts";
@@ -292,6 +298,75 @@ export class KeelDaemon {
         const cap = issueRunCapability(this.store, res.runId, this.clock());
         return { ...res, capability: cap.token, capabilityId: cap.capabilityId };
       }
+      case "saveWorkflow": {
+        const name = p.name as string;
+        this.authorizeWorkflow(conn, name, p.version as number | undefined, "workflow:save");
+        return this.api.saveWorkflow(p as unknown as SaveWorkflowRequest);
+      }
+      case "listSavedWorkflows":
+        this.authorizeAdmin(conn);
+        return this.api.listSavedWorkflows({
+          ...(p.includeDisabled === true ? { includeDisabled: true } : {}),
+          ...(p.includeDeprecated === true ? { includeDeprecated: true } : {}),
+          ...(p.includeDeleted === true ? { includeDeleted: true } : {}),
+        });
+      case "getSavedWorkflow": {
+        this.authorizeWorkflow(conn, p.name as string, undefined, "workflow:read");
+        return this.api.getSavedWorkflow(p.name as string);
+      }
+      case "getSavedWorkflowSource": {
+        this.authorizeWorkflow(
+          conn,
+          p.name as string,
+          typeof p.version === "number" ? (p.version as number) : undefined,
+          "workflow:read",
+        );
+        return this.api.getSavedWorkflowSource(p as never);
+      }
+      case "launchSavedWorkflow": {
+        const ref = (p.ref ?? {}) as SavedWorkflowRef;
+        this.authorizeWorkflow(
+          conn,
+          ref.name,
+          typeof ref.version === "number" ? ref.version : undefined,
+          "workflow:run",
+        );
+        const saved = this.store.resolveSavedWorkflowRef(ref);
+        this.authorizeWorkflow(conn, ref.name, saved.version, "workflow:run");
+        const target =
+          (p.target as string | undefined) ??
+          saved.defaultTarget ??
+          (p.clientDefaultTarget as string | undefined);
+        const res = await this.api.launchSavedWorkflow({
+          ref,
+          input: p.input,
+          target,
+          name: (p.name as string | null | undefined) ?? null,
+        });
+        this.store.claimRun(res.runId, this.ownerId, this.clock(), this.clock());
+        this.owned.add(res.runId);
+        const cap = issueRunCapability(this.store, res.runId, this.clock());
+        return { ...res, capability: cap.token, capabilityId: cap.capabilityId };
+      }
+      case "setSavedWorkflowDisabled":
+        this.authorizeWorkflow(conn, p.name as string, undefined, "workflow:save");
+        return this.api.setSavedWorkflowDisabled(p.name as string, p.disabled === true);
+      case "setSavedWorkflowVersionEnabled":
+        this.authorizeWorkflow(conn, p.name as string, p.version as number, "workflow:save");
+        return this.api.setSavedWorkflowVersionEnabled(
+          p.name as string,
+          p.version as number,
+          p.enabled === true,
+        );
+      case "deprecateSavedWorkflowVersion":
+        this.authorizeWorkflow(conn, p.name as string, p.version as number, "workflow:save");
+        return this.api.deprecateSavedWorkflowVersion(p as never);
+      case "deleteSavedWorkflow":
+        this.authorizeAdmin(conn);
+        return this.api.deleteSavedWorkflow(p.name as string);
+      case "deleteSavedWorkflowVersion":
+        this.authorizeAdmin(conn);
+        return this.api.deleteSavedWorkflowVersion(p.name as string, p.version as number);
       case "resumeRun": {
         this.authorizeRun(conn, p.runId as string, "run:resume");
         this.claimOrReject(p.runId as string);
@@ -428,16 +503,45 @@ export class KeelDaemon {
       }
       case "putSchedule": {
         this.authorizeAdmin(conn);
-        const snapshot = snapshotWorkflowSource(this.store, p.source as WorkflowSourceInput, {
-          name: (p.workflowName as string | null | undefined) ?? (p.name as string),
-          nowMs: this.clock(),
-          cacheRoot:
+        const hasSource = p.source !== undefined;
+        const hasSavedRef = p.savedRef !== undefined;
+        if (hasSource === hasSavedRef) {
+          throw new Error("putSchedule requires exactly one of source or savedRef");
+        }
+        let workflowRef: string;
+        const scheduleName = (p.workflowName as string | null | undefined) ?? (p.name as string);
+        let defaultTarget: string | null = null;
+        if (hasSavedRef) {
+          if (p.workflowName !== undefined) {
+            throw new Error("putSchedule workflowName is only valid with source");
+          }
+          const saved = this.store.resolveSavedWorkflowRef(p.savedRef as SavedWorkflowRef);
+          materializeWorkflowDefinition(
+            this.store,
+            saved.definitionHash,
             this.opts.definitionCacheRoot ?? join(dirname(this.opts.dbPath), "definitions"),
-        }).snapshot;
-        const target = requireRunTarget(p.target, "putSchedule");
+          );
+          workflowRef = saved.definitionHash;
+          // v1 schedules persist only the pinned definition hash, not a separate saved label.
+          defaultTarget = saved.defaultTarget;
+        } else {
+          const snapshot = snapshotWorkflowSource(this.store, p.source as WorkflowSourceInput, {
+            name: scheduleName,
+            nowMs: this.clock(),
+            cacheRoot:
+              this.opts.definitionCacheRoot ?? join(dirname(this.opts.dbPath), "definitions"),
+          }).snapshot;
+          workflowRef = snapshot.hash;
+        }
+        const target = requireRunTarget(
+          (p.target as string | undefined) ??
+            defaultTarget ??
+            (p.clientDefaultTarget as string | undefined),
+          "putSchedule",
+        );
         this.store.putSchedule({
           name: p.name as string,
-          workflowRef: snapshot.hash,
+          workflowRef,
           inputJson: p.input != null ? JSON.stringify(p.input) : null,
           scheduleTarget: target,
           intervalMs: p.intervalMs as number,
@@ -554,6 +658,24 @@ export class KeelDaemon {
       this.store,
       conn.credential,
       { action: "admin", resource: { kind: "daemon" } },
+      this.clock(),
+    );
+  }
+
+  private authorizeWorkflow(
+    conn: Conn,
+    name: string,
+    version: number | undefined,
+    action: CapabilityAction,
+  ): void {
+    authorize(
+      this.store,
+      conn.credential,
+      {
+        action,
+        resource:
+          version === undefined ? { kind: "workflow", name } : { kind: "workflow", name, version },
+      },
       this.clock(),
     );
   }

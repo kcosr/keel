@@ -242,6 +242,35 @@ export interface WorkflowDefinitionRow {
 
 export type NewWorkflowDefinitionRow = WorkflowDefinitionRow;
 
+export interface SavedWorkflowRow {
+  name: string;
+  title: string | null;
+  description: string | null;
+  tagsJson: string | null;
+  createdAtMs: number;
+  updatedAtMs: number;
+  disabledAtMs: number | null;
+  deletedAtMs: number | null;
+}
+
+export interface SavedWorkflowVersionRow {
+  name: string;
+  version: number;
+  definitionHash: string;
+  workflowName: string | null;
+  inputSchemaJson: string | null;
+  defaultInputJson: string | null;
+  defaultTarget: string | null;
+  metadataJson: string | null;
+  sourceProvenanceJson: string | null;
+  createdBy: string | null;
+  createdAtMs: number;
+  enabled: boolean;
+  deprecatedAtMs: number | null;
+  deprecationMessage: string | null;
+  deletedAtMs: number | null;
+}
+
 export interface CapabilityRow {
   id: string;
   secretHash: string;

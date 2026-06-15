@@ -10,16 +10,23 @@ Launch:
 ```bash
 keel launch --detach workflows/iterative-review/iterative-review.workflow.ts \
   --name iterative-review \
+  --target /home/kevin/worktrees/keel \
   --emit-capability \
   --input '{
-    "repository": "/home/kevin/worktrees/keel",
     "task": "Review the durable agent sessions implementation",
     "spec": "/home/kevin/worktrees/keel/.specs/durable-agent-sessions.md",
     "reasoning": "high",
     "maxRounds": 10,
     "stopWhenClean": false
-  }'
+}'
 ```
+
+The workflow resolves its review workspace from `input.repository` when provided,
+otherwise from `ctx.run.target` (`--target`, or the CLI cwd if `--target` is
+omitted). It binds that path with `ctx.withWorkspace({ mode: "direct" })`, so
+the reviewer cwd matches the repository named in prompts. To review a
+manually-created git worktree, pass that worktree path as `--target`;
+`repository` may be omitted unless you need to override it intentionally.
 
 For manual code review cycles, prefer `stopWhenClean: false` with a higher
 `maxRounds` such as `10`. That keeps the durable reviewer session parked after a
@@ -49,7 +56,7 @@ KEEL_RUN_CAP=kc_run_... keel signal <run-id> review-cycle '{
 
 | Field | Required | Meaning |
 |---|---:|---|
-| `repository` | yes | Absolute path to the repository or workspace to review. |
+| `repository` | no | Absolute path to the repository or workspace to review. Defaults to the run target. |
 | `task` | yes | The concrete implementation, design, or change to review. |
 | `spec` | no | Optional absolute path to a spec, design note, or acceptance criteria. |
 | `focus` | no | Optional review focus such as security, replay semantics, or docs. |

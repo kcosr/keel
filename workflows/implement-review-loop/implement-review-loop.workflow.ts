@@ -23,7 +23,7 @@ type Review = {
 };
 
 type ImplementReviewInput = {
-  repository: string;
+  repository?: string;
   spec: string;
   task?: string;
   maxRounds?: number;
@@ -45,6 +45,10 @@ type CompletionSignal = {
   action: "complete" | "continue";
   instructions?: string;
   reviewFocus?: string;
+};
+
+type ResolvedImplementReviewInput = ImplementReviewInput & {
+  repository: string;
 };
 
 const FindingSchema = {
@@ -101,80 +105,94 @@ export default async function implementReviewLoop(
   remainingFindings: Finding[];
   blockedImplementation?: ImplementationResult;
 }> {
+  const repository = resolveRepository(input.repository, ctx.run.target);
+  const resolvedInput: ResolvedImplementReviewInput = { ...input, repository };
   const maxRounds = clampRounds(input.maxRounds ?? DEFAULT_MAX_ROUNDS);
   const completionSignalName = input.completionSignalName ?? "implementation-completion";
-  const implementer = ctx.agentSession({
-    key: "implementer",
-    profile: IMPLEMENTER_PROFILE,
-    ...(input.implementerReasoning ? { reasoning: input.implementerReasoning } : {}),
-  });
-  const reviewer = ctx.agentSession({
-    key: "reviewer",
-    profile: REVIEWER_PROFILE,
-    ...(input.reviewerReasoning ? { reasoning: input.reviewerReasoning } : {}),
-    toolPolicy: "read-only",
-  });
 
-  const rounds: Round[] = [];
-  let findings: Finding[] = [];
-  let followUp: CompletionSignal | undefined;
+  return await ctx.withWorkspace(
+    { key: "repository", mode: "direct", path: repository },
+    async () => {
+      const implementer = ctx.agentSession({
+        key: "implementer",
+        profile: IMPLEMENTER_PROFILE,
+        ...(input.implementerReasoning ? { reasoning: input.implementerReasoning } : {}),
+      });
+      const reviewer = ctx.agentSession({
+        key: "reviewer",
+        profile: REVIEWER_PROFILE,
+        ...(input.reviewerReasoning ? { reasoning: input.reviewerReasoning } : {}),
+        toolPolicy: "read-only",
+      });
 
-  for (let round = 1; round <= maxRounds; round++) {
-    ctx.phase(`Implement ${round}`);
-    const followUpForRound = followUp;
-    const implementation = await implementer.turn({
-      key: round === 1 ? "implement-1" : `fix-${round}`,
-      prompt:
-        round === 1
-          ? initialImplementationPrompt(input)
-          : followUpForRound
-            ? followUpImplementationPrompt(input, round, followUpForRound)
-            : fixImplementationPrompt(input, round, findings),
-      schema: ImplementationSchema,
-      lenient: true,
-    });
-    followUp = undefined;
+      const rounds: Round[] = [];
+      let findings: Finding[] = [];
+      let followUp: CompletionSignal | undefined;
 
-    ctx.log(`implementation.${round}`, implementation);
-    if (implementation.status === "blocked") {
-      return {
-        status: "blocked",
-        rounds,
-        remainingFindings: findings,
-        blockedImplementation: implementation,
-      };
-    }
+      for (let round = 1; round <= maxRounds; round++) {
+        ctx.phase(`Implement ${round}`);
+        const followUpForRound = followUp;
+        const implementation = await implementer.turn({
+          key: round === 1 ? "implement-1" : `fix-${round}`,
+          prompt:
+            round === 1
+              ? initialImplementationPrompt(resolvedInput)
+              : followUpForRound
+                ? followUpImplementationPrompt(resolvedInput, round, followUpForRound)
+                : fixImplementationPrompt(resolvedInput, round, findings),
+          schema: ImplementationSchema,
+          lenient: true,
+        });
+        followUp = undefined;
 
-    ctx.phase(`Review ${round}`);
-    const review = await reviewer.turn({
-      key: `review-${round}`,
-      prompt: reviewPrompt(input, round, implementation, findings, followUpForRound?.reviewFocus),
-      schema: ReviewSchema,
-      lenient: true,
-    });
+        ctx.log(`implementation.${round}`, implementation);
+        if (implementation.status === "blocked") {
+          return {
+            status: "blocked",
+            rounds,
+            remainingFindings: findings,
+            blockedImplementation: implementation,
+          };
+        }
 
-    ctx.log(`review.${round}`, review);
-    rounds.push({ round, implementation, review });
-    findings = review.findings;
-    if (findings.length === 0) {
-      if (input.completionMode === "park-before-complete") {
-        ctx.phase("Awaiting implementation completion");
-        const completion = await ctx.signal<CompletionSignal>(completionSignalName);
-        if (completion.action === "continue") {
-          followUp = completion;
-          findings = [];
-          continue;
+        ctx.phase(`Review ${round}`);
+        const review = await reviewer.turn({
+          key: `review-${round}`,
+          prompt: reviewPrompt(
+            resolvedInput,
+            round,
+            implementation,
+            findings,
+            followUpForRound?.reviewFocus,
+          ),
+          schema: ReviewSchema,
+          lenient: true,
+        });
+
+        ctx.log(`review.${round}`, review);
+        rounds.push({ round, implementation, review });
+        findings = review.findings;
+        if (findings.length === 0) {
+          if (input.completionMode === "park-before-complete") {
+            ctx.phase("Awaiting implementation completion");
+            const completion = await ctx.signal<CompletionSignal>(completionSignalName);
+            if (completion.action === "continue") {
+              followUp = completion;
+              findings = [];
+              continue;
+            }
+          }
+          return { status: "clean", rounds, remainingFindings: [] };
         }
       }
-      return { status: "clean", rounds, remainingFindings: [] };
-    }
-  }
 
-  return { status: "max-rounds-reached", rounds, remainingFindings: findings };
+      return { status: "max-rounds-reached", rounds, remainingFindings: findings };
+    },
+  );
 }
 
 function followUpImplementationPrompt(
-  input: ImplementReviewInput,
+  input: ResolvedImplementReviewInput,
   round: number,
   followUp: CompletionSignal,
 ): string {
@@ -192,7 +210,7 @@ concise implementation summary, changed files, verification performed, and any
 notes.`;
 }
 
-function initialImplementationPrompt(input: ImplementReviewInput): string {
+function initialImplementationPrompt(input: ResolvedImplementReviewInput): string {
   return `Implement the requested change.
 
 Repository: ${input.repository}
@@ -204,7 +222,7 @@ changed files, verification performed, and any notes.`;
 }
 
 function fixImplementationPrompt(
-  input: ImplementReviewInput,
+  input: ResolvedImplementReviewInput,
   round: number,
   findings: Finding[],
 ): string {
@@ -223,7 +241,7 @@ performed, and any notes.`;
 }
 
 function reviewPrompt(
-  input: ImplementReviewInput,
+  input: ResolvedImplementReviewInput,
   round: number,
   implementation: ImplementationResult,
   priorFindings: Finding[],
@@ -251,4 +269,8 @@ function clampRounds(value: number): number {
   if (whole < 1) return 1;
   if (whole > HARD_MAX_ROUNDS) return HARD_MAX_ROUNDS;
   return whole;
+}
+
+function resolveRepository(repository: string | undefined, runTarget: string): string {
+  return repository && repository.trim().length > 0 ? repository : runTarget;
 }

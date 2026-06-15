@@ -15,7 +15,7 @@ type Review = {
 };
 
 type IterativeReviewInput = {
-  repository: string;
+  repository?: string;
   task: string;
   spec?: string;
   focus?: string;
@@ -35,6 +35,10 @@ type ReviewRound = {
   round: number;
   signal: ReviewCycleSignal;
   review: Review;
+};
+
+type ResolvedIterativeReviewInput = IterativeReviewInput & {
+  repository: string;
 };
 
 const FindingSchema = {
@@ -76,57 +80,64 @@ export default async function iterativeReview(
   initial: Review;
   rounds: ReviewRound[];
 }> {
+  const repository = resolveRepository(input.repository, ctx.run.target);
+  const resolvedInput: ResolvedIterativeReviewInput = { ...input, repository };
   const maxRounds = clampRounds(input.maxRounds ?? DEFAULT_MAX_ROUNDS);
   const signalName = input.signalName ?? "review-cycle";
   const stopWhenClean = input.stopWhenClean ?? true;
 
-  const reviewer = ctx.agentSession({
-    key: "reviewer",
-    profile: REVIEWER_PROFILE,
-    ...(input.reasoning ? { reasoning: input.reasoning } : {}),
-    toolPolicy: "read-only",
-  });
+  return await ctx.withWorkspace(
+    { key: "repository", mode: "direct", path: repository },
+    async () => {
+      const reviewer = ctx.agentSession({
+        key: "reviewer",
+        profile: REVIEWER_PROFILE,
+        ...(input.reasoning ? { reasoning: input.reasoning } : {}),
+        toolPolicy: "read-only",
+      });
 
-  ctx.phase("Initial review");
-  const initial = await reviewer.turn({
-    key: "initial",
-    prompt: initialPrompt(input),
-    schema: ReviewSchema,
-    lenient: true,
-  });
-  ctx.log("review.initial", initial);
+      ctx.phase("Initial review");
+      const initial = await reviewer.turn({
+        key: "initial",
+        prompt: initialPrompt(resolvedInput),
+        schema: ReviewSchema,
+        lenient: true,
+      });
+      ctx.log("review.initial", initial);
 
-  if (stopWhenClean && initial.findings.length === 0) {
-    return { status: "clean", initial, rounds: [] };
-  }
+      if (stopWhenClean && initial.findings.length === 0) {
+        return { status: "clean", initial, rounds: [] };
+      }
 
-  const rounds: ReviewRound[] = [];
-  for (let round = 1; round <= maxRounds; round++) {
-    ctx.phase(`Awaiting review cycle ${round}`);
-    const signal = await ctx.signal<ReviewCycleSignal>(signalName);
-    if (signal.done === true) {
-      return { status: "stopped", initial, rounds };
-    }
+      const rounds: ReviewRound[] = [];
+      for (let round = 1; round <= maxRounds; round++) {
+        ctx.phase(`Awaiting review cycle ${round}`);
+        const signal = await ctx.signal<ReviewCycleSignal>(signalName);
+        if (signal.done === true) {
+          return { status: "stopped", initial, rounds };
+        }
 
-    ctx.phase(`Follow-up review ${round}`);
-    const review = await reviewer.turn({
-      key: `followup-${round}`,
-      prompt: followupPrompt(input, round, signal),
-      schema: ReviewSchema,
-      lenient: true,
-    });
-    ctx.log(`review.followup.${round}`, review);
+        ctx.phase(`Follow-up review ${round}`);
+        const review = await reviewer.turn({
+          key: `followup-${round}`,
+          prompt: followupPrompt(resolvedInput, round, signal),
+          schema: ReviewSchema,
+          lenient: true,
+        });
+        ctx.log(`review.followup.${round}`, review);
 
-    rounds.push({ round, signal, review });
-    if (stopWhenClean && review.findings.length === 0) {
-      return { status: "clean", initial, rounds };
-    }
-  }
+        rounds.push({ round, signal, review });
+        if (stopWhenClean && review.findings.length === 0) {
+          return { status: "clean", initial, rounds };
+        }
+      }
 
-  return { status: "max-rounds-reached", initial, rounds };
+      return { status: "max-rounds-reached", initial, rounds };
+    },
+  );
 }
 
-function initialPrompt(input: IterativeReviewInput): string {
+function initialPrompt(input: ResolvedIterativeReviewInput): string {
   return `Review the requested work.
 
 Repository: ${input.repository}
@@ -138,7 +149,7 @@ return an empty findings array.`;
 }
 
 function followupPrompt(
-  input: IterativeReviewInput,
+  input: ResolvedIterativeReviewInput,
   round: number,
   signal: ReviewCycleSignal,
 ): string {
@@ -162,4 +173,8 @@ function clampRounds(value: number): number {
   if (whole < 0) return 0;
   if (whole > HARD_MAX_ROUNDS) return HARD_MAX_ROUNDS;
   return whole;
+}
+
+function resolveRepository(repository: string | undefined, runTarget: string): string {
+  return repository && repository.trim().length > 0 ? repository : runTarget;
 }

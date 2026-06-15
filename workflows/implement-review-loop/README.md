@@ -16,17 +16,25 @@ Launch for autonomous completion:
 ```bash
 keel launch --detach workflows/implement-review-loop/implement-review-loop.workflow.ts \
   --name implement-review \
+  --target /home/kevin/worktrees/keel \
   --emit-capability \
   --input '{
-    "repository": "/home/kevin/worktrees/keel",
     "spec": "/home/kevin/worktrees/keel/.specs/some-feature.md",
     "task": "Implement the feature described by the spec",
     "maxRounds": 3,
     "implementerReasoning": "high",
     "reviewerReasoning": "high",
     "verificationCommand": "bun test src/kernel/realm/agent-session.test.ts"
-  }'
+}'
 ```
+
+The workflow resolves its repository workspace from `input.repository` when
+provided, otherwise from `ctx.run.target` (`--target`, or the CLI cwd if
+`--target` is omitted). It binds that path with
+`ctx.withWorkspace({ mode: "direct" })`, so the prompt's repository and the
+agent/reviewer cwd stay aligned. To run in a manually-created git worktree, pass
+that worktree path as `--target`; `repository` may be omitted unless you need to
+override it intentionally.
 
 For agent/orchestrator use, prefer watching the run after launch instead of
 ending the turn at the detached run id:
@@ -64,8 +72,9 @@ KEEL_RUN_CAP=kc_run_... keel signal <run-id> implementation-completion '{
   is prompted not to modify files.
 - If `verificationCommand` is set, the implementer is asked to run it when
   practical; the `codex-default` profile supplies the tool access.
-- This workflow uses the run default direct workspace, so do not use it when
-  edits must be confined to a disposable worktree.
+- This workflow uses a direct workspace for the resolved repository. It does not
+  create a Keel-owned worktree. Use a manually-created git worktree as `--target`
+  when edits should be isolated from `main`.
 - Keep `maxRounds` small. The workflow caps it at `10`.
 - This workflow does not request Keel secret refs. Do not put raw secret values in
   prompts or input; agent outputs are journaled as-is.
@@ -74,7 +83,7 @@ KEEL_RUN_CAP=kc_run_... keel signal <run-id> implementation-completion '{
 
 | Field | Required | Meaning |
 |---|---:|---|
-| `repository` | yes | Absolute path to the repository to edit and review. |
+| `repository` | no | Absolute path to the repository to edit and review. Defaults to the run target. |
 | `spec` | yes | Absolute path to the implementation spec or design note. |
 | `task` | no | Additional task wording for the implementer and reviewer. |
 | `maxRounds` | no | Maximum implement/review rounds. Defaults to `3`, capped at `10`. |

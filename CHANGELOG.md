@@ -49,6 +49,10 @@
   `run.interrupted` audit events and best-effort active worker/provider abort.
 
 ### Changed
+- Reusable implementation/review workflows now resolve `input.repository` to a
+  direct workspace, defaulting to the run target when omitted, so prompts and
+  agent cwd stay aligned while still supporting manually-created git worktrees
+  passed with `--target`.
 - Codex app-server turns now use Keel's long-running agent timeout for
   `turn/completed` instead of the short setup RPC timeout, and provider-side
   failures interrupt an active remote turn best-effort before closing the

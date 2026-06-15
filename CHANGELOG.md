@@ -60,6 +60,10 @@
   schedule break a tick.
 - Workflow SDK ABI bumped to 3 because workspace retention participates in agent/session identity and terminal workspace lifecycle.
 - Isolated workspaces now default to terminal cleanup (`workspaceRetention: "never"`); retained workspaces require `"on-failure"` or `"always"`, and workspace RPC/CLI show/diff/merge/discard now use `workspaceId` instead of session `agentKey`.
+- Isolated session `agent.diff` and `workspace.diff_error` event payloads now
+  include the durable `workspaceId`, matching one-shot agent workspace events and
+  making retained workspace events directly addressable through workspace
+  RPC/CLI selectors.
 - Durable workspace diff payloads now cap `agent.diff.contentDiff` and changed
   path arrays with retained-workspace truncation/omission metadata, and
   oversized `git status`/`git diff` output crosses explicit buffer limits into
@@ -107,6 +111,9 @@
   rerun with a source override creates a fresh snapshot.
 - Workflow resume across compatible Keel upgrades now uses an explicit workflow
   SDK ABI for `@kcosr/keel` instead of pinning the full package tree.
+- Reusable implement/review and spec-review workflows can now park after a clean
+  review with `completionMode: "park-before-complete"`, allowing an orchestrator
+  to request another round or explicitly signal final completion.
 - Long-lived waits/event streams re-check capability validity and fail when a
   presented capability is revoked or expires; each wait/subscription is bound to
   the credential presented when it was started.
@@ -117,6 +124,8 @@
 ### Fixed
 - `keel watch` and attached lifecycle commands no longer exit on stale
   historical parked/terminal events when replaying a run that later resumed.
+- The live review workload fixture now uses a valid repository target when
+  exercising workspace isolation.
 - Provider session tokens are no longer persisted as `agent.event` payloads.
 - Workflow snapshotting resolves the `@kcosr/keel` SDK package root from the
   repository (env override, source location, then runtime paths) instead of

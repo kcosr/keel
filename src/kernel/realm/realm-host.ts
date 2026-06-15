@@ -10,21 +10,26 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { AgentFailure, executeAgent, runAgentWithStall } from "../../agents/execute.ts";
-import type { AgentProfiles } from "../../agents/profiles.ts";
 import {
-  normalizeProviderConfigMap,
-  normalizeProviderConfigValue,
-} from "../../agents/provider-config.ts";
+  type AgentProfileSnapshotEntry,
+  type AgentProfiles,
+  agentProfileConfigHash,
+  agentProfilesFromSnapshot,
+  assertValidAgentProfileName,
+  compareAgentProfileNames,
+  effectiveProfileCatalogHash,
+  normalizeAgentProfileConfig,
+} from "../../agents/profiles.ts";
+import { normalizeProviderConfigValue } from "../../agents/provider-config.ts";
 import type { SecretStore } from "../../agents/secrets.ts";
 import type {
   AgentProvider,
   AgentProviderRegistry,
-  ProviderConfigMap,
   ProviderConfigValue,
   TraceEvent,
 } from "../../agents/types.ts";
 import { redactCapabilityTokens } from "../../auth/redaction.ts";
-import { type Json, hashJson } from "../../hash.ts";
+import { type Json, canonicalJson, hashJson } from "../../hash.ts";
 import type { JournalStore } from "../../journal/store.ts";
 import type {
   AgentWorkspaceOwnerKind,
@@ -131,6 +136,13 @@ class RunInterruptedError extends Error {
   }
 }
 
+class ProfileSnapshotIntegrityError extends Error {
+  constructor(runId: string) {
+    super(`run ${runId} is missing agent profile snapshot set`);
+    this.name = "ProfileSnapshotIntegrityError";
+  }
+}
+
 interface WorkspaceSpecMessage {
   key: string;
   mode?: string | null;
@@ -156,25 +168,17 @@ interface InvocationWorkspace {
   owned: boolean;
 }
 
-function normalizeRealmAgentProfiles(profiles: Record<string, unknown>): AgentProfiles {
+function normalizeRealmAgentProfiles(
+  profiles: Record<string, unknown>,
+  registry?: AgentProviderRegistry,
+): AgentProfiles {
   const normalized: AgentProfiles = {};
   for (const [name, profile] of Object.entries(profiles)) {
-    if (!profile || typeof profile !== "object") {
-      normalized[name] = profile as AgentProfiles[string];
-      continue;
-    }
-    const raw = profile as Record<string, unknown>;
-    normalized[name] = {
-      ...raw,
-      ...(raw.providerConfig !== undefined
-        ? {
-            providerConfig: normalizeProviderConfigMap(
-              `agent profile "${name}"`,
-              raw.providerConfig as ProviderConfigMap,
-            ),
-          }
-        : {}),
-    } as AgentProfiles[string];
+    assertValidAgentProfileName(name);
+    normalized[name] = normalizeAgentProfileConfig(profile, {
+      path: `agent profile "${name}"`,
+      providerRegistry: registry,
+    });
   }
   return Object.freeze(normalized);
 }
@@ -194,6 +198,10 @@ function assertWorkflowDefinitionHash(hash: string): void {
   if (!isWorkflowDefinitionHash(hash)) {
     throw new Error(`workflow definition ${hash} is not a valid definition hash`);
   }
+}
+
+function canonicalProfileJson(profile: AgentProfileSnapshotEntry["config"]): string {
+  return canonicalJson(profile);
 }
 
 function runFinishedPayload(output: unknown): unknown {
@@ -231,7 +239,8 @@ export class RealmKernel {
     if (opts.agents) this.registry = opts.agents;
     if (opts.secrets) this.secrets = opts.secrets;
     if (opts.workspaceStore) this.workspaceStore = opts.workspaceStore;
-    if (opts.agentProfiles) this.agentProfiles = normalizeRealmAgentProfiles(opts.agentProfiles);
+    if (opts.agentProfiles)
+      this.agentProfiles = normalizeRealmAgentProfiles(opts.agentProfiles, opts.agents);
   }
 
   shutdown(): void {
@@ -250,7 +259,74 @@ export class RealmKernel {
 
   private readonly secrets?: SecretStore;
   private readonly workspaceStore?: string;
-  private readonly agentProfiles?: Record<string, unknown>;
+  private readonly agentProfiles?: AgentProfiles;
+
+  getProgrammaticAgentProfiles(): AgentProfiles {
+    return this.agentProfiles ?? {};
+  }
+
+  private captureEffectiveProfileSnapshot(atMs: number): {
+    catalogHash: string;
+    capturedAtMs: number;
+    rows: Array<{
+      name: string;
+      source: "catalog" | "programmatic";
+      configJson: string;
+      configHash: string;
+      catalogGeneration: number | null;
+    }>;
+  } {
+    const entries: AgentProfileSnapshotEntry[] = [];
+    for (const [name, config] of Object.entries(this.agentProfiles ?? {})) {
+      entries.push({
+        name,
+        source: "programmatic",
+        config,
+        configHash: agentProfileConfigHash(config),
+        catalogGeneration: null,
+      });
+    }
+    for (const row of this.store.listAgentProfileCatalogRows()) {
+      if (entries.some((entry) => entry.name === row.name)) {
+        throw new Error(
+          `duplicate agent profile "${row.name}" exists in programmatic and catalog sources`,
+        );
+      }
+      entries.push({
+        name: row.name,
+        source: "catalog",
+        config: JSON.parse(row.configJson) as AgentProfileSnapshotEntry["config"],
+        configHash: row.configHash,
+        catalogGeneration: row.generation,
+      });
+    }
+    entries.sort((a, b) => compareAgentProfileNames(a.name, b.name));
+    return {
+      catalogHash: effectiveProfileCatalogHash(entries),
+      capturedAtMs: atMs,
+      rows: entries.map((entry) => ({
+        name: entry.name,
+        source: entry.source,
+        configJson: canonicalProfileJson(entry.config),
+        configHash: entry.configHash,
+        catalogGeneration: entry.catalogGeneration,
+      })),
+    };
+  }
+
+  private profilesForRun(runId: string): AgentProfiles {
+    const set = this.store.getRunProfileSnapshotSet(runId);
+    if (!set) throw new ProfileSnapshotIntegrityError(runId);
+    return agentProfilesFromSnapshot(
+      this.store.listRunProfileSnapshots(runId).map((row) => ({
+        name: row.name,
+        source: row.source,
+        config: JSON.parse(row.configJson) as AgentProfileSnapshotEntry["config"],
+        configHash: row.configHash,
+        catalogGeneration: row.catalogGeneration,
+      })),
+    );
+  }
 
   /** Start a run and return its id immediately, with a promise for completion.
    * The RPC layer/daemon uses this so launchRun returns before the run finishes. */
@@ -269,28 +345,32 @@ export class RealmKernel {
       cacheRoot: this.definitionCacheRoot,
     });
     const runId = this.idgen();
-    this.store.insertRun({
-      runId,
-      workflowName: name,
-      definitionVersion: snapshot.hash,
-      workflowRef: workflowRefFromProvenance(workflow.provenance),
-      runTarget: target ?? null,
-      status: "running",
-      parentRunId: null,
-      tenantId: null,
-      inputRef: JSON.stringify(input ?? null),
-      outputRef: null,
-      errorJson: null,
-      heartbeatAtMs: null,
-      runtimeOwnerId: null,
-      createdAtMs: at,
+    const profileSnapshot = this.captureEffectiveProfileSnapshot(at);
+    this.store.transaction(() => {
+      this.store.insertRun({
+        runId,
+        workflowName: name,
+        definitionVersion: snapshot.hash,
+        workflowRef: workflowRefFromProvenance(workflow.provenance),
+        runTarget: target ?? null,
+        status: "running",
+        parentRunId: null,
+        tenantId: null,
+        inputRef: JSON.stringify(input ?? null),
+        outputRef: null,
+        errorJson: null,
+        heartbeatAtMs: null,
+        runtimeOwnerId: null,
+        createdAtMs: at,
+      });
+      this.store.replaceRunProfileSnapshot(runId, profileSnapshot, profileSnapshot.rows);
+      this.store.appendEvent(
+        runId,
+        "run.started",
+        { name, definitionHash: snapshot.hash, target: target ?? null },
+        this.host.clock(),
+      );
     });
-    this.store.appendEvent(
-      runId,
-      "run.started",
-      { name, definitionHash: snapshot.hash, target: target ?? null },
-      this.host.clock(),
-    );
     return { runId, done: this.execute<O>(runId, entryPath, input) };
   }
 
@@ -316,28 +396,32 @@ export class RealmKernel {
     const at = this.host.clock();
     const target = optionalRunTarget(meta.target, "RealmKernel.launchDefinition");
     const runId = this.idgen();
-    this.store.insertRun({
-      runId,
-      workflowName: meta.name ?? null,
-      definitionVersion: definitionHash,
-      workflowRef: meta.workflowRef ?? definitionHash,
-      runTarget: target,
-      status: "running",
-      parentRunId: null,
-      tenantId: null,
-      inputRef: JSON.stringify(input ?? null),
-      outputRef: null,
-      errorJson: null,
-      heartbeatAtMs: null,
-      runtimeOwnerId: null,
-      createdAtMs: at,
+    const profileSnapshot = this.captureEffectiveProfileSnapshot(at);
+    this.store.transaction(() => {
+      this.store.insertRun({
+        runId,
+        workflowName: meta.name ?? null,
+        definitionVersion: definitionHash,
+        workflowRef: meta.workflowRef ?? definitionHash,
+        runTarget: target,
+        status: "running",
+        parentRunId: null,
+        tenantId: null,
+        inputRef: JSON.stringify(input ?? null),
+        outputRef: null,
+        errorJson: null,
+        heartbeatAtMs: null,
+        runtimeOwnerId: null,
+        createdAtMs: at,
+      });
+      this.store.replaceRunProfileSnapshot(runId, profileSnapshot, profileSnapshot.rows);
+      this.store.appendEvent(
+        runId,
+        "run.started",
+        { name: meta.name ?? null, definitionHash, target },
+        this.host.clock(),
+      );
     });
-    this.store.appendEvent(
-      runId,
-      "run.started",
-      { name: meta.name ?? null, definitionHash, target },
-      this.host.clock(),
-    );
     return { runId, done: this.execute<O>(runId, entryPath, input) };
   }
 
@@ -458,16 +542,20 @@ export class RealmKernel {
         : undefined;
     // Reset the run to running and clear the previous terminal result; persist an
     // override input so a later input-less rerun does not silently use the old one.
-    this.store.updateRun(runId, {
-      status: "running",
-      finishedAtMs: null,
-      outputRef: null,
-      errorJson: null,
-      ...(overriding ? { inputRef: JSON.stringify(opts.input ?? null) } : {}),
-      ...(opts.name !== undefined ? { workflowName: name } : {}),
+    const profileSnapshot = this.captureEffectiveProfileSnapshot(this.host.clock());
+    this.store.transaction(() => {
+      this.store.updateRun(runId, {
+        status: "running",
+        finishedAtMs: null,
+        outputRef: null,
+        errorJson: null,
+        ...(overriding ? { inputRef: JSON.stringify(opts.input ?? null) } : {}),
+        ...(opts.name !== undefined ? { workflowName: name } : {}),
+      });
+      this.store.updateRunDefinition(runId, definitionHash, workflowRef);
+      this.store.replaceRunProfileSnapshot(runId, profileSnapshot, profileSnapshot.rows);
+      this.store.appendEvent(runId, "run.rerun", { definitionHash }, this.host.clock());
     });
-    this.store.updateRunDefinition(runId, definitionHash, workflowRef);
-    this.store.appendEvent(runId, "run.rerun", { definitionHash }, this.host.clock());
     return { runId, done: this.execute<O>(runId, entryPath, effectiveInput) };
   }
 
@@ -1583,7 +1671,7 @@ export class RealmKernel {
                 input,
                 sab,
                 moduleHelpers,
-                agentProfiles: this.agentProfiles ?? {},
+                agentProfiles: this.profilesForRun(runId),
                 runId,
                 runTarget,
               } satisfies HostReply);
@@ -2188,6 +2276,7 @@ export class RealmKernel {
                   runtimeOwnerId: null,
                   createdAtMs: at,
                 });
+                this.store.copyRunProfileSnapshot(runId, nextId);
                 this.store.appendEvent(nextId, "run.started", { name, continuedFrom: runId }, at);
                 this.store.updateRun(runId, {
                   status: "continued",
@@ -2229,6 +2318,22 @@ export class RealmKernel {
         } catch (hostErr) {
           if (this.isRunInterrupted(runId)) {
             finishInterrupted();
+            return;
+          }
+          if (hostErr instanceof ProfileSnapshotIntegrityError) {
+            const at = this.host.clock();
+            const error = serializeError(hostErr);
+            this.store.transaction(() => {
+              this.store.updateRun(runId, {
+                status: "failed",
+                errorJson: JSON.stringify(error),
+                finishedAtMs: at,
+              });
+              this.store.appendEvent(runId, "run.failed", error, at);
+            });
+            cleanupTerminalRunWorkspaces(this.store, runId, "failed", at);
+            this.secrets?.wipe(runId);
+            finish(() => reject(hostErr));
             return;
           }
           // A host-side fault (e.g. injected crash) — leave the run resumable and

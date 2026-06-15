@@ -136,6 +136,42 @@ function insertWorkspaceFixture(
   });
 }
 
+describe("agent profile RPC", () => {
+  test("manages catalog profiles with generation preconditions and programmatic source visibility", () => {
+    const store = JournalStore.memory();
+    const kernel = new RealmKernel(store, {
+      idgen: () => "run_profiles",
+      agents: new AgentProviderRegistry().register(new MockProvider()),
+      agentProfiles: { builtin: { provider: "mock", model: "fixed" } },
+    });
+    const api = new InProcessKeel(kernel, store, new EventHub(), {
+      agents: new AgentProviderRegistry().register(new MockProvider()),
+      clock: () => 10,
+    });
+
+    expect(api.listAgentProfiles()).toMatchObject([{ name: "builtin", source: "programmatic" }]);
+    const saved = api.putAgentProfile({
+      name: "reviewer",
+      config: { provider: "mock", model: "one", toolPolicy: "read-only" },
+      createOnly: true,
+    });
+    expect(saved).toMatchObject({ name: "reviewer", source: "catalog", generation: 1 });
+    expect(() =>
+      api.putAgentProfile({
+        name: "reviewer",
+        config: { provider: "mock", model: "two" },
+        ifGeneration: 2,
+      }),
+    ).toThrow(/generation precondition/);
+    expect(api.checkAgentProfile({ name: "reviewer" }).ok).toBe(true);
+    expect(() => api.putAgentProfile({ name: "builtin", config: {} })).toThrow(/programmatic/);
+    expect(api.deleteAgentProfile({ name: "reviewer", ifGeneration: 1 })).toEqual({
+      name: "reviewer",
+      deleted: true,
+    });
+  });
+});
+
 describe("RPC contract drives a workflow end-to-end", () => {
   test("in-process launchRun rejects missing or blank targets", async () => {
     const store = JournalStore.memory();

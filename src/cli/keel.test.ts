@@ -1030,6 +1030,66 @@ describe("keel CLI", () => {
   );
 
   test(
+    "profiles commands manage catalog entries as admin",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "keel-profiles-cli-"));
+      const socketPath = join(dir, "keel.sock");
+      const dbPath = join(dir, "keel.db");
+      const daemon = new KeelDaemon({
+        socketPath,
+        dbPath,
+        agents: new AgentProviderRegistry().register(new MockProvider()),
+        adminToken: "kc_admin_profiles_test",
+      });
+      await daemon.start();
+      try {
+        const env = {
+          KEEL_SOCKET: socketPath,
+          KEEL_DB: dbPath,
+          KEEL_DIR: dir,
+          KEEL_ADMIN_TOKEN: "kc_admin_profiles_test",
+        };
+        const config = JSON.stringify({
+          provider: "mock",
+          model: "review-v1",
+          toolPolicy: "read-only",
+        });
+
+        const set = await runCli(["profiles", "set", "reviewer", "--file", "-"], dir, env, config);
+        expect(set.code).toBe(0);
+        expect(JSON.parse(set.stdout)).toMatchObject({
+          name: "reviewer",
+          source: "catalog",
+          generation: 1,
+        });
+
+        const listed = await runCli(["profiles", "list"], dir, env);
+        expect(listed.code).toBe(0);
+        const lines = listed.stdout.trimEnd().split("\n");
+        expect(lines[0]).toContain("NAME");
+        expect(lines[0]).toContain("TOOL POLICY");
+        expect(lines[1]).toMatch(/^reviewer\s{2,}catalog\s{2,}mock\s{2,}review-v1\s{2,}read-only/);
+
+        const checked = await runCli(["profiles", "check", "reviewer"], dir, env);
+        expect(checked.code).toBe(0);
+        expect(checked.stdout).toBe("ok\n");
+
+        const deleted = await runCli(
+          ["profiles", "delete", "reviewer", "--if-generation", "1"],
+          dir,
+          env,
+        );
+        expect(deleted.code).toBe(0);
+        expect(JSON.parse(deleted.stdout)).toEqual({ name: "reviewer", deleted: true });
+      } finally {
+        daemon.stop();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    DAEMON_TEST_TIMEOUT_MS,
+  );
+
+  test(
     "execute runs a stateless TypeScript control script over the daemon",
     async () => {
       const dir = mkdtempSync(join(tmpdir(), "keel-execute-"));

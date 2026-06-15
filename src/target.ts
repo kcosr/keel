@@ -53,7 +53,5 @@ export function resolveAgentTarget(
 ): string {
   if (specTarget != null) return requireRunTarget(specTarget, `${description} target`);
   if (runTarget != null) return requireRunTarget(runTarget, `${description} run target`);
-  throw new Error(
-    `${description} requires a target; launch with --target or set an agent/profile target`,
-  );
+  throw new Error(`${description} requires a target; launch with --target or use ctx.workspace`);
 }

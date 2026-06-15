@@ -140,6 +140,7 @@ bun src/cli/keel.ts <command> [args]
 | `report <runId> [--output json\|text]` | Print a journaled per-node result digest. |
 | `list [--output text\|json]` | List runs as an aligned table or JSON envelope. Requires admin. |
 | `schedule put <name> [workflow.ts] --interval-ms ms [--target dir]` | Create or replace a pinned workflow schedule. Requires admin. |
+| `profiles list/get/set/delete/check ...` | Manage daemon-wide persistent agent profiles. Requires admin. |
 | `workspace list/show/diff/merge/discard/gc ...` | Inspect and manage retained isolated agent/session workspaces by `workspaceId`. |
 | `tui [runId] [--status status] [--limit n] [--output text]` | Open an interactive run browser or direct run detail/watch view. Browser mode requires admin. |
 | `gc` | Prune unreferenced workflow definition rows and cache entries. Requires admin. |
@@ -686,6 +687,23 @@ const finding = await ctx.agent({
 | `timeoutMs?` | Per-attempt stall timeout. Default: `1 hour`. |
 | `stallRetries?` | Retries after stalled attempts. Default: `1`. |
 | `bump?` / `version?` | Explicit version controls for invalidation. |
+
+### Persistent Agent Profiles
+
+Operators can store reusable daemon-wide profile defaults and workflows can select them with `profile: "name"`:
+
+```bash
+keel profiles list [--source all|catalog|programmatic] [--output text|json]
+keel profiles get <name> [--output text|json]
+keel profiles set <name> --file <path|-> [--if-generation <n>] [--create] [--update]
+keel profiles delete <name> [--if-generation <n>]
+keel profiles check <name> [--connect] [--output text|json]
+keel profiles check --file <path|-> [--connect] [--output text|json]
+```
+
+All profile commands use the daemon connection (`KEEL_SOCKET`/`KEEL_DIR`) and require an admin credential (`KEEL_ADMIN_TOKEN` or an admin capability file). Profile JSON may include provider/model/reasoning, tool policy, allow/deny tools, capabilities, retry/timeout options, and provider-keyed `providerConfig`. It must not include prompt/key/schema/workspace/secret fields or legacy `workspaceIsolation`, `workspaceRetention`, or `target` fields.
+
+The daemon snapshots the complete effective catalog (programmatic plus persisted catalog profiles) when a run is launched or rerun. Resume, retry, rewind, daemon restart, provider retries, and default forks keep the existing snapshot; editing or deleting a profile only affects future launches and reruns.
 
 ### Provider Config
 

@@ -25,6 +25,13 @@ export interface ResolvedToolPolicy {
   capabilities: Capabilities;
 }
 
+export const CAPABILITY_KEYS = [
+  "fs",
+  "network",
+  "shell",
+  "secrets",
+] as const satisfies readonly (keyof Capabilities)[];
+
 export const DENY_ALL: Capabilities = { fs: "none", network: "none", shell: false, secrets: [] };
 
 /** Read-only review policy. */
@@ -220,8 +227,61 @@ function capabilitiesForToolPolicy(policy: ToolPolicy): Capabilities {
   }
 }
 
+export function validateCapabilitiesDeclaration(
+  caps: Record<string, unknown>,
+  path = "capabilities",
+): Partial<Capabilities> {
+  const allowed = new Set<string>(CAPABILITY_KEYS);
+  const out: Partial<Capabilities> = {};
+  for (const key of Object.keys(caps)) {
+    if (!allowed.has(key)) throw new Error(`${path}.${key} is not a supported capability`);
+  }
+  if (caps.fs !== undefined) {
+    if (caps.fs !== "none" && caps.fs !== "read" && caps.fs !== "workspace-write") {
+      throw new Error(`${path}.fs must be none, read, or workspace-write`);
+    }
+    out.fs = caps.fs;
+  }
+  if (caps.network !== undefined) {
+    if (caps.network === "none") {
+      out.network = "none";
+    } else if (Array.isArray(caps.network)) {
+      out.network = normalizeStringArrayCapability(caps.network, `${path}.network`);
+    } else {
+      throw new Error(`${path}.network must be "none" or an array of non-empty strings`);
+    }
+  }
+  if (caps.shell !== undefined) {
+    if (typeof caps.shell !== "boolean") throw new Error(`${path}.shell must be a boolean`);
+    out.shell = caps.shell;
+  }
+  if (caps.secrets !== undefined) {
+    if (!Array.isArray(caps.secrets)) {
+      throw new Error(`${path}.secrets must be an array of non-empty strings`);
+    }
+    out.secrets = normalizeStringArrayCapability(caps.secrets, `${path}.secrets`);
+  }
+  return out;
+}
+
+function normalizeStringArrayCapability(value: unknown[], path: string): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < value.length; i += 1) {
+    if (!(i in value)) throw new Error(`${path}[${i}] must not be a sparse array hole`);
+    const item = value[i];
+    if (typeof item !== "string" || item.length === 0) {
+      throw new Error(`${path} must be an array of non-empty strings`);
+    }
+    out.push(item);
+  }
+  return out;
+}
+
 function capabilitiesFromPartial(caps: Partial<Capabilities>): Capabilities {
-  return cloneCapabilities({ ...DENY_ALL, ...caps });
+  return cloneCapabilities({
+    ...DENY_ALL,
+    ...validateCapabilitiesDeclaration(caps as Record<string, unknown>),
+  });
 }
 
 function cloneCapabilities(caps: Capabilities): Capabilities {

@@ -3,8 +3,13 @@
 
 import { type Socket, connect } from "bun";
 import type {
+  AgentProfileCheckResult,
+  AgentProfileView,
+  CheckAgentProfileRequest,
+  DeleteAgentProfileRequest,
   EventEnvelope,
   LaunchRequest,
+  PutAgentProfileRequest,
   RunLaunchResult,
   RunOutcome,
   RunStart,
@@ -199,6 +204,23 @@ export class DaemonClient {
     req: { olderThanMs?: number; includePending?: boolean; includeRemoved?: boolean } = {},
   ): Promise<WorkspaceGcResult> {
     return this.rpc("gcWorkspaces", req);
+  }
+  listAgentProfiles(
+    req: { source?: "all" | "catalog" | "programmatic" } = {},
+  ): Promise<AgentProfileView[]> {
+    return this.rpc("listAgentProfiles", req);
+  }
+  getAgentProfile(name: string): Promise<AgentProfileView | null> {
+    return this.rpc("getAgentProfile", { name });
+  }
+  putAgentProfile(req: PutAgentProfileRequest): Promise<AgentProfileView> {
+    return this.rpc("putAgentProfile", req);
+  }
+  deleteAgentProfile(req: DeleteAgentProfileRequest): Promise<{ name: string; deleted: true }> {
+    return this.rpc("deleteAgentProfile", req);
+  }
+  checkAgentProfile(req: CheckAgentProfileRequest): Promise<AgentProfileCheckResult> {
+    return this.rpc("checkAgentProfile", req);
   }
   gcDefinitions(req: { ttlMs?: number; cacheMinAgeMs?: number } = {}): Promise<{
     workflowDefinitionsRemoved: number;

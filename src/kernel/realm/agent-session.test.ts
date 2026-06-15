@@ -182,6 +182,149 @@ describe("ctx.agentSession", () => {
     await expect(k.run(WORKFLOW, { second: false })).rejects.toThrow(/requires target/);
   });
 
+  test("session turns use the run settings snapshot after current settings change", async () => {
+    const store = JournalStore.memory();
+    store.putDaemonSettingRow({
+      key: "agent.defaultTimeoutMs",
+      valueJson: "1234",
+      nowMs: 1,
+    });
+    const provider = new RecordingSessionProvider();
+    let now = 1;
+    const k = new TargetedRealmKernel(store, {
+      idgen: () => "run-settings-session",
+      clock: () => now,
+      rng: () => 0.5,
+      agents: new AgentProviderRegistry().register(provider),
+    });
+    const workflow = {
+      source: `
+        import { type Ctx } from "@kcosr/keel";
+        export default async function wf(ctx: Ctx): Promise<string> {
+          const primary = ctx.agentSession({ key: "primary", provider: "session", toolPolicy: "read-only" });
+          await primary.turn({ key: "one", prompt: "one" });
+          await ctx.sleep("pause", 10);
+          await primary.turn({ key: "two", prompt: "two" });
+          return "done";
+        }
+      `,
+      name: "settings-session",
+    };
+
+    const launched = k.launch<string>(workflow, null);
+    await expect(launched.done).resolves.toMatchObject({ status: "waiting-timer" });
+    expect(provider.calls.map((call) => call.timeoutMs)).toEqual([1234]);
+
+    store.putDaemonSettingRow({
+      key: "agent.defaultTimeoutMs",
+      valueJson: "9999",
+      nowMs: 2,
+    });
+    now = 20;
+    await expect(k.resume<string>(launched.runId)).resolves.toMatchObject({
+      status: "finished",
+      output: "done",
+    });
+    expect(provider.calls.map((call) => call.timeoutMs)).toEqual([1234, 1234]);
+  });
+
+  test("session turn identity ignores default timeout and stall settings", async () => {
+    const store = JournalStore.memory();
+    const provider = new RecordingSessionProvider();
+    let nextRun = 1;
+    const k = new TargetedRealmKernel(store, {
+      idgen: () => `run-settings-identity-${nextRun++}`,
+      clock: () => 1,
+      rng: () => 0.5,
+      agents: new AgentProviderRegistry().register(provider),
+    });
+    const workflow = {
+      source: `
+        import { type Ctx } from "@kcosr/keel";
+        export default async function wf(ctx: Ctx): Promise<string> {
+          const primary = ctx.agentSession({ key: "primary", provider: "session", toolPolicy: "read-only" });
+          return await primary.turn({ key: "one", prompt: "one" });
+        }
+      `,
+      name: "settings-session-identity",
+    };
+
+    store.putDaemonSettingRow({
+      key: "agent.defaultTimeoutMs",
+      valueJson: "1234",
+      nowMs: 1,
+    });
+    store.putDaemonSettingRow({
+      key: "agent.defaultStallRetries",
+      valueJson: "0",
+      nowMs: 1,
+    });
+    const first = await k.run<string>(workflow, null);
+    expect(first.status).toBe("finished");
+
+    store.putDaemonSettingRow({
+      key: "agent.defaultTimeoutMs",
+      valueJson: "9999",
+      nowMs: 2,
+    });
+    store.putDaemonSettingRow({
+      key: "agent.defaultStallRetries",
+      valueJson: "7",
+      nowMs: 2,
+    });
+    const second = await k.run<string>(workflow, null);
+    expect(second.status).toBe("finished");
+
+    const turnRows = store.db
+      .query<{ version: string; input_hash: string }, []>(
+        `SELECT version, input_hash
+         FROM journal
+         WHERE stable_key = '__session.primary.one'
+         ORDER BY run_id ASC`,
+      )
+      .all();
+    expect(turnRows).toHaveLength(2);
+    expect(turnRows[0]?.version).toBe(turnRows[1]?.version);
+    expect(turnRows[0]?.input_hash).toBe(turnRows[1]?.input_hash);
+    expect(provider.calls.map((call) => call.timeoutMs)).toEqual([1234, 9999]);
+  });
+
+  test("missing settings snapshot fails a session run and releases the active guard", async () => {
+    const store = JournalStore.memory();
+    const provider = new RecordingSessionProvider();
+    let now = 1;
+    const k = new TargetedRealmKernel(store, {
+      idgen: () => "run-missing-settings-session",
+      clock: () => now,
+      rng: () => 0.5,
+      agents: new AgentProviderRegistry().register(provider),
+    });
+    const workflow = {
+      source: `
+        import { type Ctx } from "@kcosr/keel";
+        export default async function wf(ctx: Ctx): Promise<string> {
+          const primary = ctx.agentSession({ key: "primary", provider: "session", toolPolicy: "read-only" });
+          await primary.turn({ key: "one", prompt: "one" });
+          await ctx.sleep("pause", 10);
+          return "done";
+        }
+      `,
+      name: "missing-settings-session",
+    };
+
+    const launched = k.launch<string>(workflow, null);
+    await expect(launched.done).resolves.toMatchObject({ status: "waiting-timer" });
+    store.db.query("DELETE FROM run_setting_snapshots WHERE run_id = ?").run(launched.runId);
+    store.db.query("DELETE FROM run_setting_snapshot_sets WHERE run_id = ?").run(launched.runId);
+
+    now = 20;
+    await expect(k.resume<string>(launched.runId)).rejects.toThrow(
+      /missing daemon settings snapshot set/,
+    );
+    expect(store.getRun(launched.runId)?.status).toBe("failed");
+    await expect(k.resume<string>(launched.runId)).resolves.toMatchObject({ status: "failed" });
+  });
+
   test("selected providerConfig is in session identity and passed to every turn", async () => {
     const store = JournalStore.memory();
     const provider = new RecordingSessionProvider();

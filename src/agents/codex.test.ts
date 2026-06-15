@@ -969,6 +969,46 @@ describe("Codex JSON-RPC flow", () => {
     expect(result.text).toBe("slow ok");
   });
 
+  test("dedicated RPC timeout does not shorten the default turn completion wait", async () => {
+    const transport = new ScriptedTransport((message, t) => {
+      switch (message.method) {
+        case "initialize":
+          t.respond(message.id, {});
+          break;
+        case "initialized":
+          break;
+        case "thread/start":
+          t.respond(message.id, { thread: { id: "thread-1" } });
+          break;
+        case "turn/start":
+          t.respond(message.id, { turn: { id: "turn-1" } });
+          t.notify("turn/started", { threadId: "thread-1", turn: { id: "turn-1" } });
+          t.notify("item/agentMessage/delta", {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            delta: "slow default ok",
+          });
+          setTimeout(() => {
+            t.notify("turn/completed", {
+              threadId: "thread-1",
+              turnId: "turn-1",
+              status: "completed",
+            });
+          }, 50);
+          break;
+        default:
+          throw new Error(`unexpected ${String(message.method)}`);
+      }
+    });
+
+    const result = await new CodexProvider({
+      transportFactory: new ScriptedFactory(transport),
+      rpcTimeoutMs: 10,
+    }).generate(codexInvocation(), {});
+
+    expect(result.text).toBe("slow default ok");
+  });
+
   test("turn completion timeout interrupts the active remote turn before failing", async () => {
     let interrupted = false;
     const transport = new ScriptedTransport((message, t) => {

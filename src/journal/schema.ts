@@ -4,7 +4,7 @@
 // or tricks. Integers are epoch-ms; JSON travels as TEXT. Reserved tables
 // (approvals/signals/timers) are created now though their effects land later.
 
-export const SCHEMA_VERSION = 16;
+export const SCHEMA_VERSION = 17;
 
 export const DDL = /* sql */ `
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -233,4 +233,33 @@ CREATE TABLE IF NOT EXISTS run_profile_snapshots (
 
 CREATE INDEX IF NOT EXISTS run_profile_snapshots_by_run
   ON run_profile_snapshots (run_id);
+
+CREATE TABLE IF NOT EXISTS daemon_settings (
+  key           TEXT PRIMARY KEY,
+  value_json    TEXT NOT NULL,
+  generation    INTEGER NOT NULL,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS run_setting_snapshot_sets (
+  run_id         TEXT PRIMARY KEY,
+  settings_hash  TEXT NOT NULL,
+  captured_at_ms INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS run_setting_snapshots (
+  run_id             TEXT NOT NULL,
+  key                TEXT NOT NULL,
+  class              TEXT NOT NULL,
+  value_json         TEXT NOT NULL,
+  default_json       TEXT NOT NULL,
+  source             TEXT NOT NULL,
+  catalog_generation INTEGER,
+  captured_at_ms     INTEGER NOT NULL,
+  PRIMARY KEY (run_id, key)
+);
+
+CREATE INDEX IF NOT EXISTS run_setting_snapshots_by_run
+  ON run_setting_snapshots (run_id);
 `;

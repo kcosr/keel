@@ -1090,6 +1090,79 @@ describe("keel CLI", () => {
   );
 
   test(
+    "settings commands manage daemon catalog entries as admin",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "keel-settings-cli-"));
+      const socketPath = join(dir, "keel.sock");
+      const dbPath = join(dir, "keel.db");
+      const daemon = new KeelDaemon({
+        socketPath,
+        dbPath,
+        agents: new AgentProviderRegistry().register(new MockProvider()),
+        adminToken: "kc_admin_settings_test",
+      });
+      await daemon.start();
+      try {
+        const env = {
+          KEEL_SOCKET: socketPath,
+          KEEL_DB: dbPath,
+          KEEL_DIR: dir,
+          KEEL_ADMIN_TOKEN: "kc_admin_settings_test",
+        };
+
+        const listed = await runCli(["settings", "list"], dir, env);
+        expect(listed.code).toBe(0);
+        expect(listed.stdout).toContain("KEY");
+        expect(listed.stdout).toContain("agent.defaultTimeoutMs");
+
+        const set = await runCli(
+          ["settings", "set", "agent.defaultTimeoutMs", "7200000"],
+          dir,
+          env,
+        );
+        expect(set.code).toBe(0);
+        expect(JSON.parse(set.stdout)).toMatchObject({
+          key: "agent.defaultTimeoutMs",
+          value: 7200000,
+          generation: 1,
+        });
+
+        const got = await runCli(
+          ["settings", "get", "agent.defaultTimeoutMs", "--output", "json"],
+          dir,
+          env,
+        );
+        expect(got.code).toBe(0);
+        expect(JSON.parse(got.stdout)).toMatchObject({
+          key: "agent.defaultTimeoutMs",
+          value: 7200000,
+          isDefault: false,
+        });
+
+        const bad = await runCli(["settings", "check", "agent.defaultTimeoutMs", "-1"], dir, env);
+        expect(bad.code).toBe(1);
+        expect(bad.stdout).toContain("failed");
+        expect(bad.stdout).toContain("expected integer > 0");
+
+        const unset = await runCli(
+          ["settings", "unset", "agent.defaultTimeoutMs", "--if-generation", "1"],
+          dir,
+          env,
+        );
+        expect(unset.code).toBe(0);
+        expect(JSON.parse(unset.stdout)).toEqual({
+          key: "agent.defaultTimeoutMs",
+          deleted: true,
+        });
+      } finally {
+        daemon.stop();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    DAEMON_TEST_TIMEOUT_MS,
+  );
+
+  test(
     "execute runs a stateless TypeScript control script over the daemon",
     async () => {
       const dir = mkdtempSync(join(tmpdir(), "keel-execute-"));

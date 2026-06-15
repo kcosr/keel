@@ -38,6 +38,21 @@ class TestInProcessKeel extends InProcessKeel {
   }
 }
 
+class FailsOnceRecordingProvider implements AgentProvider {
+  readonly name = "recording";
+  readonly calls: AgentInvocation[] = [];
+  private failed = false;
+
+  async generate(invocation: AgentInvocation): Promise<AgentResult> {
+    this.calls.push(invocation);
+    if (!this.failed) {
+      this.failed = true;
+      throw new Error("first failure");
+    }
+    return { text: "ok", transcript: [] };
+  }
+}
+
 function keel(store: JournalStore, mock?: MockProvider): InProcessKeel {
   let id = 0;
   const kernel = new RealmKernel(store, {
@@ -169,6 +184,93 @@ describe("agent profile RPC", () => {
       name: "reviewer",
       deleted: true,
     });
+  });
+});
+
+describe("settings RPC", () => {
+  test("lists, validates, sets, checks, and unsets catalog settings", () => {
+    const store = JournalStore.memory();
+    const api = keel(store);
+
+    const initial = api.getSetting("agent.defaultTimeoutMs");
+    expect(initial).toMatchObject({
+      key: "agent.defaultTimeoutMs",
+      value: 3600000,
+      isDefault: true,
+      generation: null,
+    });
+    expect(api.getSetting("missing.setting")).toBeNull();
+
+    const saved = api.putSetting({ key: "agent.defaultTimeoutMs", value: 7200000 });
+    expect(saved).toMatchObject({
+      key: "agent.defaultTimeoutMs",
+      value: 7200000,
+      isDefault: false,
+      generation: 1,
+    });
+    expect(() =>
+      api.putSetting({ key: "agent.defaultTimeoutMs", value: 1, ifGeneration: 2 }),
+    ).toThrow(/generation precondition/);
+    expect(api.checkSetting({ key: "agent.defaultTimeoutMs", value: -1 }).ok).toBe(false);
+    expect(api.checkSetting({ key: "missing.setting", value: true }).ok).toBe(false);
+    expect(api.checkSetting({ key: "agent.defaultOnFailure", value: "null" }).ok).toBe(false);
+    expect(() => api.putSetting({ key: "agent.defaultOnFailure", value: "null" })).toThrow(
+      /read-only/,
+    );
+    expect(api.deleteSetting({ key: "agent.defaultTimeoutMs", ifGeneration: 1 })).toEqual({
+      key: "agent.defaultTimeoutMs",
+      deleted: true,
+    });
+    expect(api.deleteSetting({ key: "agent.defaultTimeoutMs" })).toEqual({
+      key: "agent.defaultTimeoutMs",
+      deleted: false,
+    });
+  });
+});
+
+describe("settings snapshots", () => {
+  test("ctx.agent retry uses the original run settings snapshot", async () => {
+    const store = JournalStore.memory();
+    store.putDaemonSettingRow({
+      key: "agent.defaultTimeoutMs",
+      valueJson: "1234",
+      nowMs: 1,
+    });
+    const provider = new FailsOnceRecordingProvider();
+    let id = 0;
+    const agents = new AgentProviderRegistry().register(provider);
+    const kernel = new RealmKernel(store, {
+      idgen: () => `run_settings_agent_${id++}`,
+      clock: () => 1,
+      rng: () => 0.5,
+      agents,
+    });
+    const api = new TestInProcessKeel(kernel, store, new EventHub(), { agents });
+    const workflow = {
+      source: `
+        import { type Ctx } from "@kcosr/keel";
+        export default async function wf(ctx: Ctx): Promise<string> {
+          return await ctx.agent({ key: "review", provider: "recording", prompt: "review" });
+        }
+      `,
+      name: "settings-agent",
+    };
+
+    const launched = await api.launchRun({ ...workflow, input: null });
+    await expect(api.waitForRun(launched.runId)).resolves.toMatchObject({ status: "failed" });
+    expect(provider.calls.map((call) => call.timeoutMs)).toEqual([1234]);
+
+    store.putDaemonSettingRow({
+      key: "agent.defaultTimeoutMs",
+      valueJson: "9999",
+      nowMs: 2,
+    });
+    await api.retryRun(launched.runId);
+    await expect(api.waitForRun(launched.runId)).resolves.toMatchObject({
+      status: "finished",
+      output: "ok",
+    });
+    expect(provider.calls.map((call) => call.timeoutMs)).toEqual([1234, 1234]);
   });
 });
 

@@ -53,6 +53,8 @@ export interface AgentInvocation {
   env?: Record<string, string>;
   /** Fires when the kernel abandons a stalled attempt — kill the subprocess. */
   abortSignal?: AbortSignal;
+  /** Resolved per-attempt timeout for providers that have an inner turn wait. */
+  timeoutMs?: number;
 }
 
 export interface AgentResult {

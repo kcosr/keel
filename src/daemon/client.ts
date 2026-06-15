@@ -7,14 +7,18 @@ import type {
   AgentProfileView,
   CheckAgentProfileRequest,
   DeleteAgentProfileRequest,
+  DeleteSettingRequest,
   EventEnvelope,
   LaunchRequest,
   PutAgentProfileRequest,
+  PutSettingRequest,
   RunLaunchResult,
   RunOutcome,
   RunStart,
   RunWorkspaceDiff,
   RunWorkspaceView,
+  SettingView,
+  SettingsDiagnostic,
   WorkspaceGcResult,
 } from "../rpc/contract.ts";
 import type { RunProjection, RunReport, RunSummary } from "../rpc/projection.ts";
@@ -221,6 +225,24 @@ export class DaemonClient {
   }
   checkAgentProfile(req: CheckAgentProfileRequest): Promise<AgentProfileCheckResult> {
     return this.rpc("checkAgentProfile", req);
+  }
+  listSettings(): Promise<SettingView[]> {
+    return this.rpc("listSettings", {});
+  }
+  getSetting(key: string): Promise<SettingView | null> {
+    return this.rpc("getSetting", { key });
+  }
+  putSetting(req: PutSettingRequest): Promise<SettingView> {
+    return this.rpc("putSetting", req);
+  }
+  deleteSetting(req: DeleteSettingRequest): Promise<{ key: string; deleted: boolean }> {
+    return this.rpc("deleteSetting", req);
+  }
+  checkSetting(req: {
+    key: string;
+    value: unknown;
+  }): Promise<{ ok: boolean; diagnostics: SettingsDiagnostic[] }> {
+    return this.rpc("checkSetting", req);
   }
   gcDefinitions(req: { ttlMs?: number; cacheMinAgeMs?: number } = {}): Promise<{
     workflowDefinitionsRemoved: number;

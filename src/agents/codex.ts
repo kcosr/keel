@@ -37,6 +37,8 @@ export interface CodexProviderOptions {
   bin?: string;
   /** Per-request protocol timeout for setup/handshake RPCs. */
   timeoutMs?: number;
+  /** Per-request protocol timeout for setup/handshake RPCs without affecting model turns. */
+  rpcTimeoutMs?: number;
   /** Long-running model turn timeout; defaults to Keel's normal agent timeout. */
   turnTimeoutMs?: number;
   connectTimeoutMs?: number;
@@ -79,7 +81,7 @@ export class CodexProvider implements AgentProvider {
 
   constructor(opts: CodexProviderOptions = {}) {
     this.bin = opts.bin ?? process.env[CODEX_BIN_ENV] ?? "codex";
-    this.rpcTimeoutMs = opts.timeoutMs ?? CODEX_RPC_RESPONSE_TIMEOUT_MS;
+    this.rpcTimeoutMs = opts.rpcTimeoutMs ?? opts.timeoutMs ?? CODEX_RPC_RESPONSE_TIMEOUT_MS;
     // Keep opts.timeoutMs as a legacy/test single-knob override, but production
     // callers should use turnTimeoutMs when tuning long-running model turns.
     this.turnTimeoutMs = opts.turnTimeoutMs ?? opts.timeoutMs ?? CODEX_TURN_COMPLETION_TIMEOUT_MS;
@@ -299,8 +301,9 @@ export class CodexProvider implements AgentProvider {
       if (!state.turnId) throw new Error("codex: turn/start did not return turn.id");
       turnStartedResolve();
 
+      const turnTimeoutMs = invocation.timeoutMs ?? this.turnTimeoutMs;
       const terminal = await raceAbort(
-        timeoutPromise(turnTerminal, this.turnTimeoutMs, "codex: turn/completed was not received"),
+        timeoutPromise(turnTerminal, turnTimeoutMs, "codex: turn/completed was not received"),
       );
       state.turnInFlight = false;
       const finalText = finalizeCodexTurn(terminal, state, invocation.key);

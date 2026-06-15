@@ -17,11 +17,18 @@ import { canonicalJson } from "../hash.ts";
 import type { JournalStore } from "../journal/store.ts";
 import type { AgentProfileCatalogRow, AgentWorkspaceRow, RunStatus } from "../journal/types.ts";
 import type { RealmKernel, RunHandle } from "../kernel/realm/realm-host.ts";
-import { requireRunTarget } from "../target.ts";
 import {
-  DEFAULT_WORKFLOW_DEFINITION_TTL_MS,
-  evictWorkflowDefinitionCache,
-} from "../workflow-definitions/snapshot.ts";
+  assertValidSettingWrite,
+  canonicalSettingValueJson,
+  effectiveOperationalSettings,
+  getSettingDefinition,
+  settingViewByKey,
+  settingViews,
+  validateSettingWrite,
+} from "../settings/catalog.ts";
+import type { SettingView, SettingsDiagnostic } from "../settings/catalog.ts";
+import { requireRunTarget } from "../target.ts";
+import { evictWorkflowDefinitionCache } from "../workflow-definitions/snapshot.ts";
 import { cleanupTerminalRunWorkspaces } from "../workspace/retention.ts";
 import {
   diffWorkspace,
@@ -426,6 +433,49 @@ export class InProcessKeel implements KeelApi {
     });
   }
 
+  listSettings(): SettingView[] {
+    return settingViews(this.store.listDaemonSettingRows());
+  }
+
+  getSetting(key: string): SettingView | null {
+    return settingViewByKey(key, this.store.listDaemonSettingRows());
+  }
+
+  putSetting(req: { key: string; value: unknown; ifGeneration?: number }): SettingView {
+    assertValidSettingWrite(req.key, req.value);
+    const valueJson = canonicalSettingValueJson(req.key, req.value);
+    const row = this.store.putDaemonSettingRow({
+      key: req.key,
+      valueJson,
+      nowMs: (this.opts.clock ?? Date.now)(),
+      ...(req.ifGeneration !== undefined ? { ifGeneration: req.ifGeneration } : {}),
+    });
+    const view = settingViewByKey(row.key, [row]);
+    if (!view) throw new Error(`setting "${row.key}" was not saved`);
+    return view;
+  }
+
+  deleteSetting(req: { key: string; ifGeneration?: number }): { key: string; deleted: boolean } {
+    const definition = getSettingDefinition(req.key);
+    if (!definition) throw new Error(`unknown setting "${req.key}"`);
+    if (definition.readOnly) throw new Error(`setting "${req.key}" is read-only`);
+    return {
+      key: req.key,
+      deleted: this.store.deleteDaemonSettingRow(req.key, req.ifGeneration),
+    };
+  }
+
+  checkSetting(req: { key: string; value: unknown }): {
+    ok: boolean;
+    diagnostics: SettingsDiagnostic[];
+  } {
+    const diagnostics = validateSettingWrite(req.key, req.value);
+    return {
+      ok: !diagnostics.some((diagnostic) => diagnostic.level === "error"),
+      diagnostics,
+    };
+  }
+
   async waitForRun(runId: string): Promise<RunOutcome> {
     const pending = this.running.get(runId);
     if (pending) {
@@ -458,9 +508,10 @@ export class InProcessKeel implements KeelApi {
     definitionCacheEntriesRemoved: number;
   }> {
     const nowMs = Date.now();
+    const operational = effectiveOperationalSettings(this.store.listDaemonSettingRows());
     const workflowDefinitionsRemoved = this.store.pruneWorkflowDefinitions({
       nowMs,
-      ttlMs: opts.ttlMs ?? DEFAULT_WORKFLOW_DEFINITION_TTL_MS,
+      ttlMs: opts.ttlMs ?? operational.workflowDefinitionGcTtlMs,
     });
     const definitionCacheEntriesRemoved = evictWorkflowDefinitionCache(this.store, {
       nowMs,

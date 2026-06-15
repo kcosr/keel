@@ -11,6 +11,7 @@ import type {
   AgentProfileView,
   PersistentAgentProfileConfig,
 } from "../agents/profiles.ts";
+import type { SettingClass, SettingView, SettingsDiagnostic } from "../settings/catalog.ts";
 import type { Blockage, RunProjection, RunReport, RunSummary } from "./projection.ts";
 
 export type WorkflowProvenance = { kind: "stdin" } | { kind: "clientPath"; path: string };
@@ -137,6 +138,18 @@ export interface CheckAgentProfileRequest {
 }
 
 export type { AgentProfileCheckResult, AgentProfileSource, AgentProfileView };
+export type { SettingClass, SettingView, SettingsDiagnostic };
+
+export interface PutSettingRequest {
+  key: string;
+  value: unknown;
+  ifGeneration?: number;
+}
+
+export interface DeleteSettingRequest {
+  key: string;
+  ifGeneration?: number;
+}
 
 export interface KeelApi {
   /** Start a run; returns its id immediately (the run executes in the background). */
@@ -205,6 +218,21 @@ export interface KeelApi {
   checkAgentProfile(
     req: CheckAgentProfileRequest,
   ): Promise<AgentProfileCheckResult> | AgentProfileCheckResult;
+  listSettings(): Promise<SettingView[]> | SettingView[];
+  getSetting(key: string): Promise<SettingView | null> | SettingView | null;
+  putSetting(req: PutSettingRequest): Promise<SettingView> | SettingView;
+  deleteSetting(
+    req: DeleteSettingRequest,
+  ): Promise<{ key: string; deleted: boolean }> | { key: string; deleted: boolean };
+  checkSetting(req: {
+    key: string;
+    value: unknown;
+  }):
+    | Promise<{ ok: boolean; diagnostics: SettingsDiagnostic[] }>
+    | {
+        ok: boolean;
+        diagnostics: SettingsDiagnostic[];
+      };
   /** Await a run's next terminal or parked status and return its outcome. */
   waitForRun(runId: string): Promise<RunOutcome>;
   /** Return a run's terminal output without subscribing to events. */

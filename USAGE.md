@@ -669,7 +669,7 @@ const finding = await ctx.agent({
 | `key` | Required stable key for this agent effect. |
 | `prompt` | Prompt text sent to the provider. |
 | `profile?` | Named preset resolved before identity/versioning. Programmatic only on the bundled daemon. |
-| `provider?` | `"pi"`, `"claude"`, or `"mock"`. |
+| `provider?` | `"pi"`, `"claude"`, `"codex"`, or `"mock"`. |
 | `providerConfig?` | Provider-keyed JSON object map for provider-owned execution settings. Only the selected provider's entry affects identity and invocation. |
 | `schema?` | Structured output schema. If present, replies are validated. |
 | `model?` | Provider model name. |
@@ -721,6 +721,70 @@ and not a workspace selector. Keep raw secrets in named `secrets`, and choose
 cwd/workspace behavior with `ctx.workspace`, `ctx.withWorkspace`, and
 `workspace` handles.
 
+### Codex Provider
+
+`provider: "codex"` drives the Codex app-server JSON-RPC protocol. Codex is not
+the default provider, and the first cut deliberately supports only unrestricted
+Codex/yolo operation. A default/read-only Codex call fails with guidance to set
+`toolPolicy: "unrestricted"`:
+
+```ts
+await ctx.agent({
+  key: "edit",
+  provider: "codex",
+  toolPolicy: "unrestricted",
+  providerConfig: {
+    codex: { transport: { type: "uds", path: "/tmp/codex.sock" } },
+  },
+  prompt: "Make the requested change.",
+});
+```
+
+Transport config is selected only through `providerConfig.codex.transport` (or a
+profile that supplies it):
+
+```ts
+{ codex: { transport: { type: "stdio" } } }
+{ codex: { transport: { type: "ws", url: "ws://127.0.0.1:1455/rpc" } } }
+{ codex: { transport: { type: "uds", path: "/tmp/codex.sock" } } }
+```
+
+If `providerConfig.codex` is omitted, the runtime default is stdio and Keel
+spawns `${KEEL_CODEX_BIN:-codex} app-server` in the resolved workspace cwd.
+Omitted config and explicit `{ codex: { transport: { type: "stdio" } } }` are
+intentional distinct replay identities; choose one style and keep it stable.
+`ws.url` must be an absolute `ws://` or `wss://` URL. `uds.path` must be an
+absolute socket path and uses WebSocket over the Unix stream with request URL
+`ws://localhost/rpc`.
+
+Remote `ws`/`uds` app-servers are assumed to share the daemon filesystem
+namespace. Keel sends the resolved workspace cwd to Codex but first-cut
+unrestricted Codex is not sandboxed to that cwd and can access anything its host
+runtime can access. Secret env injection is supported only for stdio; remote
+transports reject non-empty `secrets` rather than silently dropping them.
+
+Codex app-server thread ids are captured write-ahead as session tokens and are
+returned from provider calls so schema retries and `ctx.agentSession` turns reuse
+the same thread. On resume, Keel validates the thread id and Codex-reported cwd
+before sending new input. If Codex reports the thread as active, Keel refuses to
+start a duplicate turn; adopting active remote turns is future work.
+
+`KEEL_CODEX_BIN` changes only the local stdio binary path. `KEEL_CODEX_RAW_LOG`
+enables JSONL protocol diagnostics for transport descriptors, frames, stderr,
+and close events; the log can contain prompts, outputs, cwd paths, and secret
+values.
+
+Common Codex errors include malformed `providerConfig.codex.transport...`,
+missing `toolPolicy: "unrestricted"`, unsupported narrower capabilities or
+allow/deny tool edits, remote transport plus secrets, missing/unusable cwd,
+JSON-RPC method errors, resumed cwd/token mismatch, active remote turns, and
+turn failure/interruption.
+
+A live smoke should be gated with `KEEL_LIVE=1`: point `providerConfig.codex` at
+a real app-server (or use stdio), request a tiny structured JSON response with
+`toolPolicy: "unrestricted"`, assert a session token, and verify a completed run
+replays without a second provider invocation.
+
 ### Structured Output
 
 With `schema`, Keel injects the JSON Schema into the prompt and validates the
@@ -748,9 +812,9 @@ later resume replays `null` rather than calling the agent again.
 
 ### Session Resume
 
-Pi and Claude session tokens are captured write-ahead. If the daemon dies during
-an agent call, resume reconnects to the same provider session when possible
-rather than starting a fresh call.
+Pi, Claude, and Codex session tokens are captured write-ahead. If the daemon dies
+during an agent call, resume reconnects to the same provider session when
+possible rather than starting a fresh call.
 
 ## Agent Sessions
 
@@ -789,7 +853,7 @@ reusing a turn key with a changed prompt/schema/options fails the run instead of
 starting a fresh backend session.
 
 Session participants require providers that support stable backend sessions
-(`pi`/Codex and `claude`). A later turn must resume from the latest completed
+(`pi`, `codex`, and `claude`). A later turn must resume from the latest completed
 session token; if the token is missing or the provider cannot resume, the turn
 fails. A session uses its explicit/scoped/default workspace across all turns and
 retries; changing the workspace for an existing participant changes identity and
@@ -831,7 +895,7 @@ denyTools: ["LS"];
 ```
 
 Capability enforcement is mapped to provider-specific tool flags in one place,
-including Pi and Claude mappings.
+including Pi, Claude, and first-cut unrestricted-only Codex mappings.
 
 Filesystem capability levels:
 

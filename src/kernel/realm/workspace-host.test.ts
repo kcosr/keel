@@ -6,6 +6,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { CodexProvider } from "../../agents/codex.ts";
 import { SecretStore } from "../../agents/secrets.ts";
 import type {
   AgentHooks,
@@ -229,6 +230,67 @@ describe("trusted-local agent isolation controls", () => {
     await kernel.rerun<string>("r", { input: { selected: "b", unused: "two" } });
     expect(calls).toHaveLength(2);
     expect(calls.map((c) => c.providerConfig)).toEqual([{ selected: "a" }, { selected: "b" }]);
+  });
+
+  test("codex omitted providerConfig and explicit stdio are distinct identities", async () => {
+    const store = JournalStore.memory();
+    const calls: AgentInvocation[] = [];
+    const provider: AgentProvider = {
+      name: "codex",
+      async generate(inv: AgentInvocation): Promise<AgentResult> {
+        calls.push(inv);
+        return { text: "ok", transcript: [] };
+      },
+    };
+    const workflow = {
+      source: `
+        import { type Ctx } from "@kcosr/keel";
+        export default async function wf(ctx: Ctx, input: { explicit: boolean }): Promise<string> {
+          return await ctx.agent({
+            key: "edit",
+            provider: "codex",
+            toolPolicy: "unrestricted",
+            prompt: "x",
+            ...(input.explicit ? { providerConfig: { codex: { transport: { type: "stdio" } } } } : {}),
+          });
+        }
+      `,
+      name: "codex-provider-config-identity",
+    };
+    const kernel = new RealmKernel(store, {
+      idgen: () => "r",
+      agents: new AgentProviderRegistry().register(provider),
+    });
+    await kernel.run<string>(workflow, { explicit: false }, { target: process.cwd() });
+    await kernel.rerun<string>("r", { input: { explicit: false } });
+    expect(calls).toHaveLength(1);
+    await kernel.rerun<string>("r", { input: { explicit: true } });
+    expect(calls).toHaveLength(2);
+    expect(calls.map((c) => c.providerConfig)).toEqual([
+      undefined,
+      { transport: { type: "stdio" } },
+    ]);
+  });
+
+  test("codex default read-only policy fails before falling back to daemon cwd", async () => {
+    const store = JournalStore.memory();
+    const workflow = {
+      source: `
+        import { type Ctx } from "@kcosr/keel";
+        export default async function wf(ctx: Ctx): Promise<string> {
+          return await ctx.agent({ key: "edit", provider: "codex", prompt: "x" });
+        }
+      `,
+      name: "codex-default-rejects",
+    };
+    const kernel = new RealmKernel(store, {
+      idgen: () => "r",
+      agents: new AgentProviderRegistry().register(new CodexProvider({ bin: "missing-codex" })),
+    });
+    await expect(kernel.run<string>(workflow, null, { target: process.cwd() })).rejects.toThrow(
+      /toolPolicy: "unrestricted"/,
+    );
+    expect(store.getRun("r")?.status).toBe("failed");
   });
 
   test("secrets with provider-native tool additions run without workspace isolation and receive env", async () => {

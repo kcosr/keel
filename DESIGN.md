@@ -746,10 +746,11 @@ apply capabilities, consume only the selected provider's immutable
 capture transcript + session token, return the result for journaling. Adding a provider =
 implementing this interface.
 
-### 10.2 Pi and Claude providers
+### 10.2 Pi, Claude, and Codex providers
 
 Keel supports daemon-owned provider subprocesses behind one adapter boundary.
-The bundled CLI wires Pi, Claude, and the deterministic mock provider.
+The bundled CLI wires Pi, Claude, and Codex; tests also use the deterministic
+mock provider.
 
 **The old Pi mechanism is superseded.** Current Pi provider behavior has these
 load-bearing properties:
@@ -785,6 +786,14 @@ event distinctly" ordering requirement disappears.
 **The integration target is the Pi CLI itself** — Keel's daemon spawns and owns
 one `pi --mode rpc` subprocess per agent call. Pi mechanics are captured in the
 provider implementation and tests, not in vendored reference artifacts.
+
+**Codex targets app-server JSON-RPC**, not a one-shot CLI JSONL mode. The Codex
+adapter can own a local stdio `codex app-server` subprocess or connect to a
+remote WebSocket / WebSocket-over-UDS app-server selected by
+`providerConfig.codex.transport`. Codex thread ids are the session tokens. The
+first-cut capability mapping is intentionally fail-closed: only explicit
+unrestricted tool access maps to Codex `danger-full-access`; narrower sandbox,
+network-off, and provider-native allow/deny shapes are future work.
 
 ### 10.3 Structured output
 
@@ -880,9 +889,10 @@ consumed for write-ahead state only and are not persisted in the durable event
 stream.
 
 **Vendor resume matrix (one canonical statement, L19):** Pi = designed-in per
-the sequence above; Claude = supported when the provider exposes resume hooks;
-all other vendors = in-flight calls re-execute fresh on crash. The
-asymmetry is accepted — the loss is bounded at one in-flight call.
+the sequence above; Codex = app-server thread id continuity with cwd validation
+and active-turn duplicate prevention; Claude = supported when the provider
+exposes resume hooks; all other vendors = in-flight calls re-execute fresh on
+crash. The asymmetry is accepted — the loss is bounded at one in-flight call.
 
 ### 10.6 Deterministic mock provider (core test asset)
 

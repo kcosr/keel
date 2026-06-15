@@ -2,6 +2,9 @@
 // mapped to per-vendor enforcement in one place. The OS-sandbox backstop (§11.1)
 // is a later hardening; this is the vendor-flag layer.
 
+import { existsSync, statSync } from "node:fs";
+import { isAbsolute } from "node:path";
+
 export interface Capabilities {
   /** none = no fs tools; read = read/grep/ls; workspace-write = + edit/write. */
   fs: "none" | "read" | "workspace-write";
@@ -135,6 +138,60 @@ export function resolvedToolPolicyToClaudeArgs(resolved: ResolvedToolPolicy): st
   }
   if (tools.size === 0) return ["--allowed-tools", ""];
   return ["--allowed-tools", ...tools];
+}
+
+export interface CodexCapabilityParams {
+  thread: {
+    approvalPolicy: "never";
+    sandbox: "danger-full-access";
+  };
+  turn: {
+    approvalPolicy: "never";
+    sandboxPolicy: { type: "dangerFullAccess" };
+  };
+}
+
+export function resolvedToolPolicyToCodexParams(
+  resolved: ResolvedToolPolicy,
+  cwd: string | undefined,
+): CodexCapabilityParams {
+  rejectUnrestrictedAdjustments(resolved);
+  if (resolved.allowTools.length > 0 || resolved.denyTools.length > 0) {
+    throw new Error(
+      'codex first-cut provider does not support allowTools or denyTools; use toolPolicy: "unrestricted" with no provider-native tool edits',
+    );
+  }
+  const caps = resolved.capabilities;
+  const reasons: string[] = [];
+  if (caps.fs !== "workspace-write") reasons.push(`fs=${caps.fs}`);
+  if (!caps.shell) reasons.push("shell=false");
+  if (caps.network === "none") {
+    reasons.push("network=none");
+  } else if (caps.network.length !== 1 || caps.network[0] !== "*") {
+    reasons.push(`network=${JSON.stringify(caps.network)}`);
+  }
+  if (!cwd) reasons.push("cwd is missing");
+  else if (!isAbsolute(cwd)) reasons.push(`cwd is not absolute: ${cwd}`);
+  else if (!existingDirectory(cwd)) reasons.push(`cwd is not an existing directory: ${cwd}`);
+
+  if (reasons.length > 0) {
+    throw new Error(
+      `codex first-cut provider supports only explicit unrestricted tool access; use toolPolicy: "unrestricted" with an existing absolute workspace cwd (${reasons.join(", ")})`,
+    );
+  }
+
+  return {
+    thread: { approvalPolicy: "never", sandbox: "danger-full-access" },
+    turn: { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } },
+  };
+}
+
+function existingDirectory(path: string): boolean {
+  try {
+    return existsSync(path) && statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 function rejectUnrestrictedAdjustments(

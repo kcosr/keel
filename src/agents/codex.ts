@@ -80,6 +80,8 @@ export class CodexProvider implements AgentProvider {
   constructor(opts: CodexProviderOptions = {}) {
     this.bin = opts.bin ?? process.env[CODEX_BIN_ENV] ?? "codex";
     this.rpcTimeoutMs = opts.timeoutMs ?? CODEX_RPC_RESPONSE_TIMEOUT_MS;
+    // Keep opts.timeoutMs as a legacy/test single-knob override, but production
+    // callers should use turnTimeoutMs when tuning long-running model turns.
     this.turnTimeoutMs = opts.turnTimeoutMs ?? opts.timeoutMs ?? CODEX_TURN_COMPLETION_TIMEOUT_MS;
     this.connectTimeoutMs = opts.connectTimeoutMs ?? CODEX_CONNECT_TIMEOUT_MS;
     this.rawLogPath = opts.rawLogPath ?? process.env[CODEX_RAW_LOG_ENV];
@@ -155,21 +157,27 @@ export class CodexProvider implements AgentProvider {
       latestScopedError: null,
       turnInFlight: false,
       aborting: false,
+      ignoredTurnIds: new Set(),
     };
     let turnStartedResolve: () => void = () => {};
     let turnStartedReject: (err: Error) => void = () => {};
     let turnTerminalResolve: (terminal: CodexTurnTerminal) => void = () => {};
     let turnTerminalReject: (err: Error) => void = () => {};
-    const turnStarted = new Promise<void>((resolve, reject) => {
-      turnStartedResolve = resolve;
-      turnStartedReject = reject;
-    });
-    const turnTerminal = new Promise<CodexTurnTerminal>((resolve, reject) => {
-      turnTerminalResolve = resolve;
-      turnTerminalReject = reject;
-    });
-    turnStarted.catch(() => {});
-    turnTerminal.catch(() => {});
+    let turnStarted!: Promise<void>;
+    let turnTerminal!: Promise<CodexTurnTerminal>;
+    const resetTurnWaiters = (): void => {
+      turnStarted = new Promise<void>((resolve, reject) => {
+        turnStartedResolve = resolve;
+        turnStartedReject = reject;
+      });
+      turnTerminal = new Promise<CodexTurnTerminal>((resolve, reject) => {
+        turnTerminalResolve = resolve;
+        turnTerminalReject = reject;
+      });
+      turnStarted.catch(() => {});
+      turnTerminal.catch(() => {});
+    };
+    resetTurnWaiters();
 
     const emit = (event: TraceEvent): void => {
       transcript.push(event);
@@ -240,7 +248,9 @@ export class CodexProvider implements AgentProvider {
       await raceAbort(client.notify("initialized"));
 
       if (invocation.resumeToken) {
-        await raceAbort(resumeThread(client, invocation, codexCaps.thread, state));
+        await raceAbort(
+          resumeThread(client, invocation, codexCaps.thread, state, resetTurnWaiters),
+        );
         noteSessionToken(invocation.resumeToken);
       } else {
         const startResult = await raceAbort(
@@ -926,6 +936,7 @@ interface CodexCallState {
   latestScopedError: string | null;
   turnInFlight: boolean;
   aborting: boolean;
+  ignoredTurnIds: Set<string>;
 }
 
 interface CodexTurnTerminal {
@@ -950,6 +961,7 @@ function handleCodexNotification(
       if (!matchesCurrentThread(params, state)) break;
       const turnId = extractTurnId(params);
       if (!turnId) break;
+      if (state.ignoredTurnIds.has(turnId)) break;
       if (state.turnId && state.turnId !== turnId) {
         throw new Error(
           `codex turn/started notification id mismatch: expected ${state.turnId}, got ${turnId}`,
@@ -1019,6 +1031,7 @@ async function resumeThread(
   invocation: AgentInvocation,
   threadParams: Record<string, unknown>,
   state: CodexCallState,
+  resetTurnWaiters: () => void,
 ): Promise<void> {
   const token = invocation.resumeToken;
   if (!token) throw new Error("codex resume requires a thread id");
@@ -1045,10 +1058,15 @@ async function resumeThread(
     }
     state.turnId = activeTurnId;
     state.turnInFlight = true;
-    const terminalStatus = await interruptRemoteTurn(client, token, activeTurnId);
-    state.turnInFlight = false;
-    state.turnId = undefined;
-    state.terminal = null;
+    state.ignoredTurnIds.add(activeTurnId);
+    let terminalStatus: string;
+    try {
+      terminalStatus = await interruptRemoteTurn(client, token, activeTurnId);
+    } finally {
+      state.turnInFlight = false;
+      resetPerTurnState(state, activeTurnId);
+      resetTurnWaiters();
+    }
     if (terminalStatus !== "interrupted") {
       throw new Error(
         `codex resumed thread active turn ${activeTurnId} reached ${terminalStatus} before Keel could confirm interruption; manual reconciliation is required`,
@@ -1085,6 +1103,17 @@ async function resumeThread(
       `codex thread/resume returned different thread id: expected ${token}, got ${resumedThreadId}`,
     );
   }
+}
+
+function resetPerTurnState(state: CodexCallState, ignoredTurnId?: string): void {
+  if (ignoredTurnId) state.ignoredTurnIds.add(ignoredTurnId);
+  state.turnId = undefined;
+  state.streamedText = "";
+  state.completedTexts = [];
+  state.latestStreamItemId = undefined;
+  state.latestCompletedItemId = undefined;
+  state.latestScopedError = null;
+  state.terminal = null;
 }
 
 async function discoverActiveTurnId(
@@ -1328,6 +1357,7 @@ function matchesCurrentThread(params: unknown, state: CodexCallState): boolean {
 function matchesCurrentTurn(params: unknown, state: CodexCallState): boolean {
   if (!matchesCurrentThread(params, state)) return false;
   const scopedTurn = extractTurnId(params);
+  if (scopedTurn && state.ignoredTurnIds.has(scopedTurn)) return false;
   return !scopedTurn || !state.turnId || scopedTurn === state.turnId;
 }
 
@@ -1335,6 +1365,7 @@ function errorAppliesToCurrentTurn(params: unknown, state: CodexCallState): bool
   const scopedThread = extractThreadId(params);
   if (scopedThread && state.threadId && scopedThread !== state.threadId) return false;
   const scopedTurn = extractTurnId(params);
+  if (scopedTurn && state.ignoredTurnIds.has(scopedTurn)) return false;
   if (scopedTurn && state.turnId && scopedTurn !== state.turnId) return false;
   return true;
 }

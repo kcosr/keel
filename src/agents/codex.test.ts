@@ -477,6 +477,80 @@ describe("Codex JSON-RPC flow", () => {
     ]);
   });
 
+  test("stale active-turn completion during resume does not poison the next turn", async () => {
+    let turnListCalls = 0;
+    const transport = new ScriptedTransport((message, t) => {
+      switch (message.method) {
+        case "initialize":
+          t.respond(message.id, {});
+          break;
+        case "initialized":
+          break;
+        case "thread/read":
+          t.respond(message.id, {
+            thread: { id: "thread-1", cwd: process.cwd(), status: { type: "active" } },
+          });
+          break;
+        case "thread/turns/list":
+          turnListCalls++;
+          t.respond(message.id, {
+            data: [
+              {
+                id: "stale-turn",
+                status: turnListCalls === 1 ? "inProgress" : "interrupted",
+              },
+            ],
+          });
+          break;
+        case "turn/interrupt":
+          expect(message.params).toEqual({ threadId: "thread-1", turnId: "stale-turn" });
+          t.respond(message.id, {});
+          t.notify("item/agentMessage/delta", {
+            threadId: "thread-1",
+            turnId: "stale-turn",
+            delta: "stale text",
+          });
+          t.notify("turn/completed", {
+            threadId: "thread-1",
+            turnId: "stale-turn",
+            status: "interrupted",
+          });
+          break;
+        case "thread/resume":
+          t.respond(message.id, { thread: { id: "thread-1" } });
+          setTimeout(() => {
+            t.notify("turn/completed", {
+              threadId: "thread-1",
+              turnId: "stale-turn",
+              status: "interrupted",
+            });
+          }, 0);
+          break;
+        case "turn/start":
+          t.respond(message.id, { turn: { id: "turn-2" } });
+          t.notify("item/agentMessage/delta", {
+            threadId: "thread-1",
+            turnId: "turn-2",
+            delta: "real text",
+          });
+          t.notify("turn/completed", {
+            threadId: "thread-1",
+            turnId: "turn-2",
+            status: "completed",
+          });
+          break;
+        default:
+          throw new Error(`unexpected ${String(message.method)}`);
+      }
+    });
+
+    const { result, events } = await runWithTransport(transport, { resumeToken: "thread-1" });
+    expect(result.text).toBe("real text");
+    expect(events.filter((event) => event.type === "text").map((event) => event.data)).toEqual([
+      "real text",
+    ]);
+  });
+
   test("active resumed threads fail closed when no active turn id is discoverable", async () => {
     const transport = new ScriptedTransport((message, t) => {
       switch (message.method) {

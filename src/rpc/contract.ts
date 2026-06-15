@@ -53,16 +53,29 @@ export interface RunLaunchResult {
 export interface RunWorkspaceView {
   runId: string;
   workspaceId: string;
-  mode: "direct" | "worktree";
+  mode: "direct" | "worktree" | "copy" | "clone";
   ownerKind: "workflow" | "agent" | "agent_session";
   key: string;
   lastAttempt: number | null;
   retentionPolicy: "remove" | "retain-on-failure" | "retain" | null;
   workspacePath: string;
-  sourcePath: string;
+  sourceKind:
+    | "direct-path"
+    | "local-copy"
+    | "worktree-git"
+    | "local-clone-git"
+    | "remote-git"
+    | null;
+  sourcePath: string | null;
+  sourceUri: string | null;
+  sourceBare: boolean | null;
+  sourceMergeEligible: boolean;
   suppliedPath: string | null;
   sourceRef: string | null;
+  resolvedRef: string | null;
+  checkoutBranch: string | null;
   baseCommit: string | null;
+  copyBaselinePath: string | null;
   owned: boolean;
   status: string;
   failureSeen: boolean;
@@ -75,6 +88,8 @@ export interface RunWorkspaceView {
   lastDiffEventSeq: number | null;
   lastErrorEventSeq: number | null;
   cleanupError: unknown | null;
+  mergeSupported: boolean;
+  diffSupported: boolean;
   createdAtMs: number;
   updatedAtMs: number;
   mergedAtMs: number | null;
@@ -94,6 +109,20 @@ export interface RunWorkspaceDiff {
   };
   pathLimit: number;
   contentDiff: string;
+  mode: "worktree" | "copy" | "clone";
+  diffKind: "git-patch" | "recursive-copy";
+  baseLabel: string;
+  workspaceLabel: string;
+  fileChanges: Array<{
+    path: string;
+    status: "added" | "modified" | "deleted" | "type_changed";
+    oldMode?: string | null;
+    newMode?: string | null;
+    oldSymlinkTarget?: string | null;
+    newSymlinkTarget?: string | null;
+    binary?: boolean;
+    textDiffIncluded?: boolean;
+  }>;
 }
 
 export interface WorkspaceGcResult {

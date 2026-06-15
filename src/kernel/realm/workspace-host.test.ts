@@ -3,7 +3,7 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CodexProvider } from "../../agents/codex.ts";
@@ -633,6 +633,101 @@ describe("durable diff + worktree cleanup", () => {
       retentionPolicy: "retain",
     });
     expect(existsSync(workspace?.workspacePath ?? "")).toBe(true);
+  });
+
+  test("copy workspace snapshots dirty files, excludes git metadata, and uses managed cwd", async () => {
+    const store = JournalStore.memory();
+    const target = mkdtempSync(join(tmpdir(), "keel-copy-target-"));
+    mkdirSync(join(target, ".git"), { recursive: true });
+    writeFileSync(join(target, ".git", "config"), "secret git metadata\n");
+    writeFileSync(join(target, "dirty.txt"), "dirty\n");
+    let cwd: string | undefined;
+    const provider: AgentProvider = {
+      name: "writer",
+      async generate(inv: AgentInvocation): Promise<AgentResult> {
+        cwd = inv.cwd;
+        expect(readFileSync(join(inv.cwd as string, "dirty.txt"), "utf8")).toBe("dirty\n");
+        expect(existsSync(join(inv.cwd as string, ".git"))).toBe(false);
+        writeFileSync(join(inv.cwd as string, "agent.txt"), "agent\n");
+        return { text: "copied", transcript: [] };
+      },
+    };
+    const workflow = {
+      source: `
+        import { type Ctx } from "@kcosr/keel";
+        export default async function wf(ctx: Ctx): Promise<string> {
+          const workspace = await ctx.workspace({ key: "snapshot", mode: "copy", retention: "retain" });
+          return await ctx.agent({ key: "edit", provider: "writer", prompt: "edit", workspace, capabilities: { fs: "workspace-write" } });
+        }
+      `,
+      name: "copy-workspace",
+    };
+    try {
+      const kernel = new RealmKernel(store, {
+        idgen: () => "r-copy",
+        agents: new AgentProviderRegistry().register(provider),
+        workspaceStore: mkdtempSync(join(tmpdir(), "keel-workspaces-")),
+      });
+      const handle = await kernel.run<string>(workflow, null, { target });
+      expect(handle.status).toBe("finished");
+      const row = store.getAgentWorkspace("r-copy", "snapshot");
+      expect(row).toMatchObject({
+        mode: "copy",
+        sourceKind: "local-copy",
+        sourcePath: target,
+        sourceMergeEligible: true,
+        status: "pending_review",
+      });
+      expect(cwd).toBe(row?.workspacePath);
+      expect(row?.copyBaselinePath).toBeTruthy();
+      expect(existsSync(row?.copyBaselinePath ?? "")).toBe(true);
+      expect(existsSync(join(target, "agent.txt"))).toBe(false);
+    } finally {
+      rmSync(target, { recursive: true, force: true });
+    }
+  });
+
+  test("clone workspace uses explicit local repo and excludes dirty source files", async () => {
+    const store = JournalStore.memory();
+    writeFileSync(join(repo, "dirty-source.txt"), "not committed\n");
+    let cwd: string | undefined;
+    const provider: AgentProvider = {
+      name: "writer",
+      async generate(inv: AgentInvocation): Promise<AgentResult> {
+        cwd = inv.cwd;
+        expect(readFileSync(join(inv.cwd as string, "seed.txt"), "utf8")).toBe("seed\n");
+        expect(existsSync(join(inv.cwd as string, "dirty-source.txt"))).toBe(false);
+        writeFileSync(join(inv.cwd as string, "clone-agent.txt"), "agent\n");
+        return { text: "cloned", transcript: [] };
+      },
+    };
+    const workflow = {
+      source: `
+        import { type Ctx } from "@kcosr/keel";
+        export default async function wf(ctx: Ctx): Promise<string> {
+          const workspace = await ctx.workspace({ key: "clone-local", mode: "clone", repo: ctx.run.target, retention: "retain" });
+          return await ctx.agent({ key: "edit", provider: "writer", prompt: "edit", workspace, capabilities: { fs: "workspace-write" } });
+        }
+      `,
+      name: "clone-workspace",
+    };
+    const kernel = new RealmKernel(store, {
+      idgen: () => "r-clone",
+      agents: new AgentProviderRegistry().register(provider),
+      workspaceStore: mkdtempSync(join(tmpdir(), "keel-workspaces-")),
+    });
+    const handle = await kernel.run<string>(workflow, null, { target: repo });
+    expect(handle.status).toBe("finished");
+    const row = store.getAgentWorkspace("r-clone", "clone-local");
+    expect(row).toMatchObject({
+      mode: "clone",
+      sourceKind: "local-clone-git",
+      sourcePath: repo,
+      sourceMergeEligible: true,
+      status: "pending_review",
+    });
+    expect(row?.baseCommit).toMatch(/^[0-9a-f]{40}$/);
+    expect(cwd).toBe(row?.workspacePath);
   });
 
   test("retention retain-on-failure keeps a one-shot workspace after fail-then-retry-success", async () => {

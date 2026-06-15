@@ -14,14 +14,17 @@
 // → v13 run targets and retained agent session workspaces
 // → v14 unified agent workspace retention policy table
 // → v15 workflow-scoped direct/worktree workspace rows
-// → v16 persistent agent profile catalog and run profile snapshots.
+// → v16 persistent agent profile catalog and run profile snapshots
+// → v17 managed workspace copy/clone metadata and workspace identities.
 
 import type { Database } from "bun:sqlite";
 import { parse } from "acorn";
 import { canonicalJson, sha256Hex } from "../hash.ts";
+import { workspaceIdentity } from "../workspace/identity.ts";
 
 const DEFINITION_PREFIX = "wf_sha256_";
 const WORKFLOW_SDK_ABI_V12 = 1;
+const WORKFLOW_SDK_ABI_V17 = 6;
 const tsTranspiler = new Bun.Transpiler({ loader: "tsx" });
 
 /** True if `table` already has `column` (so we don't re-add it). */
@@ -322,9 +325,135 @@ export function applyMigration(db: Database, fromVersion: number): void {
     case 15: // → v16: persistent agent profile catalog and frozen run snapshots.
       migrateAgentProfileCatalogToV16(db);
       break;
+    case 16: // → v17: managed copy/clone workspace metadata and identity hashes.
+      migrateAgentWorkspacesToV17(db);
+      break;
     default:
       throw new Error(`no migration defined from schema version ${fromVersion}`);
   }
+}
+
+function migrateAgentWorkspacesToV17(db: Database): void {
+  if (hasColumn(db, "agent_workspaces", "workspace_identity_hash")) return;
+  const rows = db.query<RawAgentWorkspaceV16, []>("SELECT * FROM agent_workspaces").all();
+  db.exec("ALTER TABLE agent_workspaces RENAME TO agent_workspaces_old");
+  db.exec(`CREATE TABLE agent_workspaces (
+    run_id                TEXT NOT NULL,
+    workspace_id          TEXT NOT NULL,
+    mode                  TEXT NOT NULL,
+    owner_kind            TEXT NOT NULL,
+    key                   TEXT NOT NULL,
+    last_attempt          INTEGER,
+    retention_policy      TEXT,
+    workspace_path        TEXT NOT NULL,
+    source_kind           TEXT,
+    source_path           TEXT,
+    source_uri            TEXT,
+    source_bare           INTEGER,
+    source_merge_eligible INTEGER NOT NULL DEFAULT 0,
+    supplied_path         TEXT,
+    source_ref            TEXT,
+    resolved_ref          TEXT,
+    checkout_branch       TEXT,
+    base_commit           TEXT,
+    copy_baseline_path    TEXT,
+    creation_error_json   TEXT,
+    workspace_identity_json TEXT NOT NULL,
+    workspace_identity_hash TEXT NOT NULL,
+    owned                 INTEGER NOT NULL DEFAULT 0,
+    status                TEXT NOT NULL,
+    failure_seen          INTEGER NOT NULL DEFAULT 0,
+    last_turn_key         TEXT,
+    last_turn_attempt     INTEGER,
+    active_holder_kind    TEXT,
+    active_holder_key     TEXT,
+    active_holder_attempt INTEGER,
+    active_started_at_ms  INTEGER,
+    last_diff_event_seq   INTEGER,
+    last_error_event_seq  INTEGER,
+    cleanup_error_json    TEXT,
+    created_at_ms         INTEGER NOT NULL,
+    updated_at_ms         INTEGER NOT NULL,
+    merged_at_ms          INTEGER,
+    discarded_at_ms       INTEGER,
+    removed_at_ms         INTEGER,
+    PRIMARY KEY (run_id, workspace_id)
+  )`);
+  const insert = db.query(
+    `INSERT INTO agent_workspaces (
+      run_id, workspace_id, mode, owner_kind, key, last_attempt, retention_policy,
+      workspace_path, source_kind, source_path, source_uri, source_bare, source_merge_eligible,
+      supplied_path, source_ref, resolved_ref, checkout_branch, base_commit, copy_baseline_path,
+      creation_error_json, workspace_identity_json, workspace_identity_hash, owned, status,
+      failure_seen, last_turn_key, last_turn_attempt, active_holder_kind, active_holder_key,
+      active_holder_attempt, active_started_at_ms, last_diff_event_seq, last_error_event_seq,
+      cleanup_error_json, created_at_ms, updated_at_ms, merged_at_ms, discarded_at_ms, removed_at_ms
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  for (const row of rows) {
+    const mode = row.mode === "direct" ? "direct" : "worktree";
+    const sourceKind = mode === "direct" ? "direct-path" : "worktree-git";
+    const retention = mode === "direct" ? null : (row.retention_policy ?? "remove");
+    const identity =
+      mode === "direct"
+        ? workspaceIdentity({
+            key: row.key,
+            mode,
+            ownerKind: row.owner_kind as "workflow" | "agent" | "agent_session",
+            path: row.workspace_path,
+            sdkAbiVersion: WORKFLOW_SDK_ABI_V17,
+          })
+        : workspaceIdentity({
+            key: row.key,
+            mode,
+            sourcePath: row.source_path,
+            sourceRef: row.source_ref ?? "HEAD",
+            retentionPolicy: retention as "remove" | "retain-on-failure" | "retain",
+            sdkAbiVersion: WORKFLOW_SDK_ABI_V17,
+          });
+    insert.run(
+      row.run_id,
+      row.workspace_id,
+      mode,
+      row.owner_kind,
+      row.key,
+      row.last_attempt,
+      retention,
+      row.workspace_path,
+      sourceKind,
+      row.source_path,
+      null,
+      null,
+      mode === "worktree" ? 1 : 0,
+      row.supplied_path,
+      row.source_ref,
+      null,
+      null,
+      row.base_commit,
+      null,
+      null,
+      identity.json,
+      identity.hash,
+      row.owned,
+      row.status,
+      row.failure_seen,
+      row.last_turn_key,
+      row.last_turn_attempt,
+      row.active_holder_kind,
+      row.active_holder_key,
+      row.active_holder_attempt,
+      row.active_started_at_ms,
+      row.last_diff_event_seq,
+      row.last_error_event_seq,
+      row.cleanup_error_json,
+      row.created_at_ms,
+      row.updated_at_ms,
+      row.merged_at_ms,
+      row.discarded_at_ms,
+      row.removed_at_ms,
+    );
+  }
+  db.exec("DROP TABLE agent_workspaces_old");
 }
 
 function migrateAgentProfileCatalogToV16(db: Database): void {
@@ -400,6 +529,38 @@ interface RawAgentSessionWorkspaceV13 {
   updated_at_ms: number;
   merged_at_ms: number | null;
   discarded_at_ms: number | null;
+}
+
+interface RawAgentWorkspaceV16 {
+  run_id: string;
+  workspace_id: string;
+  mode: string;
+  owner_kind: string;
+  key: string;
+  last_attempt: number | null;
+  retention_policy: string | null;
+  workspace_path: string;
+  source_path: string;
+  supplied_path: string | null;
+  source_ref: string | null;
+  base_commit: string | null;
+  owned: number;
+  status: string;
+  failure_seen: number;
+  last_turn_key: string | null;
+  last_turn_attempt: number | null;
+  active_holder_kind: string | null;
+  active_holder_key: string | null;
+  active_holder_attempt: number | null;
+  active_started_at_ms: number | null;
+  last_diff_event_seq: number | null;
+  last_error_event_seq: number | null;
+  cleanup_error_json: string | null;
+  created_at_ms: number;
+  updated_at_ms: number;
+  merged_at_ms: number | null;
+  discarded_at_ms: number | null;
+  removed_at_ms: number | null;
 }
 
 interface RawWorkflowDefinitionV11 {

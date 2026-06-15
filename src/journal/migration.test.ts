@@ -195,7 +195,7 @@ function insertOldWorkflowDefinition(
 }
 
 describe("schema migrations", () => {
-  test("a v4 DB migrates forward to v16 in place and idempotently", () => {
+  test("a v4 DB migrates forward to the current schema in place and idempotently", () => {
     const dir = mkdtempSync(join(tmpdir(), "keel-mig-"));
     try {
       const path = join(dir, "old.db");
@@ -208,7 +208,7 @@ describe("schema migrations", () => {
       const ver = store.db
         .query<{ value: string }, []>("SELECT value FROM schema_meta WHERE key='schema_version'")
         .get();
-      expect(ver?.value).toBe("16");
+      expect(ver?.value).toBe("17");
 
       // new columns exist
       const jcols = store.db.query<{ name: string }, []>("PRAGMA table_info(journal)").all();
@@ -504,7 +504,7 @@ describe("schema migrations", () => {
     const ver = store.db
       .query<{ value: string }, []>("SELECT value FROM schema_meta WHERE key='schema_version'")
       .get();
-    expect(ver?.value).toBe("16");
+    expect(ver?.value).toBe("17");
     store.close();
   });
 
@@ -518,7 +518,7 @@ describe("schema migrations", () => {
       const ver = store.db
         .query<{ value: string }, []>("SELECT value FROM schema_meta WHERE key='schema_version'")
         .get();
-      expect(ver?.value).toBe("16");
+      expect(ver?.value).toBe("17");
 
       const schedule = store.db
         .query<{ enabled: number; workflow_ref: string }, []>(
@@ -760,6 +760,77 @@ describe("schema migrations", () => {
       expect(workflowDefinitionHashForV12Migration(migrated)).not.toBe(snapshot.hash);
     } finally {
       store.close();
+    }
+  });
+
+  test("v16 agent workspaces migrate source metadata and identity hashes", () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-mig-v16-workspaces-"));
+    try {
+      const path = join(dir, "old.db");
+      const db = new Database(path, { create: true });
+      db.exec(`
+        CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        INSERT INTO schema_meta (key, value) VALUES ('schema_version', '16');
+        CREATE TABLE runs (
+          run_id TEXT PRIMARY KEY, workflow_name TEXT, definition_version TEXT NOT NULL,
+          workflow_ref TEXT, run_target TEXT, status TEXT NOT NULL, parent_run_id TEXT,
+          tenant_id TEXT, input_ref TEXT, output_ref TEXT, error_json TEXT,
+          heartbeat_at_ms INTEGER, runtime_owner_id TEXT, created_at_ms INTEGER NOT NULL,
+          finished_at_ms INTEGER
+        );
+        CREATE TABLE journal (
+          run_id TEXT, stable_key TEXT, attempt INTEGER DEFAULT 1, seq INTEGER DEFAULT 0,
+          effect_type TEXT, status TEXT, version TEXT, input_hash TEXT, input_deps_json TEXT,
+          key_set_hash TEXT, result_inline TEXT, result_artifact TEXT, session_token TEXT,
+          error_json TEXT, started_at_ms INTEGER, finished_at_ms INTEGER,
+          PRIMARY KEY (run_id, stable_key, attempt)
+        );
+        CREATE TABLE agent_sessions (
+          run_id TEXT, agent_key TEXT, identity_hash TEXT, identity_json TEXT,
+          current_session_token TEXT, latest_completed_turn_key TEXT,
+          latest_completed_attempt INTEGER, active_turn_key TEXT, active_turn_attempt INTEGER,
+          created_at_ms INTEGER, updated_at_ms INTEGER, PRIMARY KEY (run_id, agent_key)
+        );
+        CREATE TABLE agent_session_turns (
+          run_id TEXT, agent_key TEXT, turn_key TEXT, attempt INTEGER, stable_key TEXT,
+          status TEXT, started_session_token TEXT, observed_session_token TEXT,
+          completed_session_token TEXT, started_at_ms INTEGER, finished_at_ms INTEGER,
+          PRIMARY KEY (run_id, agent_key, turn_key, attempt)
+        );
+        CREATE TABLE agent_workspaces (
+          run_id TEXT NOT NULL, workspace_id TEXT NOT NULL, mode TEXT NOT NULL,
+          owner_kind TEXT NOT NULL, key TEXT NOT NULL, last_attempt INTEGER,
+          retention_policy TEXT, workspace_path TEXT NOT NULL, source_path TEXT NOT NULL,
+          supplied_path TEXT, source_ref TEXT, base_commit TEXT, owned INTEGER NOT NULL DEFAULT 0,
+          status TEXT NOT NULL, failure_seen INTEGER NOT NULL DEFAULT 0, last_turn_key TEXT,
+          last_turn_attempt INTEGER, active_holder_kind TEXT, active_holder_key TEXT,
+          active_holder_attempt INTEGER, active_started_at_ms INTEGER, last_diff_event_seq INTEGER,
+          last_error_event_seq INTEGER, cleanup_error_json TEXT, created_at_ms INTEGER NOT NULL,
+          updated_at_ms INTEGER NOT NULL, merged_at_ms INTEGER, discarded_at_ms INTEGER,
+          removed_at_ms INTEGER, PRIMARY KEY (run_id, workspace_id)
+        );
+      `);
+      db.query(
+        `INSERT INTO agent_workspaces (
+          run_id, workspace_id, mode, owner_kind, key, last_attempt, retention_policy,
+          workspace_path, source_path, supplied_path, source_ref, base_commit, owned, status,
+          failure_seen, created_at_ms, updated_at_ms
+        ) VALUES ('r', 'checkout', 'worktree', 'workflow', 'checkout', NULL, 'retain',
+          '/store/r/checkout', '/repo', NULL, 'HEAD', 'abc', 1, 'pending_review', 0, 1, 1)`,
+      ).run();
+      db.close();
+
+      const store = JournalStore.open(path);
+      const row = store.getAgentWorkspace("r", "checkout");
+      expect(row).toMatchObject({
+        sourceKind: "worktree-git",
+        sourceMergeEligible: true,
+        workspaceIdentityHash: expect.any(String),
+      });
+      expect(row?.workspaceIdentityHash).not.toBe("");
+      store.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

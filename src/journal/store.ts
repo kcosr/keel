@@ -593,47 +593,89 @@ export class JournalStore {
     return (row?.c ?? 0) > 0;
   }
 
-  insertAgentWorkspace(row: AgentWorkspaceRow): void {
+  insertAgentWorkspace(
+    row: Omit<
+      AgentWorkspaceRow,
+      | "sourceKind"
+      | "sourceUri"
+      | "sourceBare"
+      | "sourceMergeEligible"
+      | "resolvedRef"
+      | "checkoutBranch"
+      | "copyBaselinePath"
+      | "creationErrorJson"
+      | "workspaceIdentityJson"
+      | "workspaceIdentityHash"
+    > &
+      Partial<
+        Pick<
+          AgentWorkspaceRow,
+          | "sourceKind"
+          | "sourceUri"
+          | "sourceBare"
+          | "sourceMergeEligible"
+          | "resolvedRef"
+          | "checkoutBranch"
+          | "copyBaselinePath"
+          | "creationErrorJson"
+          | "workspaceIdentityJson"
+          | "workspaceIdentityHash"
+        >
+      >,
+  ): void {
+    const full = withAgentWorkspaceDefaults(row);
     this.db
       .query(
         `INSERT INTO agent_workspaces (
           run_id, workspace_id, mode, owner_kind, key, last_attempt, retention_policy,
-          workspace_path, source_path, supplied_path, source_ref, base_commit, owned, status, failure_seen,
+          workspace_path, source_kind, source_path, source_uri, source_bare, source_merge_eligible,
+          supplied_path, source_ref, resolved_ref, checkout_branch, base_commit, copy_baseline_path,
+          creation_error_json, workspace_identity_json, workspace_identity_hash, owned, status, failure_seen,
           last_turn_key, last_turn_attempt, active_holder_kind, active_holder_key,
           active_holder_attempt, active_started_at_ms, last_diff_event_seq, last_error_event_seq,
           cleanup_error_json, created_at_ms, updated_at_ms, merged_at_ms, discarded_at_ms, removed_at_ms
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
-        row.runId,
-        row.workspaceId,
-        row.mode,
-        row.ownerKind,
-        row.key,
-        row.lastAttempt,
-        row.retentionPolicy,
-        row.workspacePath,
-        row.sourcePath,
-        row.suppliedPath,
-        row.sourceRef,
-        row.baseCommit,
-        row.owned ? 1 : 0,
-        row.status,
-        row.failureSeen ? 1 : 0,
-        row.lastTurnKey,
-        row.lastTurnAttempt,
-        row.activeHolderKind,
-        row.activeHolderKey,
-        row.activeHolderAttempt,
-        row.activeStartedAtMs,
-        row.lastDiffEventSeq,
-        row.lastErrorEventSeq,
-        row.cleanupErrorJson,
-        row.createdAtMs,
-        row.updatedAtMs,
-        row.mergedAtMs,
-        row.discardedAtMs,
-        row.removedAtMs,
+        full.runId,
+        full.workspaceId,
+        full.mode,
+        full.ownerKind,
+        full.key,
+        full.lastAttempt,
+        full.retentionPolicy,
+        full.workspacePath,
+        full.sourceKind,
+        full.sourcePath,
+        full.sourceUri,
+        full.sourceBare == null ? null : full.sourceBare ? 1 : 0,
+        full.sourceMergeEligible ? 1 : 0,
+        full.suppliedPath,
+        full.sourceRef,
+        full.resolvedRef,
+        full.checkoutBranch,
+        full.baseCommit,
+        full.copyBaselinePath,
+        full.creationErrorJson,
+        full.workspaceIdentityJson,
+        full.workspaceIdentityHash,
+        full.owned ? 1 : 0,
+        full.status,
+        full.failureSeen ? 1 : 0,
+        full.lastTurnKey,
+        full.lastTurnAttempt,
+        full.activeHolderKind,
+        full.activeHolderKey,
+        full.activeHolderAttempt,
+        full.activeStartedAtMs,
+        full.lastDiffEventSeq,
+        full.lastErrorEventSeq,
+        full.cleanupErrorJson,
+        full.createdAtMs,
+        full.updatedAtMs,
+        full.mergedAtMs,
+        full.discardedAtMs,
+        full.removedAtMs,
       );
   }
 
@@ -653,10 +695,20 @@ export class JournalStore {
         | "lastAttempt"
         | "retentionPolicy"
         | "workspacePath"
+        | "sourceKind"
         | "sourcePath"
+        | "sourceUri"
+        | "sourceBare"
+        | "sourceMergeEligible"
         | "suppliedPath"
         | "sourceRef"
+        | "resolvedRef"
+        | "checkoutBranch"
         | "baseCommit"
+        | "copyBaselinePath"
+        | "creationErrorJson"
+        | "workspaceIdentityJson"
+        | "workspaceIdentityHash"
         | "owned"
         | "failureSeen"
         | "lastTurnKey"
@@ -688,10 +740,27 @@ export class JournalStore {
       add("retention_policy", "retentionPolicy", patch.retentionPolicy ?? null);
     if ("workspacePath" in patch)
       add("workspace_path", "workspacePath", patch.workspacePath ?? null);
+    if ("sourceKind" in patch) add("source_kind", "sourceKind", patch.sourceKind ?? null);
     if ("sourcePath" in patch) add("source_path", "sourcePath", patch.sourcePath ?? null);
+    if ("sourceUri" in patch) add("source_uri", "sourceUri", patch.sourceUri ?? null);
+    if ("sourceBare" in patch)
+      add("source_bare", "sourceBare", patch.sourceBare == null ? null : patch.sourceBare ? 1 : 0);
+    if ("sourceMergeEligible" in patch)
+      add("source_merge_eligible", "sourceMergeEligible", patch.sourceMergeEligible ? 1 : 0);
     if ("suppliedPath" in patch) add("supplied_path", "suppliedPath", patch.suppliedPath ?? null);
     if ("sourceRef" in patch) add("source_ref", "sourceRef", patch.sourceRef ?? null);
+    if ("resolvedRef" in patch) add("resolved_ref", "resolvedRef", patch.resolvedRef ?? null);
+    if ("checkoutBranch" in patch)
+      add("checkout_branch", "checkoutBranch", patch.checkoutBranch ?? null);
     if ("baseCommit" in patch) add("base_commit", "baseCommit", patch.baseCommit ?? null);
+    if ("copyBaselinePath" in patch)
+      add("copy_baseline_path", "copyBaselinePath", patch.copyBaselinePath ?? null);
+    if ("creationErrorJson" in patch)
+      add("creation_error_json", "creationErrorJson", patch.creationErrorJson ?? null);
+    if ("workspaceIdentityJson" in patch)
+      add("workspace_identity_json", "workspaceIdentityJson", patch.workspaceIdentityJson ?? null);
+    if ("workspaceIdentityHash" in patch)
+      add("workspace_identity_hash", "workspaceIdentityHash", patch.workspaceIdentityHash ?? null);
     if ("owned" in patch) add("owned", "owned", patch.owned ? 1 : 0);
     if ("failureSeen" in patch) add("failure_seen", "failureSeen", patch.failureSeen ? 1 : 0);
     if ("lastTurnKey" in patch) add("last_turn_key", "lastTurnKey", patch.lastTurnKey ?? null);
@@ -1549,6 +1618,60 @@ function withJournalDefaults(row: NewJournalRow): JournalRow {
   };
 }
 
+function withAgentWorkspaceDefaults(
+  row: Omit<
+    AgentWorkspaceRow,
+    | "sourceKind"
+    | "sourceUri"
+    | "sourceBare"
+    | "sourceMergeEligible"
+    | "resolvedRef"
+    | "checkoutBranch"
+    | "copyBaselinePath"
+    | "creationErrorJson"
+    | "workspaceIdentityJson"
+    | "workspaceIdentityHash"
+  > &
+    Partial<
+      Pick<
+        AgentWorkspaceRow,
+        | "sourceKind"
+        | "sourceUri"
+        | "sourceBare"
+        | "sourceMergeEligible"
+        | "resolvedRef"
+        | "checkoutBranch"
+        | "copyBaselinePath"
+        | "creationErrorJson"
+        | "workspaceIdentityJson"
+        | "workspaceIdentityHash"
+      >
+    >,
+): AgentWorkspaceRow {
+  return {
+    ...row,
+    sourceKind:
+      row.sourceKind ??
+      (row.mode === "direct"
+        ? "direct-path"
+        : row.mode === "copy"
+          ? "local-copy"
+          : row.mode === "clone"
+            ? "remote-git"
+            : "worktree-git"),
+    sourceUri: row.sourceUri ?? null,
+    sourceBare: row.sourceBare ?? null,
+    sourceMergeEligible:
+      row.sourceMergeEligible ?? (row.mode === "worktree" || row.mode === "copy"),
+    resolvedRef: row.resolvedRef ?? null,
+    checkoutBranch: row.checkoutBranch ?? null,
+    copyBaselinePath: row.copyBaselinePath ?? null,
+    creationErrorJson: row.creationErrorJson ?? null,
+    workspaceIdentityJson: row.workspaceIdentityJson ?? "{}",
+    workspaceIdentityHash: row.workspaceIdentityHash ?? "legacy-test-workspace",
+  };
+}
+
 // ---- raw row shapes + mappers ---------------------------------------------
 
 interface RawRunRow {
@@ -1625,10 +1748,20 @@ interface RawAgentWorkspaceRow {
   last_attempt: number | null;
   retention_policy: string | null;
   workspace_path: string;
-  source_path: string;
+  source_kind: string | null;
+  source_path: string | null;
+  source_uri: string | null;
+  source_bare: number | null;
+  source_merge_eligible: number;
   supplied_path: string | null;
   source_ref: string | null;
+  resolved_ref: string | null;
+  checkout_branch: string | null;
   base_commit: string | null;
+  copy_baseline_path: string | null;
+  creation_error_json: string | null;
+  workspace_identity_json: string;
+  workspace_identity_hash: string;
   owned: number;
   status: string;
   failure_seen: number;
@@ -1823,10 +1956,20 @@ function mapAgentWorkspace(r: RawAgentWorkspaceRow): AgentWorkspaceRow {
     lastAttempt: r.last_attempt,
     retentionPolicy: r.retention_policy as AgentWorkspaceRow["retentionPolicy"],
     workspacePath: r.workspace_path,
+    sourceKind: r.source_kind as AgentWorkspaceRow["sourceKind"],
     sourcePath: r.source_path,
+    sourceUri: r.source_uri,
+    sourceBare: r.source_bare == null ? null : r.source_bare !== 0,
+    sourceMergeEligible: r.source_merge_eligible !== 0,
     suppliedPath: r.supplied_path,
     sourceRef: r.source_ref,
+    resolvedRef: r.resolved_ref,
+    checkoutBranch: r.checkout_branch,
     baseCommit: r.base_commit,
+    copyBaselinePath: r.copy_baseline_path,
+    creationErrorJson: r.creation_error_json,
+    workspaceIdentityJson: r.workspace_identity_json,
+    workspaceIdentityHash: r.workspace_identity_hash,
     owned: r.owned !== 0,
     status: r.status as AgentWorkspaceStatus,
     failureSeen: r.failure_seen !== 0,
@@ -1852,7 +1995,7 @@ function sessionWorkspaceView(row: AgentWorkspaceRow): AgentSessionWorkspaceRow 
     runId: row.runId,
     agentKey: row.key,
     workspacePath: row.workspacePath,
-    sourcePath: row.sourcePath,
+    sourcePath: row.sourcePath ?? row.workspacePath,
     baseCommit: row.baseCommit,
     status: row.status,
     lastTurnKey: row.lastTurnKey,
@@ -1876,10 +2019,20 @@ function agentWorkspaceFromSession(row: AgentSessionWorkspaceRow): AgentWorkspac
     lastAttempt: null,
     retentionPolicy: "retain",
     workspacePath: row.workspacePath,
+    sourceKind: "worktree-git",
     sourcePath: row.sourcePath,
+    sourceUri: null,
+    sourceBare: null,
+    sourceMergeEligible: true,
     suppliedPath: null,
     sourceRef: "HEAD",
+    resolvedRef: null,
+    checkoutBranch: null,
     baseCommit: row.baseCommit,
+    copyBaselinePath: null,
+    creationErrorJson: null,
+    workspaceIdentityJson: "{}",
+    workspaceIdentityHash: "legacy-session-workspace",
     owned: true,
     status: row.status,
     failureSeen: false,

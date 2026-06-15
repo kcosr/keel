@@ -100,7 +100,14 @@ export interface AgentSessionTurnRow {
 
 export type WorkspaceRetention = "remove" | "retain-on-failure" | "retain";
 
-export type WorkspaceMode = "direct" | "worktree";
+export type WorkspaceMode = "direct" | "worktree" | "copy" | "clone";
+
+export type WorkspaceSourceKind =
+  | "direct-path"
+  | "local-copy"
+  | "worktree-git"
+  | "local-clone-git"
+  | "remote-git";
 
 export type AgentWorkspaceOwnerKind = "workflow" | "agent" | "agent_session";
 
@@ -125,10 +132,20 @@ export interface AgentWorkspaceRow {
   lastAttempt: number | null;
   retentionPolicy: WorkspaceRetention | null;
   workspacePath: string;
-  sourcePath: string;
+  sourceKind: WorkspaceSourceKind | null;
+  sourcePath: string | null;
+  sourceUri: string | null;
+  sourceBare: boolean | null;
+  sourceMergeEligible: boolean;
   suppliedPath: string | null;
   sourceRef: string | null;
+  resolvedRef: string | null;
+  checkoutBranch: string | null;
   baseCommit: string | null;
+  copyBaselinePath: string | null;
+  creationErrorJson: string | null;
+  workspaceIdentityJson: string;
+  workspaceIdentityHash: string;
   owned: boolean;
   status: AgentWorkspaceStatus;
   failureSeen: boolean;

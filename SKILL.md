@@ -135,9 +135,17 @@ resolved provider/model/selected-provider-config/tool/capability/workspace
 identity or changing a completed/pending turn's prompt/schema/options for the
 same turn key fails closed.
 
-Use `ctx.workspace({ key, mode: "worktree" })` when write-capable one-shot agents
-or session participants should stage filesystem changes in a reviewable git
-worktree. Pass the returned handle explicitly or bind it with `ctx.withWorkspace`:
+Use `ctx.workspace` when agents should run somewhere other than the default
+direct workspace at `ctx.run.target`. Choose the mode deliberately:
+
+- `direct`: intentional use of an existing directory.
+- `worktree`: local git committed state with patch merge support.
+- `copy`: dirty local filesystem state without `.git` metadata. V1 excludes only
+  `.git`, so pass a narrow `path` for large repos with caches or dependencies.
+- `clone`: explicit local or remote git checkout. Use `repo: ctx.run.target` to
+  clone the current repository; remote clone merge is unsupported.
+
+Pass the returned handle explicitly or bind it with `ctx.withWorkspace`:
 
 ```ts
 const workspace = await ctx.workspace({
@@ -149,15 +157,17 @@ await ctx.agent({ key: "impl", workspace, toolPolicy: "workspace-write", prompt 
 ```
 
 Retention is `"remove"` (default), `"retain-on-failure"`, or `"retain"` and
-applies only to Keel-owned worktrees. Direct workspaces, including the default
-`__default` workspace at `ctx.run.target`, are never removed by Keel and are not
-review diff staging areas. Workspace mode is not a secret or network security
-boundary, and Keel never auto-merges retained workspaces.
+applies only to Keel-owned `worktree`, `copy`, and `clone` workspaces. Direct
+workspaces, including the default `__default` workspace at `ctx.run.target`, are
+never removed by Keel and are not review diff staging areas. Workspace mode is
+not a secret, filesystem, or network security boundary, and Keel never
+auto-merges retained workspaces.
 
-For `ctx.agentSession` worktree participants, use `"retain-on-failure"` or
-`"retain"` if a terminal failed run should be retryable. Once terminal cleanup
-removes a session worktree, Keel fails closed rather than resuming the existing
-backend conversation in a fresh empty worktree.
+For `ctx.agentSession` participants using Keel-owned workspaces, use
+`"retain-on-failure"` or `"retain"` if a terminal failed run should be
+retryable. Once terminal cleanup removes a session workspace, Keel fails closed
+rather than resuming the existing backend conversation in a fresh empty
+workspace.
 
 ## 5. Schemas
 

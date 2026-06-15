@@ -234,6 +234,15 @@ describe("Codex provider config", () => {
   });
 });
 
+describe("Codex provider cwd", () => {
+  test("passes the resolved invocation cwd to the transport unchanged", async () => {
+    const managed = tempDir("keel-codex-managed-cwd-");
+    const transport = new ScriptedTransport(basicScript);
+    const { factory } = await runWithTransport(transport, { cwd: managed });
+    expect(factory.context?.cwd).toBe(managed);
+  });
+});
+
 describe("Codex JSON-RPC flow", () => {
   test("handshakes, captures thread id before turn/start, and returns transcript", async () => {
     const tokens: string[] = [];

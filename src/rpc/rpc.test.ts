@@ -856,6 +856,85 @@ describe("workspace lifecycle operations", () => {
     }
   });
 
+  test("copy merge rejects deleted directory when source subtree changed since baseline", () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-rpc-copy-conflict-"));
+    const store = JournalStore.memory();
+    try {
+      const source = join(dir, "source");
+      const workspace = join(dir, "store", "copy");
+      const baseline = join(dir, "store", "copy-baseline");
+      mkdirSync(join(source, "subdir"), { recursive: true });
+      writeFileSync(join(source, "subdir", "base.txt"), "base\n");
+      createRetainedCopy(source, workspace, baseline);
+      rmSync(join(workspace, "subdir"), { recursive: true, force: true });
+      writeFileSync(join(source, "subdir", "concurrent.txt"), "keep me\n");
+      store.insertRun({
+        runId: "r-copy-conflict",
+        workflowName: "wf",
+        definitionVersion: "wf_sha256_fixture",
+        status: "finished",
+        parentRunId: null,
+        tenantId: null,
+        inputRef: "null",
+        outputRef: null,
+        errorJson: null,
+        heartbeatAtMs: null,
+        runtimeOwnerId: null,
+        createdAtMs: 1,
+        finishedAtMs: 2,
+        runTarget: source,
+      });
+      store.insertAgentWorkspace({
+        runId: "r-copy-conflict",
+        workspaceId: "copy",
+        mode: "copy",
+        ownerKind: "workflow",
+        key: "copy",
+        lastAttempt: null,
+        retentionPolicy: "retain",
+        workspacePath: workspace,
+        sourceKind: "local-copy",
+        sourcePath: source,
+        sourceUri: null,
+        sourceBare: null,
+        sourceMergeEligible: true,
+        suppliedPath: source,
+        sourceRef: null,
+        resolvedRef: null,
+        checkoutBranch: null,
+        baseCommit: null,
+        copyBaselinePath: baseline,
+        creationErrorJson: null,
+        workspaceIdentityJson: "{}",
+        workspaceIdentityHash: "copy-conflict",
+        owned: true,
+        status: "pending_review",
+        failureSeen: false,
+        lastTurnKey: null,
+        lastTurnAttempt: null,
+        activeHolderKind: null,
+        activeHolderKey: null,
+        activeHolderAttempt: null,
+        activeStartedAtMs: null,
+        lastDiffEventSeq: null,
+        lastErrorEventSeq: null,
+        cleanupErrorJson: null,
+        createdAtMs: 1,
+        updatedAtMs: 1,
+        mergedAtMs: null,
+        discardedAtMs: null,
+        removedAtMs: null,
+      });
+      const api = keel(store);
+      expect(() => api.mergeRunWorkspace("r-copy-conflict", "copy")).toThrow(/source changed/);
+      expect(readFileSync(join(source, "subdir", "concurrent.txt"), "utf8")).toBe("keep me\n");
+      expect(store.getAgentWorkspace("r-copy-conflict", "copy")?.status).toBe("pending_review");
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("local clone merge includes committed changes after base commit", () => {
     const dir = mkdtempSync(join(tmpdir(), "keel-rpc-clone-"));
     const store = JournalStore.memory();
@@ -871,6 +950,8 @@ describe("workspace lifecycle operations", () => {
       execFileSync("git", ["config", "user.name", "t"], { cwd: clone });
       execFileSync("git", ["commit", "-q", "-m", "agent commit"], { cwd: clone });
       writeFileSync(join(clone, "unstaged.txt"), "unstaged\n");
+      writeFileSync(join(clone, "pre-staged.txt"), "pre-staged\n");
+      execFileSync("git", ["add", "pre-staged.txt"], { cwd: clone });
       store.insertRun({
         runId: "r-clone",
         workflowName: "wf",
@@ -933,6 +1014,15 @@ describe("workspace lifecycle operations", () => {
       expect(diff.mode).toBe("clone");
       expect(diff.added).toContain("committed.txt");
       expect(diff.added).toContain("unstaged.txt");
+      expect(diff.added).toContain("pre-staged.txt");
+      expect(
+        execFileSync("git", ["diff", "--cached", "--name-only"], {
+          cwd: clone,
+          encoding: "utf8",
+        })
+          .trim()
+          .split("\n"),
+      ).toEqual(["pre-staged.txt"]);
       expect(api.mergeRunWorkspace("r-clone", "clone").status).toBe("merged");
       expect(readFileSync(join(repo, "committed.txt"), "utf8")).toBe("committed\n");
       expect(readFileSync(join(repo, "unstaged.txt"), "utf8")).toBe("unstaged\n");
@@ -964,6 +1054,7 @@ describe("workspace lifecycle operations", () => {
         runStatus: "running",
         workspaceStatus: "pending_review",
       });
+      expect(api.getRunWorkspace("r-running", "ws_agent")?.mergeSupported).toBe(false);
       expect(() => api.mergeRunWorkspace("r-running", "ws_agent")).toThrow(/while run is running/);
       expect(() => api.discardRunWorkspace("r-running", "ws_agent")).toThrow(
         /while run is running/,

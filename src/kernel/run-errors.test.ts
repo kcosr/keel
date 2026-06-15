@@ -1,11 +1,20 @@
 import { describe, expect, test } from "bun:test";
 import { JournalStore } from "../journal/store.ts";
+import { workspaceIdentity } from "../workspace/identity.ts";
 import { failRunWithError } from "./run-errors.ts";
 
 describe("failRunWithError", () => {
   test("applies workspace retention cleanup for terminal failures", () => {
     const store = JournalStore.memory();
     try {
+      const identity = workspaceIdentity({
+        key: "agent",
+        mode: "worktree",
+        sourcePath: "/tmp/keel-missing-repo-for-run-error-test",
+        sourceRef: "HEAD",
+        retentionPolicy: "remove",
+        sdkAbiVersion: 6,
+      });
       store.insertRun({
         runId: "r",
         workflowName: "wf",
@@ -33,6 +42,8 @@ describe("failRunWithError", () => {
         suppliedPath: null,
         sourceRef: "HEAD",
         baseCommit: "abc",
+        workspaceIdentityJson: identity.json,
+        workspaceIdentityHash: identity.hash,
         owned: true,
         status: "idle",
         failureSeen: false,

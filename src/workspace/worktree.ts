@@ -105,28 +105,35 @@ function git(
   cwd: string,
   args: string[],
   input?: string,
-  options: { maxBuffer?: number } = {},
+  options: { maxBuffer?: number; env?: Record<string, string | undefined> } = {},
 ): string {
   return execFileSync("git", args, {
     cwd,
     input,
     encoding: "utf8",
+    env: options.env ? { ...process.env, ...options.env } : process.env,
     ...(options.maxBuffer !== undefined ? { maxBuffer: options.maxBuffer } : {}),
     stdio: input === undefined ? ["ignore", "pipe", "pipe"] : ["pipe", "pipe", "pipe"],
   });
 }
 
-function gitDiff(cwd: string, args: string[]): string {
-  return gitBounded(cwd, args, GIT_DIFF_MAX_BUFFER_BYTES, "git diff");
+function gitDiff(cwd: string, args: string[], env?: Record<string, string | undefined>): string {
+  return gitBounded(cwd, args, GIT_DIFF_MAX_BUFFER_BYTES, "git diff", env);
 }
 
-function gitStatus(cwd: string, args: string[]): string {
-  return gitBounded(cwd, args, GIT_STATUS_MAX_BUFFER_BYTES, "git status");
+function gitStatus(cwd: string, args: string[], env?: Record<string, string | undefined>): string {
+  return gitBounded(cwd, args, GIT_STATUS_MAX_BUFFER_BYTES, "git status", env);
 }
 
-function gitBounded(cwd: string, args: string[], maxBuffer: number, label: string): string {
+function gitBounded(
+  cwd: string,
+  args: string[],
+  maxBuffer: number,
+  label: string,
+  env?: Record<string, string | undefined>,
+): string {
   try {
-    return git(cwd, args, undefined, { maxBuffer });
+    return git(cwd, args, undefined, { maxBuffer, env });
   } catch (err) {
     if (isMaxBufferError(err)) {
       throw new Error(`${label} output exceeded explicit ${maxBuffer} byte buffer limit`);
@@ -479,8 +486,27 @@ export function diffWorkspace(workspacePath: string): DiffBundle {
 }
 
 export function diffGitFinalTree(workspacePath: string, baseCommit = "HEAD"): DiffBundle {
-  git(workspacePath, ["add", "-A"]);
-  const status = gitStatus(workspacePath, ["diff", "--cached", "--name-status", baseCommit]);
+  const indexDir = mkdtempSync(join(tmpdir(), "keel-git-index-"));
+  const indexPath = join(indexDir, "index");
+  const indexEnv = { GIT_INDEX_FILE: indexPath };
+  try {
+    git(workspacePath, ["add", "-A"], undefined, { env: indexEnv });
+    return diffGitFinalTreeWithIndex(workspacePath, baseCommit, indexEnv);
+  } finally {
+    rmSync(indexDir, { recursive: true, force: true });
+  }
+}
+
+function diffGitFinalTreeWithIndex(
+  workspacePath: string,
+  baseCommit: string,
+  indexEnv: Record<string, string | undefined>,
+): DiffBundle {
+  const status = gitStatus(
+    workspacePath,
+    ["diff", "--cached", "--name-status", baseCommit],
+    indexEnv,
+  );
   const modified: string[] = [];
   const added: string[] = [];
   const deleted: string[] = [];
@@ -504,7 +530,11 @@ export function diffGitFinalTree(workspacePath: string, baseCommit = "HEAD"): Di
       status: code?.startsWith("A") ? "added" : code?.startsWith("D") ? "deleted" : "modified",
     });
   }
-  const contentDiff = gitDiff(workspacePath, ["diff", "--binary", "--cached", baseCommit]);
+  const contentDiff = gitDiff(
+    workspacePath,
+    ["diff", "--binary", "--cached", baseCommit],
+    indexEnv,
+  );
   return {
     modified,
     added,
@@ -584,7 +614,10 @@ export function mergeCopyIntoSource(
     }
   }
   const tmp = `${source}.keel-merge-${process.pid}-${Date.now()}`;
+  const backup = `${source}.keel-backup-${process.pid}-${Date.now()}`;
   copyEntry(source, tmp, false);
+  let sourceMovedToBackup = false;
+  let tmpMovedToSource = false;
   try {
     for (const change of changes) {
       const tmpEntry = safeJoin(tmp, change.path);
@@ -597,12 +630,25 @@ export function mergeCopyIntoSource(
         copyEntry(workspaceEntry, tmpEntry, true);
       }
     }
-    rmSync(source, { recursive: true, force: true });
+    renameSync(source, backup);
+    sourceMovedToBackup = true;
     renameSync(tmp, source);
+    tmpMovedToSource = true;
   } catch (err) {
-    rmSync(tmp, { recursive: true, force: true });
+    if (tmpMovedToSource) {
+      if (existsSync(backup)) {
+        rmSync(source, { recursive: true, force: true });
+        renameSync(backup, source);
+      }
+    } else if (sourceMovedToBackup && !existsSync(source)) {
+      renameSync(backup, source);
+      rmSync(tmp, { recursive: true, force: true });
+    } else {
+      rmSync(tmp, { recursive: true, force: true });
+    }
     throw err;
   }
+  rmSync(backup, { recursive: true, force: true });
 }
 
 function worktreeHandle(
@@ -672,7 +718,11 @@ function localCloneSource(path: string, originalRepo: string): CloneSource {
 }
 
 function looksLikeRelativeLocalPath(repo: string): boolean {
-  return repo.startsWith(".") || repo.startsWith("/") || repo.includes("\\");
+  return !isRecognizedRemoteGitUrl(repo);
+}
+
+function isRecognizedRemoteGitUrl(repo: string): boolean {
+  return /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(repo) || /^[^@\s:]+@[^@\s:]+:.+/.test(repo);
 }
 
 function copyDirectorySnapshot(sourcePath: string, destPath: string): void {
@@ -925,13 +975,24 @@ function entriesEqual(a: string, b: string): boolean {
   const right = lstatSync(b);
   if (left.isDirectory() || right.isDirectory()) {
     if (!left.isDirectory() || !right.isDirectory()) return false;
-    return true;
+    return directoriesEqual(a, b);
   }
   if (left.isSymbolicLink() || right.isSymbolicLink()) {
     return left.isSymbolicLink() && right.isSymbolicLink() && readlinkSync(a) === readlinkSync(b);
   }
   if (!left.isFile() || !right.isFile()) return false;
   return modeString(left.mode) === modeString(right.mode) && filesEqual(a, b);
+}
+
+function directoriesEqual(a: string, b: string): boolean {
+  const left = readdirSync(a).sort();
+  const right = readdirSync(b).sort();
+  if (left.length !== right.length) return false;
+  for (let i = 0; i < left.length; i += 1) {
+    if (left[i] !== right[i]) return false;
+    if (!entriesEqual(join(a, left[i] as string), join(b, right[i] as string))) return false;
+  }
+  return true;
 }
 
 function filesEqual(a: string, b: string): boolean {

@@ -162,12 +162,13 @@ export class InProcessKeel implements KeelApi {
   }
 
   listRunWorkspaces(runId: string, opts: { includeRemoved?: boolean } = {}): RunWorkspaceView[] {
-    return this.store.listAgentWorkspaces(runId, opts).map(workspaceView);
+    const runStatus = this.store.getRun(runId)?.status ?? null;
+    return this.store.listAgentWorkspaces(runId, opts).map((row) => workspaceView(row, runStatus));
   }
 
   getRunWorkspace(runId: string, workspaceId: string): RunWorkspaceView | null {
     const row = this.store.getAgentWorkspace(runId, workspaceId);
-    return row ? workspaceView(row) : null;
+    return row ? workspaceView(row, this.store.getRun(runId)?.status ?? null) : null;
   }
 
   getRunWorkspaceDiff(runId: string, workspaceId: string): RunWorkspaceDiff {
@@ -185,7 +186,7 @@ export class InProcessKeel implements KeelApi {
           ? diffGitFinalTree(row.workspacePath, row.baseCommit ?? "HEAD")
           : diffWorkspace(row.workspacePath);
     return {
-      workspace: workspaceView(row),
+      workspace: workspaceView(row, this.store.getRun(runId)?.status ?? null),
       ...diff,
       mode: row.mode as "worktree" | "copy" | "clone",
       diffKind: diff.diffKind ?? "git-patch",
@@ -208,7 +209,9 @@ export class InProcessKeel implements KeelApi {
       if (!run || isTerminalRunStatus(run.status)) {
         if (run) cleanupTerminalRunWorkspaces(this.store, row.runId, run.status, nowMs);
         const next = this.store.getAgentWorkspace(row.runId, row.workspaceId);
-        if (next && next.updatedAtMs === nowMs) updated.push(workspaceView(next));
+        if (next && next.updatedAtMs === nowMs) {
+          updated.push(workspaceView(next, run?.status ?? null));
+        }
         continue;
       }
 
@@ -233,7 +236,7 @@ export class InProcessKeel implements KeelApi {
           });
         }
         this.store.deleteAgentWorkspace(row.runId, row.workspaceId);
-        deleted.push(workspaceView(row));
+        deleted.push(workspaceView(row, run?.status ?? null));
       }
     }
     return { updated, deleted };
@@ -287,7 +290,10 @@ export class InProcessKeel implements KeelApi {
         at,
       );
     });
-    return workspaceView(this.requireWorkspace(runId, workspaceId));
+    return workspaceView(
+      this.requireWorkspace(runId, workspaceId),
+      this.store.getRun(runId)?.status ?? null,
+    );
   }
 
   discardRunWorkspace(runId: string, workspaceId: string): RunWorkspaceView {
@@ -321,7 +327,10 @@ export class InProcessKeel implements KeelApi {
         at,
       );
     });
-    return workspaceView(this.requireWorkspace(runId, workspaceId));
+    return workspaceView(
+      this.requireWorkspace(runId, workspaceId),
+      this.store.getRun(runId)?.status ?? null,
+    );
   }
 
   gcWorkspaces(
@@ -360,7 +369,11 @@ export class InProcessKeel implements KeelApi {
       }
       this.store.deleteAgentWorkspace(row.runId, row.workspaceId);
     }
-    return { removed: removed.map(workspaceView) };
+    return {
+      removed: removed.map((row) =>
+        workspaceView(row, this.store.getRun(row.runId)?.status ?? null),
+      ),
+    };
   }
 
   listAgentProfiles(
@@ -619,8 +632,10 @@ function isTerminalRunStatus(status: RunStatus): boolean {
   );
 }
 
-function workspaceView(row: AgentWorkspaceRow): RunWorkspaceView {
+function workspaceView(row: AgentWorkspaceRow, runStatus: RunStatus | null): RunWorkspaceView {
   const mergeSupported =
+    runStatus !== null &&
+    isTerminalRunStatus(runStatus) &&
     row.owned &&
     row.sourceMergeEligible &&
     WORKSPACE_MERGEABLE_STATUSES.has(row.status) &&

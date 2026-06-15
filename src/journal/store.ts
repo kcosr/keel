@@ -6,6 +6,7 @@
 // the kernel (Phase 2), not here.
 
 import { Database } from "bun:sqlite";
+import { workspaceIdentity } from "../workspace/identity.ts";
 import { applyMigration } from "./migrations.ts";
 import { DDL, SCHEMA_VERSION } from "./schema.ts";
 import type {
@@ -29,6 +30,8 @@ import type {
   RunRow,
   WorkflowDefinitionRow,
 } from "./types.ts";
+
+const LEGACY_SESSION_WORKSPACE_IDENTITY_SDK_ABI_VERSION = 6;
 
 export class JournalStore {
   readonly db: Database;
@@ -604,8 +607,6 @@ export class JournalStore {
       | "checkoutBranch"
       | "copyBaselinePath"
       | "creationErrorJson"
-      | "workspaceIdentityJson"
-      | "workspaceIdentityHash"
     > &
       Partial<
         Pick<
@@ -618,8 +619,6 @@ export class JournalStore {
           | "checkoutBranch"
           | "copyBaselinePath"
           | "creationErrorJson"
-          | "workspaceIdentityJson"
-          | "workspaceIdentityHash"
         >
       >,
   ): void {
@@ -1629,8 +1628,6 @@ function withAgentWorkspaceDefaults(
     | "checkoutBranch"
     | "copyBaselinePath"
     | "creationErrorJson"
-    | "workspaceIdentityJson"
-    | "workspaceIdentityHash"
   > &
     Partial<
       Pick<
@@ -1643,11 +1640,12 @@ function withAgentWorkspaceDefaults(
         | "checkoutBranch"
         | "copyBaselinePath"
         | "creationErrorJson"
-        | "workspaceIdentityJson"
-        | "workspaceIdentityHash"
       >
     >,
 ): AgentWorkspaceRow {
+  if (!row.workspaceIdentityJson || !row.workspaceIdentityHash) {
+    throw new Error(`workspace ${row.runId}/${row.workspaceId} is missing identity metadata`);
+  }
   return {
     ...row,
     sourceKind:
@@ -1667,8 +1665,8 @@ function withAgentWorkspaceDefaults(
     checkoutBranch: row.checkoutBranch ?? null,
     copyBaselinePath: row.copyBaselinePath ?? null,
     creationErrorJson: row.creationErrorJson ?? null,
-    workspaceIdentityJson: row.workspaceIdentityJson ?? "{}",
-    workspaceIdentityHash: row.workspaceIdentityHash ?? "legacy-test-workspace",
+    workspaceIdentityJson: row.workspaceIdentityJson,
+    workspaceIdentityHash: row.workspaceIdentityHash,
   };
 }
 
@@ -2010,6 +2008,14 @@ function sessionWorkspaceView(row: AgentWorkspaceRow): AgentSessionWorkspaceRow 
 }
 
 function agentWorkspaceFromSession(row: AgentSessionWorkspaceRow): AgentWorkspaceRow {
+  const identity = workspaceIdentity({
+    key: row.agentKey,
+    mode: "worktree",
+    sourcePath: row.sourcePath,
+    sourceRef: "HEAD",
+    retentionPolicy: "retain",
+    sdkAbiVersion: LEGACY_SESSION_WORKSPACE_IDENTITY_SDK_ABI_VERSION,
+  });
   return {
     runId: row.runId,
     workspaceId: `ws_${row.agentKey}`,
@@ -2031,8 +2037,8 @@ function agentWorkspaceFromSession(row: AgentSessionWorkspaceRow): AgentWorkspac
     baseCommit: row.baseCommit,
     copyBaselinePath: null,
     creationErrorJson: null,
-    workspaceIdentityJson: "{}",
-    workspaceIdentityHash: "legacy-session-workspace",
+    workspaceIdentityJson: identity.json,
+    workspaceIdentityHash: identity.hash,
     owned: true,
     status: row.status,
     failureSeen: false,

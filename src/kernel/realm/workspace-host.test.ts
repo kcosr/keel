@@ -730,6 +730,28 @@ describe("durable diff + worktree cleanup", () => {
     expect(cwd).toBe(row?.workspacePath);
   });
 
+  test("clone workspace rejects relative local-looking repo paths before git clone", async () => {
+    const store = JournalStore.memory();
+    const workflow = {
+      source: `
+        import { type Ctx } from "@kcosr/keel";
+        export default async function wf(ctx: Ctx): Promise<string> {
+          await ctx.workspace({ key: "clone-relative", mode: "clone", repo: "subdir/repo" });
+          return "unreachable";
+        }
+      `,
+      name: "clone-relative-reject",
+    };
+    const kernel = new RealmKernel(store, {
+      idgen: () => "r-relative",
+      agents: new AgentProviderRegistry().register(writerProvider),
+      workspaceStore: mkdtempSync(join(tmpdir(), "keel-workspaces-")),
+    });
+    await expect(kernel.run<string>(workflow, null, { target: repo })).rejects.toThrow(
+      /absolute path or remote git URL/,
+    );
+  });
+
   test("retention retain-on-failure keeps a one-shot workspace after fail-then-retry-success", async () => {
     const store = JournalStore.memory();
     const workflow = {

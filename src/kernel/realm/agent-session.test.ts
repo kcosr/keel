@@ -254,6 +254,49 @@ describe("ctx.agentSession", () => {
     expect(provider.calls.length).toBe(2);
   });
 
+  test("codex agentSession turns preserve thread id continuity", async () => {
+    const store = JournalStore.memory();
+    const calls: AgentInvocation[] = [];
+    const provider: AgentProvider = {
+      name: "codex",
+      supportsSessions: true,
+      async generate(invocation, hooks) {
+        calls.push(invocation);
+        const token = invocation.resumeToken ?? "codex-thread-1";
+        hooks.onSessionToken?.(token);
+        return { text: "ok", transcript: [], sessionToken: token };
+      },
+    };
+    const workflow = {
+      source: `
+        import { type Ctx } from "@kcosr/keel";
+        export default async function wf(ctx: Ctx): Promise<string> {
+          const codex = ctx.agentSession({
+            key: "primary",
+            provider: "codex",
+            toolPolicy: "unrestricted",
+            providerConfig: { codex: { transport: { type: "stdio" } } },
+          });
+          await codex.turn({ key: "draft", prompt: "draft" });
+          await codex.turn({ key: "revise", prompt: "revise" });
+          return "done";
+        }
+      `,
+      name: "codex-session",
+    };
+
+    const handle = await kernel(store, provider).run<string>(workflow, null);
+    expect(handle.status).toBe("finished");
+    expect(calls).toHaveLength(2);
+    expect(calls[0]?.resumeToken).toBeUndefined();
+    expect(calls[1]?.resumeToken).toBe("codex-thread-1");
+    expect(calls.map((c) => c.providerConfig)).toEqual([
+      { transport: { type: "stdio" } },
+      { transport: { type: "stdio" } },
+    ]);
+    expect(store.getAgentSession("run-1", "primary")?.currentSessionToken).toBe("codex-thread-1");
+  });
+
   test("a pending later turn resumes with the token it started with", async () => {
     const store = JournalStore.memory();
     const provider = new RecordingSessionProvider();

@@ -26,6 +26,7 @@ import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ClaudeProvider } from "../agents/claude.ts";
+import { CodexProvider } from "../agents/codex.ts";
 import { PiProvider } from "../agents/pi.ts";
 import { AgentProviderRegistry } from "../agents/types.ts";
 import { redactCapabilityTokens } from "../auth/redaction.ts";
@@ -172,7 +173,8 @@ async function dispatch(argv: string[]): Promise<number> {
       await import("node:fs").then((fs) => fs.mkdirSync(KEEL_DIR, { recursive: true }));
       const agents = new AgentProviderRegistry()
         .register(new PiProvider())
-        .register(new ClaudeProvider());
+        .register(new ClaudeProvider())
+        .register(new CodexProvider());
       const daemon = new KeelDaemon({
         socketPath: SOCKET,
         dbPath: DB,

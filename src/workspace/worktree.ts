@@ -718,11 +718,16 @@ function localCloneSource(path: string, originalRepo: string): CloneSource {
 }
 
 function looksLikeRelativeLocalPath(repo: string): boolean {
+  if (repo.includes("\\") || /^[A-Za-z]:\//.test(repo)) return true;
   return !isRecognizedRemoteGitUrl(repo);
 }
 
 function isRecognizedRemoteGitUrl(repo: string): boolean {
-  return /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(repo) || /^[^@\s:]+@[^@\s:]+:.+/.test(repo);
+  return (
+    /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(repo) ||
+    /^[^@\s:]+@[^@\s:]+:.+/.test(repo) ||
+    /^[^/\\\s:]+:.+/.test(repo)
+  );
 }
 
 function copyDirectorySnapshot(sourcePath: string, destPath: string): void {
@@ -985,8 +990,12 @@ function entriesEqual(a: string, b: string): boolean {
 }
 
 function directoriesEqual(a: string, b: string): boolean {
-  const left = readdirSync(a).sort();
-  const right = readdirSync(b).sort();
+  const left = readdirSync(a)
+    .filter((name) => name !== ".git")
+    .sort();
+  const right = readdirSync(b)
+    .filter((name) => name !== ".git")
+    .sort();
   if (left.length !== right.length) return false;
   for (let i = 0; i < left.length; i += 1) {
     if (left[i] !== right[i]) return false;

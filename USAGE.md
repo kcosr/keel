@@ -59,9 +59,10 @@ For local systemd usage in this workspace, see [`AGENTS.md`](./AGENTS.md).
 keel launch ./path/to/workflow.ts --input '{"n":3}'
 ```
 
-The CLI reads `workflow.ts` locally and sends the TypeScript source to the
-daemon. The daemon never opens the client path. Omit the file to read workflow
-source from stdin:
+The CLI reads `workflow.ts` locally, captures any static local `.ts`/`.tsx`
+helper imports reachable from it, and sends that source bundle to the daemon.
+The daemon never opens the client path. Omit the file to read a single workflow
+source module from stdin:
 
 ```bash
 cat ./path/to/workflow.ts | keel run --input '{"n":3}'
@@ -376,6 +377,15 @@ rule: an optional positional is a file path read by the CLI; omitting it reads
 source from stdin. With no positional and a terminal stdin, the CLI fails instead
 of waiting forever.
 
+For file launches, the CLI captures the complete static local import graph for
+relative `.ts` and `.tsx` imports, including side-effect imports and re-exports.
+Extensionless local imports resolve to `.ts`, `.tsx`, `index.ts`, or
+`index.tsx` when exactly one target exists. The inferred bundle root is the
+lowest common ancestor of the captured files, so sibling workflows can share
+helpers such as `workflows/shared/review-tasks.ts` without a root flag. The
+normalized entry path and every captured helper path/source byte are included in
+the definition hash.
+
 Workflow input is always passed with `--input <json>`. The positional slot is
 only source, never input. `--name` is an optional display label; if omitted for
 stdin launches, the run is unnamed (`null` in JSON, `(unnamed)` in text output).
@@ -386,17 +396,20 @@ lazy default direct workspace.
 
 On launch, the daemon stores an immutable workflow definition snapshot by content
 hash and runs from a daemon-owned materialized cache. Resume, retry, rewind,
-fork, and crash recovery use the stored definition, never a client path.
-`rerun` with a source override snapshots the supplied source as a new definition.
-Workflow source is persisted verbatim in the journal database; do not embed
-secrets in workflow TypeScript.
+fork, schedule fire, and crash recovery use the stored definition, never a client
+path. `rerun` with a source override snapshots the supplied source as a new
+definition. Workflow source and helper modules are persisted verbatim in the
+journal database; do not embed secrets in workflow TypeScript.
 
-Client-captured workflow v1 is single-file only. The only external import a
-workflow source may use is the exact SDK import `@kcosr/keel`; relative imports,
-SDK subpaths, and arbitrary packages are rejected. `@kcosr/keel` resolves through
-the current daemon's workflow SDK bridge, guarded by the workflow SDK ABI stored
-in the definition manifest. Compatible Keel upgrades can resume existing
-definitions; a daemon that does not support the stored ABI fails the run with a
+Stdin launches are still a single module named `entry.ts`; local relative
+imports from stdin are rejected with guidance to launch from a file. The only
+external import a workflow source may use is the exact SDK import
+`@kcosr/keel`. SDK subpaths, arbitrary packages, Node/Bun builtins, dynamic
+imports, unsupported extensions, symlinked source paths, and relative imports
+through `node_modules` are rejected. `@kcosr/keel` resolves through the current
+daemon's workflow SDK bridge, guarded by the workflow SDK ABI stored in the
+definition manifest. Compatible Keel upgrades can resume existing definitions; a
+daemon that does not support the stored ABI fails the run with a
 required-versus-supported ABI error. The provider-config SDK addition is an ABI 5
 boundary: re-register workflow definitions after upgrade, and drain suspended or
 non-terminal older-ABI runs first unless Keel gains a real multi-ABI bridge.
@@ -1063,12 +1076,13 @@ that durable input.
 ### Schedules
 
 Schedules pin the workflow definition hash and default target captured when the
-schedule is created. CLI schedule creation defaults the target to the creation
-cwd and supports a non-empty `--target <dir>`. Raw schedule API calls must also
-provide a non-empty target. Schedules do not reread a path or automatically
-adopt later source edits. Existing
-path-based schedules from older databases are disabled by migration and should
-be recreated from current source. If a pinned definition requires an unsupported
+schedule is created, including any local helper modules captured from a workflow
+file. CLI schedule creation defaults the target to the creation cwd and supports
+a non-empty `--target <dir>`. Raw schedule API calls must also provide a
+non-empty target. Schedules do not reread a path or automatically adopt later
+source/helper edits; replace the schedule to capture a new bundle. Existing
+path-based schedules from older databases are disabled by migration and should be
+recreated from current source. If a pinned definition requires an unsupported
 workflow SDK ABI or has an invalid persisted target, the daemon disables that
 schedule and persists the error instead of retrying it on every supervisor tick.
 
@@ -1089,10 +1103,11 @@ interface LaunchRequest {
 }
 ```
 
-`source` is workflow TypeScript captured by the client. `target` is the
-daemon-resolvable run target used by the default direct workspace;
-daemon/server boundaries reject missing or blank target strings instead of
-falling back to daemon cwd.
+`source` is workflow TypeScript captured by the client, either a string for an
+inline/stdin single module or a `{ kind: "bundle", entry, modules }` source
+bundle for file launches. `target` is the daemon-resolvable run target used by
+the default direct workspace; daemon/server boundaries reject missing or blank
+target strings instead of falling back to daemon cwd.
 `provenance` is display-only; the daemon never opens or parses it for execution.
 
 ### KeelApi
@@ -1104,7 +1119,7 @@ interface KeelApi {
   interruptRun(runId: string, reason?: string): Promise<{ runId: string; status: "interrupted" }>;
   rerunRun(
     runId: string,
-    opts?: { source?: string; input?: unknown; name?: string | null; provenance?: LaunchRequest["provenance"] },
+    opts?: { source?: WorkflowSourceInput; input?: unknown; name?: string | null; provenance?: LaunchRequest["provenance"] },
   ): Promise<RunStart>;
   retryRun(runId: string): Promise<RunStart>;
   rewindRun(runId: string, toStableKey: string): Promise<RunStart>;

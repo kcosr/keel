@@ -250,6 +250,90 @@ describe("daemon multi-client over the socket", () => {
     }
   });
 
+  test("raw launch and schedule reject malformed workflow bundles before persistence", async () => {
+    const socketPath = join(dir, "malformed-bundle.sock");
+    const dbPath = join(dir, "malformed-bundle.db");
+    const daemon = new KeelDaemon({
+      socketPath,
+      dbPath,
+      adminToken: ADMIN_TOKEN,
+    });
+    await daemon.start();
+    try {
+      const malformed = [
+        {
+          label: "bad-path",
+          source: {
+            kind: "bundle",
+            entry: "../entry.ts",
+            modules: [{ path: "../entry.ts", code: "export default async () => 1;\n" }],
+          },
+        },
+        {
+          label: "duplicate",
+          source: {
+            kind: "bundle",
+            entry: "entry.ts",
+            modules: [
+              { path: "entry.ts", code: "export default async () => 1;\n" },
+              { path: "entry.ts", code: "export default async () => 2;\n" },
+            ],
+          },
+        },
+        {
+          label: "missing-entry",
+          source: {
+            kind: "bundle",
+            entry: "missing.ts",
+            modules: [{ path: "entry.ts", code: "export default async () => 1;\n" }],
+          },
+        },
+        {
+          label: "unreachable-extra",
+          source: {
+            kind: "bundle",
+            entry: "entry.ts",
+            modules: [
+              { path: "entry.ts", code: "export default async () => 1;\n" },
+              { path: "extra.ts", code: "export const extra = 1;\n" },
+            ],
+          },
+        },
+      ];
+
+      for (const { label, source } of malformed) {
+        const launched = await rawRpc(socketPath, "launchRun", {
+          source,
+          input: null,
+          target: dir,
+          name: label,
+        });
+        expect(launched.error?.message).toBeTruthy();
+
+        const scheduled = await rawAdminRpc(socketPath, "putSchedule", {
+          name: label,
+          source,
+          input: null,
+          target: dir,
+          intervalMs: 60_000,
+        });
+        expect(scheduled.error?.message).toBeTruthy();
+      }
+
+      expect((await rawAdminRpc(socketPath, "listRuns", {})).result).toEqual([]);
+    } finally {
+      daemon.stop();
+    }
+
+    const db = new Database(dbPath, { readonly: true });
+    try {
+      const row = db.query("SELECT count(*) AS count FROM schedules").get() as { count: number };
+      expect(row.count).toBe(0);
+    } finally {
+      db.close();
+    }
+  });
+
   test("startup reconciles stale retained workspace rows", async () => {
     const socketPath = join(dir, "reconcile.sock");
     const dbPath = join(dir, "reconcile.db");

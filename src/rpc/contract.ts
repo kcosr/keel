@@ -12,13 +12,14 @@ import type {
   PersistentAgentProfileConfig,
 } from "../agents/profiles.ts";
 import type { SettingClass, SettingView, SettingsDiagnostic } from "../settings/catalog.ts";
+import type { WorkflowSourceInput } from "../workflow-definitions/source.ts";
 import type { Blockage, RunProjection, RunReport, RunSummary } from "./projection.ts";
 
 export type WorkflowProvenance = { kind: "stdin" } | { kind: "clientPath"; path: string };
 
 export interface LaunchRequest {
   /** Workflow TypeScript captured by the client. The daemon never reads client paths. */
-  source: string;
+  source: WorkflowSourceInput;
   input: unknown;
   /** Daemon-resolvable default target inherited by agents in this run. */
   target?: string;
@@ -162,7 +163,7 @@ export interface KeelApi {
   rerunRun(
     runId: string,
     opts?: {
-      source?: string;
+      source?: WorkflowSourceInput;
       input?: unknown;
       name?: string | null;
       provenance?: WorkflowProvenance;

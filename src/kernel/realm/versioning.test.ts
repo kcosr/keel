@@ -11,7 +11,7 @@ const FIX = new URL("./fixtures/", import.meta.url);
 const v1 = captureWorkflowFile(new URL("versioned-v1.workflow.ts", FIX).pathname);
 const vComment = captureWorkflowFile(new URL("versioned-comment.workflow.ts", FIX).pathname);
 const vLogic = captureWorkflowFile(new URL("versioned-logic.workflow.ts", FIX).pathname);
-const badImport = captureWorkflowFile(new URL("forbidden-import.workflow.ts", FIX).pathname);
+const badImportSource = 'import fs from "node:fs";\nexport default async () => fs;\n';
 
 function fixed(store: JournalStore, extra: Record<string, unknown> = {}): RealmKernel {
   return new RealmKernel(store, {
@@ -49,17 +49,17 @@ describe("structural versioning is journaled per step", () => {
 describe("realm determinism lint gate", () => {
   test("a forbidden import fails the run before it starts (no run row)", async () => {
     const store = JournalStore.memory();
-    await expect(fixed(store).run(badImport, null, { name: "bad" })).rejects.toThrow(
-      /determinism lint[\s\S]*no-forbidden-import/,
-    );
+    await expect(
+      fixed(store).run({ source: badImportSource }, null, { name: "bad" }),
+    ).rejects.toThrow(/workflow import "node:fs" from entry.ts is not allowed/);
     expect(store.listRuns()).toHaveLength(0);
   });
 
   test("lint disabled still does not bypass the source import allowlist", async () => {
     const store = JournalStore.memory();
     await expect(
-      fixed(store, { lint: false }).run(badImport, null, { name: "bad" }),
-    ).rejects.toThrow(/only @kcosr\/keel is supported/);
+      fixed(store, { lint: false }).run({ source: badImportSource }, null, { name: "bad" }),
+    ).rejects.toThrow(/workflow import "node:fs" from entry.ts is not allowed/);
     expect(store.listRuns()).toHaveLength(0);
   });
 });

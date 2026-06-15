@@ -23,6 +23,7 @@ import type {
 } from "../rpc/contract.ts";
 import type { RunProjection, RunReport, RunSummary } from "../rpc/projection.ts";
 import { clientRunTargetOrCwd } from "../target.ts";
+import type { WorkflowSourceInput } from "../workflow-definitions/source.ts";
 
 /** Async-shaped client over the socket (the in-process KeelApi is sync; the wire
  * is async). Same method names, Promise-returning. */
@@ -133,7 +134,7 @@ export class DaemonClient {
   rerunRun(
     runId: string,
     opts?: {
-      source?: string;
+      source?: WorkflowSourceInput;
       input?: unknown;
       name?: string | null;
       provenance?: LaunchRequest["provenance"];
@@ -174,7 +175,7 @@ export class DaemonClient {
   }
   putSchedule(req: {
     name: string;
-    source: string;
+    source: WorkflowSourceInput;
     workflowName?: string | null;
     input?: unknown;
     target?: string;

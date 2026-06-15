@@ -35,9 +35,15 @@ The body runs in a sandbox. Stay inside it or the run is rejected:
 - **No `Date.now()`, `new Date()`, `Math.random()`, `fetch`, `Bun.*`, or
   file/network access** in the body. Use `ctx.now()` / `ctx.random()`; do real
   work via `ctx.agent`.
-- **Workflow code is single-file in v1** and imports only the exact authoring SDK
-  specifier `@kcosr/keel`. Do not import local helper modules, other packages,
-  SDK subpaths, or operator/control APIs such as `@kcosr/keel/execute`.
+- File-launched workflows may import local static `.ts`/`.tsx` helpers through
+  relative specifiers. Inline/stdin workflows are single-module only. The only
+  external import allowed in workflow source or helpers is the exact authoring
+  SDK specifier `@kcosr/keel`; do not import packages, SDK subpaths, dynamic
+  imports, Node/Bun builtins, or operator/control APIs such as
+  `@kcosr/keel/execute`.
+- Shared helper modules are good for deterministic prompt fragments, review
+  rubrics, task lists, and render functions. Keep them pure and deterministic,
+  and keep raw secrets out of workflow source and helper modules.
 - **A `ctx.step` callback must use only its `inputs`** — don't read outer variables
   inside a `step` function; pass them in through `inputs`. (Agent prompts can use
   any variable freely.)
@@ -329,8 +335,9 @@ workflow itself, not in `execute`.
 - On optional review fan-out agents, set **`toolPolicy: "read-only"`**, **`lenient:
   true`**, and **`onFailure: "null"`** so one flaky branch doesn't sink the run.
   For required agents, omit `onFailure` so failures can be retried.
-- A run resumes from its immutable start-time workflow snapshot. To change code,
-  run again or rerun with new inline source. Do not use retry/rewind/rerun to
-  continue an interrupted run; resume it first.
+- A run resumes from its immutable start-time workflow bundle. Helper edits
+  affect only new launches, schedule replacements, or reruns with a new source
+  override. Do not use retry/rewind/rerun to continue an interrupted run; resume
+  it first.
 - Use `run` for a single workflow; use `execute` only for mechanical
   follow-up across one or more runs.

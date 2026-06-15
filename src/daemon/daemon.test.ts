@@ -276,7 +276,7 @@ describe("daemon multi-client over the socket", () => {
       runId: "r-creating",
       agentKey: "agent",
       workspacePath: join(workspaceStore, "r-creating", "agent"),
-      target: dir,
+      sourcePath: dir,
       baseCommit: "base",
       status: "creating",
       lastTurnKey: null,
@@ -309,7 +309,7 @@ describe("daemon multi-client over the socket", () => {
       runId: "r-active",
       agentKey: "agent",
       workspacePath: activePath,
-      target: dir,
+      sourcePath: dir,
       baseCommit: "base",
       status: "active",
       lastTurnKey: "turn",
@@ -342,7 +342,7 @@ describe("daemon multi-client over the socket", () => {
       runId: "r-terminal-missing",
       agentKey: "agent",
       workspacePath: join(workspaceStore, "missing", "agent"),
-      target: dir,
+      sourcePath: dir,
       baseCommit: "base",
       status: "creating",
       lastTurnKey: null,
@@ -940,7 +940,7 @@ describe("daemon supervisor tick over the socket", () => {
         expect(failed?.runtimeOwnerId).toBe("old-abi-supervisor");
         expect(failed?.finishedAtMs).toBe(1_000);
         expect(JSON.parse(failed?.errorJson ?? "{}").message).toContain(
-          "requires workflow SDK ABI 1, but this daemon supports ABI 3",
+          "requires workflow SDK ABI 1, but this daemon supports ABI 4",
         );
         const failedEvents = probe.db
           .query<{ count: number }, []>(
@@ -1025,11 +1025,11 @@ describe("HITL over the socket", () => {
       await c.authenticate(ADMIN_TOKEN);
       await expect(
         c.decideApproval(runId, "approve-deploy", { status: "approved" }),
-      ).rejects.toThrow(/requires workflow SDK ABI 4, but this daemon supports ABI 3/);
+      ).rejects.toThrow(/requires workflow SDK ABI 5, but this daemon supports ABI 4/);
       const failed = await c.getRun(runId);
       expect(failed?.status).toBe("failed");
       expect(failed?.error?.message).toContain(
-        "requires workflow SDK ABI 4, but this daemon supports ABI 3",
+        "requires workflow SDK ABI 5, but this daemon supports ABI 4",
       );
       c.close();
     } finally {
@@ -1061,12 +1061,12 @@ describe("HITL over the socket", () => {
       requireUnsupportedSdkAbiForRun(dbPath, runId);
 
       await expect(c.sendSignal(runId, "proceed", { go: true, by: "test" })).rejects.toThrow(
-        /requires workflow SDK ABI 4, but this daemon supports ABI 3/,
+        /requires workflow SDK ABI 5, but this daemon supports ABI 4/,
       );
       const failed = await c.getRun(runId);
       expect(failed?.status).toBe("failed");
       expect(failed?.error?.message).toContain(
-        "requires workflow SDK ABI 4, but this daemon supports ABI 3",
+        "requires workflow SDK ABI 5, but this daemon supports ABI 4",
       );
       c.close();
     } finally {
@@ -1196,7 +1196,7 @@ describe("kill -9 daemon recovery", () => {
         const failed = probe.getRun("orphan");
         expect(failed?.runtimeOwnerId).toBe("orphan-reclaimer");
         expect(JSON.parse(failed?.errorJson ?? "{}").message).toContain(
-          "requires workflow SDK ABI 4, but this daemon supports ABI 3",
+          "requires workflow SDK ABI 5, but this daemon supports ABI 4",
         );
       } finally {
         probe.close();
@@ -1241,7 +1241,7 @@ function requireUnsupportedSdkAbi(store: JournalStore, hash: string): void {
   const row = store.getWorkflowDefinition(hash);
   if (!row?.manifestJson) throw new Error(`missing manifest for ${hash}`);
   const manifest = JSON.parse(row.manifestJson) as { runtime: { workflowSdkAbi: number } };
-  manifest.runtime.workflowSdkAbi = 4;
+  manifest.runtime.workflowSdkAbi = 5;
   store.db
     .query("UPDATE workflow_definitions SET manifest_json = ? WHERE hash = ?")
     .run(JSON.stringify(manifest), hash);

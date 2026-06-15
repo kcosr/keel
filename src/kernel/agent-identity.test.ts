@@ -1,11 +1,10 @@
-// Commit 4: agent step identity — capabilities & secrets are part of BOTH the
-// version and the inputs hash, and the in-process and realm paths agree.
+// Agent step identity includes capabilities, secrets, and resolved workspace id.
 
 import { describe, expect, test } from "bun:test";
 import { type ToolPolicy, resolveToolPolicy } from "../agents/capabilities.ts";
+import { DEFAULT_WORKSPACE_ID } from "../workspace/identity.ts";
 import { computeVersion } from "./version.ts";
 
-// Recompute the agent version the way both ctx.ts and worker-entry.ts now do.
 function agentVersion(spec: {
   prompt: string;
   provider: string;
@@ -15,9 +14,7 @@ function agentVersion(spec: {
   toolPolicy?: ToolPolicy;
   allowTools?: string[];
   denyTools?: string[];
-  workspaceIsolation?: boolean;
-  workspaceRetention?: "never" | "on-failure" | "always" | null;
-  target?: string | null;
+  workspaceId?: string;
   secrets?: string[];
 }): string {
   const tools = resolveToolPolicy({
@@ -36,17 +33,14 @@ function agentVersion(spec: {
       toolPolicy: tools.toolPolicy,
       allowTools: tools.allowTools,
       denyTools: tools.denyTools,
-      workspaceIsolation: spec.workspaceIsolation === true,
-      workspaceRetention:
-        spec.workspaceIsolation === true ? (spec.workspaceRetention ?? "never") : null,
-      target: spec.target ?? null,
+      workspaceId: spec.workspaceId ?? DEFAULT_WORKSPACE_ID,
       capabilities: caps,
       secrets: spec.secrets ?? [],
     },
   });
 }
 
-describe("agent identity includes capabilities and secrets", () => {
+describe("agent identity includes capabilities, secrets, and workspace", () => {
   test("omitted tool policy is identical to read-only", () => {
     const base = { prompt: "p", provider: "pi" };
     expect(agentVersion(base)).toBe(agentVersion({ ...base, toolPolicy: "read-only" }));
@@ -65,21 +59,9 @@ describe("agent identity includes capabilities and secrets", () => {
     expect(agentVersion(base)).not.toBe(agentVersion({ ...base, denyTools: ["ls"] }));
   });
 
-  test("changing workspace isolation changes the version", () => {
+  test("changing workspace id changes the version", () => {
     const base = { prompt: "p", provider: "pi", toolPolicy: "read-only" as const };
-    expect(agentVersion(base)).not.toBe(agentVersion({ ...base, workspaceIsolation: true }));
-  });
-
-  test("changing workspace retention changes the version", () => {
-    const base = { prompt: "p", provider: "pi", workspaceIsolation: true };
-    expect(agentVersion(base)).not.toBe(agentVersion({ ...base, workspaceRetention: "always" }));
-  });
-
-  test("changing target changes the version", () => {
-    const base = { prompt: "p", provider: "pi", toolPolicy: "read-only" as const };
-    expect(agentVersion({ ...base, target: "/repo/a" })).not.toBe(
-      agentVersion({ ...base, target: "/repo/b" }),
-    );
+    expect(agentVersion(base)).not.toBe(agentVersion({ ...base, workspaceId: "implementation" }));
   });
 
   test("changing the secrets set changes the version", () => {

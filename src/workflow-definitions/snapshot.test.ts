@@ -248,12 +248,12 @@ describe("workflow definition snapshots", () => {
         join(cacheRoot, snapshot.hash, "entry.ts"),
       );
 
-      manifest.runtime.workflowSdkAbi = 4;
+      manifest.runtime.workflowSdkAbi = 5;
       store.db
         .query("UPDATE workflow_definitions SET manifest_json = ? WHERE hash = ?")
         .run(JSON.stringify(manifest), snapshot.hash);
       expect(() => materializeWorkflowDefinition(store, snapshot.hash, cacheRoot)).toThrow(
-        /requires workflow SDK ABI 4, but this daemon supports ABI 3/,
+        /requires workflow SDK ABI 5, but this daemon supports ABI 4/,
       );
     } finally {
       store.close();

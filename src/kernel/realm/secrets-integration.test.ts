@@ -67,11 +67,11 @@ const ISOLATED_SESSION_SECRET_WORKFLOW = {
   source: `
     import { type Ctx } from "@kcosr/keel";
     export default async function wf(ctx: Ctx): Promise<string> {
+      const workspace = await ctx.workspace({ key: "primary-workspace", mode: "worktree", retention: "retain" });
       const primary = ctx.agentSession({
         key: "primary",
         provider: "session",
-        workspaceIsolation: true,
-        workspaceRetention: "always",
+        workspace,
         capabilities: { fs: "workspace-write" },
         secrets: ["TOKEN"],
       });
@@ -148,7 +148,7 @@ describe("trusted-local secrets side-channel", () => {
     expect(invocation?.allowTools).toContain("mcp__local__edit");
   });
 
-  test("workspace-isolated agent sessions receive secrets and retain secret-bearing diffs", async () => {
+  test("worktree agent sessions receive secrets and retain secret-bearing diffs", async () => {
     const repo = mkdtempSync(join(tmpdir(), "keel-secret-isolated-target-"));
     const workspaceStore = mkdtempSync(join(tmpdir(), "keel-secret-isolated-store-"));
     const store = JournalStore.memory();
@@ -183,8 +183,8 @@ describe("trusted-local secrets side-channel", () => {
       expect(handle.output).toBe("isolated saw isolated-secret-value");
       expect(invocation?.env?.TOKEN).toBe("isolated-secret-value");
       expect(invocation?.cwd?.startsWith(workspaceStore)).toBe(true);
-      const workspace = store.getAgentSessionWorkspace("r", "primary");
-      expect(workspace).toMatchObject({ target: repo, status: "pending_review" });
+      const workspace = store.listAgentWorkspaces("r")[0];
+      expect(workspace).toMatchObject({ sourcePath: repo, status: "pending_review" });
       expect(workspace?.workspacePath).toBe(invocation?.cwd);
       expect(readFileSync(join(workspace?.workspacePath ?? "", "secret.txt"), "utf8")).toBe(
         "secret=isolated-secret-value\n",

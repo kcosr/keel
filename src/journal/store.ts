@@ -360,6 +360,22 @@ export class JournalStore {
     return r ? mapAgentSession(r) : null;
   }
 
+  hasAgentSessionUsingWorkspace(runId: string, workspaceId: string): boolean {
+    const rows = this.db
+      .query<{ identity_json: string }, [string]>(
+        "SELECT identity_json FROM agent_sessions WHERE run_id = ?",
+      )
+      .all(runId);
+    return rows.some((row) => {
+      try {
+        const identity = JSON.parse(row.identity_json) as { workspaceId?: unknown };
+        return identity.workspaceId === workspaceId;
+      } catch {
+        return false;
+      }
+    });
+  }
+
   insertAgentSession(row: AgentSessionRow): void {
     this.db
       .query(
@@ -533,28 +549,32 @@ export class JournalStore {
 
   getAgentWorkspaceByKey(
     runId: string,
-    kind: AgentWorkspaceRow["kind"],
+    ownerKind: AgentWorkspaceRow["ownerKind"],
     key: string,
   ): AgentWorkspaceRow | null {
     const r = this.db
       .query<RawAgentWorkspaceRow, [string, string, string]>(
-        "SELECT * FROM agent_workspaces WHERE run_id = ? AND kind = ? AND key = ?",
+        "SELECT * FROM agent_workspaces WHERE run_id = ? AND owner_kind = ? AND key = ?",
       )
-      .get(runId, kind, key);
+      .get(runId, ownerKind, key);
     return r ? mapAgentWorkspace(r) : null;
   }
 
   listAgentWorkspaces(runId: string, opts: { includeRemoved?: boolean } = {}): AgentWorkspaceRow[] {
     const sql = opts.includeRemoved
-      ? "SELECT * FROM agent_workspaces WHERE run_id = ? ORDER BY kind ASC, key ASC, workspace_id ASC"
-      : "SELECT * FROM agent_workspaces WHERE run_id = ? AND status != 'removed' ORDER BY kind ASC, key ASC, workspace_id ASC";
+      ? "SELECT * FROM agent_workspaces WHERE run_id = ? ORDER BY owner_kind ASC, key ASC, workspace_id ASC"
+      : `SELECT * FROM agent_workspaces
+         WHERE run_id = ?
+           AND status != 'removed'
+           AND (owned != 0 OR failure_seen != 0 OR cleanup_error_json IS NOT NULL OR status NOT IN ('idle'))
+         ORDER BY owner_kind ASC, key ASC, workspace_id ASC`;
     return this.db.query<RawAgentWorkspaceRow, [string]>(sql).all(runId).map(mapAgentWorkspace);
   }
 
   listAllAgentWorkspaces(): AgentWorkspaceRow[] {
     return this.db
       .query<RawAgentWorkspaceRow, []>(
-        "SELECT * FROM agent_workspaces ORDER BY run_id ASC, kind ASC, key ASC, workspace_id ASC",
+        "SELECT * FROM agent_workspaces ORDER BY run_id ASC, owner_kind ASC, key ASC, workspace_id ASC",
       )
       .all()
       .map(mapAgentWorkspace);
@@ -574,26 +594,35 @@ export class JournalStore {
     this.db
       .query(
         `INSERT INTO agent_workspaces (
-          run_id, workspace_id, kind, key, last_attempt, retention_policy,
-          workspace_path, target, base_commit, status, failure_seen,
-          last_turn_key, last_turn_attempt, last_diff_event_seq, last_error_event_seq,
+          run_id, workspace_id, mode, owner_kind, key, last_attempt, retention_policy,
+          workspace_path, source_path, supplied_path, source_ref, base_commit, owned, status, failure_seen,
+          last_turn_key, last_turn_attempt, active_holder_kind, active_holder_key,
+          active_holder_attempt, active_started_at_ms, last_diff_event_seq, last_error_event_seq,
           cleanup_error_json, created_at_ms, updated_at_ms, merged_at_ms, discarded_at_ms, removed_at_ms
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         row.runId,
         row.workspaceId,
-        row.kind,
+        row.mode,
+        row.ownerKind,
         row.key,
         row.lastAttempt,
         row.retentionPolicy,
         row.workspacePath,
-        row.target,
+        row.sourcePath,
+        row.suppliedPath,
+        row.sourceRef,
         row.baseCommit,
+        row.owned ? 1 : 0,
         row.status,
         row.failureSeen ? 1 : 0,
         row.lastTurnKey,
         row.lastTurnAttempt,
+        row.activeHolderKind,
+        row.activeHolderKey,
+        row.activeHolderAttempt,
+        row.activeStartedAtMs,
         row.lastDiffEventSeq,
         row.lastErrorEventSeq,
         row.cleanupErrorJson,
@@ -620,9 +649,19 @@ export class JournalStore {
         | "status"
         | "lastAttempt"
         | "retentionPolicy"
+        | "workspacePath"
+        | "sourcePath"
+        | "suppliedPath"
+        | "sourceRef"
+        | "baseCommit"
+        | "owned"
         | "failureSeen"
         | "lastTurnKey"
         | "lastTurnAttempt"
+        | "activeHolderKind"
+        | "activeHolderKey"
+        | "activeHolderAttempt"
+        | "activeStartedAtMs"
         | "lastDiffEventSeq"
         | "lastErrorEventSeq"
         | "cleanupErrorJson"
@@ -644,10 +683,25 @@ export class JournalStore {
     if ("lastAttempt" in patch) add("last_attempt", "lastAttempt", patch.lastAttempt ?? null);
     if ("retentionPolicy" in patch)
       add("retention_policy", "retentionPolicy", patch.retentionPolicy ?? null);
+    if ("workspacePath" in patch)
+      add("workspace_path", "workspacePath", patch.workspacePath ?? null);
+    if ("sourcePath" in patch) add("source_path", "sourcePath", patch.sourcePath ?? null);
+    if ("suppliedPath" in patch) add("supplied_path", "suppliedPath", patch.suppliedPath ?? null);
+    if ("sourceRef" in patch) add("source_ref", "sourceRef", patch.sourceRef ?? null);
+    if ("baseCommit" in patch) add("base_commit", "baseCommit", patch.baseCommit ?? null);
+    if ("owned" in patch) add("owned", "owned", patch.owned ? 1 : 0);
     if ("failureSeen" in patch) add("failure_seen", "failureSeen", patch.failureSeen ? 1 : 0);
     if ("lastTurnKey" in patch) add("last_turn_key", "lastTurnKey", patch.lastTurnKey ?? null);
     if ("lastTurnAttempt" in patch)
       add("last_turn_attempt", "lastTurnAttempt", patch.lastTurnAttempt ?? null);
+    if ("activeHolderKind" in patch)
+      add("active_holder_kind", "activeHolderKind", patch.activeHolderKind ?? null);
+    if ("activeHolderKey" in patch)
+      add("active_holder_key", "activeHolderKey", patch.activeHolderKey ?? null);
+    if ("activeHolderAttempt" in patch)
+      add("active_holder_attempt", "activeHolderAttempt", patch.activeHolderAttempt ?? null);
+    if ("activeStartedAtMs" in patch)
+      add("active_started_at_ms", "activeStartedAtMs", patch.activeStartedAtMs ?? null);
     if ("lastDiffEventSeq" in patch)
       add("last_diff_event_seq", "lastDiffEventSeq", patch.lastDiffEventSeq ?? null);
     if ("lastErrorEventSeq" in patch)
@@ -682,7 +736,7 @@ export class JournalStore {
     const placeholders = statuses.map(() => "?").join(", ");
     const query = this.db.query<RawAgentWorkspaceRow, never>(
       `SELECT * FROM agent_workspaces
-       WHERE status IN (${placeholders}) AND updated_at_ms <= ?
+       WHERE owned != 0 AND status IN (${placeholders}) AND updated_at_ms <= ?
        ORDER BY updated_at_ms ASC`,
     );
     return (query.all as (...args: unknown[]) => RawAgentWorkspaceRow[])(
@@ -698,13 +752,13 @@ export class JournalStore {
 
   listAgentSessionWorkspaces(runId: string): AgentSessionWorkspaceRow[] {
     return this.listAgentWorkspaces(runId)
-      .filter((row) => row.kind === "agent_session")
+      .filter((row) => row.ownerKind === "agent_session")
       .map(sessionWorkspaceView);
   }
 
   listAllAgentSessionWorkspaces(): AgentSessionWorkspaceRow[] {
     return this.listAllAgentWorkspaces()
-      .filter((row) => row.kind === "agent_session")
+      .filter((row) => row.ownerKind === "agent_session")
       .map(sessionWorkspaceView);
   }
 
@@ -1413,17 +1467,25 @@ interface RawAgentSessionTurnRow {
 interface RawAgentWorkspaceRow {
   run_id: string;
   workspace_id: string;
-  kind: string;
+  mode: string;
+  owner_kind: string;
   key: string;
   last_attempt: number | null;
-  retention_policy: string;
+  retention_policy: string | null;
   workspace_path: string;
-  target: string;
-  base_commit: string;
+  source_path: string;
+  supplied_path: string | null;
+  source_ref: string | null;
+  base_commit: string | null;
+  owned: number;
   status: string;
   failure_seen: number;
   last_turn_key: string | null;
   last_turn_attempt: number | null;
+  active_holder_kind: string | null;
+  active_holder_key: string | null;
+  active_holder_attempt: number | null;
+  active_started_at_ms: number | null;
   last_diff_event_seq: number | null;
   last_error_event_seq: number | null;
   cleanup_error_json: string | null;
@@ -1547,17 +1609,25 @@ function mapAgentWorkspace(r: RawAgentWorkspaceRow): AgentWorkspaceRow {
   return {
     runId: r.run_id,
     workspaceId: r.workspace_id,
-    kind: r.kind as AgentWorkspaceRow["kind"],
+    mode: r.mode as AgentWorkspaceRow["mode"],
+    ownerKind: r.owner_kind as AgentWorkspaceRow["ownerKind"],
     key: r.key,
     lastAttempt: r.last_attempt,
     retentionPolicy: r.retention_policy as AgentWorkspaceRow["retentionPolicy"],
     workspacePath: r.workspace_path,
-    target: r.target,
+    sourcePath: r.source_path,
+    suppliedPath: r.supplied_path,
+    sourceRef: r.source_ref,
     baseCommit: r.base_commit,
+    owned: r.owned !== 0,
     status: r.status as AgentWorkspaceStatus,
     failureSeen: r.failure_seen !== 0,
     lastTurnKey: r.last_turn_key,
     lastTurnAttempt: r.last_turn_attempt,
+    activeHolderKind: r.active_holder_kind as AgentWorkspaceRow["activeHolderKind"],
+    activeHolderKey: r.active_holder_key,
+    activeHolderAttempt: r.active_holder_attempt,
+    activeStartedAtMs: r.active_started_at_ms,
     lastDiffEventSeq: r.last_diff_event_seq,
     lastErrorEventSeq: r.last_error_event_seq,
     cleanupErrorJson: r.cleanup_error_json,
@@ -1574,7 +1644,7 @@ function sessionWorkspaceView(row: AgentWorkspaceRow): AgentSessionWorkspaceRow 
     runId: row.runId,
     agentKey: row.key,
     workspacePath: row.workspacePath,
-    target: row.target,
+    sourcePath: row.sourcePath,
     baseCommit: row.baseCommit,
     status: row.status,
     lastTurnKey: row.lastTurnKey,
@@ -1592,17 +1662,25 @@ function agentWorkspaceFromSession(row: AgentSessionWorkspaceRow): AgentWorkspac
   return {
     runId: row.runId,
     workspaceId: `ws_${row.agentKey}`,
-    kind: "agent_session",
+    mode: "worktree",
+    ownerKind: "agent_session",
     key: row.agentKey,
     lastAttempt: null,
-    retentionPolicy: "always",
+    retentionPolicy: "retain",
     workspacePath: row.workspacePath,
-    target: row.target,
+    sourcePath: row.sourcePath,
+    suppliedPath: null,
+    sourceRef: "HEAD",
     baseCommit: row.baseCommit,
+    owned: true,
     status: row.status,
     failureSeen: false,
     lastTurnKey: row.lastTurnKey,
     lastTurnAttempt: row.lastTurnAttempt,
+    activeHolderKind: null,
+    activeHolderKey: null,
+    activeHolderAttempt: null,
+    activeStartedAtMs: null,
     lastDiffEventSeq: row.lastDiffEventSeq,
     lastErrorEventSeq: row.lastErrorEventSeq,
     cleanupErrorJson: null,

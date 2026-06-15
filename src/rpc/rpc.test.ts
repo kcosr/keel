@@ -122,7 +122,7 @@ function insertWorkspaceFixture(
     runId: opts.runId,
     agentKey: opts.agentKey,
     workspacePath: opts.workspacePath,
-    target: opts.repo,
+    sourcePath: opts.repo,
     baseCommit: opts.baseCommit,
     status: opts.workspaceStatus,
     lastTurnKey: opts.activeTurn ? "turn" : null,

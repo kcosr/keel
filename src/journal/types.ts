@@ -98,9 +98,11 @@ export interface AgentSessionTurnRow {
   finishedAtMs: number | null;
 }
 
-export type WorkspaceRetention = "never" | "on-failure" | "always";
+export type WorkspaceRetention = "remove" | "retain-on-failure" | "retain";
 
-export type AgentWorkspaceKind = "agent" | "agent_session";
+export type WorkspaceMode = "direct" | "worktree";
+
+export type AgentWorkspaceOwnerKind = "workflow" | "agent" | "agent_session";
 
 export type AgentWorkspaceStatus =
   | "creating"
@@ -117,17 +119,25 @@ export type AgentWorkspaceStatus =
 export interface AgentWorkspaceRow {
   runId: string;
   workspaceId: string;
-  kind: AgentWorkspaceKind;
+  mode: WorkspaceMode;
+  ownerKind: AgentWorkspaceOwnerKind;
   key: string;
   lastAttempt: number | null;
-  retentionPolicy: WorkspaceRetention;
+  retentionPolicy: WorkspaceRetention | null;
   workspacePath: string;
-  target: string;
-  baseCommit: string;
+  sourcePath: string;
+  suppliedPath: string | null;
+  sourceRef: string | null;
+  baseCommit: string | null;
+  owned: boolean;
   status: AgentWorkspaceStatus;
   failureSeen: boolean;
   lastTurnKey: string | null;
   lastTurnAttempt: number | null;
+  activeHolderKind: AgentWorkspaceOwnerKind | null;
+  activeHolderKey: string | null;
+  activeHolderAttempt: number | null;
+  activeStartedAtMs: number | null;
   lastDiffEventSeq: number | null;
   lastErrorEventSeq: number | null;
   cleanupErrorJson: string | null;
@@ -144,8 +154,8 @@ export interface AgentSessionWorkspaceRow {
   runId: string;
   agentKey: string;
   workspacePath: string;
-  target: string;
-  baseCommit: string;
+  sourcePath: string;
+  baseCommit: string | null;
   status: AgentSessionWorkspaceStatus;
   lastTurnKey: string | null;
   lastTurnAttempt: number | null;

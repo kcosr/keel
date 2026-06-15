@@ -179,7 +179,7 @@ describe("ctx.agentSession", () => {
       agents: new AgentProviderRegistry().register(new RecordingSessionProvider()),
     });
 
-    await expect(k.run(WORKFLOW, { second: false })).rejects.toThrow(/requires a target/);
+    await expect(k.run(WORKFLOW, { second: false })).rejects.toThrow(/requires target/);
   });
 
   test("later turns resume the latest completed participant token and completed turns replay", async () => {
@@ -279,7 +279,8 @@ describe("ctx.agentSession", () => {
       source: `
         import { type Ctx } from "@kcosr/keel";
         export default async function wf(ctx: Ctx): Promise<void> {
-          await ctx.agentSession({ key: "p", provider: "session", workspaceIsolation: true }).turn({ key: "x", prompt: "x" });
+          const workspace = await ctx.workspace({ key: "p-workspace", mode: "worktree" });
+          await ctx.agentSession({ key: "p", provider: "session", workspace }).turn({ key: "x", prompt: "x" });
         }
       `,
       name: "isolated",
@@ -289,7 +290,7 @@ describe("ctx.agentSession", () => {
     ).rejects.toThrow(/workspaceStore/);
   });
 
-  test("workspace-isolated sessions reuse one retained workspace across turns", async () => {
+  test("worktree sessions reuse one retained workspace across turns", async () => {
     const repo = mkdtempSync(join(tmpdir(), "keel-session-target-"));
     const workspaceStore = mkdtempSync(join(tmpdir(), "keel-session-store-"));
     try {
@@ -305,7 +306,8 @@ describe("ctx.agentSession", () => {
         source: `
           import { type Ctx } from "@kcosr/keel";
           export default async function wf(ctx: Ctx): Promise<string> {
-            const primary = ctx.agentSession({ key: "primary", provider: "session", workspaceIsolation: true, workspaceRetention: "always", capabilities: { fs: "workspace-write" } });
+            const workspace = await ctx.workspace({ key: "primary-workspace", mode: "worktree", retention: "retain" });
+            const primary = ctx.agentSession({ key: "primary", provider: "session", workspace, capabilities: { fs: "workspace-write" } });
             await primary.turn({ key: "draft", prompt: "draft" });
             await primary.turn({ key: "revise", prompt: "revise" });
             return "done";
@@ -336,8 +338,13 @@ describe("ctx.agentSession", () => {
       expect(calls).toHaveLength(2);
       expect(calls[0]?.cwd).toBe(calls[1]?.cwd);
       expect(calls[0]?.cwd?.startsWith(workspaceStore)).toBe(true);
-      const workspace = store.getAgentSessionWorkspace("run-1", "primary");
-      expect(workspace).toMatchObject({ target: repo, status: "pending_review" });
+      const workspace = store.listAgentWorkspaces("run-1")[0];
+      expect(workspace).toMatchObject({
+        sourcePath: repo,
+        status: "pending_review",
+        ownerKind: "workflow",
+        key: "primary-workspace",
+      });
       expect(workspace?.workspacePath).toBe(calls[0]?.cwd);
       expect(readFileSync(join(workspace?.workspacePath ?? "", "state.txt"), "utf8")).toContain(
         "__session.primary.draft\n__session.primary.revise\n",
@@ -359,7 +366,7 @@ describe("ctx.agentSession", () => {
     }
   });
 
-  test("two isolated participants can target different repositories", async () => {
+  test("two worktree participants can use different repositories", async () => {
     const repoA = mkdtempSync(join(tmpdir(), "keel-session-target-a-"));
     const repoB = mkdtempSync(join(tmpdir(), "keel-session-target-b-"));
     const workspaceStore = mkdtempSync(join(tmpdir(), "keel-session-store-multi-"));
@@ -370,8 +377,10 @@ describe("ctx.agentSession", () => {
         source: `
           import { type Ctx } from "@kcosr/keel";
           export default async function wf(ctx: Ctx, input: { a: string; b: string }): Promise<string> {
-            await ctx.agentSession({ key: "a", provider: "session", workspaceIsolation: true, workspaceRetention: "always", target: input.a, capabilities: { fs: "workspace-write" } }).turn({ key: "one", prompt: "one" });
-            await ctx.agentSession({ key: "b", provider: "session", workspaceIsolation: true, workspaceRetention: "always", target: input.b, capabilities: { fs: "workspace-write" } }).turn({ key: "one", prompt: "one" });
+            const workspaceA = await ctx.workspace({ key: "a-workspace", mode: "worktree", path: input.a, retention: "retain" });
+            const workspaceB = await ctx.workspace({ key: "b-workspace", mode: "worktree", path: input.b, retention: "retain" });
+            await ctx.agentSession({ key: "a", provider: "session", workspace: workspaceA, capabilities: { fs: "workspace-write" } }).turn({ key: "one", prompt: "one" });
+            await ctx.agentSession({ key: "b", provider: "session", workspace: workspaceB, capabilities: { fs: "workspace-write" } }).turn({ key: "one", prompt: "one" });
             return "done";
           }
         `,
@@ -394,10 +403,11 @@ describe("ctx.agentSession", () => {
         { target: repoA },
       );
       expect(result.status).toBe("finished");
-      const a = store.getAgentSessionWorkspace("run-1", "a");
-      const b = store.getAgentSessionWorkspace("run-1", "b");
-      expect(a?.target).toBe(repoA);
-      expect(b?.target).toBe(repoB);
+      const rows = store.listAgentWorkspaces("run-1");
+      const a = rows.find((row) => row.key === "a-workspace");
+      const b = rows.find((row) => row.key === "b-workspace");
+      expect(a?.sourcePath).toBe(repoA);
+      expect(b?.sourcePath).toBe(repoB);
       expect(a?.workspacePath).not.toBe(b?.workspacePath);
       expect(readFileSync(join(a?.workspacePath ?? "", "owner.txt"), "utf8")).toBe(
         "__session.a.one\n",
@@ -423,7 +433,8 @@ describe("ctx.agentSession", () => {
         source: `
           import { type Ctx } from "@kcosr/keel";
           export default async function wf(ctx: Ctx): Promise<string> {
-            const primary = ctx.agentSession({ key: "primary", provider: "session", workspaceIsolation: true, workspaceRetention: "always", capabilities: { fs: "workspace-write" } });
+            const workspace = await ctx.workspace({ key: "primary-workspace", mode: "worktree", retention: "retain" });
+            const primary = ctx.agentSession({ key: "primary", provider: "session", workspace, capabilities: { fs: "workspace-write" } });
             await primary.turn({ key: "draft", prompt: "draft" });
             await primary.turn({ key: "revise", prompt: "revise" });
             return "done";
@@ -455,16 +466,66 @@ describe("ctx.agentSession", () => {
         .run<string>(workflow, null, { target: repo })
         .catch(() => null);
       expect(store.getRun("run-1")?.status).toBe("failed");
-      const failedWorkspace = store.getAgentSessionWorkspace("run-1", "primary");
+      const failedWorkspace = store.listAgentWorkspaces("run-1")[0];
       expect(failedWorkspace?.status).toBe("pending_review");
 
       const retried = await kernel(store, provider, { workspaceStore }).retry<string>("run-1");
       expect(retried.status).toBe("finished");
-      const workspace = store.getAgentSessionWorkspace("run-1", "primary");
+      const workspace = store.listAgentWorkspaces("run-1")[0];
       expect(workspace?.workspacePath).toBe(failedWorkspace?.workspacePath);
       expect(readFileSync(join(workspace?.workspacePath ?? "", "state.txt"), "utf8")).toBe(
         "__session.primary.draft\n__session.primary.revise\n__session.primary.revise\n",
       );
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+      rmSync(workspaceStore, { recursive: true, force: true });
+    }
+  });
+
+  test("retry fails closed when a session workspace was removed by terminal cleanup", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "keel-session-removed-target-"));
+    const workspaceStore = mkdtempSync(join(tmpdir(), "keel-session-removed-store-"));
+    try {
+      initGitRepo(repo);
+      const workflow = {
+        source: `
+          import { type Ctx } from "@kcosr/keel";
+          export default async function wf(ctx: Ctx): Promise<string> {
+            const workspace = await ctx.workspace({ key: "primary-workspace", mode: "worktree" });
+            const primary = ctx.agentSession({ key: "primary", provider: "session", workspace, capabilities: { fs: "workspace-write" } });
+            await primary.turn({ key: "draft", prompt: "draft" });
+            await primary.turn({ key: "revise", prompt: "revise" });
+            return "done";
+          }
+        `,
+        name: "removed-session-workspace-retry",
+      };
+      let failed = false;
+      const provider: AgentProvider = {
+        name: "session",
+        supportsSessions: true,
+        async generate(invocation, hooks) {
+          const token = invocation.resumeToken ?? "sess-1";
+          hooks.onSessionToken?.(token);
+          if (invocation.key === "__session.primary.revise" && !failed) {
+            failed = true;
+            throw new Error("transient failure");
+          }
+          return { text: "ok", transcript: [], sessionToken: token };
+        },
+      };
+      const store = JournalStore.memory();
+      await kernel(store, provider, { workspaceStore })
+        .run<string>(workflow, null, { target: repo })
+        .catch(() => null);
+      expect(store.getRun("run-1")?.status).toBe("failed");
+      expect(store.listAgentWorkspaces("run-1", { includeRemoved: true })[0]?.status).toBe(
+        "removed",
+      );
+
+      await expect(
+        kernel(store, provider, { workspaceStore }).retry<string>("run-1"),
+      ).rejects.toThrow(/referenced by an existing agent session/);
     } finally {
       rmSync(repo, { recursive: true, force: true });
       rmSync(workspaceStore, { recursive: true, force: true });
@@ -480,7 +541,8 @@ describe("ctx.agentSession", () => {
         source: `
           import { type Ctx } from "@kcosr/keel";
           export default async function wf(ctx: Ctx): Promise<string> {
-            const primary = ctx.agentSession({ key: "primary", provider: "session", workspaceIsolation: true, workspaceRetention: "on-failure", capabilities: { fs: "workspace-write" } });
+            const workspace = await ctx.workspace({ key: "primary-workspace", mode: "worktree", retention: "retain-on-failure" });
+            const primary = ctx.agentSession({ key: "primary", provider: "session", workspace, capabilities: { fs: "workspace-write" } });
             await primary.turn({ key: "optional", prompt: "optional", onFailure: "null" });
             await primary.turn({ key: "repair", prompt: "repair" });
             return "done";
@@ -511,11 +573,11 @@ describe("ctx.agentSession", () => {
       expect(result.status).toBe("finished");
       const workspace = store.listAgentWorkspaces("run-1")[0];
       expect(workspace).toMatchObject({
-        kind: "agent_session",
-        key: "primary",
+        ownerKind: "workflow",
+        key: "primary-workspace",
         status: "pending_review",
         failureSeen: true,
-        retentionPolicy: "on-failure",
+        retentionPolicy: "retain-on-failure",
       });
       expect(
         readFileSync(
@@ -541,7 +603,8 @@ describe("ctx.agentSession", () => {
         source: `
           import { type Ctx } from "@kcosr/keel";
           export default async function wf(ctx: Ctx): Promise<string> {
-            const primary = ctx.agentSession({ key: "primary", provider: "session", workspaceIsolation: true, workspaceRetention: "always", capabilities: { fs: "workspace-write" } });
+            const workspace = await ctx.workspace({ key: "primary-workspace", mode: "worktree", retention: "retain" });
+            const primary = ctx.agentSession({ key: "primary", provider: "session", workspace, capabilities: { fs: "workspace-write" } });
             await primary.turn({ key: "huge", prompt: "huge" });
             return "done";
           }
@@ -568,7 +631,7 @@ describe("ctx.agentSession", () => {
       });
 
       expect(result.status).toBe("finished");
-      const workspace = store.getAgentSessionWorkspace("run-1", "primary");
+      const workspace = store.listAgentWorkspaces("run-1")[0];
       expect(workspace?.status).toBe("diff_error");
       const events = store.listEvents("run-1");
       expect(events.some((e) => e.type === "agent.diff")).toBe(false);
@@ -595,7 +658,8 @@ describe("ctx.agentSession", () => {
         source: `
           import { type Ctx } from "@kcosr/keel";
           export default async function wf(ctx: Ctx): Promise<string> {
-            const primary = ctx.agentSession({ key: "primary", provider: "session", workspaceIsolation: true, workspaceRetention: "always", capabilities: { fs: "workspace-write" } });
+            const workspace = await ctx.workspace({ key: "primary-workspace", mode: "worktree", retention: "retain" });
+            const primary = ctx.agentSession({ key: "primary", provider: "session", workspace, capabilities: { fs: "workspace-write" } });
             await primary.turn({ key: "break", prompt: "break" });
             await primary.turn({ key: "repair", prompt: "repair" });
             return "done";
@@ -628,7 +692,7 @@ describe("ctx.agentSession", () => {
         target: repo,
       });
       expect(result.status).toBe("finished");
-      const workspace = store.getAgentSessionWorkspace("run-1", "primary");
+      const workspace = store.listAgentWorkspaces("run-1")[0];
       expect(workspace?.status).toBe("pending_review");
       expect(typeof workspace?.lastErrorEventSeq).toBe("number");
       expect(typeof workspace?.lastDiffEventSeq).toBe("number");
@@ -814,7 +878,7 @@ describe("ctx.agentSession", () => {
     expect(provider.calls).toHaveLength(1);
   });
 
-  test("resume uses a migrated session workspace persisted path and retention policy", async () => {
+  test("resume uses a workspace persisted path and retention policy", async () => {
     const repo = mkdtempSync(join(tmpdir(), "keel-session-migrated-target-"));
     const workspaceStore = mkdtempSync(join(tmpdir(), "keel-session-migrated-store-"));
     try {
@@ -823,10 +887,11 @@ describe("ctx.agentSession", () => {
         source: `
           import { type Ctx } from "@kcosr/keel";
           export default async function wf(ctx: Ctx): Promise<string> {
+            const workspace = await ctx.workspace({ key: "primary-workspace", mode: "worktree", retention: "retain" });
             const primary = ctx.agentSession({
               key: "primary",
               provider: "session",
-              workspaceIsolation: true,
+              workspace,
               capabilities: { fs: "workspace-write" },
             });
             await primary.turn({ key: "draft", prompt: "draft" });
@@ -863,7 +928,7 @@ describe("ctx.agentSession", () => {
       renameSync(workspace.workspacePath, migratedPath);
       store.db
         .query(
-          "UPDATE agent_workspaces SET workspace_path = ?, retention_policy = 'always' WHERE run_id = ? AND workspace_id = ?",
+          "UPDATE agent_workspaces SET workspace_path = ?, retention_policy = 'retain' WHERE run_id = ? AND workspace_id = ?",
         )
         .run(migratedPath, "run-1", workspace.workspaceId);
 
@@ -878,7 +943,7 @@ describe("ctx.agentSession", () => {
       );
       expect(store.getAgentWorkspace("run-1", workspace.workspaceId)).toMatchObject({
         workspacePath: migratedPath,
-        retentionPolicy: "always",
+        retentionPolicy: "retain",
         status: "pending_review",
       });
     } finally {

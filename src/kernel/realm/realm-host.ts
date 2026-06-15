@@ -15,7 +15,12 @@ import type { AgentProvider, AgentProviderRegistry, TraceEvent } from "../../age
 import { redactCapabilityTokens } from "../../auth/redaction.ts";
 import { type Json, hashJson } from "../../hash.ts";
 import type { JournalStore } from "../../journal/store.ts";
-import type { RunRow, RunStatus } from "../../journal/types.ts";
+import type {
+  AgentWorkspaceOwnerKind,
+  AgentWorkspaceRow,
+  RunRow,
+  RunStatus,
+} from "../../journal/types.ts";
 import type { WorkflowProvenance } from "../../rpc/contract.ts";
 import { optionalRunTarget, requireRunTarget } from "../../target.ts";
 import {
@@ -25,16 +30,18 @@ import {
   resolveKeelPackageRoot,
   snapshotWorkflowSource,
 } from "../../workflow-definitions/snapshot.ts";
-import { agentWorkspaceId } from "../../workspace/identity.ts";
+import { DEFAULT_WORKSPACE_ID, workflowWorkspaceId } from "../../workspace/identity.ts";
 import {
+  DEFAULT_WORKSPACE_RETENTION,
   cleanupTerminalRunWorkspaces,
-  resolveWorkspaceRetention,
+  validateWorkspaceRetention,
 } from "../../workspace/retention.ts";
 import {
   assertUsableTargetDirectory,
   createRetainedWorktree,
   diffWorkspace,
   resolveGitRootTarget,
+  resolveUsableDirectory,
   retainedWorkspacePath,
 } from "../../workspace/worktree.ts";
 import { type DurableAgentEvent, finalAgentMessageEvents } from "../agent-events.ts";
@@ -111,6 +118,31 @@ class RunInterruptedError extends Error {
     super(`run ${runId} interrupted`);
     this.name = "RunInterruptedError";
   }
+}
+
+interface WorkspaceSpecMessage {
+  key: string;
+  mode?: string | null;
+  path?: string | null;
+  ref?: string | null;
+  retention?: string | null;
+}
+
+interface WorkspaceHolder {
+  kind: AgentWorkspaceOwnerKind;
+  key: string;
+  attempt: number;
+}
+
+interface InvocationWorkspace {
+  cwd: string;
+  workspaceId: string;
+  workspacePath: string;
+  sourcePath: string;
+  sourceRef?: string;
+  baseCommit?: string;
+  mode: AgentWorkspaceRow["mode"];
+  owned: boolean;
 }
 
 export interface ClientCapturedWorkflow {
@@ -519,6 +551,396 @@ export class RealmKernel {
     };
   }
 
+  private resolveWorkspaceSpec(
+    runId: string,
+    spec: WorkspaceSpecMessage,
+    atMs: number,
+  ): { id: string } {
+    if (typeof spec.key !== "string" || spec.key.trim().length === 0) {
+      throw new Error("WorkspaceSpec.key is required and must be a non-empty string");
+    }
+    if (spec.key === DEFAULT_WORKSPACE_ID) {
+      throw new Error(
+        `workspace key ${DEFAULT_WORKSPACE_ID} is reserved for the run default workspace`,
+      );
+    }
+    const mode = spec.mode ?? "direct";
+    if (mode === "copy" || mode === "clone") {
+      throw new Error(`workspace mode ${mode} is reserved for a future Keel release`);
+    }
+    if (mode !== "direct" && mode !== "worktree") {
+      throw new Error(`workspace mode must be direct or worktree, got ${String(mode)}`);
+    }
+    const runTarget = requireRunTarget(
+      this.store.getRun(runId)?.runTarget,
+      "ctx.workspace run target",
+    );
+    const workspaceId = workflowWorkspaceId(spec.key);
+    if (mode === "direct") {
+      if (spec.retention != null) {
+        throw new Error(
+          "direct workspaces do not accept retention because Keel does not own the directory",
+        );
+      }
+      if (spec.ref != null) throw new Error("direct workspaces do not accept ref");
+      const suppliedPath = spec.path ?? null;
+      const path = resolveUsableDirectory(suppliedPath ?? runTarget);
+      this.store.transaction(() => {
+        const existing = this.store.getAgentWorkspace(runId, workspaceId);
+        if (!existing) {
+          this.store.insertAgentWorkspace({
+            runId,
+            workspaceId,
+            mode: "direct",
+            ownerKind: "workflow",
+            key: spec.key,
+            lastAttempt: null,
+            retentionPolicy: null,
+            workspacePath: path,
+            sourcePath: path,
+            suppliedPath,
+            sourceRef: null,
+            baseCommit: null,
+            owned: false,
+            status: "idle",
+            failureSeen: false,
+            lastTurnKey: null,
+            lastTurnAttempt: null,
+            activeHolderKind: null,
+            activeHolderKey: null,
+            activeHolderAttempt: null,
+            activeStartedAtMs: null,
+            lastDiffEventSeq: null,
+            lastErrorEventSeq: null,
+            cleanupErrorJson: null,
+            createdAtMs: atMs,
+            updatedAtMs: atMs,
+            mergedAtMs: null,
+            discardedAtMs: null,
+            removedAtMs: null,
+          });
+          return;
+        }
+        if (
+          existing.mode !== "direct" ||
+          existing.workspacePath !== path ||
+          existing.sourcePath !== path ||
+          existing.retentionPolicy !== null ||
+          existing.owned
+        ) {
+          throw new Error(
+            `workspace "${spec.key}" identity changed; use a new workspace key or a fresh run`,
+          );
+        }
+      });
+      return { id: workspaceId };
+    }
+
+    if (!this.workspaceStore) {
+      throw new Error(
+        `workspace "${spec.key}" requests mode worktree but the kernel has no workspaceStore configured`,
+      );
+    }
+    const suppliedPath = spec.path ?? null;
+    const sourceRef = spec.ref && spec.ref.length > 0 ? spec.ref : "HEAD";
+    const retentionPolicy =
+      spec.retention == null
+        ? DEFAULT_WORKSPACE_RETENTION
+        : validateWorkspaceRetention(spec.retention);
+    const gitTarget = resolveGitRootTarget(suppliedPath ?? runTarget, sourceRef);
+    const defaultPath = retainedWorkspacePath(this.workspaceStore, runId, workspaceId);
+    let needsCreate = false;
+    this.store.transaction(() => {
+      const existing = this.store.getAgentWorkspace(runId, workspaceId);
+      if (!existing) {
+        this.store.insertAgentWorkspace({
+          runId,
+          workspaceId,
+          mode: "worktree",
+          ownerKind: "workflow",
+          key: spec.key,
+          lastAttempt: null,
+          retentionPolicy,
+          workspacePath: defaultPath,
+          sourcePath: gitTarget.target,
+          suppliedPath,
+          sourceRef,
+          baseCommit: gitTarget.baseCommit,
+          owned: true,
+          status: "creating",
+          failureSeen: false,
+          lastTurnKey: null,
+          lastTurnAttempt: null,
+          activeHolderKind: null,
+          activeHolderKey: null,
+          activeHolderAttempt: null,
+          activeStartedAtMs: null,
+          lastDiffEventSeq: null,
+          lastErrorEventSeq: null,
+          cleanupErrorJson: null,
+          createdAtMs: atMs,
+          updatedAtMs: atMs,
+          mergedAtMs: null,
+          discardedAtMs: null,
+          removedAtMs: null,
+        });
+        needsCreate = true;
+        return;
+      }
+      if (
+        existing.mode !== "worktree" ||
+        existing.sourcePath !== gitTarget.target ||
+        existing.sourceRef !== sourceRef ||
+        existing.retentionPolicy !== retentionPolicy ||
+        !existing.owned
+      ) {
+        throw new Error(
+          `workspace "${spec.key}" identity changed; use a new workspace key or a fresh run`,
+        );
+      }
+      if (existing.status === "creating" && !existsSync(existing.workspacePath)) {
+        needsCreate = true;
+      }
+      if (existing.status === "removed") {
+        if (this.store.hasAgentSessionUsingWorkspace(runId, workspaceId)) {
+          throw new Error(
+            `workspace "${spec.key}" was removed and is referenced by an existing agent session; start a fresh run or use retention retain-on-failure/retain`,
+          );
+        }
+        this.store.updateAgentWorkspace(runId, workspaceId, {
+          status: "creating",
+          workspacePath: defaultPath,
+          sourcePath: gitTarget.target,
+          suppliedPath,
+          sourceRef,
+          baseCommit: gitTarget.baseCommit,
+          retentionPolicy,
+          failureSeen: false,
+          lastDiffEventSeq: null,
+          lastErrorEventSeq: null,
+          cleanupErrorJson: null,
+          mergedAtMs: null,
+          discardedAtMs: null,
+          removedAtMs: null,
+          updatedAtMs: atMs,
+        });
+        needsCreate = true;
+      }
+    });
+    if (needsCreate) {
+      try {
+        createRetainedWorktree(gitTarget.repoRoot, defaultPath, gitTarget.baseCommit);
+        this.store.updateAgentWorkspace(runId, workspaceId, {
+          status: "idle",
+          updatedAtMs: atMs,
+        });
+      } catch (err) {
+        this.store.updateAgentWorkspace(runId, workspaceId, {
+          status: "abandoned",
+          failureSeen: true,
+          updatedAtMs: this.host.clock(),
+        });
+        throw err;
+      }
+    }
+    return { id: workspaceId };
+  }
+
+  private ensureDefaultWorkspace(runId: string, atMs: number): AgentWorkspaceRow {
+    const runTarget = requireRunTarget(
+      this.store.getRun(runId)?.runTarget,
+      "run default workspace target",
+    );
+    const path = resolveUsableDirectory(runTarget);
+    let row = this.store.getAgentWorkspace(runId, DEFAULT_WORKSPACE_ID);
+    if (!row) {
+      this.store.insertAgentWorkspace({
+        runId,
+        workspaceId: DEFAULT_WORKSPACE_ID,
+        mode: "direct",
+        ownerKind: "workflow",
+        key: DEFAULT_WORKSPACE_ID,
+        lastAttempt: null,
+        retentionPolicy: null,
+        workspacePath: path,
+        sourcePath: path,
+        suppliedPath: runTarget,
+        sourceRef: null,
+        baseCommit: null,
+        owned: false,
+        status: "idle",
+        failureSeen: false,
+        lastTurnKey: null,
+        lastTurnAttempt: null,
+        activeHolderKind: null,
+        activeHolderKey: null,
+        activeHolderAttempt: null,
+        activeStartedAtMs: null,
+        lastDiffEventSeq: null,
+        lastErrorEventSeq: null,
+        cleanupErrorJson: null,
+        createdAtMs: atMs,
+        updatedAtMs: atMs,
+        mergedAtMs: null,
+        discardedAtMs: null,
+        removedAtMs: null,
+      });
+      row = this.store.getAgentWorkspace(runId, DEFAULT_WORKSPACE_ID);
+    }
+    if (!row) throw new Error("failed to create run default workspace");
+    if (row.mode !== "direct" || row.workspacePath !== path || row.sourcePath !== path) {
+      throw new Error("run default workspace identity changed; refusing to continue");
+    }
+    return row;
+  }
+
+  private beginInvocationWorkspace(
+    runId: string,
+    workspaceId: string,
+    holder: WorkspaceHolder,
+    atMs: number,
+  ): InvocationWorkspace {
+    const row =
+      workspaceId === DEFAULT_WORKSPACE_ID
+        ? this.ensureDefaultWorkspace(runId, atMs)
+        : this.store.getAgentWorkspace(runId, workspaceId);
+    if (!row) throw new Error(`workspace handle "${workspaceId}" was not created in this run`);
+    if (row.mode === "direct") {
+      assertUsableTargetDirectory(row.workspacePath);
+      return {
+        cwd: row.workspacePath,
+        workspaceId: row.workspaceId,
+        workspacePath: row.workspacePath,
+        sourcePath: row.sourcePath,
+        mode: row.mode,
+        owned: false,
+      };
+    }
+    if (!row.owned) throw new Error(`workspace ${row.workspaceId} is not owned by Keel`);
+    if (!existsSync(row.workspacePath)) {
+      this.store.updateAgentWorkspace(runId, row.workspaceId, {
+        status: "abandoned",
+        failureSeen: true,
+        updatedAtMs: this.host.clock(),
+      });
+      throw new Error(`workspace "${row.workspaceId}" is missing at ${row.workspacePath}`);
+    }
+    this.store.transaction(() => {
+      const current = this.store.getAgentWorkspace(runId, row.workspaceId);
+      if (!current) throw new Error(`workspace ${runId}/${row.workspaceId} not found`);
+      const sameHolder =
+        current.activeHolderKind === holder.kind &&
+        current.activeHolderKey === holder.key &&
+        current.activeHolderAttempt === holder.attempt;
+      if (current.activeHolderKind && !sameHolder) {
+        throw new Error(
+          `workspace "${row.workspaceId}" is already active for ${current.activeHolderKind} "${current.activeHolderKey}" attempt ${current.activeHolderAttempt}`,
+        );
+      }
+      if (
+        current.status !== "idle" &&
+        current.status !== "diff_error" &&
+        current.status !== "active" &&
+        current.status !== "creating"
+      ) {
+        throw new Error(`workspace "${row.workspaceId}" is ${current.status} and cannot start`);
+      }
+      this.store.updateAgentWorkspace(runId, row.workspaceId, {
+        status: "active",
+        lastAttempt: holder.kind === "agent" ? holder.attempt : current.lastAttempt,
+        lastTurnKey: current.lastTurnKey,
+        lastTurnAttempt: current.lastTurnAttempt,
+        activeHolderKind: holder.kind,
+        activeHolderKey: holder.key,
+        activeHolderAttempt: holder.attempt,
+        activeStartedAtMs: atMs,
+        updatedAtMs: atMs,
+      });
+    });
+    return {
+      cwd: row.workspacePath,
+      workspaceId: row.workspaceId,
+      workspacePath: row.workspacePath,
+      sourcePath: row.sourcePath,
+      ...(row.sourceRef ? { sourceRef: row.sourceRef } : {}),
+      ...(row.baseCommit ? { baseCommit: row.baseCommit } : {}),
+      mode: row.mode,
+      owned: true,
+    };
+  }
+
+  private releaseWorkspaceHolder(
+    runId: string,
+    workspaceId: string | undefined,
+    holder: WorkspaceHolder,
+    patch: Partial<
+      Pick<
+        AgentWorkspaceRow,
+        | "status"
+        | "failureSeen"
+        | "lastTurnKey"
+        | "lastTurnAttempt"
+        | "lastDiffEventSeq"
+        | "lastErrorEventSeq"
+        | "updatedAtMs"
+      >
+    >,
+  ): void {
+    if (!workspaceId) return;
+    const row = this.store.getAgentWorkspace(runId, workspaceId);
+    if (!row?.owned) {
+      if (patch.failureSeen) {
+        this.store.updateAgentWorkspace(runId, workspaceId, {
+          failureSeen: true,
+          updatedAtMs: patch.updatedAtMs ?? this.host.clock(),
+        });
+      }
+      return;
+    }
+    if (
+      row.status === "removed" ||
+      row.status === "pending_review" ||
+      row.status === "merged" ||
+      row.status === "discarded" ||
+      row.status === "abandoned" ||
+      row.status === "cleanup_error"
+    ) {
+      return;
+    }
+    if (
+      row.activeHolderKind &&
+      (row.activeHolderKind !== holder.kind ||
+        row.activeHolderKey !== holder.key ||
+        row.activeHolderAttempt !== holder.attempt)
+    ) {
+      throw new Error(
+        `workspace "${workspaceId}" active holder changed while provider was running`,
+      );
+    }
+    this.store.updateAgentWorkspace(runId, workspaceId, {
+      ...patch,
+      activeHolderKind: null,
+      activeHolderKey: null,
+      activeHolderAttempt: null,
+      activeStartedAtMs: null,
+    });
+  }
+
+  private recoverActiveWorkspaceHolders(runId: string, atMs: number): void {
+    for (const row of this.store.listAgentWorkspaces(runId, { includeRemoved: true })) {
+      if (!row.activeHolderKind) continue;
+      this.store.updateAgentWorkspace(runId, row.workspaceId, {
+        status: row.owned && !existsSync(row.workspacePath) ? "abandoned" : "idle",
+        ...(row.owned && !existsSync(row.workspacePath) ? { failureSeen: true } : {}),
+        activeHolderKind: null,
+        activeHolderKey: null,
+        activeHolderAttempt: null,
+        activeStartedAtMs: null,
+        updatedAtMs: atMs,
+      });
+    }
+  }
+
   private beginAgentSessionTurn(
     runId: string,
     m: Extract<WorkerRequest, { type: "agent-turn" }>,
@@ -535,6 +957,7 @@ export class RealmKernel {
         workspacePath?: string;
         workspaceTarget?: string;
         workspaceBaseCommit?: string;
+        workspaceOwned?: boolean;
         resumeToken?: string;
       } {
     if (!provider.supportsSessions) {
@@ -615,118 +1038,12 @@ export class RealmKernel {
     });
     if (preflight.kind === "replay") return preflight;
 
-    const target = requireRunTarget(m.target, `agent session "${m.agentKey}"`);
-    let cwd: string;
-    let workspaceId: string | undefined;
-    let workspacePath: string | undefined;
-    let workspaceTarget: string | undefined;
-    let workspaceBaseCommit: string | undefined;
-    if (m.workspaceIsolation) {
-      if (!this.workspaceStore) {
-        throw new Error(
-          `agent session "${m.agentKey}" requests workspaceIsolation but the kernel has no workspaceStore configured`,
-        );
-      }
-      const retentionPolicy = resolveWorkspaceRetention({
-        workspaceIsolation: m.workspaceIsolation,
-        workspaceRetention: m.workspaceRetention,
-      });
-      if (!retentionPolicy) throw new Error("workspaceRetention resolution failed");
-      const gitTarget = resolveGitRootTarget(target);
-      const sessionWorkspaceId = agentWorkspaceId("agent_session", m.agentKey);
-      workspaceId = sessionWorkspaceId;
-      const defaultPath = retainedWorkspacePath(this.workspaceStore, runId, sessionWorkspaceId);
-      let path = defaultPath;
-      let persistedTarget = gitTarget.target;
-      let persistedBaseCommit = gitTarget.baseCommit;
-      let needsCreate = false;
-      this.store.transaction(() => {
-        const existingWorkspace = this.store.getAgentWorkspace(runId, sessionWorkspaceId);
-        if (!existingWorkspace) {
-          this.store.insertAgentWorkspace({
-            runId,
-            workspaceId: sessionWorkspaceId,
-            kind: "agent_session",
-            key: m.agentKey,
-            lastAttempt: null,
-            retentionPolicy,
-            workspacePath: defaultPath,
-            target: gitTarget.target,
-            baseCommit: gitTarget.baseCommit,
-            status: "creating",
-            failureSeen: false,
-            lastTurnKey: null,
-            lastTurnAttempt: null,
-            lastDiffEventSeq: null,
-            lastErrorEventSeq: null,
-            cleanupErrorJson: null,
-            createdAtMs: startedAtMs,
-            updatedAtMs: startedAtMs,
-            mergedAtMs: null,
-            discardedAtMs: null,
-            removedAtMs: null,
-          });
-          needsCreate = true;
-          return;
-        }
-        path = existingWorkspace.workspacePath;
-        persistedTarget = existingWorkspace.target;
-        persistedBaseCommit = existingWorkspace.baseCommit;
-        if (existingWorkspace.target !== gitTarget.target) {
-          throw new Error(
-            `agent session "${m.agentKey}" workspace target changed from ${existingWorkspace.target} to ${gitTarget.target}`,
-          );
-        }
-        const migratedAlwaysDefault =
-          existingWorkspace.retentionPolicy === "always" &&
-          retentionPolicy === "never" &&
-          existingWorkspace.workspacePath !== defaultPath;
-        if (existingWorkspace.retentionPolicy !== retentionPolicy && !migratedAlwaysDefault) {
-          throw new Error(
-            `agent session "${m.agentKey}" workspaceRetention changed; use a new participant key or a fresh run`,
-          );
-        }
-        if (
-          existingWorkspace.status === "active" &&
-          existingWorkspace.lastTurnKey === m.turnKey &&
-          existingWorkspace.lastTurnAttempt === preflight.attempt
-        ) {
-          return;
-        }
-        if (existingWorkspace.status !== "idle" && existingWorkspace.status !== "diff_error") {
-          throw new Error(
-            `agent session "${m.agentKey}" workspace is ${existingWorkspace.status} and cannot start a turn`,
-          );
-        }
-      });
-      if (needsCreate) {
-        try {
-          createRetainedWorktree(gitTarget.repoRoot, defaultPath, gitTarget.baseCommit);
-        } catch (err) {
-          this.store.updateAgentSessionWorkspace(runId, m.agentKey, {
-            status: "abandoned",
-            updatedAtMs: this.host.clock(),
-          });
-          throw err;
-        }
-      }
-      if (!existsSync(path)) {
-        this.store.updateAgentSessionWorkspace(runId, m.agentKey, {
-          status: "abandoned",
-          updatedAtMs: this.host.clock(),
-        });
-        throw new Error(
-          `agent session "${m.agentKey}" retained workspace is missing at ${path}; refusing to create a fresh workspace for an existing conversation`,
-        );
-      }
-      cwd = path;
-      workspacePath = path;
-      workspaceTarget = persistedTarget;
-      workspaceBaseCommit = persistedBaseCommit;
-    } else {
-      assertUsableTargetDirectory(target);
-      cwd = target;
-    }
+    const holder: WorkspaceHolder = {
+      kind: "agent_session",
+      key: m.agentKey,
+      attempt: preflight.attempt,
+    };
+    const workspace = this.beginInvocationWorkspace(runId, m.workspaceId, holder, startedAtMs);
 
     this.store.transaction(() => {
       this.store.putJournalRow({
@@ -761,9 +1078,8 @@ export class RealmKernel {
         preflight.attempt,
         startedAtMs,
       );
-      if (workspacePath) {
-        this.store.updateAgentSessionWorkspace(runId, m.agentKey, {
-          status: "active",
+      if (workspace.owned) {
+        this.store.updateAgentWorkspace(runId, workspace.workspaceId, {
           lastTurnKey: m.turnKey,
           lastTurnAttempt: preflight.attempt,
           updatedAtMs: startedAtMs,
@@ -776,11 +1092,12 @@ export class RealmKernel {
       attempt: preflight.attempt,
       inputHash,
       startedAtMs,
-      cwd,
-      ...(workspaceId ? { workspaceId } : {}),
-      ...(workspacePath ? { workspacePath } : {}),
-      ...(workspaceTarget ? { workspaceTarget } : {}),
-      ...(workspaceBaseCommit ? { workspaceBaseCommit } : {}),
+      cwd: workspace.cwd,
+      workspaceId: workspace.workspaceId,
+      workspacePath: workspace.workspacePath,
+      workspaceTarget: workspace.sourcePath,
+      workspaceOwned: workspace.owned,
+      ...(workspace.baseCommit ? { workspaceBaseCommit: workspace.baseCommit } : {}),
       ...(preflight.resumeToken ? { resumeToken: preflight.resumeToken } : {}),
     };
   }
@@ -790,149 +1107,20 @@ export class RealmKernel {
     m: Extract<WorkerRequest, { type: "agent" }>,
     attempt: number,
     startedAtMs: number,
-  ): {
-    cwd: string;
-    workspaceId?: string;
-    workspacePath?: string;
-    target: string;
-    baseCommit?: string;
-  } {
-    const target = requireRunTarget(m.target, `agent "${m.key}"`);
-    if (!m.workspaceIsolation) {
-      assertUsableTargetDirectory(target);
-      return { cwd: target, target };
-    }
-    if (!this.workspaceStore) {
-      throw new Error(
-        `agent "${m.key}" requests workspaceIsolation but the kernel has no workspaceStore configured`,
-      );
-    }
-    const retentionPolicy = resolveWorkspaceRetention({
-      workspaceIsolation: m.workspaceIsolation,
-      workspaceRetention: m.workspaceRetention,
-    });
-    if (!retentionPolicy) throw new Error("workspaceRetention resolution failed");
-    const gitTarget = resolveGitRootTarget(target);
-    const workspaceId = agentWorkspaceId("agent", m.key);
-    const defaultPath = retainedWorkspacePath(this.workspaceStore, runId, workspaceId);
-    let path = defaultPath;
-    let persistedTarget = gitTarget.target;
-    let persistedBaseCommit = gitTarget.baseCommit;
-    let needsCreate = false;
-    this.store.transaction(() => {
-      const existingWorkspace = this.store.getAgentWorkspace(runId, workspaceId);
-      if (!existingWorkspace) {
-        this.store.insertAgentWorkspace({
-          runId,
-          workspaceId,
-          kind: "agent",
-          key: m.key,
-          lastAttempt: attempt,
-          retentionPolicy,
-          workspacePath: defaultPath,
-          target: gitTarget.target,
-          baseCommit: gitTarget.baseCommit,
-          status: "creating",
-          failureSeen: false,
-          lastTurnKey: null,
-          lastTurnAttempt: null,
-          lastDiffEventSeq: null,
-          lastErrorEventSeq: null,
-          cleanupErrorJson: null,
-          createdAtMs: startedAtMs,
-          updatedAtMs: startedAtMs,
-          mergedAtMs: null,
-          discardedAtMs: null,
-          removedAtMs: null,
-        });
-        needsCreate = true;
-        return;
-      }
-      path = existingWorkspace.workspacePath;
-      persistedTarget = existingWorkspace.target;
-      persistedBaseCommit = existingWorkspace.baseCommit;
-      if (existingWorkspace.target !== gitTarget.target) {
-        throw new Error(
-          `agent "${m.key}" workspace target changed from ${existingWorkspace.target} to ${gitTarget.target}`,
-        );
-      }
-      if (existingWorkspace.status === "removed") {
-        this.store.updateAgentWorkspace(runId, workspaceId, {
-          status: "creating",
-          lastAttempt: attempt,
-          retentionPolicy,
-          failureSeen: false,
-          lastDiffEventSeq: null,
-          lastErrorEventSeq: null,
-          cleanupErrorJson: null,
-          updatedAtMs: startedAtMs,
-          mergedAtMs: null,
-          discardedAtMs: null,
-          removedAtMs: null,
-        });
-        needsCreate = true;
-        return;
-      }
-      if (
-        existingWorkspace.status !== "idle" &&
-        existingWorkspace.status !== "diff_error" &&
-        existingWorkspace.status !== "active" &&
-        existingWorkspace.status !== "creating"
-      ) {
-        throw new Error(
-          `agent "${m.key}" workspace is ${existingWorkspace.status} and cannot start`,
-        );
-      }
-      this.store.updateAgentWorkspace(runId, workspaceId, {
-        status: "active",
-        lastAttempt: attempt,
-        retentionPolicy,
-        updatedAtMs: startedAtMs,
-      });
-    });
-    if (needsCreate) {
-      try {
-        createRetainedWorktree(gitTarget.repoRoot, path, persistedBaseCommit);
-      } catch (err) {
-        this.store.updateAgentWorkspace(runId, workspaceId, {
-          status: "abandoned",
-          failureSeen: true,
-          updatedAtMs: this.host.clock(),
-        });
-        throw err;
-      }
-      this.store.updateAgentWorkspace(runId, workspaceId, {
-        status: "active",
-        updatedAtMs: startedAtMs,
-      });
-    }
-    if (!existsSync(path)) {
-      this.store.updateAgentWorkspace(runId, workspaceId, {
-        status: "abandoned",
-        failureSeen: true,
-        updatedAtMs: this.host.clock(),
-      });
-      throw new Error(`agent "${m.key}" retained workspace is missing at ${path}`);
-    }
-    return {
-      cwd: path,
-      workspaceId,
-      workspacePath: path,
-      target: persistedTarget,
-      baseCommit: persistedBaseCommit,
-    };
+  ): InvocationWorkspace {
+    return this.beginInvocationWorkspace(
+      runId,
+      m.workspaceId,
+      { kind: "agent", key: m.key, attempt },
+      startedAtMs,
+    );
   }
 
   private captureAgentWorkspaceEvents(
     m: Extract<WorkerRequest, { type: "agent" }>,
-    workspace: {
-      workspaceId?: string;
-      workspacePath?: string;
-      target: string;
-      baseCommit?: string;
-    },
+    workspace: InvocationWorkspace,
   ): { events: DurableAgentEvent[]; status: "idle" | "diff_error" } {
-    if (!workspace.workspacePath) return { events: [], status: "idle" };
+    if (!workspace.owned) return { events: [], status: "idle" };
     try {
       const bundle = diffWorkspace(workspace.workspacePath);
       return {
@@ -944,7 +1132,7 @@ export class RealmKernel {
               key: m.key,
               workspaceId: workspace.workspaceId ?? null,
               workspacePath: workspace.workspacePath,
-              target: workspace.target,
+              sourcePath: workspace.sourcePath,
               baseCommit: workspace.baseCommit ?? null,
               modified: bundle.modified,
               added: bundle.added,
@@ -977,6 +1165,7 @@ export class RealmKernel {
   private updateAgentWorkspaceAfterEvents(
     runId: string,
     workspaceId: string | undefined,
+    holder: WorkspaceHolder,
     status: "idle" | "diff_error",
     failureSeen: boolean,
     events: DurableAgentEvent[],
@@ -991,7 +1180,7 @@ export class RealmKernel {
         if (event.type === "agent.diff") lastDiffEventSeq = seq;
         if (event.type === "workspace.diff_error") lastErrorEventSeq = seq;
       }
-      this.store.updateAgentWorkspace(runId, workspaceId, {
+      this.releaseWorkspaceHolder(runId, workspaceId, holder, {
         status,
         ...(failureSeen || status === "diff_error" ? { failureSeen: true } : {}),
         ...(lastDiffEventSeq !== null ? { lastDiffEventSeq } : {}),
@@ -1034,9 +1223,10 @@ export class RealmKernel {
       workspacePath?: string;
       workspaceTarget?: string;
       workspaceBaseCommit?: string;
+      workspaceOwned?: boolean;
     },
   ): { events: DurableAgentEvent[]; status: "idle" | "diff_error" } {
-    if (!begun.workspacePath) return { events: [], status: "idle" };
+    if (!begun.workspaceOwned || !begun.workspacePath) return { events: [], status: "idle" };
     try {
       const bundle = diffWorkspace(begun.workspacePath);
       return {
@@ -1050,7 +1240,7 @@ export class RealmKernel {
               turnKey: m.turnKey,
               workspaceId: begun.workspaceId ?? null,
               workspacePath: begun.workspacePath,
-              target: begun.workspaceTarget ?? m.target,
+              sourcePath: begun.workspaceTarget ?? null,
               baseCommit: begun.workspaceBaseCommit ?? null,
               modified: bundle.modified,
               added: bundle.added,
@@ -1089,6 +1279,7 @@ export class RealmKernel {
       attempt: number;
       inputHash: string;
       startedAtMs: number;
+      workspaceId?: string;
       workspacePath?: string;
       resumeToken?: string;
     },
@@ -1158,8 +1349,11 @@ export class RealmKernel {
         tokenAfter,
         finishedAtMs,
       );
-      if (begun.workspacePath) {
-        this.store.updateAgentSessionWorkspace(runId, m.agentKey, {
+      this.releaseWorkspaceHolder(
+        runId,
+        begun.workspaceId,
+        { kind: "agent_session", key: m.agentKey, attempt: begun.attempt },
+        {
           status: workspaceStatus,
           ...(failureSeen || workspaceStatus === "diff_error" ? { failureSeen: true } : {}),
           lastTurnKey: m.turnKey,
@@ -1167,8 +1361,8 @@ export class RealmKernel {
           ...(lastDiffEventSeq !== null ? { lastDiffEventSeq } : {}),
           ...(lastErrorEventSeq !== null ? { lastErrorEventSeq } : {}),
           updatedAtMs: finishedAtMs,
-        });
-      }
+        },
+      );
     });
     this.store.appendEvent(
       runId,
@@ -1181,7 +1375,13 @@ export class RealmKernel {
   private failAgentSessionTurn(
     runId: string,
     m: Extract<WorkerRequest, { type: "agent-turn" }>,
-    begun: { attempt: number; inputHash: string; startedAtMs: number; workspacePath?: string },
+    begun: {
+      attempt: number;
+      inputHash: string;
+      startedAtMs: number;
+      workspaceId?: string;
+      workspacePath?: string;
+    },
     err: unknown,
     events: DurableAgentEvent[] = [],
   ): void {
@@ -1211,8 +1411,11 @@ export class RealmKernel {
         finishedAtMs: atMs,
       });
       this.store.failAgentSessionTurn(runId, m.agentKey, m.turnKey, begun.attempt, atMs);
-      if (begun.workspacePath) {
-        this.store.updateAgentSessionWorkspace(runId, m.agentKey, {
+      this.releaseWorkspaceHolder(
+        runId,
+        begun.workspaceId,
+        { kind: "agent_session", key: m.agentKey, attempt: begun.attempt },
+        {
           status: lastErrorEventSeq !== null ? "diff_error" : "idle",
           failureSeen: true,
           lastTurnKey: m.turnKey,
@@ -1220,8 +1423,8 @@ export class RealmKernel {
           ...(lastDiffEventSeq !== null ? { lastDiffEventSeq } : {}),
           ...(lastErrorEventSeq !== null ? { lastErrorEventSeq } : {}),
           updatedAtMs: atMs,
-        });
-      }
+        },
+      );
     });
   }
 
@@ -1255,6 +1458,7 @@ export class RealmKernel {
       sessionRunGuarded = true;
     }
     const runTarget = this.store.getRun(runId)?.runTarget ?? null;
+    this.recoverActiveWorkspaceHolders(runId, this.host.clock());
     const source = readSourceSafe(workflowUrl);
     const sourcePath = workflowUrl.startsWith("file:")
       ? new URL(workflowUrl).pathname
@@ -1301,6 +1505,18 @@ export class RealmKernel {
           // worker gone
         }
       };
+      const replyError = (id: number, err: unknown): void => {
+        if (settled) return;
+        try {
+          worker.postMessage({
+            type: "rpc-error",
+            id,
+            error: serializeError(err),
+          } satisfies HostReply);
+        } catch {
+          // worker gone
+        }
+      };
       // Settle a run as resumable (a host-side crash fault); the pending row
       // written before the fault drives re-execution on the next run.
       const abort = (err: unknown): void => {
@@ -1334,6 +1550,7 @@ export class RealmKernel {
                 sab,
                 moduleHelpers,
                 agentProfiles: this.agentProfiles ?? {},
+                runId,
                 runTarget,
               } satisfies HostReply);
               break;
@@ -1382,6 +1599,15 @@ export class RealmKernel {
               reply(m.id, {});
               break;
             }
+            case "workspace": {
+              try {
+                const handle = this.resolveWorkspaceSpec(runId, m.spec, this.host.clock());
+                reply(m.id, handle);
+              } catch (err) {
+                replyError(m.id, err);
+              }
+              break;
+            }
             case "agent": {
               const begun = engine.beginStep(
                 m.key,
@@ -1413,6 +1639,11 @@ export class RealmKernel {
               // §11: an explicitly isolated agent edits in a git worktree;
               // secrets are injected as invocation env from the side channel.
               const caps = m.capabilities ?? undefined;
+              const workspaceHolder: WorkspaceHolder = {
+                kind: "agent",
+                key: m.key,
+                attempt: begun.attempt,
+              };
               let workspace: ReturnType<typeof this.beginAgentWorkspace>;
               try {
                 workspace = this.beginAgentWorkspace(runId, m, begun.attempt, begun.startedAtMs);
@@ -1481,7 +1712,13 @@ export class RealmKernel {
                       onStall: (a) => engine.emit("agent.stalled", { key: m.key, attempt: a }),
                     },
                   );
-                  if (settled || this.isRunInterrupted(runId)) return;
+                  if (settled || this.isRunInterrupted(runId)) {
+                    this.releaseWorkspaceHolder(runId, workspace.workspaceId, workspaceHolder, {
+                      status: "idle",
+                      updatedAtMs: this.host.clock(),
+                    });
+                    return;
+                  }
                   const output = execution.output;
                   const workspaceCapture = this.captureAgentWorkspaceEvents(m, workspace);
                   const text = execution.text;
@@ -1500,6 +1737,7 @@ export class RealmKernel {
                     this.updateAgentWorkspaceAfterEvents(
                       runId,
                       workspace.workspaceId,
+                      workspaceHolder,
                       workspaceCapture.status,
                       false,
                       workspaceCapture.events,
@@ -1515,7 +1753,14 @@ export class RealmKernel {
                     contentHash: hashJson(output),
                   });
                 } catch (agentErr) {
-                  if (settled || this.isRunInterrupted(runId)) return;
+                  if (settled || this.isRunInterrupted(runId)) {
+                    this.releaseWorkspaceHolder(runId, workspace.workspaceId, workspaceHolder, {
+                      status: "idle",
+                      failureSeen: true,
+                      updatedAtMs: this.host.clock(),
+                    });
+                    return;
+                  }
                   // onFailure:'null' (D7) tolerates a terminal failure: journal a
                   // COMPLETED null (with failure metadata as an event) so resume
                   // replays null instead of re-calling the agent.
@@ -1537,6 +1782,7 @@ export class RealmKernel {
                       this.updateAgentWorkspaceAfterEvents(
                         runId,
                         workspace.workspaceId,
+                        workspaceHolder,
                         workspaceCapture.status,
                         true,
                         workspaceCapture.events,
@@ -1553,6 +1799,7 @@ export class RealmKernel {
                   this.updateAgentWorkspaceAfterEvents(
                     runId,
                     workspace.workspaceId,
+                    workspaceHolder,
                     workspaceCapture.status,
                     true,
                     workspaceCapture.events,
@@ -1679,7 +1926,15 @@ export class RealmKernel {
                         engine.emit("agent.stalled", { key: m.stableKey, attempt: a }),
                     },
                   );
-                  if (settled || this.isRunInterrupted(runId)) return;
+                  if (settled || this.isRunInterrupted(runId)) {
+                    this.releaseWorkspaceHolder(
+                      runId,
+                      begun.workspaceId,
+                      { kind: "agent_session", key: m.agentKey, attempt: begun.attempt },
+                      { status: "idle", updatedAtMs: this.host.clock() },
+                    );
+                    return;
+                  }
                   const output = execution.output;
                   const text = execution.text;
                   const workspaceCapture = this.captureSessionWorkspaceEvents(m, begun);
@@ -1707,7 +1962,15 @@ export class RealmKernel {
                   }
                   reply(m.id, { ok: true, output, contentHash: hashJson(output) });
                 } catch (agentErr) {
-                  if (settled || this.isRunInterrupted(runId)) return;
+                  if (settled || this.isRunInterrupted(runId)) {
+                    this.releaseWorkspaceHolder(
+                      runId,
+                      begun.workspaceId,
+                      { kind: "agent_session", key: m.agentKey, attempt: begun.attempt },
+                      { status: "idle", failureSeen: true, updatedAtMs: this.host.clock() },
+                    );
+                    return;
+                  }
                   if (m.onFailure === "null" && agentErr instanceof AgentFailure) {
                     const errJson = serializeError(agentErr) as unknown as Json;
                     engine.emit("agent.tolerated_failure", { key: m.stableKey, error: errJson });

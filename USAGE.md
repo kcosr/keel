@@ -378,9 +378,9 @@ Workflow input is always passed with `--input <json>`. The positional slot is
 only source, never input. `--name` is an optional display label; if omitted for
 stdin launches, the run is unnamed (`null` in JSON, `(unnamed)` in text output).
 Names are not handles and may repeat. Use run ids for follow-up commands.
-`--target <dir>` overrides the default run target (the CLI cwd); the value must
-be non-empty. The selected target is stored with the run and inherited by agents
-unless a profile/spec sets a target.
+`--target <dir>` overrides the run target (the CLI cwd); the value must be
+non-empty. The selected target is stored with the run and is the path used by the
+lazy default direct workspace.
 
 On launch, the daemon stores an immutable workflow definition snapshot by content
 hash and runs from a daemon-owned materialized cache. Resume, retry, rewind,
@@ -397,35 +397,58 @@ in the definition manifest. Compatible Keel upgrades can resume existing
 definitions; a daemon that does not support the stored ABI fails the run with a
 required-versus-supported ABI error.
 
-### Targets And Retained Workspaces
+### Targets And Run Workspaces
 
-Every CLI/client-created run records a default `target`: for `keel launch` and
-`keel run` this is the client cwd, or `--target <dir>` when supplied. Raw
-low-level API callers must send a non-empty target; the daemon rejects missing or
-blank targets rather than substituting its own cwd. Non-isolated agents execute
-with provider `cwd = target`. Agent specs/profiles may set their own absolute
-`target`.
+Every CLI/client-created run records a `target`: for `keel launch` and `keel run`
+this is the client cwd, or `--target <dir>` when supplied. Raw low-level API
+callers must send a non-empty target; the daemon rejects missing or blank targets
+rather than substituting its own cwd.
 
-`workspaceIsolation: true` requires the resolved target to be the git repository
-root. If a subdirectory is supplied, the run fails and names the detected repo
-root to pass explicitly. Isolation is reviewable filesystem staging, not a
-secret/network security boundary.
+Provider cwd always comes from a resolved run workspace, never daemon cwd. Agents
+and sessions resolve workspaces in this order: an explicit `workspace` handle,
+the innermost `ctx.withWorkspace`, then the lazy default direct workspace:
 
-Isolated `ctx.agent` steps and `ctx.agentSession` participants create durable
-workspace rows under `KEEL_WORKSPACE_STORE` (default: beside the journal under
-`KEEL_DIR/workspaces`). One-shot agents reuse the same workspace for retries of
-the same logical step while the run is non-terminal; sessions reuse one
-workspace per `(runId, agentKey)` across turns, retries, parks, interrupts, and
-daemon restarts. `workspaceRetention` controls terminal cleanup:
+```ts
+{ key: "__default", mode: "direct", path: ctx.run.target }
+```
 
-- `"never"` (default): remove the filesystem at terminal run cleanup and hide
+Direct workspaces use an existing directory and are not owned, diffed, merged,
+discarded, or removed by Keel. Worktree workspaces are Keel-owned git worktrees
+created under `KEEL_WORKSPACE_STORE` (default: beside the journal under
+`KEEL_DIR/workspaces`). Worktree `path` defaults to `ctx.run.target` and may be a
+subdirectory; Keel resolves it to the enclosing git repository root. Worktree
+`ref` defaults to `HEAD`.
+
+```ts
+const workspace = await ctx.workspace({
+  key: "implementation",
+  mode: "worktree",
+  retention: "retain-on-failure",
+});
+await ctx.agent({ key: "impl", workspace, toolPolicy: "workspace-write", prompt: "..." });
+```
+
+`ctx.withWorkspace(specOrHandle, fn)` binds a scoped default for all agents and
+sessions inside `fn`, while explicit per-agent/session `workspace` overrides the
+scope. `WorkspaceSpec.key` is required; `__default` is reserved for the run
+default workspace.
+
+Worktree retention controls terminal cleanup:
+
+- `"remove"` (default): remove the filesystem at terminal run cleanup and hide
   the audit row from default listings.
-- `"on-failure"`: retain failed/cancelled runs, tolerated agent failures, diff
-  errors, abandoned workspaces, or cleanup errors; remove clean successes.
-- `"always"`: retain terminal workspaces for operator review.
+- `"retain-on-failure"`: retain failed/cancelled runs, tolerated agent failures,
+  diff errors, abandoned workspaces, or cleanup errors; remove clean successes.
+- `"retain"`: retain terminal workspaces for operator review.
 
-`workspaceRetention` is valid only with `workspaceIsolation: true`, participates
-in agent/session identity, and can be inherited from an agent profile.
+For durable `ctx.agentSession` participants that use a worktree workspace, choose
+`"retain-on-failure"` or `"retain"` when you expect to retry a terminal failed
+run. If terminal cleanup removes the worktree, Keel fails closed rather than
+resuming the existing backend conversation in a fresh empty worktree.
+
+Public per-agent `workspaceIsolation`, `workspaceRetention`, and `target` fields
+have been removed at the workflow SDK ABI 4 boundary. Drain non-terminal old-ABI
+runs before upgrading or expect resume to fail with the unsupported-ABI error.
 
 ```bash
 keel workspace list <runId> [--all]
@@ -437,20 +460,23 @@ keel workspace gc [--older-than-ms ms] [--include-pending] [--include-removed]
 ```
 
 `RunWorkspaceView.workspaceId` is the canonical selector for show/diff/merge/
-discard. Views also include `kind`, display `key`, latest attempt/turn metadata,
-`retentionPolicy`, `failureSeen`, timestamps, and cleanup errors. Default list
-shows retained/operator-actionable workspaces and cleanup errors; `--all`
-includes removed audit rows.
+discard. Views include `mode`, `ownerKind`, display `key`, provider
+`workspacePath`, `sourcePath`, ownership, retention, latest attempt/turn and
+active-holder metadata, `failureSeen`, timestamps, and cleanup errors. Default
+list output hides idle direct workspaces such as `__default`; `--all` includes
+removed audit rows and direct workspace rows.
 
 Merge/discard are explicit operator actions and refuse while the run is
-non-terminal, a session turn is active, or the workspace has already moved to a
-terminal lifecycle status such as `removed`, `merged`, or `discarded`. Merge
-applies the current workspace filesystem back to its recorded target. Durable
-`agent.diff` payloads include the `workspaceId`/path/target and bounded
+non-terminal, a worktree provider invocation is active, the workspace is direct,
+or the workspace has already moved to a terminal lifecycle status such as
+`removed`, `merged`, or `discarded`. Merge applies the current workspace
+filesystem back to its recorded source repository. Durable `agent.diff` payloads
+include the `workspaceId`, `workspacePath`, `sourcePath`, and bounded
 `contentDiff` values that end with a truncation notice when the retained
 workspace should be inspected for the full patch; changed path arrays are capped
-with `omittedPathCounts`/`pathLimit` metadata. Diff capture that exceeds Keel's
-explicit git status or diff buffers is recorded as `workspace.diff_error`.
+with `omittedPathCounts`/`pathLimit` metadata. Direct workspaces do not produce
+review diffs in v1. Diff capture that exceeds Keel's explicit git status or diff
+buffers is recorded as `workspace.diff_error`.
 
 ### Authorization
 
@@ -526,6 +552,12 @@ return {
 };
 ```
 
+`execute` can also manage run workspaces without shelling out to the CLI:
+`keel.listRunWorkspaces`, `keel.getRunWorkspace`, `keel.getRunWorkspaceDiff`,
+`keel.mergeRunWorkspace`, `keel.discardRunWorkspace`, and `keel.gcWorkspaces`.
+Per-run capabilities may list/get/diff workspaces for that run; merge, discard,
+and GC restore the execute control credential/admin capability.
+
 `execute` is not durable orchestration. It can be re-invoked with non-secret
 state handles, but durable pauses belong in workflow code via `ctx.human`,
 `ctx.signal`, and `ctx.sleep`. Saved workflows/tasks and `ctx.spawn` are
@@ -580,6 +612,9 @@ versioning and can cause affected steps to re-run.
 
 | Member | What It Does |
 |---|---|
+| `run.id` / `run.target` | Current run id and daemon-resolvable run target. |
+| `workspace(spec)` | Resolve a run-scoped direct or worktree workspace handle. |
+| `withWorkspace(specOrHandle, fn)` | Bind a scoped default workspace for agents/sessions in `fn`. |
 | `step(key, schema, inputs, fn, opts?)` | Pure, memoized step. Re-runs only if inputs or version change. |
 | `agent(spec)` | Journaled LLM agent call. A completed agent effect never re-runs on resume. |
 | `agentSession(spec)` | Realm-only logical agent participant with multiple durable `.turn(...)` calls in one backend conversation. |
@@ -639,9 +674,7 @@ const finding = await ctx.agent({
 | `toolPolicy?` | `"none"`, `"read-only"`, `"workspace-write"`, or `"unrestricted"`. Defaults to `"read-only"`. |
 | `allowTools?` | Provider-native tool additions after policy resolution. |
 | `denyTools?` | Provider-native tool removals after policy resolution. |
-| `workspaceIsolation?` | Explicit opt-in to isolated worktree execution and `agent.diff` capture. |
-| `workspaceRetention?` | Isolated workspace terminal cleanup policy: `"never"` (default), `"on-failure"`, or `"always"`. Valid only with `workspaceIsolation: true`. |
-| `target?` | Absolute daemon-resolvable directory for this agent; defaults to the run target. Isolated agents require a git repository root. |
+| `workspace?` | `WorkspaceHandle` from `ctx.workspace`; defaults to the scoped or run default direct workspace. |
 | `capabilities?` | Explicit normalized capability declaration used when `toolPolicy` is omitted. |
 | `secrets?` | Secret names to inject from the side channel. |
 | `onFailure?` | `"throw"` by default, or `"null"` to tolerate terminal failure. |
@@ -713,19 +746,21 @@ Both keys must match `[A-Za-z0-9_-]+`; ordinary `ctx.step` and `ctx.agent` keys
 may not start with `__session.`.
 
 Participant identity is fixed for the run after profiles, tool policy, allowed
-tools, denied tools, capabilities, workspace isolation, workspace retention,
-target, and secret names are resolved. Changing the participant identity or
+tools, denied tools, capabilities, resolved workspace id, and secret names are
+resolved. Changing the participant identity or
 reusing a turn key with a changed prompt/schema/options fails the run instead of
 starting a fresh backend session.
 
 Session participants require providers that support stable backend sessions
 (`pi`/Codex and `claude`). A later turn must resume from the latest completed
 session token; if the token is missing or the provider cannot resume, the turn
-fails. With `workspaceIsolation: true`, one workspace is created per `(runId,
-agentKey)` and reused across all turns/retries while the run can continue; the
-resolved `workspaceRetention` decides whether terminal cleanup removes or keeps
-it for inspect/merge/discard/GC. If `onFailure: "null"` is set, a tolerated failure can complete as `null` only
-after a session token has been captured.
+fails. A session uses its explicit/scoped/default workspace across all turns and
+retries; changing the workspace for an existing participant changes identity and
+fails closed. A removed worktree workspace also fails closed for an existing
+participant; use worktree retention `"retain-on-failure"` or `"retain"` when a
+terminal failed session run should be retryable. If `onFailure: "null"` is set,
+a tolerated failure can complete as `null` only after a session token has been
+captured.
 
 Runs that use `ctx.agentSession` can resume after crashes and can retry failed
 turns, but `rerun`, `rewind`, and `fork` reject them. Start a fresh run when you
@@ -755,7 +790,7 @@ capabilities: {
 };
 allowTools: ["Bash"];
 denyTools: ["LS"];
-workspaceIsolation: true; // opt into worktree + diff capture
+// For reviewable edits, pass a worktree WorkspaceHandle to the agent/session.
 ```
 
 Capability enforcement is mapped to provider-specific tool flags in one place,
@@ -767,15 +802,15 @@ Filesystem capability levels:
 |---|---|
 | `"none"` | No file tools. |
 | `"read"` | Read, grep, and list. |
-| `"workspace-write"` | Edit/write through provider tools. Use `workspaceIsolation: true` when those edits should be staged in an isolated worktree and reviewed as a diff. |
+| `"workspace-write"` | Edit/write through provider tools. Use a `mode: "worktree"` workspace when those edits should be staged in a retained worktree and reviewed as a diff. |
 
 Secrets named in `secrets` are resolved from a side channel keyed by run and
 injected into the provider invocation environment. Secret names, not raw values,
 belong in workflow source and agent options. If an agent prints, streams,
 returns, writes, diffs, or errors with a secret value, Keel journals that content
 as-is; there is no exact-value agent-secret redaction pass. Secrets do not
-require `workspaceIsolation`, and workspace isolation is only an optional
-worktree/diff-review mode.
+require worktree mode; workspace choice is only cwd/lifecycle selection, not a
+secret boundary.
 
 The bundled `keel daemon` does not yet construct a `SecretStore`; secret
 injection requires constructing `RealmKernel` or `KeelDaemon` programmatically
@@ -879,9 +914,10 @@ interface LaunchRequest {
 }
 ```
 
-`source` is workflow TypeScript captured by the client. `target` is the default
-daemon-resolvable run target inherited by agents; daemon/server boundaries reject
-missing or blank target strings instead of falling back to daemon cwd.
+`source` is workflow TypeScript captured by the client. `target` is the
+daemon-resolvable run target used by the default direct workspace;
+daemon/server boundaries reject missing or blank target strings instead of
+falling back to daemon cwd.
 `provenance` is display-only; the daemon never opens or parses it for execution.
 
 ### KeelApi

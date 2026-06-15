@@ -49,8 +49,8 @@ No round label is required; the timestamp and identity preserve history.
   a reason to use the provider default. If you use Claude for either role,
   configure Claude to permit `Edit`/`Write`; otherwise it may return findings
   without appending to the file.
-- `ctx.agentSession` does not support `workspaceIsolation: true` yet, so this
-  workflow edits the target spec directly.
+- This workflow uses the run default direct workspace, so it edits the target
+  spec directly.
 - Keep `maxRounds` small. The workflow caps it at `10`.
 - This workflow does not request Keel secret refs. Do not put raw secret values in
   prompts or input; agent outputs are journaled as-is.

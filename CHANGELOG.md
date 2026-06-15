@@ -3,8 +3,10 @@
 ## [Unreleased]
 
 ### Added
-- `workspaceRetention: "never" | "on-failure" | "always"` for isolated `ctx.agent` and `ctx.agentSession` workspaces, with profile inheritance, workspace CLI/RPC metadata, and unified `workspaceId` selectors.
-- Run/schedule agent targets via `--target`, per-agent/profile `target`, and workspace lifecycle RPC/CLI commands (`keel workspace ...`).
+- Workflow-scoped `ctx.workspace`/`ctx.withWorkspace` with direct and git-worktree modes, `WorkspaceHandle` sharing across agents/sessions, and a lazy `__default` direct workspace at `ctx.run.target`.
+- Workspace lifecycle metadata now distinguishes `mode`, `ownerKind`, source path, provider cwd, ownership, retention, and active worktree holders in RPC/CLI/execute views.
+- `keel execute` control scripts can list/get/diff/merge/discard/GC run workspaces through the daemon client.
+- Run/schedule targets via `--target`; the run target feeds the default workspace instead of acting as a per-agent cwd override.
 - Top-level `workflows/` directory for reusable operational workflows, starting
   with `iterative-review.workflow.ts`, a signal-driven multi-turn review loop,
   and `implement-review-loop.workflow.ts`, a bounded write-capable
@@ -51,26 +53,25 @@
 - Terminal text rendering for list/report/watch/TUI now uses shared sanitization,
   avoids unbounded table width argument spreads, and bounds retained TUI watch row
   text for long coalesced streams.
-- Agent provider `cwd` is now the resolved run/agent target for non-isolated
-  agents; isolated agents require the target to be a git repository root and no
-  longer use daemon cwd or `KEEL_WORKSPACE_ROOT` fallback. Raw daemon/RPC launch
-  and schedule calls now reject missing or blank targets, while CLI/client
-  wrappers still capture their own cwd as the default target. The supervisor
-  disables persisted schedules with invalid targets instead of letting one bad
-  schedule break a tick.
-- Workflow SDK ABI bumped to 3 because workspace retention participates in agent/session identity and terminal workspace lifecycle.
-- Isolated workspaces now default to terminal cleanup (`workspaceRetention: "never"`); retained workspaces require `"on-failure"` or `"always"`, and workspace RPC/CLI show/diff/merge/discard now use `workspaceId` instead of session `agentKey`.
-- Isolated session `agent.diff` and `workspace.diff_error` event payloads now
-  include the durable `workspaceId`, matching one-shot agent workspace events and
-  making retained workspace events directly addressable through workspace
-  RPC/CLI selectors.
+- Agent provider `cwd` is now always the resolved workspace path: explicit
+  handle, scoped workspace, or the default direct workspace at the run target.
+  Worktree mode resolves the supplied path to an enclosing git repository root.
+  Raw daemon/RPC launch and schedule calls reject missing or blank targets, while
+  CLI/client wrappers still capture their own cwd as the default target. The
+  supervisor disables persisted schedules with invalid targets instead of letting
+  one bad schedule break a tick.
+- Workflow SDK ABI bumped to 4 and journal schema to v15 for the workflow workspace API; non-terminal runs captured with older SDK ABIs must be drained before upgrade or will fail resume with the existing unsupported-ABI error.
+- Public `workspaceIsolation`, `workspaceRetention`, and per-agent/profile `target` options were removed. Use `ctx.workspace({ key, mode: "worktree", retention })` and pass the returned handle to agents/sessions.
+- Worktree retention names are now `"remove"`, `"retain-on-failure"`, and `"retain"`; retention applies only to Keel-owned worktrees, never direct workspaces.
+- Durable agent sessions fail closed if a referenced worktree was removed by terminal cleanup; use `"retain-on-failure"` or `"retain"` for retryable failed session runs.
+- Agent/session `agent.diff` and `workspace.diff_error` event payloads include the durable `workspaceId` and workspace source/cwd metadata for RPC/CLI selectors.
 - Durable workspace diff payloads now cap `agent.diff.contentDiff` and changed
   path arrays with retained-workspace truncation/omission metadata, and
   oversized `git status`/`git diff` output crosses explicit buffer limits into
   `workspace.diff_error` instead of relying on Node's default `maxBuffer`.
-- Agent secrets are now trusted-local env injection only: secrets no longer
-  require `workspaceIsolation`, and exact secret values emitted by agents are no
-  longer redacted from outputs, events, tolerated failures, or isolated diffs.
+- Agent secrets are trusted-local env injection only: secrets do not require
+  worktree mode, and exact secret values emitted by agents are not redacted from
+  outputs, events, tolerated failures, or workspace diffs.
 - Attached CLI text transcripts now coalesce adjacent live agent text/reasoning
   chunks under one header for human-readable streaming output, while NDJSON
   event streams remain full-fidelity envelopes.

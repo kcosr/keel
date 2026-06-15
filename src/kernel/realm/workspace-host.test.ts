@@ -62,14 +62,14 @@ describe("trusted-local agent isolation controls", () => {
       workspaceStore: mkdtempSync(join(tmpdir(), "keel-workspaces-")),
     });
     await expect(kernel.run(writeUrl, null, { name: "w", target })).rejects.toThrow(
-      /git repository root/,
+      /not inside a git repository/,
     );
     rmSync(target, { recursive: true, force: true });
     expect(called).toBe(false); // provider never invoked — failed closed
     expect(store.getRun("r")?.status).toBe("failed");
   });
 
-  test("workspaceRetention requires workspaceIsolation", async () => {
+  test("removed per-agent workspaceRetention is rejected", async () => {
     const store = JournalStore.memory();
     const workflow = {
       source: `
@@ -85,17 +85,17 @@ describe("trusted-local agent isolation controls", () => {
       agents: new AgentProviderRegistry().register(writerProvider),
     });
     await expect(kernel.run(workflow, null, { name: "w", target: process.cwd() })).rejects.toThrow(
-      /workspaceRetention requires workspaceIsolation/,
+      /no longer accepts workspaceRetention/,
     );
   });
 
   test("an explicitly allowed shell tool does not imply workspace isolation", async () => {
     const store = JournalStore.memory();
-    let called = false;
+    let invocation: AgentInvocation | undefined;
     const provider: AgentProvider = {
       name: "writer",
-      async generate(): Promise<AgentResult> {
-        called = true;
+      async generate(inv: AgentInvocation): Promise<AgentResult> {
+        invocation = inv;
         return { text: "inspected", transcript: [] };
       },
     };
@@ -110,7 +110,14 @@ describe("trusted-local agent isolation controls", () => {
     });
     expect(handle.status).toBe("finished");
     expect(handle.output).toBe("inspected");
-    expect(called).toBe(true);
+    expect(invocation?.cwd).toBe(process.cwd());
+    expect(store.getAgentWorkspace("r", "__default")).toMatchObject({
+      mode: "direct",
+      ownerKind: "workflow",
+      owned: false,
+      workspacePath: process.cwd(),
+    });
+    expect(store.listAgentWorkspaces("r")).toEqual([]);
   });
 
   test("secrets with write capability run without workspace isolation and receive env", async () => {
@@ -169,6 +176,91 @@ describe("trusted-local agent isolation controls", () => {
     expect(invocation?.allowTools).toContain("bash");
     expect(invocation?.env?.TOKEN).toBe("tool-secret-abc");
   });
+
+  test("explicit direct workspace uses the supplied cwd and persists a direct row", async () => {
+    const store = JournalStore.memory();
+    const target = mkdtempSync(join(tmpdir(), "keel-direct-target-"));
+    let invocation: AgentInvocation | undefined;
+    const provider: AgentProvider = {
+      name: "writer",
+      async generate(inv: AgentInvocation): Promise<AgentResult> {
+        invocation = inv;
+        return { text: "direct", transcript: [] };
+      },
+    };
+    const workflow = {
+      source: `
+        import { type Ctx } from "@kcosr/keel";
+        export default async function wf(ctx: Ctx): Promise<string> {
+          const workspace = await ctx.workspace({ key: "direct-review", mode: "direct" });
+          return await ctx.agent({ key: "review", provider: "writer", prompt: "review", workspace });
+        }
+      `,
+      name: "direct-workspace",
+    };
+    try {
+      const kernel = new RealmKernel(store, {
+        idgen: () => "r",
+        agents: new AgentProviderRegistry().register(provider),
+      });
+      const handle = await kernel.run<string>(workflow, null, { name: "direct", target });
+      expect(handle.status).toBe("finished");
+      expect(invocation?.cwd).toBe(target);
+      expect(store.getAgentWorkspace("r", "direct-review")).toMatchObject({
+        mode: "direct",
+        ownerKind: "workflow",
+        owned: false,
+        sourcePath: target,
+        workspacePath: target,
+      });
+      expect(store.listAgentWorkspaces("r")).toEqual([]);
+    } finally {
+      rmSync(target, { recursive: true, force: true });
+    }
+  });
+
+  test("withWorkspace works when destructured from ctx", async () => {
+    const store = JournalStore.memory();
+    const target = mkdtempSync(join(tmpdir(), "keel-direct-target-"));
+    let invocation: AgentInvocation | undefined;
+    const provider: AgentProvider = {
+      name: "writer",
+      async generate(inv: AgentInvocation): Promise<AgentResult> {
+        invocation = inv;
+        return { text: "scoped", transcript: [] };
+      },
+    };
+    const workflow = {
+      source: `
+        import { type Ctx } from "@kcosr/keel";
+        export default async function wf(ctx: Ctx): Promise<string> {
+          const { withWorkspace } = ctx;
+          return await withWorkspace({ key: "scoped-direct", mode: "direct" }, async () => {
+            return await ctx.agent({ key: "review", provider: "writer", prompt: "review" });
+          });
+        }
+      `,
+      name: "destructured-with-workspace",
+    };
+    try {
+      const kernel = new RealmKernel(store, {
+        idgen: () => "r",
+        agents: new AgentProviderRegistry().register(provider),
+      });
+      const handle = await kernel.run<string>(workflow, null, { name: "direct", target });
+      expect(handle.status).toBe("finished");
+      expect(handle.output).toBe("scoped");
+      expect(invocation?.cwd).toBe(target);
+      expect(store.getAgentWorkspace("r", "scoped-direct")).toMatchObject({
+        mode: "direct",
+        ownerKind: "workflow",
+        owned: false,
+        workspacePath: target,
+      });
+    } finally {
+      rmSync(target, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("durable diff + worktree cleanup", () => {
@@ -184,6 +276,163 @@ describe("durable diff + worktree cleanup", () => {
     g(["commit", "-q", "-m", "init"]);
   });
   afterEach(() => rmSync(repo, { recursive: true, force: true }));
+
+  test("two agents sharing one worktree handle observe the same cwd", async () => {
+    const store = JournalStore.memory();
+    const calls: AgentInvocation[] = [];
+    const provider: AgentProvider = {
+      name: "writer",
+      async generate(inv: AgentInvocation): Promise<AgentResult> {
+        calls.push({ ...inv });
+        if (inv.prompt === "write" && inv.cwd)
+          writeFileSync(join(inv.cwd, "shared.txt"), "shared\n");
+        if (inv.prompt === "read" && inv.cwd) {
+          return { text: readFileSync(join(inv.cwd, "shared.txt"), "utf8"), transcript: [] };
+        }
+        return { text: "wrote", transcript: [] };
+      },
+    };
+    const workflow = {
+      source: `
+        import { type Ctx } from "@kcosr/keel";
+        export default async function wf(ctx: Ctx): Promise<string> {
+          const workspace = await ctx.workspace({ key: "shared", mode: "worktree", retention: "retain" });
+          await ctx.agent({ key: "write", provider: "writer", prompt: "write", workspace, capabilities: { fs: "workspace-write" } });
+          return await ctx.agent({ key: "read", provider: "writer", prompt: "read", workspace });
+        }
+      `,
+      name: "shared-worktree",
+    };
+    const kernel = new RealmKernel(store, {
+      idgen: () => "r",
+      agents: new AgentProviderRegistry().register(provider),
+      workspaceStore: mkdtempSync(join(tmpdir(), "keel-workspaces-")),
+    });
+    const handle = await kernel.run<string>(workflow, null, { name: "w", target: repo });
+    expect(handle.status).toBe("finished");
+    expect(handle.output).toBe("shared\n");
+    expect(calls[0]?.cwd).toBe(calls[1]?.cwd);
+    expect(store.listAgentWorkspaces("r")[0]).toMatchObject({
+      workspaceId: "shared",
+      status: "pending_review",
+    });
+  });
+
+  test("concurrent active use of the same worktree fails clearly", async () => {
+    const store = JournalStore.memory();
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const provider: AgentProvider = {
+      name: "writer",
+      async generate(inv: AgentInvocation): Promise<AgentResult> {
+        if (inv.prompt === "slow") await gate;
+        return { text: inv.prompt, transcript: [] };
+      },
+    };
+    const workflow = {
+      source: `
+        import { type Ctx } from "@kcosr/keel";
+        export default async function wf(ctx: Ctx): Promise<string[]> {
+          const workspace = await ctx.workspace({ key: "shared", mode: "worktree" });
+          return await Promise.all([
+            ctx.agent({ key: "slow", provider: "writer", prompt: "slow", workspace }),
+            ctx.agent({ key: "fast", provider: "writer", prompt: "fast", workspace }),
+          ]);
+        }
+      `,
+      name: "concurrent-worktree",
+    };
+    const kernel = new RealmKernel(store, {
+      idgen: () => "r",
+      agents: new AgentProviderRegistry().register(provider),
+      workspaceStore: mkdtempSync(join(tmpdir(), "keel-workspaces-")),
+    });
+    await expect(kernel.run<string[]>(workflow, null, { name: "w", target: repo })).rejects.toThrow(
+      /already active/,
+    );
+    release?.();
+  });
+
+  test("parallel default direct workspace agents are permitted", async () => {
+    const store = JournalStore.memory();
+    const cwdByKey = new Map<string, string | undefined>();
+    const provider: AgentProvider = {
+      name: "writer",
+      async generate(inv: AgentInvocation): Promise<AgentResult> {
+        cwdByKey.set(inv.key, inv.cwd);
+        await Bun.sleep(20);
+        return { text: inv.key, transcript: [] };
+      },
+    };
+    const workflow = {
+      source: `
+        import { type Ctx } from "@kcosr/keel";
+        export default async function wf(ctx: Ctx): Promise<string[]> {
+          return await Promise.all([
+            ctx.agent({ key: "a", provider: "writer", prompt: "a" }),
+            ctx.agent({ key: "b", provider: "writer", prompt: "b" }),
+          ]);
+        }
+      `,
+      name: "parallel-default-direct",
+    };
+    const kernel = new RealmKernel(store, {
+      idgen: () => "r",
+      agents: new AgentProviderRegistry().register(provider),
+      workspaceStore: mkdtempSync(join(tmpdir(), "keel-workspaces-")),
+    });
+    const handle = await kernel.run<string[]>(workflow, null, { name: "w", target: repo });
+    expect(handle.status).toBe("finished");
+    expect(cwdByKey.get("a")).toBe(repo);
+    expect(cwdByKey.get("b")).toBe(repo);
+    expect(store.getAgentWorkspace("r", "__default")).toMatchObject({
+      mode: "direct",
+      owned: false,
+    });
+  });
+
+  test("late provider completion does not overwrite terminal workspace cleanup", async () => {
+    const store = JournalStore.memory();
+    const provider: AgentProvider = {
+      name: "writer",
+      async generate(inv: AgentInvocation): Promise<AgentResult> {
+        if (inv.prompt === "fail") throw new Error("boom");
+        await Bun.sleep(80);
+        return { text: "slow", transcript: [] };
+      },
+    };
+    const workflow = {
+      source: `
+        import { type Ctx } from "@kcosr/keel";
+        export default async function wf(ctx: Ctx): Promise<string[]> {
+          const slowWorkspace = await ctx.workspace({ key: "slow-workspace", mode: "worktree" });
+          const failWorkspace = await ctx.workspace({ key: "fail-workspace", mode: "worktree" });
+          return await Promise.all([
+            ctx.agent({ key: "slow", provider: "writer", prompt: "slow", workspace: slowWorkspace }),
+            ctx.agent({ key: "fail", provider: "writer", prompt: "fail", workspace: failWorkspace }),
+          ]);
+        }
+      `,
+      name: "late-workspace-release",
+    };
+    const kernel = new RealmKernel(store, {
+      idgen: () => "r",
+      agents: new AgentProviderRegistry().register(provider),
+      workspaceStore: mkdtempSync(join(tmpdir(), "keel-workspaces-")),
+    });
+    await expect(kernel.run<string[]>(workflow, null, { name: "w", target: repo })).rejects.toThrow(
+      /boom/,
+    );
+    await Bun.sleep(120);
+
+    const slowWorkspace = store
+      .listAgentWorkspaces("r", { includeRemoved: true })
+      .find((row) => row.key === "slow-workspace");
+    expect(slowWorkspace?.status).toBe("removed");
+    expect(slowWorkspace?.activeHolderKind).toBeNull();
+  });
 
   test("the agent.diff event carries bounded reviewable contentDiff, and the worktree is removed", async () => {
     const store = JournalStore.memory();
@@ -206,18 +455,18 @@ describe("durable diff + worktree cleanup", () => {
     expect(store.listAgentWorkspaces("r", { includeRemoved: true })[0]?.status).toBe("removed");
   });
 
-  test("workspaceRetention always keeps a one-shot success workspace for review", async () => {
+  test("retention retain keeps a one-shot success workspace for review", async () => {
     const store = JournalStore.memory();
     const workflow = {
       source: `
         import { type Ctx } from "@kcosr/keel";
         export default async function wf(ctx: Ctx): Promise<string> {
+          const workspace = await ctx.workspace({ key: "edit-workspace", mode: "worktree", retention: "retain" });
           return await ctx.agent({
             key: "edit",
             prompt: "make a change",
             provider: "writer",
-            workspaceIsolation: true,
-            workspaceRetention: "always",
+            workspace,
             capabilities: { fs: "workspace-write" },
           });
         }
@@ -232,22 +481,28 @@ describe("durable diff + worktree cleanup", () => {
     const handle = await kernel.run<string>(workflow, null, { name: "w", target: repo });
     expect(handle.status).toBe("finished");
     const workspace = store.listAgentWorkspaces("r")[0];
-    expect(workspace).toMatchObject({ kind: "agent", key: "edit", status: "pending_review" });
+    expect(workspace).toMatchObject({
+      mode: "worktree",
+      ownerKind: "workflow",
+      key: "edit-workspace",
+      status: "pending_review",
+      retentionPolicy: "retain",
+    });
     expect(existsSync(workspace?.workspacePath ?? "")).toBe(true);
   });
 
-  test("workspaceRetention on-failure keeps a one-shot workspace after fail-then-retry-success", async () => {
+  test("retention retain-on-failure keeps a one-shot workspace after fail-then-retry-success", async () => {
     const store = JournalStore.memory();
     const workflow = {
       source: `
         import { type Ctx } from "@kcosr/keel";
         export default async function wf(ctx: Ctx): Promise<string> {
+          const workspace = await ctx.workspace({ key: "edit-workspace", mode: "worktree", retention: "retain-on-failure" });
           return await ctx.agent({
             key: "edit",
             prompt: "make a change",
             provider: "writer",
-            workspaceIsolation: true,
-            workspaceRetention: "on-failure",
+            workspace,
             capabilities: { fs: "workspace-write" },
           });
         }
@@ -292,11 +547,12 @@ describe("durable diff + worktree cleanup", () => {
       source: `
         import { type Ctx } from "@kcosr/keel";
         export default async function wf(ctx: Ctx): Promise<string> {
+          const workspace = await ctx.workspace({ key: "edit-workspace", mode: "worktree" });
           return await ctx.agent({
             key: "edit",
             prompt: "make a change",
             provider: "writer",
-            workspaceIsolation: true,
+            workspace,
             capabilities: { fs: "workspace-write" },
           });
         }

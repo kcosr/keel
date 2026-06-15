@@ -12,7 +12,8 @@
 // → v10 nullable display names → v11 durable agent session tables
 // → v12 workflow SDK ABI manifests and schedule failure state
 // → v13 run targets and retained agent session workspaces
-// → v14 unified agent workspace retention policy table.
+// → v14 unified agent workspace retention policy table
+// → v15 workflow-scoped direct/worktree workspace rows.
 
 import type { Database } from "bun:sqlite";
 import { parse } from "acorn";
@@ -197,14 +198,24 @@ export function applyMigration(db: Database, fromVersion: number): void {
         const rows = db
           .query<RawAgentSessionWorkspaceV13, []>("SELECT * FROM agent_session_workspaces")
           .all();
-        const insert = db.query(
-          `INSERT OR REPLACE INTO agent_workspaces (
-            run_id, workspace_id, kind, key, last_attempt, retention_policy,
-            workspace_path, target, base_commit, status, failure_seen,
-            last_turn_key, last_turn_attempt, last_diff_event_seq, last_error_event_seq,
-            cleanup_error_json, created_at_ms, updated_at_ms, merged_at_ms, discarded_at_ms, removed_at_ms
-          ) VALUES (?, ?, 'agent_session', ?, NULL, 'always', ?, ?, ?, ?, 0, ?, ?, ?, ?, NULL, ?, ?, ?, ?, NULL)`,
-        );
+        const insert = hasColumn(db, "agent_workspaces", "kind")
+          ? db.query(
+              `INSERT OR REPLACE INTO agent_workspaces (
+                run_id, workspace_id, kind, key, last_attempt, retention_policy,
+                workspace_path, target, base_commit, status, failure_seen,
+                last_turn_key, last_turn_attempt, last_diff_event_seq, last_error_event_seq,
+                cleanup_error_json, created_at_ms, updated_at_ms, merged_at_ms, discarded_at_ms, removed_at_ms
+              ) VALUES (?, ?, 'agent_session', ?, NULL, 'always', ?, ?, ?, ?, 0, ?, ?, ?, ?, NULL, ?, ?, ?, ?, NULL)`,
+            )
+          : db.query(
+              `INSERT OR REPLACE INTO agent_workspaces (
+                run_id, workspace_id, mode, owner_kind, key, last_attempt, retention_policy,
+                workspace_path, source_path, supplied_path, source_ref, base_commit, owned, status,
+                failure_seen, last_turn_key, last_turn_attempt, active_holder_kind, active_holder_key,
+                active_holder_attempt, active_started_at_ms, last_diff_event_seq, last_error_event_seq,
+                cleanup_error_json, created_at_ms, updated_at_ms, merged_at_ms, discarded_at_ms, removed_at_ms
+              ) VALUES (?, ?, 'worktree', 'agent_session', ?, NULL, 'retain', ?, ?, NULL, 'HEAD', ?, 1, ?, 0, ?, ?, NULL, NULL, NULL, NULL, ?, ?, NULL, ?, ?, ?, ?, NULL)`,
+            );
         for (const row of rows) {
           insert.run(
             row.run_id,
@@ -226,6 +237,86 @@ export function applyMigration(db: Database, fromVersion: number): void {
         }
         db.exec("DROP TABLE agent_session_workspaces");
       }
+      break;
+    case 14: // → v15: workflow-scoped direct/worktree workspace rows.
+      if (!hasColumn(db, "agent_workspaces", "kind")) break;
+      db.exec("ALTER TABLE agent_workspaces RENAME TO agent_workspaces_old");
+      db.exec(`CREATE TABLE agent_workspaces (
+        run_id                TEXT NOT NULL,
+        workspace_id          TEXT NOT NULL,
+        mode                  TEXT NOT NULL,
+        owner_kind            TEXT NOT NULL,
+        key                   TEXT NOT NULL,
+        last_attempt          INTEGER,
+        retention_policy      TEXT,
+        workspace_path        TEXT NOT NULL,
+        source_path           TEXT NOT NULL,
+        supplied_path         TEXT,
+        source_ref            TEXT,
+        base_commit           TEXT,
+        owned                 INTEGER NOT NULL DEFAULT 0,
+        status                TEXT NOT NULL,
+        failure_seen          INTEGER NOT NULL DEFAULT 0,
+        last_turn_key         TEXT,
+        last_turn_attempt     INTEGER,
+        active_holder_kind    TEXT,
+        active_holder_key     TEXT,
+        active_holder_attempt INTEGER,
+        active_started_at_ms  INTEGER,
+        last_diff_event_seq   INTEGER,
+        last_error_event_seq  INTEGER,
+        cleanup_error_json    TEXT,
+        created_at_ms         INTEGER NOT NULL,
+        updated_at_ms         INTEGER NOT NULL,
+        merged_at_ms          INTEGER,
+        discarded_at_ms       INTEGER,
+        removed_at_ms         INTEGER,
+        PRIMARY KEY (run_id, workspace_id)
+      )`);
+      db.exec(`INSERT INTO agent_workspaces (
+        run_id, workspace_id, mode, owner_kind, key, last_attempt, retention_policy,
+        workspace_path, source_path, supplied_path, source_ref, base_commit, owned, status,
+        failure_seen, last_turn_key, last_turn_attempt, active_holder_kind, active_holder_key,
+        active_holder_attempt, active_started_at_ms, last_diff_event_seq, last_error_event_seq,
+        cleanup_error_json, created_at_ms, updated_at_ms, merged_at_ms, discarded_at_ms, removed_at_ms
+      )
+      SELECT
+        run_id,
+        workspace_id,
+        'worktree',
+        kind,
+        key,
+        last_attempt,
+        CASE retention_policy
+          WHEN 'never' THEN 'remove'
+          WHEN 'on-failure' THEN 'retain-on-failure'
+          WHEN 'always' THEN 'retain'
+          ELSE retention_policy
+        END,
+        workspace_path,
+        target,
+        NULL,
+        'HEAD',
+        base_commit,
+        1,
+        status,
+        failure_seen,
+        last_turn_key,
+        last_turn_attempt,
+        NULL,
+        NULL,
+        NULL,
+        NULL,
+        last_diff_event_seq,
+        last_error_event_seq,
+        cleanup_error_json,
+        created_at_ms,
+        updated_at_ms,
+        merged_at_ms,
+        discarded_at_ms,
+        removed_at_ms
+      FROM agent_workspaces_old`);
+      db.exec("DROP TABLE agent_workspaces_old");
       break;
     default:
       throw new Error(`no migration defined from schema version ${fromVersion}`);

@@ -49,6 +49,12 @@
   `run.interrupted` audit events and best-effort active worker/provider abort.
 
 ### Changed
+- Codex app-server turns now use Keel's long-running agent timeout for
+  `turn/completed` instead of the short setup RPC timeout, and provider-side
+  failures interrupt an active remote turn best-effort before closing the
+  transport. Resume/retry of an active Codex thread now discovers the in-progress
+  turn through `thread/turns/list`, interrupts it, and fails closed unless
+  interruption is confirmed.
 - `keel list` and the TUI run browser now show newest runs first by default, and
   the browser keeps the selected row visible while moving through long lists.
 - The TUI detail view keeps live watch output visible in constrained terminals and

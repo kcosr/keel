@@ -413,7 +413,8 @@ describe("Codex JSON-RPC flow", () => {
     expect(result.text).toBe("again");
   });
 
-  test("active resumed threads reject before duplicate turn/start", async () => {
+  test("active resumed threads are interrupted before starting the next turn", async () => {
+    let turnListCalls = 0;
     const transport = new ScriptedTransport((message, t) => {
       switch (message.method) {
         case "initialize":
@@ -426,13 +427,118 @@ describe("Codex JSON-RPC flow", () => {
             thread: { id: "thread-1", cwd: process.cwd(), status: { type: "active" } },
           });
           break;
+        case "thread/turns/list":
+          turnListCalls++;
+          t.respond(message.id, {
+            data: [
+              {
+                id: "stale-turn",
+                status: turnListCalls === 1 ? "inProgress" : "interrupted",
+              },
+            ],
+          });
+          break;
+        case "turn/interrupt":
+          expect(message.params).toEqual({ threadId: "thread-1", turnId: "stale-turn" });
+          t.respond(message.id, {});
+          break;
+        case "thread/resume":
+          t.respond(message.id, { thread: { id: "thread-1" } });
+          break;
+        case "turn/start":
+          t.respond(message.id, { turn: { id: "turn-2" } });
+          t.notify("item/agentMessage/delta", {
+            threadId: "thread-1",
+            turnId: "turn-2",
+            delta: "after interrupt",
+          });
+          t.notify("turn/completed", {
+            threadId: "thread-1",
+            turnId: "turn-2",
+            status: "completed",
+          });
+          break;
+        default:
+          throw new Error(`unexpected ${String(message.method)}`);
+      }
+    });
+
+    const { result } = await runWithTransport(transport, { resumeToken: "thread-1" });
+    expect(result.text).toBe("after interrupt");
+    expect(transport.sent.map((m) => m.method)).toEqual([
+      "initialize",
+      "initialized",
+      "thread/read",
+      "thread/turns/list",
+      "turn/interrupt",
+      "thread/turns/list",
+      "thread/resume",
+      "turn/start",
+    ]);
+  });
+
+  test("active resumed threads fail closed when no active turn id is discoverable", async () => {
+    const transport = new ScriptedTransport((message, t) => {
+      switch (message.method) {
+        case "initialize":
+          t.respond(message.id, {});
+          break;
+        case "initialized":
+          break;
+        case "thread/read":
+          t.respond(message.id, {
+            thread: { id: "thread-1", cwd: process.cwd(), status: { type: "active" } },
+          });
+          break;
+        case "thread/turns/list":
+          t.respond(message.id, { data: [{ id: "done-turn", status: "completed" }] });
+          break;
         default:
           throw new Error(`unexpected ${String(message.method)}`);
       }
     });
 
     await expect(runWithTransport(transport, { resumeToken: "thread-1" })).rejects.toThrow(
-      /active remote Codex turns/,
+      /no active remote turn id/,
+    );
+    expect(transport.sent.map((m) => m.method)).not.toContain("turn/start");
+  });
+
+  test("active resumed threads fail closed if the remote turn completes before interruption", async () => {
+    let turnListCalls = 0;
+    const transport = new ScriptedTransport((message, t) => {
+      switch (message.method) {
+        case "initialize":
+          t.respond(message.id, {});
+          break;
+        case "initialized":
+          break;
+        case "thread/read":
+          t.respond(message.id, {
+            thread: { id: "thread-1", cwd: process.cwd(), status: { type: "active" } },
+          });
+          break;
+        case "thread/turns/list":
+          turnListCalls++;
+          t.respond(message.id, {
+            data: [
+              {
+                id: "stale-turn",
+                status: turnListCalls === 1 ? "inProgress" : "completed",
+              },
+            ],
+          });
+          break;
+        case "turn/interrupt":
+          t.respond(message.id, {});
+          break;
+        default:
+          throw new Error(`unexpected ${String(message.method)}`);
+      }
+    });
+
+    await expect(runWithTransport(transport, { resumeToken: "thread-1" })).rejects.toThrow(
+      /manual reconciliation/,
     );
     expect(transport.sent.map((m) => m.method)).not.toContain("turn/start");
   });
@@ -746,6 +852,93 @@ describe("Codex JSON-RPC flow", () => {
     }).generate(codexInvocation(), {});
 
     expect(factory.context?.connectTimeoutMs).toBe(55);
+  });
+
+  test("turn completion wait is independent from short RPC response timeout", async () => {
+    const transport = new ScriptedTransport((message, t) => {
+      switch (message.method) {
+        case "initialize":
+          t.respond(message.id, {});
+          break;
+        case "initialized":
+          break;
+        case "thread/start":
+          t.respond(message.id, { thread: { id: "thread-1" } });
+          break;
+        case "turn/start":
+          t.respond(message.id, { turn: { id: "turn-1" } });
+          t.notify("turn/started", { threadId: "thread-1", turnId: "turn-1" });
+          t.notify("item/agentMessage/delta", {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            delta: "slow ok",
+          });
+          setTimeout(() => {
+            t.notify("turn/completed", {
+              threadId: "thread-1",
+              turnId: "turn-1",
+              status: "completed",
+            });
+          }, 50);
+          break;
+        default:
+          throw new Error(`unexpected ${String(message.method)}`);
+      }
+    });
+
+    const result = await new CodexProvider({
+      transportFactory: new ScriptedFactory(transport),
+      timeoutMs: 10,
+      turnTimeoutMs: 1_000,
+    }).generate(codexInvocation(), {});
+
+    expect(result.text).toBe("slow ok");
+  });
+
+  test("turn completion timeout interrupts the active remote turn before failing", async () => {
+    let interrupted = false;
+    const transport = new ScriptedTransport((message, t) => {
+      switch (message.method) {
+        case "initialize":
+          t.respond(message.id, {});
+          break;
+        case "initialized":
+          break;
+        case "thread/start":
+          t.respond(message.id, { thread: { id: "thread-1" } });
+          break;
+        case "turn/start":
+          t.respond(message.id, { turn: { id: "turn-1" } });
+          t.notify("turn/started", { threadId: "thread-1", turnId: "turn-1" });
+          break;
+        case "turn/interrupt":
+          interrupted = true;
+          expect(message.params).toEqual({ threadId: "thread-1", turnId: "turn-1" });
+          t.respond(message.id, {});
+          t.notify("turn/completed", {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            status: "interrupted",
+          });
+          break;
+        default:
+          throw new Error(`unexpected ${String(message.method)}`);
+      }
+    });
+
+    await expect(
+      new CodexProvider({
+        transportFactory: new ScriptedFactory(transport),
+        timeoutMs: 1_000,
+        turnTimeoutMs: 20,
+      }).generate(
+        codexInvocation({ providerConfig: { transport: { type: "uds", path: "/x" } } }),
+        {},
+      ),
+    ).rejects.toThrow(/turn\/completed was not received after 20ms/);
+
+    expect(interrupted).toBe(true);
+    expect(transport.closed).toBe(true);
   });
 });
 

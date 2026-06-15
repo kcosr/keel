@@ -784,8 +784,12 @@ transports reject non-empty `secrets` rather than silently dropping them.
 Codex app-server thread ids are captured write-ahead as session tokens and are
 returned from provider calls so schema retries and `ctx.agentSession` turns reuse
 the same thread. On resume, Keel validates the thread id and Codex-reported cwd
-before sending new input. If Codex reports the thread as active, Keel refuses to
-start a duplicate turn; adopting active remote turns is future work.
+before sending new input. If Codex reports the thread as active, Keel scans
+recent turns with `thread/turns/list`, interrupts the discovered in-progress turn,
+waits for confirmed interruption, and only then starts a fresh Keel-managed turn.
+If no active turn id can be discovered, interruption cannot be confirmed, or the
+remote turn reaches another terminal state before Keel confirms interruption,
+Keel fails closed rather than starting a duplicate turn.
 
 `KEEL_CODEX_BIN` changes only the local stdio binary path. `KEEL_CODEX_RAW_LOG`
 enables JSONL protocol diagnostics for transport descriptors, frames, stderr,
@@ -795,8 +799,8 @@ values.
 Common Codex errors include malformed `providerConfig.codex.transport...`,
 missing `toolPolicy: "unrestricted"`, unsupported narrower capabilities or
 allow/deny tool edits, remote transport plus secrets, missing/unusable cwd,
-JSON-RPC method errors, resumed cwd/token mismatch, active remote turns, and
-turn failure/interruption.
+JSON-RPC method errors, resumed cwd/token mismatch, unreconcilable active remote
+turns, and turn failure/interruption.
 
 A live smoke should be gated with `KEEL_LIVE=1`: point `providerConfig.codex` at
 a real app-server (or use stdio), request a tiny structured JSON response with

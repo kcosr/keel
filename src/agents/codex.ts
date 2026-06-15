@@ -4,6 +4,7 @@ import { type Socket, createConnection } from "node:net";
 import { dirname, isAbsolute } from "node:path";
 import { type TLSSocket, connect as tlsConnect } from "node:tls";
 import { resolveInvocationToolPolicy, resolvedToolPolicyToCodexParams } from "./capabilities.ts";
+import { DEFAULT_AGENT_TIMEOUT_MS } from "./defaults.ts";
 import { ProviderConfigValidationError } from "./provider-config.ts";
 import type {
   AgentHooks,
@@ -18,6 +19,7 @@ export const CODEX_BIN_ENV = "KEEL_CODEX_BIN";
 export const CODEX_RAW_LOG_ENV = "KEEL_CODEX_RAW_LOG";
 export const CODEX_CONNECT_TIMEOUT_MS = 15_000;
 export const CODEX_RPC_RESPONSE_TIMEOUT_MS = 60_000;
+export const CODEX_TURN_COMPLETION_TIMEOUT_MS = DEFAULT_AGENT_TIMEOUT_MS;
 export const CODEX_CLOSE_GRACE_MS = 1_000;
 export const CODEX_INTERRUPT_CONFIRM_MS = 2_000;
 export const CODEX_DEFAULT_TRANSPORT = Object.freeze({ type: "stdio" as const });
@@ -33,7 +35,10 @@ export type CodexTransportConfig =
 
 export interface CodexProviderOptions {
   bin?: string;
+  /** Per-request protocol timeout for setup/handshake RPCs. */
   timeoutMs?: number;
+  /** Long-running model turn timeout; defaults to Keel's normal agent timeout. */
+  turnTimeoutMs?: number;
   connectTimeoutMs?: number;
   rawLogPath?: string;
   transportFactory?: CodexTransportFactory;
@@ -66,14 +71,16 @@ export class CodexProvider implements AgentProvider {
   readonly name = "codex";
   readonly supportsSessions = true;
   private readonly bin: string;
-  private readonly timeoutMs: number;
+  private readonly rpcTimeoutMs: number;
+  private readonly turnTimeoutMs: number;
   private readonly connectTimeoutMs: number;
   private readonly rawLogPath?: string;
   private readonly transportFactory: CodexTransportFactory;
 
   constructor(opts: CodexProviderOptions = {}) {
     this.bin = opts.bin ?? process.env[CODEX_BIN_ENV] ?? "codex";
-    this.timeoutMs = opts.timeoutMs ?? CODEX_RPC_RESPONSE_TIMEOUT_MS;
+    this.rpcTimeoutMs = opts.timeoutMs ?? CODEX_RPC_RESPONSE_TIMEOUT_MS;
+    this.turnTimeoutMs = opts.turnTimeoutMs ?? opts.timeoutMs ?? CODEX_TURN_COMPLETION_TIMEOUT_MS;
     this.connectTimeoutMs = opts.connectTimeoutMs ?? CODEX_CONNECT_TIMEOUT_MS;
     this.rawLogPath = opts.rawLogPath ?? process.env[CODEX_RAW_LOG_ENV];
     this.transportFactory = opts.transportFactory ?? new DefaultCodexTransportFactory();
@@ -175,7 +182,7 @@ export class CodexProvider implements AgentProvider {
     };
 
     const client = new CodexRpcClient(transport, {
-      timeoutMs: this.timeoutMs,
+      timeoutMs: this.rpcTimeoutMs,
       rawLog,
       onNotification: (method, params) => {
         try {
@@ -272,19 +279,34 @@ export class CodexProvider implements AgentProvider {
         state.turnId = resultTurnId;
       } else if (!state.turnId) {
         await raceAbort(
-          timeoutPromise(turnStarted, this.timeoutMs, "codex: turn/start did not return turn.id"),
+          timeoutPromise(
+            turnStarted,
+            this.rpcTimeoutMs,
+            "codex: turn/start did not return turn.id",
+          ),
         );
       }
       if (!state.turnId) throw new Error("codex: turn/start did not return turn.id");
       turnStartedResolve();
 
       const terminal = await raceAbort(
-        timeoutPromise(turnTerminal, this.timeoutMs, "codex: turn/completed was not received"),
+        timeoutPromise(turnTerminal, this.turnTimeoutMs, "codex: turn/completed was not received"),
       );
       state.turnInFlight = false;
       const finalText = finalizeCodexTurn(terminal, state, invocation.key);
       await transport.close();
       return { text: finalText, transcript, sessionToken: state.threadId };
+    } catch (err) {
+      if (!abortStarted && state.turnInFlight) {
+        await interruptActiveTurnAfterFailure({
+          state,
+          client,
+          transport,
+          emit,
+          transportType: config.type,
+        });
+      }
+      throw err;
     } finally {
       invocation.abortSignal?.removeEventListener("abort", onAbort);
       await client.close();
@@ -1013,11 +1035,26 @@ async function resumeThread(
       `codex resumed thread cwd mismatch: expected ${invocation.cwd}, got ${observedCwd}`,
     );
   }
-  const statusType = threadStatusType(readResult);
+  let statusType = threadStatusType(readResult);
   if (statusType === "active") {
-    throw new Error(
-      "codex resumed thread is active; adopting active remote Codex turns is not yet supported",
-    );
+    const activeTurnId = await discoverActiveTurnId(client, token);
+    if (!activeTurnId) {
+      throw new Error(
+        "codex resumed thread is active but no active remote turn id could be discovered",
+      );
+    }
+    state.turnId = activeTurnId;
+    state.turnInFlight = true;
+    const terminalStatus = await interruptRemoteTurn(client, token, activeTurnId);
+    state.turnInFlight = false;
+    state.turnId = undefined;
+    state.terminal = null;
+    if (terminalStatus !== "interrupted") {
+      throw new Error(
+        `codex resumed thread active turn ${activeTurnId} reached ${terminalStatus} before Keel could confirm interruption; manual reconciliation is required`,
+      );
+    }
+    statusType = "idle";
   }
   if (statusType === "systemError") {
     throw new Error(
@@ -1048,6 +1085,71 @@ async function resumeThread(
       `codex thread/resume returned different thread id: expected ${token}, got ${resumedThreadId}`,
     );
   }
+}
+
+async function discoverActiveTurnId(
+  client: CodexRpcClient,
+  threadId: string,
+): Promise<string | null> {
+  const result = await client.request("thread/turns/list", {
+    threadId,
+    limit: 20,
+    sortDirection: "desc",
+    itemsView: "notLoaded",
+  });
+  const data = isPlainObject(result) && Array.isArray(result.data) ? result.data : [];
+  for (const turn of data) {
+    if (!isPlainObject(turn)) continue;
+    const status = turnListStatus(turn);
+    if (status !== "completed" && status !== "failed" && status !== "interrupted") {
+      const turnId = stringAt(turn, ["id"]) ?? stringAt(turn, ["turn", "id"]);
+      if (turnId) return turnId;
+    }
+  }
+  return null;
+}
+
+async function interruptRemoteTurn(
+  client: CodexRpcClient,
+  threadId: string,
+  turnId: string,
+): Promise<string> {
+  try {
+    await client.request("turn/interrupt", { threadId, turnId }, CODEX_INTERRUPT_CONFIRM_MS);
+  } catch (err) {
+    throw new Error(
+      `codex resumed thread has active remote turn ${turnId}, and interrupt failed: ${errorMessage(err)}`,
+    );
+  }
+  const deadline = Date.now() + CODEX_INTERRUPT_CONFIRM_MS;
+  while (Date.now() <= deadline) {
+    const status = await findTurnStatus(client, threadId, turnId);
+    if (status === "completed" || status === "failed" || status === "interrupted") return status;
+    await Bun.sleep(50);
+  }
+  throw new Error(
+    `codex resumed thread has active remote turn ${turnId}, and interrupt did not reach a terminal status`,
+  );
+}
+
+async function findTurnStatus(
+  client: CodexRpcClient,
+  threadId: string,
+  turnId: string,
+): Promise<string | null> {
+  const result = await client.request("thread/turns/list", {
+    threadId,
+    limit: 20,
+    sortDirection: "desc",
+    itemsView: "notLoaded",
+  });
+  const data = isPlainObject(result) && Array.isArray(result.data) ? result.data : [];
+  for (const turn of data) {
+    if (!isPlainObject(turn)) continue;
+    const id = stringAt(turn, ["id"]) ?? stringAt(turn, ["turn", "id"]);
+    if (id === turnId) return turnListStatus(turn);
+  }
+  return null;
 }
 
 async function handleAbort(args: {
@@ -1099,6 +1201,52 @@ async function handleAbort(args: {
   };
   emit(event);
   throw new Error(message);
+}
+
+async function interruptActiveTurnAfterFailure(args: {
+  state: CodexCallState;
+  client: CodexRpcClient;
+  transport: CodexTransport;
+  emit: (event: TraceEvent) => void;
+  transportType: CodexTransportConfig["type"];
+}): Promise<void> {
+  const { state, client, transport, emit, transportType } = args;
+  if (!state.turnInFlight) return;
+  state.aborting = true;
+  if (state.threadId && state.turnId) {
+    try {
+      await client.request(
+        "turn/interrupt",
+        { threadId: state.threadId, turnId: state.turnId },
+        CODEX_INTERRUPT_CONFIRM_MS,
+      );
+    } catch {
+      // The original provider failure is authoritative; interruption is cleanup.
+    }
+    const confirmed = await Promise.race([
+      waitForTerminal(state, CODEX_INTERRUPT_CONFIRM_MS).then(
+        (terminal) => terminal.status === "interrupted",
+      ),
+      Bun.sleep(CODEX_INTERRUPT_CONFIRM_MS).then(() => false),
+    ]);
+    if (confirmed) return;
+  }
+  try {
+    await transport.close();
+  } catch {
+    // Cleanup must not replace the original provider failure.
+  }
+  emit({
+    type: "disconnect",
+    data: {
+      message:
+        transportType === "stdio"
+          ? "codex failure could not confirm turn interruption; owned stdio app-server child was terminated"
+          : "codex failure could not confirm remote turn interruption; remote turn may still be active",
+      threadId: state.threadId,
+      turnId: state.turnId,
+    },
+  });
 }
 
 function waitForTerminal(state: CodexCallState, timeoutMs: number): Promise<CodexTurnTerminal> {
@@ -1218,6 +1366,10 @@ function terminalStatus(params: unknown): string | undefined {
     stringAt(params, ["status", "type"]) ??
     stringAt(params, ["status"])
   );
+}
+
+function turnListStatus(turn: Record<string, unknown>): string {
+  return stringAt(turn, ["status"]) ?? stringAt(turn, ["status", "type"]) ?? "inProgress";
 }
 
 function terminalMessage(params: unknown): string | undefined {

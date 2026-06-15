@@ -1245,7 +1245,8 @@ Rows are kept when any run references their `definition_version` or any enabled
 schedule references their pinned hash. Cache directories are not evicted while a
 running or parked run uses that definition. `workflowDefinition.gcTtlMs` is the
 default row TTL when the API/CLI call does not supply `ttlMs`; the shipped
-default is 30 days.
+default is 30 days. `KEEL_DEFINITION_TTL_MS` is no longer read; set
+`workflowDefinition.gcTtlMs` with `keel settings set` instead.
 
 ### Multiple Processes
 

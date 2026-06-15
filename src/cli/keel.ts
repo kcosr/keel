@@ -202,7 +202,7 @@ async function dispatch(argv: string[]): Promise<number> {
         .register(new ClaudeProvider())
         .register(
           new CodexProvider({
-            timeoutMs: operational.codexRpcTimeoutMs,
+            rpcTimeoutMs: operational.codexRpcTimeoutMs,
             connectTimeoutMs: operational.codexConnectTimeoutMs,
           }),
         );

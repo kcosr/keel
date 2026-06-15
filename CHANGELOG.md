@@ -52,7 +52,7 @@
 
 ### Changed
 - `ctx.agent` and `ctx.agentSession().turn` default `maxRetries`, `lenient`, `onFailure`, `timeoutMs`, and `stallRetries` from each run's settings snapshot after explicit workflow and profile values, so resume/retry/rewind/fork do not observe later daemon setting edits. Codex `turn/completed` waits now receive the host-resolved per-call agent timeout.
-- `keel gc` / `gcDefinitions` use `workflowDefinition.gcTtlMs` as the default workflow definition TTL when the request does not supply `ttlMs`; `codex.rpcTimeoutMs` and `codex.connectTimeoutMs` apply when the Codex provider is constructed, normally at daemon restart.
+- `keel gc` / `gcDefinitions` use `workflowDefinition.gcTtlMs` as the default workflow definition TTL when the request does not supply `ttlMs`; `KEEL_DEFINITION_TTL_MS` is no longer honored. `codex.rpcTimeoutMs` and `codex.connectTimeoutMs` apply when the Codex provider is constructed, normally at daemon restart.
 - Reusable implementation/review workflows now resolve `input.repository` to a
   direct workspace, defaulting to the run target when omitted, so prompts and
   agent cwd stay aligned while still supporting manually-created git worktrees

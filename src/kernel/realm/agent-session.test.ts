@@ -228,6 +228,42 @@ describe("ctx.agentSession", () => {
     expect(provider.calls.map((call) => call.timeoutMs)).toEqual([1234, 1234]);
   });
 
+  test("missing settings snapshot fails a session run and releases the active guard", async () => {
+    const store = JournalStore.memory();
+    const provider = new RecordingSessionProvider();
+    let now = 1;
+    const k = new TargetedRealmKernel(store, {
+      idgen: () => "run-missing-settings-session",
+      clock: () => now,
+      rng: () => 0.5,
+      agents: new AgentProviderRegistry().register(provider),
+    });
+    const workflow = {
+      source: `
+        import { type Ctx } from "@kcosr/keel";
+        export default async function wf(ctx: Ctx): Promise<string> {
+          const primary = ctx.agentSession({ key: "primary", provider: "session", toolPolicy: "read-only" });
+          await primary.turn({ key: "one", prompt: "one" });
+          await ctx.sleep("pause", 10);
+          return "done";
+        }
+      `,
+      name: "missing-settings-session",
+    };
+
+    const launched = k.launch<string>(workflow, null);
+    await expect(launched.done).resolves.toMatchObject({ status: "waiting-timer" });
+    store.db.query("DELETE FROM run_setting_snapshots WHERE run_id = ?").run(launched.runId);
+    store.db.query("DELETE FROM run_setting_snapshot_sets WHERE run_id = ?").run(launched.runId);
+
+    now = 20;
+    await expect(k.resume<string>(launched.runId)).rejects.toThrow(
+      /missing daemon settings snapshot set/,
+    );
+    expect(store.getRun(launched.runId)?.status).toBe("failed");
+    await expect(k.resume<string>(launched.runId)).resolves.toMatchObject({ status: "failed" });
+  });
+
   test("selected providerConfig is in session identity and passed to every turn", async () => {
     const store = JournalStore.memory();
     const provider = new RecordingSessionProvider();

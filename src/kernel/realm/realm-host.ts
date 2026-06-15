@@ -1620,7 +1620,6 @@ export class RealmKernel {
       sessionRunGuarded = true;
     }
     const runTarget = this.store.getRun(runId)?.runTarget ?? null;
-    const workflowSettings = this.workflowSettingsForRun(runId);
     this.recoverActiveWorkspaceHolders(runId, this.host.clock());
     const source = readSourceSafe(workflowUrl);
     const sourcePath = workflowUrl.startsWith("file:")
@@ -1635,6 +1634,7 @@ export class RealmKernel {
       const worker = new Worker(WORKER_URL, { type: "module" });
       const runAbortController = new AbortController();
       this.activeWorkers.add(worker);
+      let workflowSettings: WorkflowVisibleSettings | null = null;
 
       let settled = false;
       let unregisterActive = () => {};
@@ -1649,6 +1649,10 @@ export class RealmKernel {
       };
       const finishInterrupted = (): void => {
         finish(() => resolve({ runId, status: "interrupted" }));
+      };
+      const requireWorkflowSettings = (): WorkflowVisibleSettings => {
+        if (!workflowSettings) throw new SettingSnapshotIntegrityError(runId);
+        return workflowSettings;
       };
       const active: ActiveExecution = {
         interrupt: () => {
@@ -1706,6 +1710,7 @@ export class RealmKernel {
           }
           switch (m.type) {
             case "ready":
+              workflowSettings = this.workflowSettingsForRun(runId);
               worker.postMessage({
                 type: "init",
                 workflowUrl,
@@ -1836,6 +1841,7 @@ export class RealmKernel {
               const secretRefs = this.secrets?.resolve(runId, m.secrets) ?? [];
               const secretEnv: Record<string, string> = {};
               for (const r of secretRefs) secretEnv[r.name] = r.value;
+              const settings = requireWorkflowSettings();
 
               void (async () => {
                 try {
@@ -1858,7 +1864,7 @@ export class RealmKernel {
                           ...(secretRefs.length > 0 ? { env: secretEnv } : {}),
                           ...(begun.resumeToken ? { resumeToken: begun.resumeToken } : {}),
                           abortSignal: signal,
-                          timeoutMs: m.timeoutMs ?? workflowSettings.agentDefaultTimeoutMs,
+                          timeoutMs: m.timeoutMs ?? settings.agentDefaultTimeoutMs,
                         },
                         {
                           onSessionToken: (tok) => {
@@ -1881,8 +1887,8 @@ export class RealmKernel {
                         },
                       ),
                     {
-                      timeoutMs: m.timeoutMs ?? workflowSettings.agentDefaultTimeoutMs,
-                      stallRetries: m.stallRetries ?? workflowSettings.agentDefaultStallRetries,
+                      timeoutMs: m.timeoutMs ?? settings.agentDefaultTimeoutMs,
+                      stallRetries: m.stallRetries ?? settings.agentDefaultStallRetries,
                       signal: runAbortController.signal,
                       onStall: (a) => engine.emit("agent.stalled", { key: m.key, attempt: a }),
                     },
@@ -2053,6 +2059,7 @@ export class RealmKernel {
               const secretRefs = this.secrets?.resolve(runId, m.secrets) ?? [];
               const secretEnv: Record<string, string> = {};
               for (const r of secretRefs) secretEnv[r.name] = r.value;
+              const settings = requireWorkflowSettings();
 
               void (async () => {
                 try {
@@ -2075,7 +2082,7 @@ export class RealmKernel {
                           ...(secretRefs.length > 0 ? { env: secretEnv } : {}),
                           ...(begun.resumeToken ? { resumeToken: begun.resumeToken } : {}),
                           abortSignal: signal,
-                          timeoutMs: m.timeoutMs ?? workflowSettings.agentDefaultTimeoutMs,
+                          timeoutMs: m.timeoutMs ?? settings.agentDefaultTimeoutMs,
                         },
                         {
                           onSessionToken: (tok) => {
@@ -2103,8 +2110,8 @@ export class RealmKernel {
                         },
                       ),
                     {
-                      timeoutMs: m.timeoutMs ?? workflowSettings.agentDefaultTimeoutMs,
-                      stallRetries: m.stallRetries ?? workflowSettings.agentDefaultStallRetries,
+                      timeoutMs: m.timeoutMs ?? settings.agentDefaultTimeoutMs,
+                      stallRetries: m.stallRetries ?? settings.agentDefaultStallRetries,
                       signal: runAbortController.signal,
                       onStall: (a) =>
                         engine.emit("agent.stalled", { key: m.stableKey, attempt: a }),
@@ -2365,7 +2372,10 @@ export class RealmKernel {
             finishInterrupted();
             return;
           }
-          if (hostErr instanceof ProfileSnapshotIntegrityError) {
+          if (
+            hostErr instanceof ProfileSnapshotIntegrityError ||
+            hostErr instanceof SettingSnapshotIntegrityError
+          ) {
             const at = this.host.clock();
             const error = serializeError(hostErr);
             this.store.transaction(() => {

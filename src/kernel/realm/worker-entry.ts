@@ -717,8 +717,8 @@ const ctx = Object.freeze({
           maxRetries: rawTurnSpec.maxRetries ?? settings.agentDefaultMaxRetries,
           lenient: rawTurnSpec.lenient ?? settings.agentDefaultLenient,
           onFailure: rawTurnSpec.onFailure ?? settings.agentDefaultOnFailure,
-          timeoutMs: rawTurnSpec.timeoutMs ?? settings.agentDefaultTimeoutMs,
-          stallRetries: rawTurnSpec.stallRetries ?? settings.agentDefaultStallRetries,
+          timeoutMs: rawTurnSpec.timeoutMs ?? null,
+          stallRetries: rawTurnSpec.stallRetries ?? null,
         };
         const version =
           rawTurnSpec.version ??

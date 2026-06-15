@@ -1,9 +1,9 @@
 // Git-worktree isolation + retained workspace lifecycle (DESIGN.md §11.3).
 //
 // `target` is the user repository an agent is meant to operate in. Retained
-// isolated session workspaces live outside that target in a Keel-owned
-// workspace store; one-shot isolated agents still use a temporary worktree that
-// is removed after the call.
+// isolated agent and session workspaces live outside that target in a Keel-owned
+// workspace store. Terminal cleanup is governed by the persisted workspace
+// retention policy, not by per-call temporary directory cleanup.
 
 import { execFileSync } from "node:child_process";
 import {

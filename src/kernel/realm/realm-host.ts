@@ -531,6 +531,7 @@ export class RealmKernel {
         inputHash: string;
         startedAtMs: number;
         cwd: string;
+        workspaceId?: string;
         workspacePath?: string;
         workspaceTarget?: string;
         workspaceBaseCommit?: string;
@@ -616,6 +617,7 @@ export class RealmKernel {
 
     const target = requireRunTarget(m.target, `agent session "${m.agentKey}"`);
     let cwd: string;
+    let workspaceId: string | undefined;
     let workspacePath: string | undefined;
     let workspaceTarget: string | undefined;
     let workspaceBaseCommit: string | undefined;
@@ -631,18 +633,19 @@ export class RealmKernel {
       });
       if (!retentionPolicy) throw new Error("workspaceRetention resolution failed");
       const gitTarget = resolveGitRootTarget(target);
-      const workspaceId = agentWorkspaceId("agent_session", m.agentKey);
-      const defaultPath = retainedWorkspacePath(this.workspaceStore, runId, workspaceId);
+      const sessionWorkspaceId = agentWorkspaceId("agent_session", m.agentKey);
+      workspaceId = sessionWorkspaceId;
+      const defaultPath = retainedWorkspacePath(this.workspaceStore, runId, sessionWorkspaceId);
       let path = defaultPath;
       let persistedTarget = gitTarget.target;
       let persistedBaseCommit = gitTarget.baseCommit;
       let needsCreate = false;
       this.store.transaction(() => {
-        const existingWorkspace = this.store.getAgentWorkspace(runId, workspaceId);
+        const existingWorkspace = this.store.getAgentWorkspace(runId, sessionWorkspaceId);
         if (!existingWorkspace) {
           this.store.insertAgentWorkspace({
             runId,
-            workspaceId,
+            workspaceId: sessionWorkspaceId,
             kind: "agent_session",
             key: m.agentKey,
             lastAttempt: null,
@@ -774,6 +777,7 @@ export class RealmKernel {
       inputHash,
       startedAtMs,
       cwd,
+      ...(workspaceId ? { workspaceId } : {}),
       ...(workspacePath ? { workspacePath } : {}),
       ...(workspaceTarget ? { workspaceTarget } : {}),
       ...(workspaceBaseCommit ? { workspaceBaseCommit } : {}),
@@ -1026,6 +1030,7 @@ export class RealmKernel {
     m: Extract<WorkerRequest, { type: "agent-turn" }>,
     begun: {
       attempt: number;
+      workspaceId?: string;
       workspacePath?: string;
       workspaceTarget?: string;
       workspaceBaseCommit?: string;
@@ -1043,6 +1048,7 @@ export class RealmKernel {
               key: m.stableKey,
               agentKey: m.agentKey,
               turnKey: m.turnKey,
+              workspaceId: begun.workspaceId ?? null,
               workspacePath: begun.workspacePath,
               target: begun.workspaceTarget ?? m.target,
               baseCommit: begun.workspaceBaseCommit ?? null,
@@ -1066,6 +1072,7 @@ export class RealmKernel {
               key: m.stableKey,
               agentKey: m.agentKey,
               turnKey: m.turnKey,
+              workspaceId: begun.workspaceId ?? null,
               workspacePath: begun.workspacePath,
               error: serializeError(err),
             },

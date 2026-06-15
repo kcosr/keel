@@ -446,11 +446,11 @@ Merge/discard are explicit operator actions and refuse while the run is
 non-terminal, a session turn is active, or the workspace has already moved to a
 terminal lifecycle status such as `removed`, `merged`, or `discarded`. Merge
 applies the current workspace filesystem back to its recorded target. Durable
-`agent.diff.contentDiff` values are bounded and end with a truncation notice
-when the retained workspace should be inspected for the full patch; changed path
-arrays are capped with `omittedPathCounts`/`pathLimit` metadata. Diff capture
-that exceeds Keel's explicit git status or diff buffers is recorded as
-`workspace.diff_error`.
+`agent.diff` payloads include the `workspaceId`/path/target and bounded
+`contentDiff` values that end with a truncation notice when the retained
+workspace should be inspected for the full patch; changed path arrays are capped
+with `omittedPathCounts`/`pathLimit` metadata. Diff capture that exceeds Keel's
+explicit git status or diff buffers is recorded as `workspace.diff_error`.
 
 ### Authorization
 

@@ -343,7 +343,12 @@ describe("ctx.agentSession", () => {
         "__session.primary.draft\n__session.primary.revise\n",
       );
       expect(existsSync(join(repo, "state.txt"))).toBe(false);
-      expect(store.listEvents("run-1").filter((e) => e.type === "agent.diff")).toHaveLength(2);
+      const diffEvents = store.listEvents("run-1").filter((e) => e.type === "agent.diff");
+      expect(diffEvents).toHaveLength(2);
+      expect(JSON.parse(diffEvents[0]?.payloadJson ?? "{}")).toMatchObject({
+        workspaceId: store.listAgentWorkspaces("run-1")[0]?.workspaceId,
+        agentKey: "primary",
+      });
 
       const replayed = await kernel(store, provider, { workspaceStore }).resume<string>("run-1");
       expect(replayed.output).toBe("done");

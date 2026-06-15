@@ -427,6 +427,7 @@ export class WorkflowCtx implements Ctx {
     const caps = tools.capabilities;
     const workspaceHandle = this.resolveAgentWorkspaceHandle(spec.workspace);
     const workspaceId = workspaceHandle.id;
+    const workspaceIdentityHash = workspaceHandle.identityHash ?? null;
     const cwd = this.resolveInProcessWorkspace(workspaceId, spec.key);
     const identityFields = {
       prompt: spec.prompt,
@@ -438,7 +439,7 @@ export class WorkflowCtx implements Ctx {
       allowTools: tools.allowTools,
       denyTools: tools.denyTools,
       workspaceId,
-      workspaceIdentityHash: workspaceHandle.identityHash ?? null,
+      ...(workspaceIdentityHash !== null ? { workspaceIdentityHash } : {}),
       capabilities: caps,
       secrets: spec.secrets ?? [],
     };

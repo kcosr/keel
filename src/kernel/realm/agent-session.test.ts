@@ -757,9 +757,11 @@ describe("ctx.agentSession", () => {
         .run<string>(workflow, null, { target: repo })
         .catch(() => null);
       expect(store.getRun("run-1")?.status).toBe("failed");
-      expect(store.listAgentWorkspaces("run-1", { includeRemoved: true })[0]?.status).toBe(
-        "removed",
-      );
+      expect(
+        store
+          .listAgentWorkspaces("run-1", { includeRemoved: true })
+          .find((row) => row.key === "primary-workspace")?.status,
+      ).toBe("removed");
 
       await expect(
         kernel(store, provider, { workspaceStore }).retry<string>("run-1"),

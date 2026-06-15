@@ -13,6 +13,7 @@ describe("failRunWithError", () => {
         sourcePath: "/tmp/keel-missing-repo-for-run-error-test",
         sourceRef: "HEAD",
         retentionPolicy: "remove",
+        branchPolicy: "detached",
         sdkAbiVersion: 6,
       });
       store.insertRun({

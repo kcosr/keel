@@ -125,6 +125,7 @@ export type WorkspaceSpec =
       path?: string;
       ref?: string;
       retention?: WorkspaceRetention;
+      branch?: boolean;
     }
   | {
       key: string;
@@ -685,6 +686,7 @@ function normalizeWorkspaceSpec(
       suppliedPath: string | null;
       ref?: string;
       retention: WorkspaceRetention;
+      branch?: boolean;
     }
   | {
       key: string;
@@ -704,6 +706,7 @@ function normalizeWorkspaceSpec(
   const suppliedPath = raw.path === undefined ? null : String(raw.path);
   const defaultPath = requireRunTarget(runTarget, `workspace "${raw.key}" run target`);
   if (mode === "direct") {
+    if (raw.branch !== undefined) throw new Error("direct workspaces do not accept branch");
     if (raw.repo !== undefined) {
       throw new Error("direct workspaces do not accept repo");
     }
@@ -724,6 +727,7 @@ function normalizeWorkspaceSpec(
   }
   if (mode === "clone") {
     if (raw.path !== undefined) throw new Error("clone workspaces do not accept path; use repo");
+    if (raw.branch !== undefined) throw new Error("clone workspaces do not accept branch");
     if (typeof raw.repo !== "string" || raw.repo.trim().length === 0) {
       throw new Error("clone workspaces require repo");
     }
@@ -739,6 +743,7 @@ function normalizeWorkspaceSpec(
   if (mode === "copy") {
     if (raw.repo !== undefined) throw new Error("copy workspaces do not accept repo");
     if (raw.ref !== undefined) throw new Error("copy workspaces do not accept ref");
+    if (raw.branch !== undefined) throw new Error("copy workspaces do not accept branch");
     return {
       key: raw.key,
       mode: "copy",
@@ -749,6 +754,9 @@ function normalizeWorkspaceSpec(
     };
   }
   if (raw.repo !== undefined) throw new Error("worktree workspaces do not accept repo");
+  if (raw.branch !== undefined && typeof raw.branch !== "boolean") {
+    throw new Error("worktree branch must be boolean; object branch policies are not supported");
+  }
   return {
     key: raw.key,
     mode: "worktree",
@@ -757,6 +765,7 @@ function normalizeWorkspaceSpec(
     ref: typeof raw.ref === "string" && raw.ref.length > 0 ? raw.ref : "HEAD",
     retention:
       raw.retention === undefined ? "remove" : validateWorkspaceRetentionForCtx(raw.retention),
+    ...(raw.branch === undefined ? {} : { branch: raw.branch }),
   };
 }
 

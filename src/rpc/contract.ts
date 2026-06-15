@@ -76,6 +76,8 @@ export interface RunWorkspaceView {
   sourceRef: string | null;
   resolvedRef: string | null;
   checkoutBranch: string | null;
+  worktreeCheckoutKind?: "detached" | "branch" | null;
+  worktreeBranchOwned?: boolean;
   baseCommit: string | null;
   copyBaselinePath: string | null;
   owned: boolean;

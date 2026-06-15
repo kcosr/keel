@@ -37,10 +37,8 @@ import { cleanupTerminalRunWorkspaces } from "../workspace/retention.ts";
 import {
   diffCopyWorkspace,
   diffGitFinalTree,
-  diffWorkspace,
   mergeCloneIntoTarget,
   mergeCopyIntoSource,
-  mergeWorkspaceIntoTarget,
   removeManagedWorkspace,
 } from "../workspace/worktree.ts";
 import type {
@@ -193,9 +191,13 @@ export class InProcessKeel implements KeelApi {
     const diff =
       row.mode === "copy"
         ? diffCopyWorkspace(row.workspacePath, row.copyBaselinePath ?? "")
-        : row.mode === "clone"
+        : row.mode === "clone" || row.mode === "worktree"
           ? diffGitFinalTree(row.workspacePath, row.baseCommit ?? "HEAD")
-          : diffWorkspace(row.workspacePath);
+          : (() => {
+              throw new Error(
+                `workspace ${runId}/${workspaceId} mode ${row.mode} does not support diff`,
+              );
+            })();
     return {
       workspace: workspaceView(row, this.store.getRun(runId)?.status ?? null),
       ...diff,
@@ -276,8 +278,12 @@ export class InProcessKeel implements KeelApi {
       }
       mergeCloneIntoTarget(row.workspacePath, row.sourcePath, row.baseCommit);
     } else {
-      if (!row.sourcePath) throw new Error(`workspace ${runId}/${workspaceId} has no source path`);
-      mergeWorkspaceIntoTarget(row.workspacePath, row.sourcePath);
+      if (!row.sourcePath || !row.baseCommit) {
+        throw new Error(
+          `worktree workspace ${runId}/${workspaceId} cannot be merged without source and base commit`,
+        );
+      }
+      mergeCloneIntoTarget(row.workspacePath, row.sourcePath, row.baseCommit);
     }
     const at = Date.now();
     this.store.transaction(() => {
@@ -713,6 +719,8 @@ function workspaceView(row: AgentWorkspaceRow, runStatus: RunStatus | null): Run
     sourceRef: row.sourceRef,
     resolvedRef: row.resolvedRef,
     checkoutBranch: row.checkoutBranch,
+    worktreeCheckoutKind: row.worktreeCheckoutKind,
+    worktreeBranchOwned: row.worktreeBranchOwned,
     baseCommit: row.baseCommit,
     copyBaselinePath: row.copyBaselinePath,
     owned: row.owned,

@@ -145,7 +145,9 @@ Use `ctx.workspace` when agents should run somewhere other than the default
 direct workspace at `ctx.run.target`. Choose the mode deliberately:
 
 - `direct`: intentional use of an existing directory.
-- `worktree`: local git committed state with patch merge support.
+- `worktree`: local git committed state with final-tree patch merge support.
+  Add `branch: true` when the implementation should live on a generated
+  Keel-owned branch instead of a detached worktree.
 - `copy`: dirty local filesystem state without `.git` metadata. V1 excludes only
   `.git`, so pass a narrow `path` for large repos with caches or dependencies.
 - `clone`: explicit local or remote git checkout. Use `repo: ctx.run.target` to
@@ -157,6 +159,7 @@ Pass the returned handle explicitly or bind it with `ctx.withWorkspace`:
 const workspace = await ctx.workspace({
   key: "implementation",
   mode: "worktree",
+  // branch: true,
   retention: "retain-on-failure",
 });
 await ctx.agent({ key: "impl", workspace, toolPolicy: "workspace-write", prompt });
@@ -167,7 +170,11 @@ applies only to Keel-owned `worktree`, `copy`, and `clone` workspaces. Direct
 workspaces, including the default `__default` workspace at `ctx.run.target`, are
 never removed by Keel and are not review diff staging areas. Workspace mode is
 not a secret, filesystem, or network security boundary, and Keel never
-auto-merges retained workspaces.
+auto-merges retained workspaces. For `worktree`, omitted `path` resolves through
+the run's canonical `__default` direct workspace path, not daemon cwd. Generated
+branches from `branch: true` are retained for manual inspection/cleanup; Keel
+removes filesystem worktrees according to retention but does not delete branch
+refs in this release.
 
 For `ctx.agentSession` participants using Keel-owned workspaces, use
 `"retain-on-failure"` or `"retain"` if a terminal failed run should be

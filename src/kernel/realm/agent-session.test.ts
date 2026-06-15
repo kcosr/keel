@@ -573,6 +573,11 @@ describe("ctx.agentSession", () => {
       const events = store.listEvents("run-1");
       expect(events.some((e) => e.type === "agent.diff")).toBe(false);
       const diffError = events.find((e) => e.type === "workspace.diff_error");
+      const diffErrorPayload = JSON.parse(diffError?.payloadJson ?? "{}");
+      expect(diffErrorPayload).toMatchObject({
+        workspaceId: store.listAgentWorkspaces("run-1")[0]?.workspaceId,
+        agentKey: "primary",
+      });
       expect(diffError?.payloadJson).toContain("git diff output exceeded explicit");
       expect(diffError?.payloadJson).toContain(String(GIT_DIFF_MAX_BUFFER_BYTES));
     } finally {

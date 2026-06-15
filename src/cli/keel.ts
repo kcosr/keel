@@ -42,6 +42,8 @@ import type {
 import type { RunReport } from "../rpc/projection.ts";
 import { cliTargetPath } from "../target.ts";
 import { runTui } from "../tui/index.ts";
+import { captureWorkflowFile } from "../workflow-definitions/capture.ts";
+import type { WorkflowSourceInput } from "../workflow-definitions/source.ts";
 import { displayName, formatDuration, formatListRuns, formatUtcTimestamp } from "./run-display.ts";
 import { formatTable, tableCell } from "./table.ts";
 import { compactTerminalText } from "./terminal-text.ts";
@@ -508,7 +510,7 @@ async function dispatch(argv: string[]): Promise<number> {
           ? loadCredentialFromFile(parsed.capFile)
           : loadCredential();
         client = await openClient(credential);
-        const source = (await readCommandSource(parsed.file, "control script")).source;
+        const source = await readControlScriptSource(parsed.file);
         const state = parsed.stateFile ? JSON.parse(readFileSync(parsed.stateFile, "utf8")) : null;
         const result = await runExecuteScript({
           client,
@@ -903,7 +905,7 @@ export function workflowName(workflowUrl: string): string {
 }
 
 interface CapturedCommandSource {
-  source: string;
+  source: WorkflowSourceInput;
   defaultName: string | null;
   provenance: WorkflowProvenance;
 }
@@ -914,9 +916,17 @@ async function readCommandSource(
 ): Promise<CapturedCommandSource> {
   if (file) {
     const path = resolveWorkflowPath(file);
+    if (label === "workflow") {
+      const captured = captureWorkflowFile(path);
+      return {
+        source: captured.source,
+        defaultName: captured.name,
+        provenance: captured.provenance,
+      };
+    }
     return {
       source: readFileSync(path, "utf8"),
-      defaultName: workflowName(path),
+      defaultName: null,
       provenance: { kind: "clientPath", path },
     };
   }
@@ -928,6 +938,14 @@ async function readCommandSource(
     defaultName: null,
     provenance: { kind: "stdin" },
   };
+}
+
+async function readControlScriptSource(file: string | undefined): Promise<string> {
+  if (file) return readFileSync(resolveWorkflowPath(file), "utf8");
+  if (process.stdin.isTTY) {
+    throw new Error("no control script source: pass a file or pipe stdin");
+  }
+  return await new Response(Bun.stdin.stream()).text();
 }
 
 function isParked(status: string): boolean {

@@ -13,6 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { JournalStore } from "../journal/store.ts";
+import { captureWorkflowFile } from "./capture.ts";
 import {
   WORKFLOW_SDK_ABI_VERSION,
   evictWorkflowDefinitionCache,
@@ -97,7 +98,7 @@ describe("workflow definition snapshots", () => {
     }
   });
 
-  test("relative imports escaping the workflow root fail closed", () => {
+  test("stdin relative imports fail with the file-capture guidance", () => {
     const dir = mkdtempSync(join(tmpdir(), "keel-snapshot-escape-"));
     try {
       const source = `
@@ -112,11 +113,82 @@ describe("workflow definition snapshots", () => {
             nowMs: 1,
             cacheRoot: join(dir, "definitions"),
           }),
-        ).toThrow(/single self-contained file/);
+        ).toThrow(/local workflow imports require launching from a file/);
       } finally {
         store.close();
       }
     } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("file capture stores a sorted multi-module bundle with inferred entry path", () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-snapshot-bundle-"));
+    const store = JournalStore.memory();
+    try {
+      mkdirSync(join(dir, "workflows", "shared"), { recursive: true });
+      mkdirSync(join(dir, "workflows", "spec-review-loop"), { recursive: true });
+      const workflow = join(dir, "workflows", "spec-review-loop", "spec-review-loop.workflow.ts");
+      writeFileSync(
+        join(dir, "workflows", "shared", "review-tasks.ts"),
+        "export const task = 'review';\n",
+      );
+      writeFileSync(
+        workflow,
+        `
+          import { task } from "../shared/review-tasks";
+          export default async function wf() { return task; }
+        `,
+      );
+
+      const captured = captureWorkflowFile(workflow);
+      expect(captured.source).toMatchObject({
+        kind: "bundle",
+        entry: "spec-review-loop/spec-review-loop.workflow.ts",
+      });
+      const { snapshot } = snapshotWorkflowSource(store, captured.source, {
+        name: "review",
+        nowMs: 1,
+        cacheRoot: join(dir, "definitions"),
+      });
+      expect(snapshot.manifest.entry).toBe("spec-review-loop/spec-review-loop.workflow.ts");
+      expect(snapshot.manifest.modules.map((module) => module.path)).toEqual([
+        "shared/review-tasks.ts",
+        "spec-review-loop/spec-review-loop.workflow.ts",
+      ]);
+      expect(snapshot.code).toContain("../shared/review-tasks");
+      expect(
+        readFileSync(join(dir, "definitions", snapshot.hash, "shared", "review-tasks.ts"), "utf8"),
+      ).toBe("export const task = 'review';\n");
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("single-file path launches use the entry basename while stdin uses entry.ts", () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-snapshot-entry-"));
+    const store = JournalStore.memory();
+    try {
+      const workflow = join(dir, "named.workflow.ts");
+      writeFileSync(workflow, "export default async function wf() { return 1; }\n");
+      const captured = captureWorkflowFile(workflow);
+      expect(captured.source).toMatchObject({ kind: "bundle", entry: "named.workflow.ts" });
+      const fileSnapshot = snapshotWorkflowSource(store, captured.source, {
+        name: "file",
+        nowMs: 1,
+        cacheRoot: join(dir, "definitions"),
+      }).snapshot;
+      const stdinSnapshot = snapshotWorkflowSource(
+        store,
+        "export default async function wf() { return 1; }\n",
+        { name: "stdin", nowMs: 2, cacheRoot: join(dir, "definitions") },
+      ).snapshot;
+      expect(fileSnapshot.manifest.entry).toBe("named.workflow.ts");
+      expect(stdinSnapshot.manifest.entry).toBe("entry.ts");
+      expect(fileSnapshot.hash).not.toBe(stdinSnapshot.hash);
+    } finally {
+      store.close();
       rmSync(dir, { recursive: true, force: true });
     }
   });
@@ -166,6 +238,32 @@ describe("workflow definition snapshots", () => {
       expect(() =>
         materializeWorkflowDefinition(store, "wf_sha256_persisted_package", cacheRoot),
       ).toThrow(/left-pad" is not allowed/);
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("persisted definitions reject malicious paths and unreachable modules", () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-snapshot-malicious-"));
+    const store = JournalStore.memory();
+    try {
+      const cacheRoot = join(dir, "definitions");
+      putPersistedDefinitionWithModules(store, "wf_sha256_persisted_escape", "entry.ts", [
+        { path: "../escape.ts", code: "export const bad = 1;\n" },
+        { path: "entry.ts", code: "export default async () => 1;\n" },
+      ]);
+      expect(() =>
+        materializeWorkflowDefinition(store, "wf_sha256_persisted_escape", cacheRoot),
+      ).toThrow(/normalized relative POSIX path/);
+
+      putPersistedDefinitionWithModules(store, "wf_sha256_persisted_extra", "entry.ts", [
+        { path: "entry.ts", code: "export default async () => 1;\n" },
+        { path: "extra.ts", code: "export const extra = 1;\n" },
+      ]);
+      expect(() =>
+        materializeWorkflowDefinition(store, "wf_sha256_persisted_extra", cacheRoot),
+      ).toThrow(/unreachable modules: extra.ts/);
     } finally {
       store.close();
       rmSync(dir, { recursive: true, force: true });
@@ -358,6 +456,35 @@ function putPersistedDefinition(
         bunVersion: Bun.version,
         keelDefinitionAbi: 1,
         workflowSdkAbi: 2,
+      },
+    }),
+    createdAtMs: 1,
+  });
+}
+
+function putPersistedDefinitionWithModules(
+  store: JournalStore,
+  hash: string,
+  entry: string,
+  modules: Array<{ path: string; code: string }>,
+): void {
+  store.putWorkflowDefinition({
+    hash,
+    name: "persisted",
+    kind: "source",
+    code: modules.find((module) => module.path === entry)?.code ?? "",
+    sourceMap: null,
+    manifestJson: JSON.stringify({
+      format: "keel.workflow-definition.v1",
+      entry,
+      modules,
+      externalImports: [],
+      externalPackages: [],
+      sourceRoot: "client-captured://source",
+      runtime: {
+        bunVersion: Bun.version,
+        keelDefinitionAbi: 1,
+        workflowSdkAbi: WORKFLOW_SDK_ABI_VERSION,
       },
     }),
     createdAtMs: 1,

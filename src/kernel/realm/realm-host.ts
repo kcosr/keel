@@ -46,6 +46,7 @@ import {
   resolveKeelPackageRoot,
   snapshotWorkflowSource,
 } from "../../workflow-definitions/snapshot.ts";
+import type { WorkflowSourceInput } from "../../workflow-definitions/source.ts";
 import { DEFAULT_WORKSPACE_ID, workflowWorkspaceId } from "../../workspace/identity.ts";
 import {
   DEFAULT_WORKSPACE_RETENTION,
@@ -184,7 +185,7 @@ function normalizeRealmAgentProfiles(
 }
 
 export interface ClientCapturedWorkflow {
-  source: string;
+  source: WorkflowSourceInput;
   name?: string | null;
   provenance?: WorkflowProvenance;
 }
@@ -497,7 +498,7 @@ export class RealmKernel {
   async rerun<O>(
     runId: string,
     opts: {
-      source?: string;
+      source?: WorkflowSourceInput;
       input?: unknown;
       name?: string | null;
       provenance?: WorkflowProvenance;
@@ -509,7 +510,7 @@ export class RealmKernel {
   startRerun<O>(
     runId: string,
     opts: {
-      source?: string;
+      source?: WorkflowSourceInput;
       input?: unknown;
       name?: string | null;
       provenance?: WorkflowProvenance;
@@ -528,7 +529,7 @@ export class RealmKernel {
     const sourceOverride = opts.source !== undefined;
     const name = opts.name !== undefined ? opts.name : run.workflowName;
     const { definitionHash, workflowRef, entryPath } = sourceOverride
-      ? this.snapshotSourceForExistingRun(opts.source as string, name, opts.provenance)
+      ? this.snapshotSourceForExistingRun(opts.source as WorkflowSourceInput, name, opts.provenance)
       : {
           definitionHash: run.definitionVersion,
           workflowRef: run.workflowRef,
@@ -656,7 +657,7 @@ export class RealmKernel {
   }
 
   private snapshotSourceForExistingRun(
-    source: string,
+    source: WorkflowSourceInput,
     name: string | null,
     provenance: WorkflowProvenance | undefined,
   ): { definitionHash: string; workflowRef: string; entryPath: string } {

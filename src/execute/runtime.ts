@@ -11,6 +11,7 @@ import type {
   WorkspaceGcResult,
 } from "../rpc/contract.ts";
 import type { Blockage, RunProjection, RunReport } from "../rpc/projection.ts";
+import { captureWorkflowFile } from "../workflow-definitions/capture.ts";
 
 export interface ExecuteKeel {
   launch(req: ExecuteLaunchRequest): Promise<ExecuteRunHandle>;
@@ -239,22 +240,24 @@ export function createExecuteKeel(opts: ExecuteRuntimeOptions): ExecuteKeel {
 function normalizeLaunch(req: ExecuteLaunchRequest, cwd: string): LaunchRequest {
   if (typeof req === "string") {
     const path = resolve(cwd, req);
+    const captured = captureWorkflowFile(path);
     return {
-      source: readFileSync(path, "utf8"),
+      source: captured.source,
       input: {},
       target: cwd,
-      name: workflowName(path),
-      provenance: { kind: "clientPath", path },
+      name: captured.name ?? workflowName(path),
+      provenance: captured.provenance,
     };
   }
   if (typeof req.workflow === "string") {
     const path = resolve(cwd, req.workflow);
+    const captured = captureWorkflowFile(path);
     return {
-      source: readFileSync(path, "utf8"),
+      source: captured.source,
       input: req.input ?? {},
       target: cwd,
-      name: req.name ?? workflowName(path),
-      provenance: { kind: "clientPath", path },
+      name: req.name ?? captured.name ?? workflowName(path),
+      provenance: captured.provenance,
     };
   }
   return {

@@ -12,8 +12,8 @@ import { dirname, join, resolve } from "node:path";
 import { parse } from "acorn";
 
 const transpiler = new Bun.Transpiler({ loader: "tsx", minifyWhitespace: true });
-const IMPORT_EXTENSIONS = ["", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"];
-const INDEX_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"];
+const IMPORT_EXTENSIONS = ["", ".ts", ".tsx"];
+const INDEX_EXTENSIONS = [".ts", ".tsx"];
 
 type AnyNode = { type: string; start: number; end: number } & Record<string, unknown>;
 

@@ -22,6 +22,7 @@ import {
   DEFAULT_WORKFLOW_DEFINITION_TTL_MS,
   evictWorkflowDefinitionCache,
 } from "../workflow-definitions/snapshot.ts";
+import type { WorkflowSourceInput } from "../workflow-definitions/source.ts";
 import { cleanupTerminalRunWorkspaces } from "../workspace/retention.ts";
 import {
   diffWorkspace,
@@ -116,7 +117,7 @@ export class InProcessKeel implements KeelApi {
   async rerunRun(
     runId: string,
     opts?: {
-      source?: string;
+      source?: WorkflowSourceInput;
       input?: unknown;
       name?: string | null;
       provenance?: WorkflowProvenance;

@@ -13,21 +13,29 @@ import {
 } from "node:fs";
 import { builtinModules } from "node:module";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { posix } from "node:path";
 import { fileURLToPath } from "node:url";
-import { parse } from "acorn";
 import { canonicalJson, sha256Hex } from "../hash.ts";
 import type { JournalStore } from "../journal/store.ts";
 import type { WorkflowDefinitionRow } from "../journal/types.ts";
 import { formatViolations, lintWorkflowSource } from "../lint/determinism.ts";
+import {
+  assertAllowedExternalWorkflowImport,
+  isLocalWorkflowImport,
+  isUrlLikeSpecifier,
+  resolveBundledLocalImport,
+  staticWorkflowImports,
+  validateWorkflowModulePath,
+} from "./imports.ts";
+import {
+  MAX_WORKFLOW_BUNDLE_MODULES,
+  WORKFLOW_SOURCE_ROOT,
+  type WorkflowSourceInput,
+  type WorkflowSourceModule,
+} from "./source.ts";
 
-type AnyNode = { type: string } & Record<string, unknown>;
-
-interface CapturedModule {
-  path: string;
-  code: string;
-}
+type CapturedModule = WorkflowSourceModule;
 
 interface WorkflowDefinitionManifest {
   format: "keel.workflow-definition.v1";
@@ -69,9 +77,9 @@ export const WORKFLOW_DEFINITION_ABI_VERSION = 1;
 export const WORKFLOW_SDK_ABI_VERSION = 5;
 export const CURRENT_WORKFLOW_SDK_ABI_VERSION = WORKFLOW_SDK_ABI_VERSION;
 export const MAX_WORKFLOW_SOURCE_BYTES = 256 * 1024;
+export const MAX_WORKFLOW_BUNDLE_BYTES = MAX_WORKFLOW_SOURCE_BYTES;
 export const DEFAULT_WORKFLOW_DEFINITION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const NODE_BUILTINS = new Set([...builtinModules, ...builtinModules.map((name) => `node:${name}`)]);
-const tsTranspiler = new Bun.Transpiler({ loader: "tsx" });
 
 export class UnsupportedWorkflowSdkAbiError extends Error {
   readonly requiredAbi: number;
@@ -156,7 +164,7 @@ export function defaultDefinitionCacheRoot(): string {
 
 export function snapshotWorkflowSource(
   store: JournalStore,
-  source: string,
+  source: WorkflowSourceInput,
   opts: SnapshotWorkflowOptions,
 ): { snapshot: WorkflowDefinitionSnapshot; entryPath: string } {
   const snapshot = createWorkflowDefinitionSnapshot(source, opts);
@@ -233,6 +241,10 @@ export function materializeWorkflowDefinition(
 function isMaterializationComplete(root: string, manifest: WorkflowDefinitionManifest): boolean {
   const entryPath = join(root, manifest.modules.length === 0 ? "entry.ts" : manifest.entry);
   if (!existsSync(entryPath)) return false;
+  const modules = manifest.modules.length > 0 ? manifest.modules : [{ path: "entry.ts", code: "" }];
+  for (const module of modules) {
+    if (!existsSync(join(root, module.path))) return false;
+  }
   for (const specifier of manifest.externalImports) {
     const packageName = packageNameForImport(specifier);
     if (!packageName) continue;
@@ -280,40 +292,37 @@ export function isWorkflowDefinitionHash(value: string): boolean {
 }
 
 function createWorkflowDefinitionSnapshot(
-  source: string,
+  source: WorkflowSourceInput,
   opts: SnapshotWorkflowOptions,
 ): WorkflowDefinitionSnapshot {
-  const size = new TextEncoder().encode(source).byteLength;
-  if (size > MAX_WORKFLOW_SOURCE_BYTES) {
-    throw new Error(
-      `workflow source is ${size} bytes; maximum is ${MAX_WORKFLOW_SOURCE_BYTES} bytes`,
-    );
+  const bundle = normalizeWorkflowSourceInput(source);
+  const size = bundle.modules.reduce(
+    (sum, module) => sum + new TextEncoder().encode(module.code).byteLength,
+    0,
+  );
+  if (size > MAX_WORKFLOW_BUNDLE_BYTES) {
+    throw new Error(`workflow bundle is ${size} bytes; maximum is ${MAX_WORKFLOW_BUNDLE_BYTES}`);
   }
   const name = opts.name ?? null;
-  const filename = name ?? "workflow";
   if (opts.lint ?? true) {
-    const violations = lintWorkflowSource(source, filename);
+    const violations = bundle.modules.flatMap((module) =>
+      lintWorkflowSource(module.code, module.path).map((violation) => ({
+        modulePath: module.path,
+        violation,
+      })),
+    );
     if (violations.length > 0) {
       throw new Error(
-        `workflow failed the determinism lint:\n${formatViolations(violations, filename)}`,
+        `workflow failed the determinism lint:\n${violations
+          .map(({ modulePath, violation }) => formatViolations([violation], modulePath))
+          .join("\n")}`,
       );
     }
   }
-  const imports = staticImports(source, filename);
-  for (const spec of imports) {
-    if (spec.startsWith(".") || isAbsolute(spec)) {
-      throw new Error(
-        `workflow must be a single self-contained file; import "${spec}" is not allowed`,
-      );
-    }
-    if (spec !== "@kcosr/keel") {
-      throw new Error(`workflow import "${spec}" is not allowed; only @kcosr/keel is supported`);
-    }
-  }
-  const modules: CapturedModule[] = [{ path: "entry.ts", code: source }];
-  const entry = "entry.ts";
+  const modules = bundle.modules;
+  const entry = bundle.entry;
   const externalImports = collectExternalImports(modules).sort();
-  const sourceRoot = "client-captured://source";
+  const sourceRoot = WORKFLOW_SOURCE_ROOT;
   const manifest: WorkflowDefinitionManifest = {
     format: "keel.workflow-definition.v1",
     entry,
@@ -333,46 +342,121 @@ function createWorkflowDefinitionSnapshot(
     hash,
     name,
     kind: "source",
-    code: source,
+    code: modules.find((module) => module.path === entry)?.code ?? "",
     manifest,
   };
 }
 
-function staticImports(source: string, filename: string): string[] {
-  let ast: AnyNode;
-  try {
-    ast = parse(tsTranspiler.transformSync(source), {
-      ecmaVersion: "latest",
-      sourceType: "module",
-    }) as unknown as AnyNode;
-  } catch (err) {
-    throw new Error(
-      `could not parse workflow imports in ${filename}: ${err instanceof Error ? err.message : String(err)}`,
-    );
+function normalizeWorkflowSourceInput(source: WorkflowSourceInput): {
+  entry: string;
+  modules: WorkflowSourceModule[];
+} {
+  if (typeof source === "string") {
+    const bundle = { entry: "entry.ts", modules: [{ path: "entry.ts", code: source }] };
+    validateSourceBundle(bundle, true);
+    return bundle;
   }
+  if (
+    typeof source !== "object" ||
+    source === null ||
+    source.kind !== "bundle" ||
+    typeof source.entry !== "string" ||
+    !Array.isArray(source.modules)
+  ) {
+    throw new Error("workflow source must be a string or bundle");
+  }
+  const bundle = {
+    entry: source.entry,
+    modules: source.modules.map((module) => {
+      if (
+        typeof module !== "object" ||
+        module === null ||
+        typeof module.path !== "string" ||
+        typeof module.code !== "string"
+      ) {
+        throw new Error("workflow source bundle modules must contain path and code strings");
+      }
+      return { path: module.path, code: module.code };
+    }),
+  };
+  validateSourceBundle(bundle, false);
+  return {
+    entry: bundle.entry,
+    modules: [...bundle.modules].sort((a, b) => a.path.localeCompare(b.path)),
+  };
+}
 
-  const imports: string[] = [];
-  walk(ast, (node) => {
-    if (node.type === "ImportExpression") {
-      throw new Error(`dynamic import(...) is not allowed in workflow code: ${filename}`);
+function validateSourceBundle(
+  bundle: { entry: string; modules: WorkflowSourceModule[] },
+  inlineSource: boolean,
+): void {
+  if (bundle.modules.length === 0) throw new Error("workflow source bundle must contain modules");
+  if (bundle.modules.length > MAX_WORKFLOW_BUNDLE_MODULES) {
+    throw new Error(`workflow bundle has more than ${MAX_WORKFLOW_BUNDLE_MODULES} modules`);
+  }
+  validateWorkflowModulePath(bundle.entry, "workflow entry path");
+  const modulesByPath = new Map<string, WorkflowSourceModule>();
+  for (const module of bundle.modules) {
+    validateWorkflowModulePath(module.path);
+    if (modulesByPath.has(module.path)) {
+      throw new Error(`workflow source bundle contains duplicate module ${module.path}`);
     }
-    if (
-      node.type === "ImportDeclaration" ||
-      node.type === "ExportNamedDeclaration" ||
-      node.type === "ExportAllDeclaration"
-    ) {
-      const src = (node.source as AnyNode | undefined)?.value;
-      if (typeof src === "string") imports.push(src);
+    modulesByPath.set(module.path, module);
+  }
+  if (!modulesByPath.has(bundle.entry)) {
+    throw new Error(`workflow source bundle entry ${bundle.entry} is missing`);
+  }
+  const reachable = validateBundleGraph(
+    bundle.entry,
+    modulesByPath,
+    "workflow source bundle",
+    inlineSource,
+  );
+  if (reachable.size !== bundle.modules.length) {
+    const extra = bundle.modules
+      .map((module) => module.path)
+      .filter((path) => !reachable.has(path));
+    throw new Error(`workflow source bundle contains unreachable modules: ${extra.join(", ")}`);
+  }
+}
+
+function validateBundleGraph(
+  entry: string,
+  modulesByPath: Map<string, WorkflowSourceModule>,
+  label: string,
+  inlineSource = false,
+): Set<string> {
+  const reachable = new Set<string>();
+  const visit = (modulePath: string): void => {
+    if (reachable.has(modulePath)) return;
+    const module = modulesByPath.get(modulePath);
+    if (!module) throw new Error(`${label} is missing module ${modulePath}`);
+    reachable.add(modulePath);
+    for (const specifier of staticWorkflowImports(module.code, module.path)) {
+      if (isLocalWorkflowImport(specifier)) {
+        if (inlineSource) {
+          throw new Error(
+            "local workflow imports require launching from a file so Keel can capture the helper graph",
+          );
+        }
+        visit(resolveBundledLocalImport(module.path, specifier, modulesByPath));
+        continue;
+      }
+      if (isUrlLikeSpecifier(specifier)) {
+        throw new Error(`workflow import "${specifier}" from ${module.path} is not allowed`);
+      }
+      assertAllowedExternalWorkflowImport(specifier, module.path);
     }
-  });
-  return imports;
+  };
+  visit(entry);
+  return reachable;
 }
 
 function collectExternalImports(modules: CapturedModule[]): string[] {
   const imports = new Set<string>();
   for (const module of modules) {
-    for (const spec of staticImports(module.code, module.path)) {
-      if (!spec.startsWith(".") && !isAbsolute(spec)) imports.add(spec);
+    for (const spec of staticWorkflowImports(module.code, module.path)) {
+      if (!isLocalWorkflowImport(spec)) imports.add(spec);
     }
   }
   return [...imports];
@@ -421,6 +505,9 @@ function validatePersistedImportBoundary(
   row: WorkflowDefinitionRow,
   manifest: WorkflowDefinitionManifest,
 ): void {
+  if (typeof manifest.entry !== "string") {
+    throw new Error(`workflow definition ${row.hash} manifest entry must be a string`);
+  }
   if (!Array.isArray(manifest.modules)) {
     throw new Error(`workflow definition ${row.hash} manifest modules must be an array`);
   }
@@ -432,15 +519,72 @@ function validatePersistedImportBoundary(
   }
   const modules =
     manifest.modules.length > 0 ? manifest.modules : [{ path: "entry.ts", code: row.code }];
+  if (modules.length > MAX_WORKFLOW_BUNDLE_MODULES) {
+    throw new Error(
+      `workflow definition ${row.hash} manifest has more than ${MAX_WORKFLOW_BUNDLE_MODULES} modules`,
+    );
+  }
+  const totalBytes = modules.reduce(
+    (sum, module) =>
+      sum +
+      (typeof module.code === "string" ? new TextEncoder().encode(module.code).byteLength : 0),
+    0,
+  );
+  if (totalBytes > MAX_WORKFLOW_BUNDLE_BYTES) {
+    throw new Error(
+      `workflow definition ${row.hash} manifest source is ${totalBytes} bytes; maximum is ${MAX_WORKFLOW_BUNDLE_BYTES}`,
+    );
+  }
+  const modulesByPath = new Map<string, WorkflowSourceModule>();
+  const expectedOrder = [...modules].sort((a, b) => a.path.localeCompare(b.path));
+  if (
+    canonicalJson(modules.map((module) => module.path)) !==
+    canonicalJson(expectedOrder.map((module) => module.path))
+  ) {
+    throw new Error(`workflow definition ${row.hash} manifest modules must be sorted by path`);
+  }
   for (const module of modules) {
     if (typeof module.path !== "string" || typeof module.code !== "string") {
       throw new Error(`workflow definition ${row.hash} manifest module entries are invalid`);
     }
+    try {
+      validateWorkflowModulePath(module.path);
+    } catch (err) {
+      throw new Error(
+        `workflow definition ${row.hash} manifest ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    if (modulesByPath.has(module.path)) {
+      throw new Error(
+        `workflow definition ${row.hash} manifest has duplicate module ${module.path}`,
+      );
+    }
+    modulesByPath.set(module.path, module);
+  }
+  const entry = manifest.modules.length > 0 ? manifest.entry : "entry.ts";
+  try {
+    validateWorkflowModulePath(entry, "workflow entry path");
+  } catch (err) {
+    throw new Error(
+      `workflow definition ${row.hash} manifest ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  if (!modulesByPath.has(entry)) {
+    throw new Error(`workflow definition ${row.hash} manifest entry ${entry} is missing`);
+  }
+  const reachable = validateBundleGraph(entry, modulesByPath, `workflow definition ${row.hash}`);
+  if (reachable.size !== modules.length) {
+    const extra = modules.map((module) => module.path).filter((path) => !reachable.has(path));
+    throw new Error(
+      `workflow definition ${row.hash} manifest contains unreachable modules: ${extra.join(", ")}`,
+    );
   }
   const actualImports = collectExternalImports(modules).sort();
   for (const spec of actualImports) {
-    if (spec !== "@kcosr/keel") {
-      throw new Error(`workflow import "${spec}" is not allowed; only @kcosr/keel is supported`);
+    try {
+      assertAllowedExternalWorkflowImport(spec, "workflow definition manifest");
+    } catch (err) {
+      throw new Error(err instanceof Error ? err.message : String(err));
     }
   }
   const declaredImports = [...manifest.externalImports].sort();
@@ -625,34 +769,4 @@ function sdkMaterializedSpecifier(modulePath: string): string {
   const fromDir = posix.dirname(modulePath.split(sep).join(posix.sep));
   const rel = posix.relative(fromDir, "node_modules/@kcosr/keel/src/sdk.ts");
   return rel.startsWith(".") ? rel : `./${rel}`;
-}
-
-function walk(root: AnyNode, fn: (node: AnyNode) => void): void {
-  const visit = (node: AnyNode): void => {
-    fn(node);
-    for (const child of childNodes(node)) visit(child);
-  };
-  visit(root);
-}
-
-function childNodes(node: AnyNode): AnyNode[] {
-  const out: AnyNode[] = [];
-  for (const key of Object.keys(node)) {
-    if (key === "loc" || key === "start" || key === "end" || key === "type") continue;
-    const value = node[key];
-    if (Array.isArray(value)) {
-      for (const v of value) if (isNode(v)) out.push(v);
-    } else if (isNode(value)) {
-      out.push(value);
-    }
-  }
-  return out;
-}
-
-function isNode(value: unknown): value is AnyNode {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    typeof (value as { type?: unknown }).type === "string"
-  );
 }

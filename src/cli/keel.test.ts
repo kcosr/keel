@@ -579,6 +579,44 @@ describe("keel CLI", () => {
   );
 
   test(
+    "run captures local helper modules from workflow files",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "keel-run-helper-"));
+      const socketPath = join(dir, "keel.sock");
+      const dbPath = join(dir, "keel.db");
+      const daemon = new KeelDaemon({
+        socketPath,
+        dbPath,
+        agents: new AgentProviderRegistry().register(new MockProvider()),
+      });
+      await daemon.start();
+      try {
+        mkdirSync(join(dir, "workflows", "shared"), { recursive: true });
+        mkdirSync(join(dir, "workflows", "review"), { recursive: true });
+        const workflow = join(dir, "workflows", "review", "review.workflow.ts");
+        writeFileSync(join(dir, "workflows", "shared", "tasks.ts"), "export const value = 7;\n");
+        writeFileSync(
+          workflow,
+          `
+            import { value } from "../shared/tasks";
+            export default async function wf() { return value; }
+          `,
+        );
+        const env = { KEEL_SOCKET: socketPath, KEEL_DB: dbPath, KEEL_DIR: dir };
+        const out = await runCli(["run", workflow], dir, env);
+        expect(out.code).toBe(0);
+        const payload = JSON.parse(out.stdout) as { status: string; output: number };
+        expect(payload.status).toBe("finished");
+        expect(payload.output).toBe(7);
+      } finally {
+        daemon.stop();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    DAEMON_TEST_TIMEOUT_MS,
+  );
+
+  test(
     "run closes the client and exits when the daemon rejects the launch",
     async () => {
       const dir = mkdtempSync(join(tmpdir(), "keel-run-reject-"));
@@ -604,7 +642,7 @@ describe("keel CLI", () => {
         );
         expect(rejected.timedOut).toBe(false);
         expect(rejected.code).toBe(1);
-        expect(rejected.stderr).toContain("no-forbidden-import");
+        expect(rejected.stderr).toContain('workflow import "node:fs" from entry.ts is not allowed');
       } finally {
         daemon.stop();
         rmSync(dir, { recursive: true, force: true });

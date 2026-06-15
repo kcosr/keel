@@ -42,6 +42,10 @@
   materialized definition cache directories.
 - Immutable workflow definition snapshots are stored by content hash and
   materialized from the journal for run execution and resume.
+- File-launched workflows can import local static `.ts`/`.tsx` helper modules
+  through relative specifiers. The client captures the reachable helper graph,
+  infers a bundle root from the captured files, and the daemon validates and
+  persists the complete source bundle under one immutable definition hash.
 - Daemon-enforced bearer capabilities for run control, including launch-minted
   run capabilities, admin capabilities, and client-side capability files.
 - `keel interrupt <runId> [reason]` and `interruptRun` park non-terminal runs in
@@ -102,8 +106,13 @@
 - Workflow input for `launch` and `run` is now `--input <json>`; the positional
   argument is source only. Stdin launches may be unnamed, and JSON projections
   represent unnamed runs as `null`.
-- Workflow sources are v1 single-file only and may import only the exact
-  `@kcosr/keel` SDK specifier.
+- Stdin workflow sources remain single-module `entry.ts` definitions and cannot
+  use local helper imports. Package imports, SDK subpaths, dynamic imports,
+  symlinked source paths, and relative imports through `node_modules` remain
+  rejected for workflow bundles.
+- Path-launched workflow definition hashes now include the normalized entry
+  path and every captured helper path/source byte. Single-file path launches use
+  the entry basename; stdin/string launches keep the stable `entry.ts` path.
 - Schedules now pin the captured workflow definition hash at creation time.
   Existing path-based schedules are disabled by migration.
 - `keel launch --detach` now returns JSON containing `runId` and

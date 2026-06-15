@@ -32,6 +32,7 @@ import {
   keelPackageRoot,
   snapshotWorkflowSource,
 } from "../workflow-definitions/snapshot.ts";
+import type { WorkflowSourceInput } from "../workflow-definitions/source.ts";
 
 export interface DaemonOptions {
   socketPath: string;
@@ -280,7 +281,7 @@ export class KeelDaemon {
       case "launchRun": {
         const target = requireRunTarget(p.target, "launchRun");
         const res = await this.api.launchRun({
-          source: p.source as string,
+          source: p.source as WorkflowSourceInput,
           input: p.input,
           target,
           name: (p.name as string | null | undefined) ?? null,
@@ -307,7 +308,7 @@ export class KeelDaemon {
         return this.api.rerunRun(
           p.runId as string,
           p.opts as {
-            source?: string;
+            source?: WorkflowSourceInput;
             input?: unknown;
             name?: string | null;
             provenance?: WorkflowProvenance;
@@ -427,7 +428,7 @@ export class KeelDaemon {
       }
       case "putSchedule": {
         this.authorizeAdmin(conn);
-        const snapshot = snapshotWorkflowSource(this.store, p.source as string, {
+        const snapshot = snapshotWorkflowSource(this.store, p.source as WorkflowSourceInput, {
           name: (p.workflowName as string | null | undefined) ?? (p.name as string),
           nowMs: this.clock(),
           cacheRoot:

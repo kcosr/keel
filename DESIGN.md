@@ -72,9 +72,10 @@ Postgres-dialect discipline).
   require a run capability or an admin capability; the daemon stores only token
   hashes. The CLI writes cap files by default and raw tokens require explicit
   opt-in.
-- **Workflow definitions are immutable snapshots.** `runs.definition_version`
+- **Workflow definitions are immutable source bundles.** `runs.definition_version`
   is the content-addressed definition hash; `runs.workflow_ref` is provenance.
-  Resume/retry/rewind/fork use the stored definition, while rerun with a source
+  File launches capture the static local `.ts`/`.tsx` import graph client-side,
+  and resume/retry/rewind/fork use the stored bundle. Rerun with a source
   override snapshots new source intentionally.
 - **Secret injection remains programmatic-only on the bundled daemon**, while
   agent profiles now support both constructor-supplied programmatic profiles and
@@ -455,11 +456,16 @@ new `definitionVersion` and lets structural versioning (§5.2) compute which
 steps are invalidated.
 
 **Definitions register at launch.** `launchRun` accepts client-captured workflow
-source; the daemon archives those bytes content-addressed as the run's pinned
+source: either an inline single module or a source bundle whose entry and local
+helper modules were captured by the client. The daemon validates module paths,
+reachability, import boundaries, lint results, runtime ABI metadata, and then
+archives the canonical bundle content-addressed as the run's pinned
 `definitionVersion` — there is no separate deploy step. The daemon never opens a
-client workflow path. Load-bearing for L22: the common author is an agent
-submitting a just-written workflow in one call, exactly the Claude Workflow
-tool's submit-script-and-run shape.
+client workflow path. Materialization writes only the persisted bundle into the
+definition cache, so deleting or editing original workflow/helper files cannot
+change resume, retry, rewind, fork, or schedule fire behavior. Load-bearing for
+L22: the common author is an agent submitting a just-written workflow in one
+call, exactly the Claude Workflow tool's submit-script-and-run shape.
 
 ## 8. Persistence
 

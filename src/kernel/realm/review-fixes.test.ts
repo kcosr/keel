@@ -40,7 +40,7 @@ describe("#1 helper-closure versioning", () => {
     expect(exec).toEqual(["compute"]);
   });
 
-  test("extensionless relative helper imports are rejected by source capture", async () => {
+  test("extensionless relative helper imports are captured and versioned", async () => {
     const dir = mkdtempSync(join(tmpdir(), "keel-helper-import-"));
     try {
       const workflow = join(dir, "wf.ts");
@@ -58,9 +58,23 @@ describe("#1 helper-closure versioning", () => {
       writeFileSync(helper, "export function transform(n) { return n * 2; }\n");
 
       const store = JournalStore.memory();
-      await expect(
-        fixed(store).run<number>(captureWorkflowFile(workflow), { n: 5 }),
-      ).rejects.toThrow(/single self-contained file/);
+      const exec: string[] = [];
+      const kernel = fixed(store, {
+        definitionCacheRoot: join(dir, "definitions"),
+        onStepExecute: (key: string) => exec.push(key),
+      });
+      const first = await kernel.run<number>(captureWorkflowFile(workflow), { n: 5 });
+      expect(first.output).toBe(10);
+      expect(exec).toEqual(["compute"]);
+
+      exec.length = 0;
+      writeFileSync(helper, "export function transform(n) { return n * 3; }\n");
+      const second = await kernel.rerun<number>("run_0", {
+        ...captureWorkflowFile(workflow),
+        input: { n: 5 },
+      });
+      expect(second.output).toBe(15);
+      expect(exec).toEqual(["compute"]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -113,6 +127,47 @@ describe("#2 resume uses immutable workflow snapshots", () => {
       expect(store.getRun("run_0")?.status).toBe("running");
       expect(store.getRun("run_0")?.definitionVersion.startsWith("wf_sha256_")).toBe(true);
 
+      rmSync(workflow);
+
+      const resumed = await fixed(store, { definitionCacheRoot: cacheRoot }).resume<number>(
+        "run_0",
+      );
+      expect(resumed.status).toBe("finished");
+      expect(resumed.output).toBe(14);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("resume succeeds after an imported helper file is deleted", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-snapshot-helper-"));
+    try {
+      const workflow = join(dir, "snapshot.workflow.ts");
+      const helper = join(dir, "helper.ts");
+      const cacheRoot = join(dir, "definitions");
+      writeFileSync(helper, "export function transform(n) { return n * 2; }\n");
+      writeFileSync(
+        workflow,
+        `
+          import { transform } from "./helper";
+          export default async function wf(ctx, input) {
+            const Schema = { parse: (v) => v };
+            return ctx.step("compute", Schema, { n: input.n }, ({ n }) => transform(n));
+          }
+        `,
+      );
+
+      const store = JournalStore.memory();
+      const k1 = fixed(store, {
+        definitionCacheRoot: cacheRoot,
+        fault: (p: string, key: string) => {
+          if (p === "after-pending" && key === "compute") throw new Error("CRASH");
+        },
+      });
+      await k1.run(captureWorkflowFile(workflow), { n: 7 }, { name: "snapshot" }).catch(() => null);
+      expect(store.getRun("run_0")?.status).toBe("running");
+
+      rmSync(helper);
       rmSync(workflow);
 
       const resumed = await fixed(store, { definitionCacheRoot: cacheRoot }).resume<number>(
@@ -192,13 +247,8 @@ describe("#2 resume uses immutable workflow snapshots", () => {
       );
 
       const store = JournalStore.memory();
-      await expect(
-        fixed(store, { definitionCacheRoot: join(dir, "definitions") }).run(
-          captureWorkflowFile(workflow),
-          { n: 5 },
-          { name: "external" },
-        ),
-      ).rejects.toThrow(/only @kcosr\/keel is supported/);
+      expect(() => captureWorkflowFile(workflow)).toThrow(/only @kcosr\/keel is supported/);
+      expect(store.listRuns()).toEqual([]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

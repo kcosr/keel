@@ -1709,7 +1709,8 @@ export class RealmKernel {
             return;
           }
           switch (m.type) {
-            case "ready":
+            case "ready": {
+              const agentProfiles = this.profilesForRun(runId);
               workflowSettings = this.workflowSettingsForRun(runId);
               worker.postMessage({
                 type: "init",
@@ -1717,12 +1718,13 @@ export class RealmKernel {
                 input,
                 sab,
                 moduleHelpers,
-                agentProfiles: this.profilesForRun(runId),
+                agentProfiles,
                 workflowSettings,
                 runId,
                 runTarget,
               } satisfies HostReply);
               break;
+            }
             case "step-begin": {
               const begun = engine.beginStep(m.key, m.inputs as Json, m.version, m.deps);
               if (begun.kind === "replay") {

@@ -23,6 +23,8 @@ import {
   DEFAULT_SCHEMA_MAX_RETRIES,
 } from "../../agents/defaults.ts";
 import { type AgentProfiles, resolveProfile } from "../../agents/profiles.ts";
+import { resolveSelectedProviderConfig } from "../../agents/provider-config.ts";
+import type { ProviderConfigMap } from "../../agents/types.ts";
 import { type Json, hashJson } from "../../hash.ts";
 import type { WorkspaceRetention } from "../../journal/types.ts";
 import { requireRunTarget } from "../../target.ts";
@@ -518,6 +520,7 @@ const ctx = Object.freeze({
     prompt: string;
     profile?: string;
     provider?: string;
+    providerConfig?: ProviderConfigMap;
     schema?: Schemaish<T>;
     model?: string;
     reasoning?: string;
@@ -540,6 +543,16 @@ const ctx = Object.freeze({
     const spec = resolveProfile(rawSpec, agentProfiles) as Omit<typeof rawSpec, "profile">;
     assertNotReservedAuthorKey(spec.key, "ctx.agent");
     const provider = spec.provider ?? DEFAULT_AGENT_PROVIDER;
+    const profileProviderConfig = rawSpec.profile
+      ? agentProfiles[rawSpec.profile]?.providerConfig
+      : undefined;
+    const selectedProviderConfig = resolveSelectedProviderConfig({
+      context: `ctx.agent("${spec.key}")`,
+      selectedProvider: provider,
+      explicitProviderConfig: spec.providerConfig,
+      profileName: rawSpec.profile,
+      profileProviderConfig,
+    });
     const schema = spec.schema as Schema<unknown> | undefined;
     const tools = resolveToolPolicy({
       ...(spec.capabilities ? { capabilities: spec.capabilities } : {}),
@@ -550,29 +563,10 @@ const ctx = Object.freeze({
     const caps = tools.capabilities;
     rejectRemovedWorkspaceFields(rawSpec, `ctx.agent("${spec.key}")`);
     const workspaceId = resolveWorkspaceId(spec.workspace);
-    const version =
-      spec.version ??
-      computeVersion({
-        spec: {
-          prompt: spec.prompt,
-          provider,
-          model: spec.model ?? null,
-          reasoning: spec.reasoning ?? null,
-          toolPolicy: tools.toolPolicy,
-          allowTools: tools.allowTools,
-          denyTools: tools.denyTools,
-          workspaceId,
-          capabilities: caps,
-          secrets: spec.secrets ?? [],
-        },
-        schema,
-        ...(spec.bump !== undefined ? { bump: spec.bump } : {}),
-      });
-    // Inputs are the COMPLETE identity: every field that participates in the
-    // version must also appear here (caps/secrets included — §11).
-    const inputs = {
+    const identityFields = {
       prompt: spec.prompt,
       provider,
+      ...(selectedProviderConfig !== undefined ? { providerConfig: selectedProviderConfig } : {}),
       model: spec.model ?? null,
       reasoning: spec.reasoning ?? null,
       toolPolicy: tools.toolPolicy,
@@ -582,6 +576,16 @@ const ctx = Object.freeze({
       capabilities: caps,
       secrets: spec.secrets ?? [],
     };
+    const version =
+      spec.version ??
+      computeVersion({
+        spec: identityFields,
+        schema,
+        ...(spec.bump !== undefined ? { bump: spec.bump } : {}),
+      });
+    // Inputs are the COMPLETE identity: every field that participates in the
+    // version must also appear here (caps/secrets included — §11).
+    const inputs = identityFields;
     const reply = await rpc<{
       ok: boolean;
       output?: unknown;
@@ -593,6 +597,7 @@ const ctx = Object.freeze({
       key: spec.key,
       prompt: spec.prompt,
       provider,
+      providerConfig: selectedProviderConfig ?? null,
       model: spec.model ?? null,
       reasoning: spec.reasoning ?? null,
       toolPolicy: tools.toolPolicy,
@@ -625,6 +630,7 @@ const ctx = Object.freeze({
     key: string;
     profile?: string;
     provider?: string;
+    providerConfig?: ProviderConfigMap;
     model?: string;
     reasoning?: string;
     toolPolicy?: ToolPolicy;
@@ -653,6 +659,16 @@ const ctx = Object.freeze({
     >;
     assertSessionKey(sessionSpec.key, "agentSession");
     const provider = sessionSpec.provider ?? DEFAULT_AGENT_PROVIDER;
+    const profileProviderConfig = rawSessionSpec.profile
+      ? agentProfiles[rawSessionSpec.profile]?.providerConfig
+      : undefined;
+    const selectedProviderConfig = resolveSelectedProviderConfig({
+      context: `ctx.agentSession("${sessionSpec.key}")`,
+      selectedProvider: provider,
+      explicitProviderConfig: sessionSpec.providerConfig,
+      profileName: rawSessionSpec.profile,
+      profileProviderConfig,
+    });
     const tools = resolveToolPolicy({
       ...(sessionSpec.capabilities ? { capabilities: sessionSpec.capabilities } : {}),
       ...(sessionSpec.toolPolicy ? { toolPolicy: sessionSpec.toolPolicy } : {}),
@@ -665,6 +681,7 @@ const ctx = Object.freeze({
     const identity = {
       agentKey: sessionSpec.key,
       provider,
+      ...(selectedProviderConfig !== undefined ? { providerConfig: selectedProviderConfig } : {}),
       model: sessionSpec.model ?? null,
       reasoning: sessionSpec.reasoning ?? null,
       toolPolicy: tools.toolPolicy,
@@ -705,6 +722,9 @@ const ctx = Object.freeze({
             spec: {
               prompt: rawTurnSpec.prompt,
               provider,
+              ...(selectedProviderConfig !== undefined
+                ? { providerConfig: selectedProviderConfig }
+                : {}),
               model: sessionSpec.model ?? null,
               reasoning: sessionSpec.reasoning ?? null,
               toolPolicy: tools.toolPolicy,
@@ -722,6 +742,9 @@ const ctx = Object.freeze({
         const inputs = {
           prompt: rawTurnSpec.prompt,
           provider,
+          ...(selectedProviderConfig !== undefined
+            ? { providerConfig: selectedProviderConfig }
+            : {}),
           model: sessionSpec.model ?? null,
           reasoning: sessionSpec.reasoning ?? null,
           toolPolicy: tools.toolPolicy,
@@ -748,6 +771,7 @@ const ctx = Object.freeze({
           identityJson,
           prompt: rawTurnSpec.prompt,
           provider,
+          providerConfig: selectedProviderConfig ?? null,
           model: sessionSpec.model ?? null,
           reasoning: sessionSpec.reasoning ?? null,
           toolPolicy: tools.toolPolicy,

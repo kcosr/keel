@@ -14,11 +14,14 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { JournalStore } from "../journal/store.ts";
 import {
+  WORKFLOW_SDK_ABI_VERSION,
   evictWorkflowDefinitionCache,
   materializeWorkflowDefinition,
   resolveKeelPackageRoot,
   snapshotWorkflowSource,
 } from "./snapshot.ts";
+
+const NEXT_WORKFLOW_SDK_ABI_VERSION = WORKFLOW_SDK_ABI_VERSION + 1;
 
 describe("workflow definition snapshots", () => {
   test("resolves the Keel package root from the source module location", () => {
@@ -248,12 +251,12 @@ describe("workflow definition snapshots", () => {
         join(cacheRoot, snapshot.hash, "entry.ts"),
       );
 
-      manifest.runtime.workflowSdkAbi = 5;
+      manifest.runtime.workflowSdkAbi = NEXT_WORKFLOW_SDK_ABI_VERSION;
       store.db
         .query("UPDATE workflow_definitions SET manifest_json = ? WHERE hash = ?")
         .run(JSON.stringify(manifest), snapshot.hash);
       expect(() => materializeWorkflowDefinition(store, snapshot.hash, cacheRoot)).toThrow(
-        /requires workflow SDK ABI 5, but this daemon supports ABI 4/,
+        `requires workflow SDK ABI ${NEXT_WORKFLOW_SDK_ABI_VERSION}, but this daemon supports ABI ${WORKFLOW_SDK_ABI_VERSION}`,
       );
     } finally {
       store.close();

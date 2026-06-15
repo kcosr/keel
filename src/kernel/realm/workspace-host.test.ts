@@ -149,6 +149,88 @@ describe("trusted-local agent isolation controls", () => {
     expect(invocation?.env?.TOKEN).toBe("file-secret-abc");
   });
 
+  test("selected providerConfig reaches provider immutably without affecting cwd", async () => {
+    const store = JournalStore.memory();
+    const calls: AgentInvocation[] = [];
+    const provider: AgentProvider = {
+      name: "writer",
+      async generate(inv: AgentInvocation): Promise<AgentResult> {
+        calls.push(inv);
+        expect(inv.cwd).toBe(process.cwd());
+        expect(inv.providerConfig).toEqual({ transport: { type: "stdio" } });
+        expect(() => {
+          (inv.providerConfig as { transport: { type: string } }).transport.type = "mutated";
+        }).toThrow();
+        return { text: "ok", transcript: [] };
+      },
+    };
+    const workflow = {
+      source: `
+        import { type Ctx } from "@kcosr/keel";
+        export default async function wf(ctx: Ctx): Promise<string> {
+          return await ctx.agent({
+            key: "cfg",
+            provider: "writer",
+            prompt: "x",
+            providerConfig: {
+              writer: { transport: { type: "stdio" } },
+              other: { ignored: true },
+            },
+          });
+        }
+      `,
+      name: "provider-config-cwd",
+    };
+    const kernel = new RealmKernel(store, {
+      idgen: () => "r",
+      agents: new AgentProviderRegistry().register(provider),
+    });
+    const handle = await kernel.run<string>(workflow, null, { name: "cfg", target: process.cwd() });
+    expect(handle.status).toBe("finished");
+    expect(handle.output).toBe("ok");
+    expect(calls).toHaveLength(1);
+  });
+
+  test("unselected providerConfig does not affect replay identity but selected config does", async () => {
+    const store = JournalStore.memory();
+    const calls: AgentInvocation[] = [];
+    const provider: AgentProvider = {
+      name: "writer",
+      async generate(inv: AgentInvocation): Promise<AgentResult> {
+        calls.push(inv);
+        return { text: `saw ${JSON.stringify(inv.providerConfig)}`, transcript: [] };
+      },
+    };
+    const workflow = {
+      source: `
+        import { type Ctx } from "@kcosr/keel";
+        export default async function wf(ctx: Ctx, input: { selected: string; unused: string }): Promise<string> {
+          return await ctx.agent({
+            key: "cfg",
+            provider: "writer",
+            prompt: "x",
+            providerConfig: {
+              writer: { selected: input.selected },
+              other: { unused: input.unused },
+            },
+          });
+        }
+      `,
+      name: "provider-config-identity",
+    };
+    const kernel = new RealmKernel(store, {
+      idgen: () => "r",
+      agents: new AgentProviderRegistry().register(provider),
+    });
+    await kernel.run<string>(workflow, { selected: "a", unused: "one" }, { target: process.cwd() });
+    expect(calls).toHaveLength(1);
+    await kernel.rerun<string>("r", { input: { selected: "a", unused: "two" } });
+    expect(calls).toHaveLength(1);
+    await kernel.rerun<string>("r", { input: { selected: "b", unused: "two" } });
+    expect(calls).toHaveLength(2);
+    expect(calls.map((c) => c.providerConfig)).toEqual([{ selected: "a" }, { selected: "b" }]);
+  });
+
   test("secrets with provider-native tool additions run without workspace isolation and receive env", async () => {
     const store = JournalStore.memory();
     const secrets = new SecretStore();

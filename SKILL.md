@@ -79,9 +79,15 @@ Filter tolerated failures out with `.filter(Boolean)`. Do not use `onFailure:
 retried.
 
 `toolPolicy` is only `"none"`, `"read-only"`, `"workspace-write"`, or
-`"unrestricted"`. Agents run in a resolved workspace: explicit handle, scoped
-`ctx.withWorkspace`, or the run default direct workspace at `ctx.run.target`. To
-let an agent run shell commands, use explicit capabilities:
+`"unrestricted"`. Use `providerConfig` only for provider-owned JSON settings;
+Keel validates the full provider-keyed map, but only the selected provider's
+entry affects replay identity or reaches the adapter. It replaces, not deep
+merges, profile config for that provider. Do not put raw secrets or workspace
+choices in `providerConfig`; use `secrets` and workspace handles instead.
+
+Agents run in a resolved workspace: explicit handle, scoped `ctx.withWorkspace`,
+or the run default direct workspace at `ctx.run.target`. To let an agent run
+shell commands, use explicit capabilities:
 
 ```ts
 capabilities: { fs: "none", network: "none", shell: true, secrets: [] }
@@ -115,8 +121,9 @@ Use separate participant keys for independent conversations.
 Session runs can resume and retry, but not rerun, rewind, or fork. If a session
 turn is interrupted after a backend token is observed, explicit resume continues
 from that token rather than starting a fresh session. Changing a participant's
-resolved provider/model/tool/capability/workspace identity or changing a completed/pending
-turn's prompt/schema/options for the same turn key fails closed.
+resolved provider/model/selected-provider-config/tool/capability/workspace
+identity or changing a completed/pending turn's prompt/schema/options for the
+same turn key fails closed.
 
 Use `ctx.workspace({ key, mode: "worktree" })` when write-capable one-shot agents
 or session participants should stage filesystem changes in a reviewable git

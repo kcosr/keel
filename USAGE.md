@@ -395,7 +395,9 @@ SDK subpaths, and arbitrary packages are rejected. `@kcosr/keel` resolves throug
 the current daemon's workflow SDK bridge, guarded by the workflow SDK ABI stored
 in the definition manifest. Compatible Keel upgrades can resume existing
 definitions; a daemon that does not support the stored ABI fails the run with a
-required-versus-supported ABI error.
+required-versus-supported ABI error. The provider-config SDK addition is an ABI 5
+boundary: re-register workflow definitions after upgrade, and drain suspended or
+non-terminal older-ABI runs first unless Keel gains a real multi-ABI bridge.
 
 ### Targets And Run Workspaces
 
@@ -668,6 +670,7 @@ const finding = await ctx.agent({
 | `prompt` | Prompt text sent to the provider. |
 | `profile?` | Named preset resolved before identity/versioning. Programmatic only on the bundled daemon. |
 | `provider?` | `"pi"`, `"claude"`, or `"mock"`. |
+| `providerConfig?` | Provider-keyed JSON object map for provider-owned execution settings. Only the selected provider's entry affects identity and invocation. |
 | `schema?` | Structured output schema. If present, replies are validated. |
 | `model?` | Provider model name. |
 | `reasoning?` | Provider reasoning/thinking effort. Pi supports `off`, `minimal`, `low`, `medium`, `high`, `xhigh`. |
@@ -683,6 +686,40 @@ const finding = await ctx.agent({
 | `timeoutMs?` | Per-attempt stall timeout. Default: `1 hour`. |
 | `stallRetries?` | Retries after stalled attempts. Default: `1`. |
 | `bump?` / `version?` | Explicit version controls for invalidation. |
+
+### Provider Config
+
+`providerConfig` is a map from provider name to a plain JSON object:
+
+```ts
+await ctx.agent({
+  key: "review",
+  provider: "pi",
+  providerConfig: {
+    pi: { providerOwnedOption: true },
+    claude: { unusedUnlessClaudeSelected: true },
+  },
+  prompt: "Review this change.",
+});
+```
+
+Keel validates every entry in the supplied map as strict JSON before hashing or
+calling a provider: no `undefined`, functions, symbols, bigint, non-finite
+numbers, sparse arrays, cycles, `Date`, `Map`, class instances, or non-plain
+objects. Provider-specific semantic validation is selected-adapter-only. Valid
+unselected entries are ignored after generic validation: they are not passed to
+adapters and do not affect durable identity. When no selected config exists,
+Keel omits the `providerConfig` key from durable identity.
+
+Named profiles may also define `providerConfig`. An explicit config object for
+the selected provider replaces the profile's selected config as a unit; Keel does
+not deep merge. Use `{}` for the selected provider to clear a profile config.
+Adapters receive a deep-cloned, deeply frozen selected config object.
+
+`providerConfig` is replay-visible execution configuration, not a secret store
+and not a workspace selector. Keep raw secrets in named `secrets`, and choose
+cwd/workspace behavior with `ctx.workspace`, `ctx.withWorkspace`, and
+`workspace` handles.
 
 ### Structured Output
 
@@ -745,9 +782,9 @@ journaled interaction and is derived internally as `__session.<agent>.<turn>`.
 Both keys must match `[A-Za-z0-9_-]+`; ordinary `ctx.step` and `ctx.agent` keys
 may not start with `__session.`.
 
-Participant identity is fixed for the run after profiles, tool policy, allowed
-tools, denied tools, capabilities, resolved workspace id, and secret names are
-resolved. Changing the participant identity or
+Participant identity is fixed for the run after profiles, selected provider
+config, tool policy, allowed tools, denied tools, capabilities, resolved
+workspace id, and secret names are resolved. Changing the participant identity or
 reusing a turn key with a changed prompt/schema/options fails the run instead of
 starting a fresh backend session.
 

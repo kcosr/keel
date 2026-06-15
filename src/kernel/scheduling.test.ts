@@ -3,7 +3,10 @@
 import { describe, expect, test } from "bun:test";
 import { JournalStore } from "../journal/store.ts";
 import { captureWorkflowFile } from "../workflow-definitions/capture.ts";
-import { snapshotWorkflowSource } from "../workflow-definitions/snapshot.ts";
+import {
+  WORKFLOW_SDK_ABI_VERSION,
+  snapshotWorkflowSource,
+} from "../workflow-definitions/snapshot.ts";
 import { RealmKernel } from "./realm/realm-host.ts";
 import { Supervisor } from "./supervisor.ts";
 
@@ -13,6 +16,7 @@ const napUrl = captureWorkflowFile(
 const chainUrl = captureWorkflowFile(
   new URL("./realm/fixtures/chain.workflow.ts", import.meta.url).pathname,
 );
+const NEXT_WORKFLOW_SDK_ABI_VERSION = WORKFLOW_SDK_ABI_VERSION + 1;
 
 describe("durable ctx.sleep park/wake", () => {
   test("a run parks at sleep and a supervisor tick wakes it to finish", async () => {
@@ -72,7 +76,7 @@ describe("durable ctx.sleep park/wake", () => {
     const failed = store.getRun("r_abi");
     expect(failed?.status).toBe("failed");
     expect(JSON.parse(failed?.errorJson ?? "{}").message).toContain(
-      "requires workflow SDK ABI 5, but this daemon supports ABI 4",
+      `requires workflow SDK ABI ${NEXT_WORKFLOW_SDK_ABI_VERSION}, but this daemon supports ABI ${WORKFLOW_SDK_ABI_VERSION}`,
     );
     expect((await supervisor.tick()).woken).toEqual([]);
   });
@@ -196,7 +200,7 @@ describe("cron schedules", () => {
       .get();
     expect(badSchedule?.enabled).toBe(0);
     expect(JSON.parse(badSchedule?.last_error_json ?? "{}").message).toContain(
-      "requires workflow SDK ABI 5, but this daemon supports ABI 4",
+      `requires workflow SDK ABI ${NEXT_WORKFLOW_SDK_ABI_VERSION}, but this daemon supports ABI ${WORKFLOW_SDK_ABI_VERSION}`,
     );
     expect(store.listRuns().map((run) => run.workflowName)).toEqual(["good"]);
   });
@@ -225,10 +229,18 @@ describe("unsupported SDK ABI direct lifecycle calls", () => {
       resultInline: "1",
     });
 
-    await expect(kernel.resume("r_resume")).rejects.toThrow(/requires workflow SDK ABI 5/);
-    await expect(kernel.retry("r_retry")).rejects.toThrow(/requires workflow SDK ABI 5/);
-    await expect(kernel.rewind("r_rewind", "keep")).rejects.toThrow(/requires workflow SDK ABI 5/);
-    await expect(kernel.rerun("r_rerun")).rejects.toThrow(/requires workflow SDK ABI 5/);
+    await expect(kernel.resume("r_resume")).rejects.toThrow(
+      `requires workflow SDK ABI ${NEXT_WORKFLOW_SDK_ABI_VERSION}`,
+    );
+    await expect(kernel.retry("r_retry")).rejects.toThrow(
+      `requires workflow SDK ABI ${NEXT_WORKFLOW_SDK_ABI_VERSION}`,
+    );
+    await expect(kernel.rewind("r_rewind", "keep")).rejects.toThrow(
+      `requires workflow SDK ABI ${NEXT_WORKFLOW_SDK_ABI_VERSION}`,
+    );
+    await expect(kernel.rerun("r_rerun")).rejects.toThrow(
+      `requires workflow SDK ABI ${NEXT_WORKFLOW_SDK_ABI_VERSION}`,
+    );
 
     expect(store.getRun("r_resume")?.status).toBe("waiting-timer");
     expect(store.getRun("r_retry")?.status).toBe("failed");
@@ -242,7 +254,7 @@ function requireUnsupportedSdkAbi(store: JournalStore, hash: string): void {
   const row = store.getWorkflowDefinition(hash);
   if (!row?.manifestJson) throw new Error(`missing manifest for ${hash}`);
   const manifest = JSON.parse(row.manifestJson) as { runtime: { workflowSdkAbi: number } };
-  manifest.runtime.workflowSdkAbi = 5;
+  manifest.runtime.workflowSdkAbi = NEXT_WORKFLOW_SDK_ABI_VERSION;
   store.db
     .query("UPDATE workflow_definitions SET manifest_json = ? WHERE hash = ?")
     .run(JSON.stringify(manifest), hash);

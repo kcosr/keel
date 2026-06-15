@@ -10,8 +10,19 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { AgentFailure, executeAgent, runAgentWithStall } from "../../agents/execute.ts";
+import type { AgentProfiles } from "../../agents/profiles.ts";
+import {
+  normalizeProviderConfigMap,
+  normalizeProviderConfigValue,
+} from "../../agents/provider-config.ts";
 import type { SecretStore } from "../../agents/secrets.ts";
-import type { AgentProvider, AgentProviderRegistry, TraceEvent } from "../../agents/types.ts";
+import type {
+  AgentProvider,
+  AgentProviderRegistry,
+  ProviderConfigMap,
+  ProviderConfigValue,
+  TraceEvent,
+} from "../../agents/types.ts";
 import { redactCapabilityTokens } from "../../auth/redaction.ts";
 import { type Json, hashJson } from "../../hash.ts";
 import type { JournalStore } from "../../journal/store.ts";
@@ -145,6 +156,29 @@ interface InvocationWorkspace {
   owned: boolean;
 }
 
+function normalizeRealmAgentProfiles(profiles: Record<string, unknown>): AgentProfiles {
+  const normalized: AgentProfiles = {};
+  for (const [name, profile] of Object.entries(profiles)) {
+    if (!profile || typeof profile !== "object") {
+      normalized[name] = profile as AgentProfiles[string];
+      continue;
+    }
+    const raw = profile as Record<string, unknown>;
+    normalized[name] = {
+      ...raw,
+      ...(raw.providerConfig !== undefined
+        ? {
+            providerConfig: normalizeProviderConfigMap(
+              `agent profile "${name}"`,
+              raw.providerConfig as ProviderConfigMap,
+            ),
+          }
+        : {}),
+    } as AgentProfiles[string];
+  }
+  return Object.freeze(normalized);
+}
+
 export interface ClientCapturedWorkflow {
   source: string;
   name?: string | null;
@@ -197,7 +231,7 @@ export class RealmKernel {
     if (opts.agents) this.registry = opts.agents;
     if (opts.secrets) this.secrets = opts.secrets;
     if (opts.workspaceStore) this.workspaceStore = opts.workspaceStore;
-    if (opts.agentProfiles) this.agentProfiles = opts.agentProfiles;
+    if (opts.agentProfiles) this.agentProfiles = normalizeRealmAgentProfiles(opts.agentProfiles);
   }
 
   shutdown(): void {
@@ -1609,6 +1643,15 @@ export class RealmKernel {
               break;
             }
             case "agent": {
+              let providerConfig: Readonly<ProviderConfigValue> | undefined;
+              try {
+                providerConfig = m.providerConfig
+                  ? normalizeProviderConfigValue(`realm agent "${m.key}"`, m.providerConfig)
+                  : undefined;
+              } catch (err) {
+                reply(m.id, { ok: false, error: serializeError(err) });
+                break;
+              }
               const begun = engine.beginStep(
                 m.key,
                 m.inputs as Json,
@@ -1674,6 +1717,7 @@ export class RealmKernel {
                           key: m.key,
                           provider: m.provider,
                           prompt: m.prompt,
+                          ...(providerConfig !== undefined ? { providerConfig } : {}),
                           ...(m.model ? { model: m.model } : {}),
                           toolPolicy: m.toolPolicy,
                           allowTools: m.allowTools,
@@ -1846,8 +1890,15 @@ export class RealmKernel {
                 });
                 break;
               }
+              let providerConfig: Readonly<ProviderConfigValue> | undefined;
               let begun: ReturnType<typeof this.beginAgentSessionTurn>;
               try {
+                providerConfig = m.providerConfig
+                  ? normalizeProviderConfigValue(
+                      `realm agent session "${m.agentKey}"`,
+                      m.providerConfig,
+                    )
+                  : undefined;
                 begun = this.beginAgentSessionTurn(runId, m, provider);
               } catch (err) {
                 const pending = this.store.getLatestAttempt(runId, m.stableKey);
@@ -1882,6 +1933,7 @@ export class RealmKernel {
                           key: m.stableKey,
                           provider: m.provider,
                           prompt: m.prompt,
+                          ...(providerConfig !== undefined ? { providerConfig } : {}),
                           ...(m.model ? { model: m.model } : {}),
                           toolPolicy: m.toolPolicy,
                           allowTools: m.allowTools,

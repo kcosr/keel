@@ -2,12 +2,14 @@
 
 import { describe, expect, test } from "bun:test";
 import { type ToolPolicy, resolveToolPolicy } from "../agents/capabilities.ts";
+import type { ProviderConfigValue } from "../agents/types.ts";
 import { DEFAULT_WORKSPACE_ID } from "../workspace/identity.ts";
 import { computeVersion } from "./version.ts";
 
 function agentVersion(spec: {
   prompt: string;
   provider: string;
+  providerConfig?: ProviderConfigValue;
   model?: string | null;
   reasoning?: string | null;
   capabilities?: Record<string, unknown>;
@@ -28,6 +30,7 @@ function agentVersion(spec: {
     spec: {
       prompt: spec.prompt,
       provider: spec.provider,
+      ...(spec.providerConfig !== undefined ? { providerConfig: spec.providerConfig } : {}),
       model: spec.model ?? null,
       reasoning: spec.reasoning ?? null,
       toolPolicy: tools.toolPolicy,
@@ -74,5 +77,27 @@ describe("agent identity includes capabilities, secrets, and workspace", () => {
   test("identical specs produce identical versions (in-process/realm parity)", () => {
     const spec = { prompt: "p", provider: "pi", model: "m", capabilities: { fs: "read" as const } };
     expect(agentVersion(spec)).toBe(agentVersion(spec));
+  });
+
+  test("selected provider config changes version and key order is canonical", () => {
+    const base = { prompt: "p", provider: "codex" };
+    const a = agentVersion({ ...base, providerConfig: { transport: { type: "stdio" } } });
+    const b = agentVersion({ ...base, providerConfig: { transport: { type: "uds" } } });
+    const reorderedA = agentVersion({
+      ...base,
+      providerConfig: { b: 2, a: { y: true, x: "same" } },
+    });
+    const reorderedB = agentVersion({
+      ...base,
+      providerConfig: { a: { x: "same", y: true }, b: 2 },
+    });
+    expect(a).not.toBe(b);
+    expect(reorderedA).toBe(reorderedB);
+  });
+
+  test("absence of selected provider config omits the identity key", () => {
+    const base = { prompt: "p", provider: "codex" };
+    expect(agentVersion(base)).toBe(agentVersion({ ...base }));
+    expect(agentVersion(base)).not.toBe(agentVersion({ ...base, providerConfig: {} }));
   });
 });

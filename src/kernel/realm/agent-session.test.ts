@@ -182,6 +182,58 @@ describe("ctx.agentSession", () => {
     await expect(k.run(WORKFLOW, { second: false })).rejects.toThrow(/requires target/);
   });
 
+  test("selected providerConfig is in session identity and passed to every turn", async () => {
+    const store = JournalStore.memory();
+    const provider = new RecordingSessionProvider();
+    const workflow = {
+      source: `
+        import { type Ctx, jsonSchema } from "@kcosr/keel";
+        const Out = jsonSchema<{ value: number }>({
+          type: "object",
+          additionalProperties: false,
+          required: ["value"],
+          properties: { value: { type: "number" } },
+        });
+        export default async function wf(ctx: Ctx): Promise<number> {
+          const primary = ctx.agentSession({
+            key: "primary",
+            provider: "session",
+            providerConfig: {
+              session: { transport: { type: "stdio" } },
+              other: { ignored: true },
+            },
+          });
+          const first = await primary.turn({ key: "draft", prompt: "draft", schema: Out });
+          const second = await primary.turn({ key: "revise", prompt: "revise", schema: Out });
+          return first.value + second.value;
+        }
+      `,
+      name: "session-provider-config",
+    };
+
+    const handle = await kernel(store, provider).run<number>(workflow, null);
+    expect(handle.status).toBe("finished");
+    expect(provider.calls).toHaveLength(2);
+    expect(provider.calls.map((c) => c.providerConfig)).toEqual([
+      { transport: { type: "stdio" } },
+      { transport: { type: "stdio" } },
+    ]);
+    expect(Object.isFrozen(provider.calls[0]?.providerConfig)).toBe(true);
+    expect(JSON.parse(store.getAgentSession("run-1", "primary")?.identityJson ?? "{}")).toEqual({
+      agentKey: "primary",
+      provider: "session",
+      providerConfig: { transport: { type: "stdio" } },
+      model: null,
+      reasoning: null,
+      toolPolicy: "read-only",
+      allowTools: [],
+      denyTools: [],
+      workspaceId: "__default",
+      capabilities: { fs: "read", shell: false, network: "none", secrets: [] },
+      secrets: [],
+    });
+  });
+
   test("later turns resume the latest completed participant token and completed turns replay", async () => {
     const store = JournalStore.memory();
     const provider = new RecordingSessionProvider();

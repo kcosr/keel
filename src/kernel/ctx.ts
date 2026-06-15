@@ -10,7 +10,8 @@ import { type Capabilities, type ToolPolicy, resolveToolPolicy } from "../agents
 import { DEFAULT_AGENT_PROVIDER, DEFAULT_SCHEMA_MAX_RETRIES } from "../agents/defaults.ts";
 import { AgentFailure, executeAgent, runAgentWithStall } from "../agents/execute.ts";
 import { type AgentProfiles, resolveProfile } from "../agents/profiles.ts";
-import type { AgentProviderRegistry } from "../agents/types.ts";
+import { resolveSelectedProviderConfig } from "../agents/provider-config.ts";
+import type { AgentProviderRegistry, ProviderConfigMap } from "../agents/types.ts";
 import type { Json } from "../hash.ts";
 import type { JournalStore } from "../journal/store.ts";
 import { requireRunTarget } from "../target.ts";
@@ -46,6 +47,8 @@ export interface AgentSpec<T> {
   profile?: string;
   /** Provider name; defaults to "pi" in v0 (L19). */
   provider?: string;
+  /** Provider-keyed, JSON-only config; only the selected provider's entry is used. */
+  providerConfig?: ProviderConfigMap;
   schema?: Schema<T>;
   model?: string;
   /** Reasoning/thinking effort (Pi: off|minimal|low|medium|high|xhigh). */
@@ -372,6 +375,16 @@ export class WorkflowCtx implements Ctx {
     }
     rejectRemovedWorkspaceFields(rawSpec, `ctx.agent("${spec.key}")`);
     const provider = spec.provider ?? DEFAULT_AGENT_PROVIDER;
+    const profileProviderConfig = rawSpec.profile
+      ? (this.agentProfiles as AgentProfiles | undefined)?.[rawSpec.profile]?.providerConfig
+      : undefined;
+    const selectedProviderConfig = resolveSelectedProviderConfig({
+      context: `ctx.agent("${spec.key}")`,
+      selectedProvider: provider,
+      explicitProviderConfig: spec.providerConfig,
+      profileName: rawSpec.profile,
+      profileProviderConfig,
+    });
     // Resolve capabilities identically to the realm path so the two front-ends
     // produce the same version hash for the same spec (identity parity, §11).
     const tools = resolveToolPolicy({
@@ -383,27 +396,10 @@ export class WorkflowCtx implements Ctx {
     const caps = tools.capabilities;
     const workspaceId = this.resolveAgentWorkspaceId(spec.workspace);
     const cwd = this.resolveInProcessWorkspace(workspaceId, spec.key);
-    const version =
-      spec.version ??
-      computeVersion({
-        spec: {
-          prompt: spec.prompt,
-          provider,
-          model: spec.model ?? null,
-          reasoning: spec.reasoning ?? null,
-          toolPolicy: tools.toolPolicy,
-          allowTools: tools.allowTools,
-          denyTools: tools.denyTools,
-          workspaceId,
-          capabilities: caps,
-          secrets: spec.secrets ?? [],
-        },
-        schema: spec.schema,
-        ...(spec.bump !== undefined ? { bump: spec.bump } : {}),
-      });
-    const inputs = {
+    const identityFields = {
       prompt: spec.prompt,
       provider,
+      ...(selectedProviderConfig !== undefined ? { providerConfig: selectedProviderConfig } : {}),
       model: spec.model ?? null,
       reasoning: spec.reasoning ?? null,
       toolPolicy: tools.toolPolicy,
@@ -413,6 +409,14 @@ export class WorkflowCtx implements Ctx {
       capabilities: caps,
       secrets: spec.secrets ?? [],
     };
+    const version =
+      spec.version ??
+      computeVersion({
+        spec: identityFields,
+        schema: spec.schema,
+        ...(spec.bump !== undefined ? { bump: spec.bump } : {}),
+      });
+    const inputs = identityFields;
     const begun = this.engine.beginStep(
       spec.key,
       inputs as unknown as Json,
@@ -433,6 +437,9 @@ export class WorkflowCtx implements Ctx {
               key: spec.key,
               provider,
               prompt: spec.prompt,
+              ...(selectedProviderConfig !== undefined
+                ? { providerConfig: selectedProviderConfig }
+                : {}),
               ...(spec.model ? { model: spec.model } : {}),
               ...(spec.reasoning ? { reasoning: spec.reasoning } : {}),
               toolPolicy: tools.toolPolicy,

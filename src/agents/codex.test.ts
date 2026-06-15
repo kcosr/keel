@@ -321,6 +321,52 @@ describe("Codex JSON-RPC flow", () => {
     expect(result.text).toBe("first\n\nsecond");
   });
 
+  test("accepts app-server frames that omit the jsonrpc member", async () => {
+    const transport = new ScriptedTransport((message, t) => {
+      switch (message.method) {
+        case "initialize":
+          t.raw(JSON.stringify({ id: message.id, result: {} }));
+          break;
+        case "initialized":
+          t.raw(
+            JSON.stringify({
+              method: "remoteControl/status/changed",
+              params: { status: "enabled" },
+            }),
+          );
+          break;
+        case "thread/start":
+          t.raw(JSON.stringify({ id: message.id, result: { thread: { id: "thread-1" } } }));
+          break;
+        case "turn/start":
+          t.raw(JSON.stringify({ id: message.id, result: { turn: { id: "turn-1" } } }));
+          t.raw(
+            JSON.stringify({
+              method: "item/completed",
+              params: {
+                threadId: "thread-1",
+                turnId: "turn-1",
+                item: { id: "a", type: "agentMessage", text: "desktop ok" },
+              },
+            }),
+          );
+          t.raw(
+            JSON.stringify({
+              method: "turn/completed",
+              params: { threadId: "thread-1", turnId: "turn-1", status: "completed" },
+            }),
+          );
+          break;
+        default:
+          throw new Error(`unexpected ${String(message.method)}`);
+      }
+    });
+
+    const { result } = await runWithTransport(transport);
+    expect(result.text).toBe("desktop ok");
+    expect(result.sessionToken).toBe("thread-1");
+  });
+
   test("resume reads, validates, resumes, and starts the next turn", async () => {
     const transport = new ScriptedTransport((message, t) => {
       switch (message.method) {
@@ -426,6 +472,14 @@ describe("Codex JSON-RPC flow", () => {
 
     const malformed = new ScriptedTransport((_message, t) => t.raw("not json"));
     await expect(runWithTransport(malformed)).rejects.toThrow(/malformed JSON-RPC message/);
+
+    const wrongVersion = new ScriptedTransport((_message, t) =>
+      t.raw(JSON.stringify({ jsonrpc: "1.0", id: 1, result: {} })),
+    );
+    await expect(runWithTransport(wrongVersion)).rejects.toThrow(/malformed JSON-RPC message/);
+
+    const empty = new ScriptedTransport((_message, t) => t.raw(JSON.stringify({})));
+    await expect(runWithTransport(empty)).rejects.toThrow(/malformed JSON-RPC message/);
   });
 
   test("thread/start must return thread.id even if notifications mention ids", async () => {

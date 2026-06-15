@@ -850,7 +850,7 @@ class CodexRpcClient {
       void this.transport.close();
       return;
     }
-    if (!isPlainObject(msg) || msg.jsonrpc !== "2.0") {
+    if (!isPlainObject(msg) || (hasOwn(msg, "jsonrpc") && msg.jsonrpc !== "2.0")) {
       const error = new Error(
         `codex ${this.transport.descriptor} emitted malformed JSON-RPC message`,
       );
@@ -858,8 +858,16 @@ class CodexRpcClient {
       void this.transport.close();
       return;
     }
-    const id = typeof msg.id === "number" ? msg.id : undefined;
-    if (id !== undefined) {
+    if (hasOwn(msg, "id")) {
+      if (typeof msg.id !== "number") {
+        const error = new Error(
+          `codex ${this.transport.descriptor} emitted malformed JSON-RPC message`,
+        );
+        this.fail(error);
+        void this.transport.close();
+        return;
+      }
+      const id = msg.id;
       const pending = this.pending.get(id);
       if (!pending) return;
       this.pending.delete(id);
@@ -877,6 +885,11 @@ class CodexRpcClient {
       this.opts.onNotification(msg.method, hasOwn(msg, "params") ? msg.params : undefined);
       return;
     }
+    const error = new Error(
+      `codex ${this.transport.descriptor} emitted malformed JSON-RPC message`,
+    );
+    this.fail(error);
+    void this.transport.close();
   }
 }
 

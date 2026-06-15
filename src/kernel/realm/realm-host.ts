@@ -64,15 +64,20 @@ import {
   validateWorkspaceRetention,
 } from "../../workspace/retention.ts";
 import {
+  BranchAlreadyExistsError,
   assertUsableTargetDirectory,
+  attachBranchBackedWorktree,
+  branchContainsCommit,
+  branchExists,
   classifyCloneSource,
   copyBaselinePath,
+  createBranchBackedWorktree,
   createRetainedClone,
   createRetainedCopy,
   createRetainedWorktree,
   diffCopyWorkspace,
   diffGitFinalTree,
-  diffWorkspace,
+  generatedWorktreeBranchName,
   resolveGitRootTarget,
   resolveUsableDirectory,
   retainedWorkspacePath,
@@ -174,6 +179,7 @@ interface WorkspaceSpecMessage {
   repo?: string | null;
   ref?: string | null;
   retention?: string | null;
+  branch?: unknown;
 }
 
 interface WorkspaceHolder {
@@ -772,12 +778,9 @@ export class RealmKernel {
         `workspace mode must be direct, worktree, copy, or clone, got ${String(mode)}`,
       );
     }
-    const runTarget = requireRunTarget(
-      this.store.getRun(runId)?.runTarget,
-      "ctx.workspace run target",
-    );
     const workspaceId = workflowWorkspaceId(spec.key);
     if (mode === "direct") {
+      if (spec.branch != null) throw new Error("direct workspaces do not accept branch");
       if (spec.repo != null) throw new Error("direct workspaces do not accept repo");
       if (spec.retention != null) {
         throw new Error(
@@ -786,7 +789,9 @@ export class RealmKernel {
       }
       if (spec.ref != null) throw new Error("direct workspaces do not accept ref");
       const suppliedPath = spec.path ?? null;
-      const path = resolveUsableDirectory(suppliedPath ?? runTarget);
+      const path = suppliedPath
+        ? resolveUsableDirectory(suppliedPath)
+        : this.ensureDefaultWorkspace(runId, atMs).workspacePath;
       const identity = workspaceIdentity({
         key: spec.key,
         mode: "direct",
@@ -857,8 +862,11 @@ export class RealmKernel {
     if (mode === "copy") {
       if (spec.repo != null) throw new Error("copy workspaces do not accept repo");
       if (spec.ref != null) throw new Error("copy workspaces do not accept ref");
+      if (spec.branch != null) throw new Error("copy workspaces do not accept branch");
       const suppliedPath = spec.path ?? null;
-      const sourcePath = resolveUsableDirectory(suppliedPath ?? runTarget);
+      const sourcePath = suppliedPath
+        ? resolveUsableDirectory(suppliedPath)
+        : this.ensureDefaultWorkspace(runId, atMs).workspacePath;
       const retentionPolicy =
         spec.retention == null
           ? DEFAULT_WORKSPACE_RETENTION
@@ -953,6 +961,7 @@ export class RealmKernel {
     }
     if (mode === "clone") {
       if (spec.path != null) throw new Error("clone workspaces do not accept path; use repo");
+      if (spec.branch != null) throw new Error("clone workspaces do not accept branch");
       if (spec.repo == null || spec.repo.trim().length === 0) {
         throw new Error("clone workspaces require repo");
       }
@@ -1055,23 +1064,36 @@ export class RealmKernel {
     }
 
     if (spec.repo != null) throw new Error("worktree workspaces do not accept repo");
+    if (spec.branch != null && typeof spec.branch !== "boolean") {
+      throw new Error("worktree branch must be boolean; object branch policies are not supported");
+    }
     const suppliedPath = spec.path ?? null;
     const sourceRef = spec.ref && spec.ref.length > 0 ? spec.ref : "HEAD";
+    const branchPolicy = spec.branch === true ? "generated" : "detached";
+    const worktreeCheckoutKind = branchPolicy === "generated" ? "branch" : "detached";
     const retentionPolicy =
       spec.retention == null
         ? DEFAULT_WORKSPACE_RETENTION
         : validateWorkspaceRetention(spec.retention);
-    const gitTarget = resolveGitRootTarget(suppliedPath ?? runTarget, sourceRef);
+    const sourceInput = suppliedPath ?? this.ensureDefaultWorkspace(runId, atMs).workspacePath;
+    const gitTarget = resolveGitRootTarget(sourceInput, sourceRef);
     const defaultPath = retainedWorkspacePath(this.workspaceStore, runId, workspaceId);
+    const generatedBranch =
+      branchPolicy === "generated" ? generatedWorktreeBranchName(runId, spec.key) : null;
     const identity = workspaceIdentity({
       key: spec.key,
       mode: "worktree",
       sourcePath: gitTarget.target,
       sourceRef,
       retentionPolicy,
+      branchPolicy,
       sdkAbiVersion: WORKFLOW_SDK_ABI_VERSION,
     });
-    let needsCreate = false;
+    let worktreeAction: "none" | "detached-create" | "branch-create" | "branch-attach" = "none";
+    let reuseExistingBranch = false;
+    let actionRepoRoot = gitTarget.repoRoot;
+    let actionBaseCommit = gitTarget.baseCommit;
+    let actionBranch = generatedBranch;
     this.store.transaction(() => {
       const existing = this.store.getAgentWorkspace(runId, workspaceId);
       if (!existing) {
@@ -1092,7 +1114,9 @@ export class RealmKernel {
           suppliedPath,
           sourceRef,
           resolvedRef: sourceRef,
-          checkoutBranch: null,
+          checkoutBranch: generatedBranch,
+          worktreeCheckoutKind,
+          worktreeBranchOwned: branchPolicy === "generated",
           baseCommit: gitTarget.baseCommit,
           copyBaselinePath: null,
           creationErrorJson: null,
@@ -1116,7 +1140,7 @@ export class RealmKernel {
           discardedAtMs: null,
           removedAtMs: null,
         });
-        needsCreate = true;
+        worktreeAction = branchPolicy === "generated" ? "branch-create" : "detached-create";
         return;
       }
       if (existing.workspaceIdentityHash !== identity.hash) {
@@ -1124,14 +1148,48 @@ export class RealmKernel {
           `workspace "${spec.key}" identity changed; use a new workspace key or a fresh run`,
         );
       }
-      if (existing.status === "creating" && !existsSync(existing.workspacePath)) {
-        needsCreate = true;
+      if (existing.status === "creating") {
+        if (branchPolicy === "generated") {
+          if (
+            !this.isCreatingWorkspaceBeforeProviderAcquisition(existing) ||
+            existing.checkoutBranch !== generatedBranch
+          ) {
+            throw new Error(
+              `workspace "${spec.key}" has an existing branch creation state that is not eligible for recovery`,
+            );
+          }
+          const existingBranch = existing.checkoutBranch;
+          if (!existingBranch) throw new Error(`workspace "${spec.key}" has no persisted branch`);
+          actionBranch = existingBranch;
+          actionBaseCommit = existing.baseCommit ?? gitTarget.baseCommit;
+          reuseExistingBranch = branchExists(gitTarget.repoRoot, existingBranch);
+          worktreeAction = "branch-create";
+        } else if (!existsSync(existing.workspacePath)) {
+          worktreeAction = "detached-create";
+        }
       }
       if (existing.status === "removed") {
         if (this.store.hasAgentSessionUsingWorkspace(runId, workspaceId)) {
           throw new Error(
             `workspace "${spec.key}" was removed and is referenced by an existing agent session; start a fresh run or use retention retain-on-failure/retain`,
           );
+        }
+        if (branchPolicy === "generated") {
+          if (!existing.checkoutBranch || !existing.sourcePath) {
+            throw new Error(
+              `branch-backed workspace "${spec.key}" was removed but has no persisted branch metadata`,
+            );
+          }
+          if (!branchExists(existing.sourcePath, existing.checkoutBranch)) {
+            throw new Error(
+              `branch-backed workspace "${spec.key}" cannot be reattached because branch ${existing.checkoutBranch} is missing`,
+            );
+          }
+          actionRepoRoot = existing.sourcePath;
+          actionBranch = existing.checkoutBranch;
+          worktreeAction = "branch-attach";
+        } else {
+          worktreeAction = "detached-create";
         }
         this.store.updateAgentWorkspace(runId, workspaceId, {
           status: "creating",
@@ -1144,8 +1202,10 @@ export class RealmKernel {
           suppliedPath,
           sourceRef,
           resolvedRef: sourceRef,
-          checkoutBranch: null,
-          baseCommit: gitTarget.baseCommit,
+          checkoutBranch: branchPolicy === "generated" ? existing.checkoutBranch : null,
+          worktreeCheckoutKind,
+          worktreeBranchOwned: branchPolicy === "generated",
+          baseCommit: branchPolicy === "generated" ? existing.baseCommit : gitTarget.baseCommit,
           copyBaselinePath: null,
           creationErrorJson: null,
           workspaceIdentityJson: identity.json,
@@ -1160,22 +1220,47 @@ export class RealmKernel {
           removedAtMs: null,
           updatedAtMs: atMs,
         });
-        needsCreate = true;
       }
     });
-    if (needsCreate) {
+    if (worktreeAction !== "none") {
       try {
-        createRetainedWorktree(gitTarget.repoRoot, defaultPath, gitTarget.baseCommit);
+        if (worktreeAction === "branch-create") {
+          if (!actionBranch) throw new Error("generated worktree branch was not computed");
+          createBranchBackedWorktree(actionRepoRoot, defaultPath, actionBaseCommit, actionBranch, {
+            reuseExistingBranch,
+          });
+        } else if (worktreeAction === "branch-attach") {
+          if (!actionBranch) throw new Error("persisted worktree branch was not recorded");
+          attachBranchBackedWorktree(actionRepoRoot, defaultPath, actionBranch);
+        } else {
+          createRetainedWorktree(gitTarget.repoRoot, defaultPath, gitTarget.baseCommit);
+        }
         this.store.updateAgentWorkspace(runId, workspaceId, {
           status: "idle",
+          creationErrorJson: null,
           updatedAtMs: atMs,
         });
       } catch (err) {
-        this.store.updateAgentWorkspace(runId, workspaceId, {
-          status: "abandoned",
+        const branchAlreadyExisted =
+          branchPolicy === "generated" && err instanceof BranchAlreadyExistsError;
+        const patch: Partial<
+          Pick<
+            AgentWorkspaceRow,
+            | "status"
+            | "failureSeen"
+            | "creationErrorJson"
+            | "checkoutBranch"
+            | "worktreeBranchOwned"
+            | "updatedAtMs"
+          >
+        > = {
+          status: branchPolicy === "generated" && !branchAlreadyExisted ? "creating" : "abandoned",
           failureSeen: true,
+          creationErrorJson: JSON.stringify(serializeError(err)),
+          ...(branchAlreadyExisted ? { checkoutBranch: null, worktreeBranchOwned: false } : {}),
           updatedAtMs: this.host.clock(),
-        });
+        };
+        this.store.updateAgentWorkspace(runId, workspaceId, patch);
         throw err;
       }
     }
@@ -1247,6 +1332,18 @@ export class RealmKernel {
     return row;
   }
 
+  private isCreatingWorkspaceBeforeProviderAcquisition(row: AgentWorkspaceRow): boolean {
+    return (
+      row.status === "creating" &&
+      row.activeHolderKind === null &&
+      row.activeHolderKey === null &&
+      row.activeHolderAttempt === null &&
+      row.lastAttempt === null &&
+      row.lastTurnKey === null &&
+      row.lastTurnAttempt === null
+    );
+  }
+
   private beginInvocationWorkspace(
     runId: string,
     workspaceId: string,
@@ -1286,8 +1383,26 @@ export class RealmKernel {
       });
       throw new Error(`copy workspace "${row.workspaceId}" is missing baseline snapshot`);
     }
-    if (row.mode === "clone" && !row.baseCommit) {
-      throw new Error(`clone workspace "${row.workspaceId}" is missing base commit`);
+    if ((row.mode === "clone" || row.mode === "worktree") && !row.baseCommit) {
+      throw new Error(`${row.mode} workspace "${row.workspaceId}" is missing base commit`);
+    }
+    if (row.mode === "worktree" && row.worktreeCheckoutKind === "branch") {
+      const baseCommit = row.baseCommit;
+      if (!baseCommit)
+        throw new Error(`worktree workspace "${row.workspaceId}" is missing base commit`);
+      if (!row.sourcePath || !row.checkoutBranch) {
+        throw new Error(`branch-backed workspace "${row.workspaceId}" is missing branch metadata`);
+      }
+      if (!branchExists(row.sourcePath, row.checkoutBranch)) {
+        throw new Error(
+          `branch-backed workspace "${row.workspaceId}" expected branch ${row.checkoutBranch} but it is missing`,
+        );
+      }
+      if (!branchContainsCommit(row.sourcePath, row.checkoutBranch, baseCommit)) {
+        throw new Error(
+          `branch-backed workspace "${row.workspaceId}" expected branch ${row.checkoutBranch} to contain base commit ${baseCommit}`,
+        );
+      }
     }
     this.store.transaction(() => {
       const current = this.store.getAgentWorkspace(runId, row.workspaceId);
@@ -1596,9 +1711,11 @@ export class RealmKernel {
       const bundle =
         workspace.mode === "copy"
           ? diffCopyWorkspace(workspace.workspacePath, workspace.copyBaselinePath ?? "")
-          : workspace.mode === "clone"
+          : workspace.mode === "clone" || workspace.mode === "worktree"
             ? diffGitFinalTree(workspace.workspacePath, workspace.baseCommit ?? "HEAD")
-            : diffWorkspace(workspace.workspacePath);
+            : (() => {
+                throw new Error(`workspace mode ${workspace.mode} does not support diff`);
+              })();
       return {
         status: "idle",
         events: [
@@ -1712,9 +1829,13 @@ export class RealmKernel {
       const bundle =
         begun.workspaceMode === "copy"
           ? diffCopyWorkspace(begun.workspacePath, begun.workspaceCopyBaselinePath ?? "")
-          : begun.workspaceMode === "clone"
+          : begun.workspaceMode === "clone" || begun.workspaceMode === "worktree"
             ? diffGitFinalTree(begun.workspacePath, begun.workspaceBaseCommit ?? "HEAD")
-            : diffWorkspace(begun.workspacePath);
+            : (() => {
+                throw new Error(
+                  `workspace mode ${String(begun.workspaceMode)} does not support diff`,
+                );
+              })();
       return {
         status: "idle",
         events: [

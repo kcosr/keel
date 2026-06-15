@@ -8,7 +8,7 @@ import type {
 
 export const DEFAULT_WORKSPACE_ID = "__default";
 export const DIRECT_WORKSPACE_RULES_VERSION = 1;
-export const WORKTREE_WORKSPACE_RULES_VERSION = 1;
+export const WORKTREE_WORKSPACE_RULES_VERSION = 2;
 export const COPY_WORKSPACE_RULES_VERSION = 1;
 export const CLONE_WORKSPACE_RULES_VERSION = 1;
 
@@ -34,6 +34,7 @@ export type WorkspaceIdentityInput =
       sourcePath: string;
       sourceRef: string;
       retentionPolicy: WorkspaceRetention;
+      branchPolicy: "detached" | "generated";
       sdkAbiVersion: number;
     }
   | {
@@ -81,6 +82,7 @@ function workspaceIdentityValue(input: WorkspaceIdentityInput): Record<string, u
         sourcePath: input.sourcePath,
         sourceRef: input.sourceRef,
         retentionPolicy: input.retentionPolicy,
+        branchPolicy: input.branchPolicy,
         rulesVersion: WORKTREE_WORKSPACE_RULES_VERSION,
         sdkAbiVersion: input.sdkAbiVersion,
       };

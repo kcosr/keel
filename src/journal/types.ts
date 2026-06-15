@@ -101,6 +101,7 @@ export interface AgentSessionTurnRow {
 export type WorkspaceRetention = "remove" | "retain-on-failure" | "retain";
 
 export type WorkspaceMode = "direct" | "worktree" | "copy" | "clone";
+export type WorktreeCheckoutKind = "detached" | "branch";
 
 export type WorkspaceSourceKind =
   | "direct-path"
@@ -141,6 +142,8 @@ export interface AgentWorkspaceRow {
   sourceRef: string | null;
   resolvedRef: string | null;
   checkoutBranch: string | null;
+  worktreeCheckoutKind: WorktreeCheckoutKind | null;
+  worktreeBranchOwned: boolean;
   baseCommit: string | null;
   copyBaselinePath: string | null;
   creationErrorJson: string | null;

@@ -23,6 +23,7 @@ import {
   resolvedToolPolicyToPiArgs,
 } from "../agents/capabilities.ts";
 import { SecretStore } from "../agents/secrets.ts";
+import { WORKTREE_WORKSPACE_RULES_VERSION, workspaceIdentity } from "./identity.ts";
 import {
   AGENT_DIFF_CONTENT_MAX_BYTES,
   AGENT_DIFF_PATH_MAX_ENTRIES,
@@ -200,6 +201,24 @@ describe("git-worktree isolation + diff gate", () => {
     g(["commit", "-q", "-m", "init"]);
   });
   afterEach(() => rmSync(repo, { recursive: true, force: true }));
+
+  test("worktree identity distinguishes detached and generated branch policies", () => {
+    const base = {
+      key: "impl",
+      mode: "worktree" as const,
+      sourcePath: repo,
+      sourceRef: "HEAD",
+      retentionPolicy: "retain" as const,
+      sdkAbiVersion: 7,
+    };
+    const detached = workspaceIdentity({ ...base, branchPolicy: "detached" });
+    const generated = workspaceIdentity({ ...base, branchPolicy: "generated" });
+    expect(detached.hash).not.toBe(generated.hash);
+    expect(JSON.parse(generated.json)).toMatchObject({
+      branchPolicy: "generated",
+      rulesVersion: WORKTREE_WORKSPACE_RULES_VERSION,
+    });
+  });
 
   test("a write agent's changes stay confined to the worktree until merge", () => {
     const wt = createWorktree(repo, "writer");

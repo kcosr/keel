@@ -991,11 +991,15 @@ or the lazy `__default` direct workspace at `ctx.run.target`.
 
 Direct workspaces point at existing directories, are not owned by Keel, permit
 parallel provider invocations, and are hidden from default workspace listings
-unless they have operator-actionable metadata. Worktree workspaces are
-Keel-owned git worktrees under the workspace store, keyed by `(runId,
-workspaceId)`, checked out from a resolved source repo/ref, and reused across
-retries, parks, interrupts, daemon restarts, and session turns while the run can
-continue. Copy workspaces are Keel-owned filesystem snapshots of local
+unless they have operator-actionable metadata. The run target is represented as
+the lazy `__default` direct workspace; omitted source paths for path-based modes
+derive from that canonical row. Worktree workspaces are Keel-owned git worktrees
+under the workspace store, keyed by `(runId, workspaceId)`, checked out from a
+resolved source repo/ref, and reused across retries, parks, interrupts, daemon
+restarts, and session turns while the run can continue. They are detached by
+default; `branch: true` attaches them to a generated `keel/...` branch recorded
+in `checkout_branch` with `worktree_checkout_kind = 'branch'`. Copy workspaces
+are Keel-owned filesystem snapshots of local
 directories, including dirty files but excluding `.git` metadata and storing a
 second hidden baseline snapshot for diff/merge. Clone workspaces are Keel-owned
 git clones from explicit local paths, `file://` URLs, or remote git URLs; clone
@@ -1008,11 +1012,15 @@ Terminal cleanup evaluates Keel-owned workspace retention: `remove`,
 `retain-on-failure`, or `retain`. Direct workspaces are never removed, diffed,
 merged, discarded, or GC'd by Keel. Changes are never auto-merged; operator
 merge/discard/GC commands act on retained workspaces by `(runId, workspaceId)`.
-Worktree and supported local-clone merge apply final-tree git patches. Copy merge
-compares workspace state to the copy baseline and writes back only if affected
-source paths still match that baseline. Remote clone and local bare clone merge
-are unsupported because this design does not add push credentials, branch gates,
-or commit-preserving merge semantics. Durable agent sessions fail closed if their
+Worktree and supported local-clone merge apply final-tree git patches relative
+to `baseCommit`, including commits made inside the workspace plus dirty state.
+This does not preserve workspace commits as commits. Copy merge compares
+workspace state to the copy baseline and writes back only if affected source
+paths still match that baseline. Generated worktree branches are intentionally
+not deleted by terminal cleanup, discard, or GC in this release. Remote clone and
+local bare clone merge are unsupported because this design does not add push
+credentials, branch gates, or commit-preserving merge semantics. Durable agent
+sessions fail closed if their
 Keel-owned workspace was removed before retry/resume; workflows that need
 terminal failed session runs to be retryable should use `retain-on-failure` or
 `retain`. These workspaces are trusted-local cwd/lifecycle conveniences, not

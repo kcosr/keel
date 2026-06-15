@@ -1234,6 +1234,94 @@ describe("workspace lifecycle operations", () => {
     }
   });
 
+  test("worktree diff and merge include commits after base commit", () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-rpc-worktree-"));
+    const store = JournalStore.memory();
+    try {
+      const repo = join(dir, "repo");
+      const worktree = join(dir, "worktree");
+      mkdirSync(repo, { recursive: true });
+      const baseCommit = initGitRepo(repo);
+      createRetainedWorktree(repo, worktree, baseCommit);
+      writeFileSync(join(worktree, "committed.txt"), "committed\n");
+      execFileSync("git", ["add", "-A"], { cwd: worktree });
+      execFileSync("git", ["config", "user.email", "t@t"], { cwd: worktree });
+      execFileSync("git", ["config", "user.name", "t"], { cwd: worktree });
+      execFileSync("git", ["commit", "-q", "-m", "agent commit"], { cwd: worktree });
+      writeFileSync(join(worktree, "unstaged.txt"), "unstaged\n");
+      store.insertRun({
+        runId: "r-worktree",
+        workflowName: "wf",
+        definitionVersion: "wf_sha256_fixture",
+        status: "finished",
+        parentRunId: null,
+        tenantId: null,
+        inputRef: "null",
+        outputRef: null,
+        errorJson: null,
+        heartbeatAtMs: null,
+        runtimeOwnerId: null,
+        createdAtMs: 1,
+        finishedAtMs: 2,
+        runTarget: repo,
+      });
+      store.insertAgentWorkspace({
+        runId: "r-worktree",
+        workspaceId: "wt",
+        mode: "worktree",
+        ownerKind: "workflow",
+        key: "wt",
+        lastAttempt: null,
+        retentionPolicy: "retain",
+        workspacePath: worktree,
+        sourceKind: "worktree-git",
+        sourcePath: repo,
+        sourceUri: null,
+        sourceBare: null,
+        sourceMergeEligible: true,
+        suppliedPath: null,
+        sourceRef: "HEAD",
+        resolvedRef: "HEAD",
+        checkoutBranch: null,
+        worktreeCheckoutKind: "detached",
+        worktreeBranchOwned: false,
+        baseCommit,
+        copyBaselinePath: null,
+        creationErrorJson: null,
+        workspaceIdentityJson: "{}",
+        workspaceIdentityHash: "worktree",
+        owned: true,
+        status: "pending_review",
+        failureSeen: false,
+        lastTurnKey: null,
+        lastTurnAttempt: null,
+        activeHolderKind: null,
+        activeHolderKey: null,
+        activeHolderAttempt: null,
+        activeStartedAtMs: null,
+        lastDiffEventSeq: null,
+        lastErrorEventSeq: null,
+        cleanupErrorJson: null,
+        createdAtMs: 1,
+        updatedAtMs: 1,
+        mergedAtMs: null,
+        discardedAtMs: null,
+        removedAtMs: null,
+      });
+      const api = keel(store);
+      const diff = api.getRunWorkspaceDiff("r-worktree", "wt");
+      expect(diff.mode).toBe("worktree");
+      expect(diff.added).toContain("committed.txt");
+      expect(diff.added).toContain("unstaged.txt");
+      expect(api.mergeRunWorkspace("r-worktree", "wt").status).toBe("merged");
+      expect(readFileSync(join(repo, "committed.txt"), "utf8")).toBe("committed\n");
+      expect(readFileSync(join(repo, "unstaged.txt"), "utf8")).toBe("unstaged\n");
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("merge, discard, and GC enforce lifecycle guards and are idempotent", () => {
     const dir = mkdtempSync(join(tmpdir(), "keel-rpc-workspace-"));
     const store = JournalStore.memory();

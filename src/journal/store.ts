@@ -608,6 +608,8 @@ export class JournalStore {
       | "sourceMergeEligible"
       | "resolvedRef"
       | "checkoutBranch"
+      | "worktreeCheckoutKind"
+      | "worktreeBranchOwned"
       | "copyBaselinePath"
       | "creationErrorJson"
     > &
@@ -620,6 +622,8 @@ export class JournalStore {
           | "sourceMergeEligible"
           | "resolvedRef"
           | "checkoutBranch"
+          | "worktreeCheckoutKind"
+          | "worktreeBranchOwned"
           | "copyBaselinePath"
           | "creationErrorJson"
         >
@@ -631,12 +635,13 @@ export class JournalStore {
         `INSERT INTO agent_workspaces (
           run_id, workspace_id, mode, owner_kind, key, last_attempt, retention_policy,
           workspace_path, source_kind, source_path, source_uri, source_bare, source_merge_eligible,
-          supplied_path, source_ref, resolved_ref, checkout_branch, base_commit, copy_baseline_path,
+          supplied_path, source_ref, resolved_ref, checkout_branch, worktree_checkout_kind,
+          worktree_branch_owned, base_commit, copy_baseline_path,
           creation_error_json, workspace_identity_json, workspace_identity_hash, owned, status, failure_seen,
           last_turn_key, last_turn_attempt, active_holder_kind, active_holder_key,
           active_holder_attempt, active_started_at_ms, last_diff_event_seq, last_error_event_seq,
           cleanup_error_json, created_at_ms, updated_at_ms, merged_at_ms, discarded_at_ms, removed_at_ms
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         full.runId,
@@ -656,6 +661,8 @@ export class JournalStore {
         full.sourceRef,
         full.resolvedRef,
         full.checkoutBranch,
+        full.worktreeCheckoutKind,
+        full.worktreeBranchOwned ? 1 : 0,
         full.baseCommit,
         full.copyBaselinePath,
         full.creationErrorJson,
@@ -706,6 +713,8 @@ export class JournalStore {
         | "sourceRef"
         | "resolvedRef"
         | "checkoutBranch"
+        | "worktreeCheckoutKind"
+        | "worktreeBranchOwned"
         | "baseCommit"
         | "copyBaselinePath"
         | "creationErrorJson"
@@ -754,6 +763,10 @@ export class JournalStore {
     if ("resolvedRef" in patch) add("resolved_ref", "resolvedRef", patch.resolvedRef ?? null);
     if ("checkoutBranch" in patch)
       add("checkout_branch", "checkoutBranch", patch.checkoutBranch ?? null);
+    if ("worktreeCheckoutKind" in patch)
+      add("worktree_checkout_kind", "worktreeCheckoutKind", patch.worktreeCheckoutKind ?? null);
+    if ("worktreeBranchOwned" in patch)
+      add("worktree_branch_owned", "worktreeBranchOwned", patch.worktreeBranchOwned ? 1 : 0);
     if ("baseCommit" in patch) add("base_commit", "baseCommit", patch.baseCommit ?? null);
     if ("copyBaselinePath" in patch)
       add("copy_baseline_path", "copyBaselinePath", patch.copyBaselinePath ?? null);
@@ -1779,6 +1792,8 @@ function withAgentWorkspaceDefaults(
     | "sourceMergeEligible"
     | "resolvedRef"
     | "checkoutBranch"
+    | "worktreeCheckoutKind"
+    | "worktreeBranchOwned"
     | "copyBaselinePath"
     | "creationErrorJson"
   > &
@@ -1791,6 +1806,8 @@ function withAgentWorkspaceDefaults(
         | "sourceMergeEligible"
         | "resolvedRef"
         | "checkoutBranch"
+        | "worktreeCheckoutKind"
+        | "worktreeBranchOwned"
         | "copyBaselinePath"
         | "creationErrorJson"
       >
@@ -1816,6 +1833,8 @@ function withAgentWorkspaceDefaults(
       row.sourceMergeEligible ?? (row.mode === "worktree" || row.mode === "copy"),
     resolvedRef: row.resolvedRef ?? null,
     checkoutBranch: row.checkoutBranch ?? null,
+    worktreeCheckoutKind: row.worktreeCheckoutKind ?? (row.mode === "worktree" ? "detached" : null),
+    worktreeBranchOwned: row.worktreeBranchOwned ?? false,
     copyBaselinePath: row.copyBaselinePath ?? null,
     creationErrorJson: row.creationErrorJson ?? null,
     workspaceIdentityJson: row.workspaceIdentityJson,
@@ -1908,6 +1927,8 @@ interface RawAgentWorkspaceRow {
   source_ref: string | null;
   resolved_ref: string | null;
   checkout_branch: string | null;
+  worktree_checkout_kind: string | null;
+  worktree_branch_owned: number;
   base_commit: string | null;
   copy_baseline_path: string | null;
   creation_error_json: string | null;
@@ -2172,6 +2193,8 @@ function mapAgentWorkspace(r: RawAgentWorkspaceRow): AgentWorkspaceRow {
     sourceRef: r.source_ref,
     resolvedRef: r.resolved_ref,
     checkoutBranch: r.checkout_branch,
+    worktreeCheckoutKind: r.worktree_checkout_kind as AgentWorkspaceRow["worktreeCheckoutKind"],
+    worktreeBranchOwned: r.worktree_branch_owned !== 0,
     baseCommit: r.base_commit,
     copyBaselinePath: r.copy_baseline_path,
     creationErrorJson: r.creation_error_json,
@@ -2223,6 +2246,7 @@ function agentWorkspaceFromSession(row: AgentSessionWorkspaceRow): AgentWorkspac
     sourcePath: row.sourcePath,
     sourceRef: "HEAD",
     retentionPolicy: "retain",
+    branchPolicy: "detached",
     sdkAbiVersion: LEGACY_SESSION_WORKSPACE_IDENTITY_SDK_ABI_VERSION,
   });
   return {
@@ -2243,6 +2267,8 @@ function agentWorkspaceFromSession(row: AgentSessionWorkspaceRow): AgentWorkspac
     sourceRef: "HEAD",
     resolvedRef: null,
     checkoutBranch: null,
+    worktreeCheckoutKind: "detached",
+    worktreeBranchOwned: false,
     baseCommit: row.baseCommit,
     copyBaselinePath: null,
     creationErrorJson: null,

@@ -430,10 +430,12 @@ the innermost `ctx.withWorkspace`, then the lazy default direct workspace:
 ```
 
 Direct workspaces use an existing directory and are not owned, diffed, merged,
-discarded, or removed by Keel. Worktree workspaces are Keel-owned git worktrees
-created under `KEEL_WORKSPACE_STORE` (default: beside the journal under
-`KEEL_DIR/workspaces`). Worktree `path` defaults to `ctx.run.target` and may be a
-subdirectory; Keel resolves it to the enclosing git repository root. Worktree
+discarded, or removed by Keel. The run target is first modeled as the lazy
+`__default` direct workspace; omitted `path` for `direct`, `copy`, and
+`worktree` resolves through that canonical default workspace path. Worktree
+workspaces are Keel-owned git worktrees created under `KEEL_WORKSPACE_STORE`
+(default: beside the journal under `KEEL_DIR/workspaces`). Worktree `path` may be
+a subdirectory; Keel resolves it to the enclosing git repository root. Worktree
 `ref` defaults to `HEAD`.
 
 ```ts
@@ -445,6 +447,23 @@ const workspace = await ctx.workspace({
 await ctx.agent({ key: "impl", workspace, toolPolicy: "workspace-write", prompt: "..." });
 ```
 
+Branch-backed worktrees opt into a generated Keel-owned branch while keeping
+`mode: "worktree"`:
+
+```ts
+const workspace = await ctx.workspace({
+  key: "implementation",
+  mode: "worktree",
+  branch: true,
+  retention: "retain",
+});
+```
+
+`branch` is boolean-only. `branch: true` creates a valid generated ref such as
+`keel/<run-hash>/<workspace-slug>-<key-hash>` at the workspace `baseCommit` and
+attaches the worktree to it. Omitted or `false` keeps detached worktree behavior.
+Keel does not accept user-supplied branch names in this release.
+
 `ctx.withWorkspace(specOrHandle, fn)` binds a scoped default for all agents and
 sessions inside `fn`, while explicit per-agent/session `workspace` overrides the
 scope. `WorkspaceSpec.key` is required; `__default` is reserved for the run
@@ -454,8 +473,10 @@ Workspace modes:
 
 - `direct` points at an existing directory, defaults to `ctx.run.target`, is not
   Keel-owned, and is never diffed, merged, discarded, GC'd, or removed by Keel.
-- `worktree` creates a Keel-owned detached git worktree from a local repository
-  path/ref. It is for committed local git state with patch merge support.
+- `worktree` creates a Keel-owned git worktree from a local repository path/ref.
+  It is detached by default; `branch: true` attaches it to a generated branch.
+  Both variants use final-tree patch diff/merge relative to `baseCommit`, so
+  committed, staged, unstaged, untracked, deleted, and mode changes are included.
 - `copy` creates a Keel-owned filesystem snapshot of a local directory, including
   dirty files, but excludes `.git` metadata at every level. It does not apply
   `.gitignore`; pass a narrower `path` when large caches, dependencies, build
@@ -503,14 +524,23 @@ Merge/discard are explicit operator actions and refuse while the run is
 non-terminal, a Keel-owned provider invocation is active, the workspace is
 direct, remote clone/local bare clone merge is requested, or the workspace has
 already moved to a terminal lifecycle status such as `removed`, `merged`, or
-`discarded`. Worktree and local-clone merge apply a final-tree git patch; copy
-merge compares the workspace to its baseline and writes back only if the original
-source paths still match that baseline. Durable `agent.diff` payloads include the
+`discarded`. Worktree and local-clone merge apply a final-tree git patch and do
+not preserve commits as commits; a true commit-preserving git merge is not part
+of this release. Copy merge compares the workspace to its baseline and writes
+back only if the original source paths still match that baseline. Durable
+`agent.diff` payloads include the
 `workspaceId`, `workspacePath`, source metadata, mode/diff kind, bounded
 `contentDiff`, and `fileChanges`; changed path arrays are capped with
 `omittedPathCounts`/`pathLimit` metadata. Direct workspaces do not produce review
 diffs in v1. Diff capture that exceeds Keel's explicit git status or diff buffers
 is recorded as `workspace.diff_error`.
+
+Terminal cleanup, `workspace discard`, and `workspace gc` remove generated
+branch-backed worktree filesystem state according to retention, but do not delete
+the generated branch ref. Workspace views expose `worktreeCheckoutKind`,
+`checkoutBranch`, and `worktreeBranchOwned` so operators can inspect, push, or
+manually delete generated branches. Branch refs are trusted-local metadata and
+are not a sandbox or exfiltration boundary.
 
 Copy and clone workspaces are trusted-local filesystem conveniences, not
 sandboxes. Tool-capable providers may still read or write outside the cwd

@@ -38,6 +38,7 @@ export type WorkerRequest =
         repo?: string | null;
         ref?: string | null;
         retention?: WorkspaceRetention | null;
+        branch?: boolean | null;
       };
     }
   | {

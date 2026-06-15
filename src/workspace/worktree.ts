@@ -28,6 +28,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { hashJson } from "../hash.ts";
 
 export const AGENT_DIFF_CONTENT_MAX_BYTES = 512 * 1024;
 export const AGENT_DIFF_PATH_MAX_ENTRIES = 1_000;
@@ -88,6 +89,18 @@ export interface CloneResult extends CloneSource {
   baseCommit: string;
   checkoutBranch: string | null;
   resolvedRef: string | null;
+}
+
+export interface BranchBackedWorktreeResult {
+  checkoutBranch: string;
+  reusedExistingBranch: boolean;
+}
+
+export class BranchAlreadyExistsError extends Error {
+  constructor(readonly branch: string) {
+    super(`worktree branch ${branch} already exists`);
+    this.name = "BranchAlreadyExistsError";
+  }
 }
 
 export interface Worktree {
@@ -231,8 +244,112 @@ export function createRetainedWorktree(
   workspacePath: string,
   baseCommit: string,
 ): void {
+  cleanupIncompleteWorktree(repoRoot, workspacePath);
   mkdirSync(dirname(workspacePath), { recursive: true });
   git(repoRoot, ["worktree", "add", "--detach", workspacePath, baseCommit]);
+}
+
+export function generatedWorktreeBranchName(runId: string, workspaceKey: string): string {
+  const runHash = hashJson({ runId }).slice(0, 16);
+  const keyHash = hashJson({ workspaceKey }).slice(0, 12);
+  const fallbackSlug = "workspace";
+  const slug =
+    workspaceKey
+      .replace(/[^A-Za-z0-9._-]+/g, "-")
+      .replace(/[-.]{2,}/g, "-")
+      .replace(/^[-.]+|[-.]+$/g, "")
+      .slice(0, 48) || fallbackSlug;
+  return `keel/${runHash}/${slug}-${keyHash}`;
+}
+
+export function assertValidBranchName(repoRoot: string, branch: string): void {
+  try {
+    git(repoRoot, ["check-ref-format", "--branch", branch]);
+  } catch (err) {
+    throw new Error(
+      `generated worktree branch ${branch} is not a valid git ref: ${gitErrorMessage(err)}`,
+    );
+  }
+}
+
+export function branchExists(repoRoot: string, branch: string): boolean {
+  try {
+    git(repoRoot, ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function branchPointsAt(repoRoot: string, branch: string, expectedCommit: string): boolean {
+  try {
+    const actual = git(repoRoot, ["rev-parse", `refs/heads/${branch}`]).trim();
+    return actual === expectedCommit;
+  } catch {
+    return false;
+  }
+}
+
+export function branchContainsCommit(repoRoot: string, branch: string, commit: string): boolean {
+  try {
+    git(repoRoot, ["merge-base", "--is-ancestor", commit, `refs/heads/${branch}`]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function cleanupIncompleteWorktree(repoRoot: string, workspacePath: string): void {
+  try {
+    git(repoRoot, ["worktree", "remove", "--force", workspacePath]);
+  } catch {
+    rmSync(workspacePath, { recursive: true, force: true });
+  }
+  try {
+    git(repoRoot, ["worktree", "prune"]);
+  } catch {
+    // Best-effort cleanup before the next deterministic attach/create attempt.
+  }
+}
+
+export function createBranchBackedWorktree(
+  repoRoot: string,
+  workspacePath: string,
+  baseCommit: string,
+  checkoutBranch: string,
+  opts: { reuseExistingBranch?: boolean } = {},
+): BranchBackedWorktreeResult {
+  assertValidBranchName(repoRoot, checkoutBranch);
+  cleanupIncompleteWorktree(repoRoot, workspacePath);
+  mkdirSync(dirname(workspacePath), { recursive: true });
+  if (opts.reuseExistingBranch) {
+    if (!branchPointsAt(repoRoot, checkoutBranch, baseCommit)) {
+      throw new Error(
+        `worktree branch ${checkoutBranch} does not point at expected base commit ${baseCommit}`,
+      );
+    }
+    git(repoRoot, ["worktree", "add", workspacePath, checkoutBranch]);
+    return { checkoutBranch, reusedExistingBranch: true };
+  }
+  if (branchExists(repoRoot, checkoutBranch)) {
+    throw new BranchAlreadyExistsError(checkoutBranch);
+  }
+  git(repoRoot, ["worktree", "add", "-b", checkoutBranch, workspacePath, baseCommit]);
+  return { checkoutBranch, reusedExistingBranch: false };
+}
+
+export function attachBranchBackedWorktree(
+  repoRoot: string,
+  workspacePath: string,
+  checkoutBranch: string,
+): void {
+  assertValidBranchName(repoRoot, checkoutBranch);
+  if (!branchExists(repoRoot, checkoutBranch)) {
+    throw new Error(`worktree branch ${checkoutBranch} is missing`);
+  }
+  cleanupIncompleteWorktree(repoRoot, workspacePath);
+  mkdirSync(dirname(workspacePath), { recursive: true });
+  git(repoRoot, ["worktree", "add", workspacePath, checkoutBranch]);
 }
 
 export function createRetainedCopy(
@@ -426,65 +543,6 @@ function readTextFilePrefix(path: string, maxBytes: number): { text: string; tru
   }
 }
 
-export function diffWorkspace(workspacePath: string): DiffBundle {
-  // include untracked files so added files show up
-  const status = gitStatus(workspacePath, ["status", "--porcelain", "--untracked-files=all"]);
-  const modified: string[] = [];
-  const added: string[] = [];
-  const deleted: string[] = [];
-  const omittedPathCounts: DiffPathCounts = { modified: 0, added: 0, deleted: 0 };
-  let retainedPathCount = 0;
-  for (const line of status.split("\n")) {
-    if (!line.trim()) continue;
-    const code = line.slice(0, 2);
-    const file = line.slice(3);
-    const bucket =
-      code.includes("?") || code.includes("A") ? added : code.includes("D") ? deleted : modified;
-    const omittedKey = bucket === added ? "added" : bucket === deleted ? "deleted" : "modified";
-    if (retainedPathCount < AGENT_DIFF_PATH_MAX_ENTRIES) {
-      bucket.push(file);
-      retainedPathCount += 1;
-    } else {
-      omittedPathCounts[omittedKey] += 1;
-    }
-  }
-  // `git diff --binary HEAD` preserves tracked binary/mode/symlink deltas for
-  // review and merge. Add readable untracked file bodies for convenient text
-  // review; unreadable/binary untracked files remain represented by path and are
-  // preserved by merge after staging. The durable contentDiff is intentionally
-  // capped; the retained workspace remains the source of truth for full review.
-  const content = new DiffContentBuilder();
-  content.append(gitDiff(workspacePath, ["diff", "--binary", "HEAD"]));
-  for (const f of added) {
-    if (content.truncated) break;
-    try {
-      const { text, truncated } = readTextFilePrefix(
-        join(workspacePath, f),
-        AGENT_DIFF_CONTENT_MAX_BYTES,
-      );
-      const lines = text.split("\n");
-      if (lines.at(-1) === "") lines.pop();
-      content.append(
-        `\ndiff --git a/${f} b/${f}\nnew file\n--- /dev/null\n+++ b/${f}\n${lines
-          .map((l) => `+${l}`)
-          .join("\n")}\n`,
-      );
-      if (truncated) content.markTruncated();
-    } catch {
-      // unreadable (binary/directory/etc.) — path remains in `added`; merge uses
-      // `git diff --binary --cached` after staging, not this text append.
-    }
-  }
-  return {
-    modified,
-    added,
-    deleted,
-    omittedPathCounts,
-    pathLimit: AGENT_DIFF_PATH_MAX_ENTRIES,
-    contentDiff: content.value,
-  };
-}
-
 export function diffGitFinalTree(workspacePath: string, baseCommit = "HEAD"): DiffBundle {
   const indexDir = mkdtempSync(join(tmpdir(), "keel-git-index-"));
   const indexPath = join(indexDir, "index");
@@ -530,18 +588,15 @@ function diffGitFinalTreeWithIndex(
       status: code?.startsWith("A") ? "added" : code?.startsWith("D") ? "deleted" : "modified",
     });
   }
-  const contentDiff = gitDiff(
-    workspacePath,
-    ["diff", "--binary", "--cached", baseCommit],
-    indexEnv,
-  );
+  const content = new DiffContentBuilder();
+  content.append(gitDiff(workspacePath, ["diff", "--binary", "--cached", baseCommit], indexEnv));
   return {
     modified,
     added,
     deleted,
     omittedPathCounts,
     pathLimit: AGENT_DIFF_PATH_MAX_ENTRIES,
-    contentDiff,
+    contentDiff: content.value,
     mode: "clone",
     diffKind: "git-patch",
     baseLabel: baseCommit,
@@ -553,24 +608,6 @@ function diffGitFinalTreeWithIndex(
 export function diffCopyWorkspace(workspacePath: string, baselinePath: string): DiffBundle {
   const changes = compareTrees(baselinePath, workspacePath);
   return diffBundleFromCopyChanges(changes, baselinePath, workspacePath);
-}
-
-export function mergeWorkspaceIntoTarget(workspacePath: string, target: string): void {
-  assertUsableTargetDirectory(target);
-  // Stage the retained workspace state so untracked files, binary files, modes,
-  // and symlinks enter the binary patch. This mutates only the retained
-  // workspace index, not the target.
-  git(workspacePath, ["add", "-A"]);
-  const patch = gitDiff(workspacePath, ["diff", "--binary", "--cached", "HEAD"]);
-  if (!patch.trim()) return;
-  try {
-    git(target, ["apply", "--check", "--3way", "--whitespace=nowarn", "-"], patch);
-  } catch (err) {
-    throw new Error(
-      `workspace merge would conflict; target was not modified: ${gitErrorMessage(err)}`,
-    );
-  }
-  git(target, ["apply", "--3way", "--whitespace=nowarn", "-"], patch);
 }
 
 export function mergeCloneIntoTarget(
@@ -660,8 +697,8 @@ function worktreeHandle(
   return {
     path,
     baseCommit,
-    diff: () => diffWorkspace(path),
-    mergeInto: (target: string) => mergeWorkspaceIntoTarget(path, target),
+    diff: () => diffGitFinalTree(path, baseCommit),
+    mergeInto: (target: string) => mergeCloneIntoTarget(path, target, baseCommit),
     remove(): void {
       if (!removable) {
         try {

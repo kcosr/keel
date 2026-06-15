@@ -208,7 +208,7 @@ describe("schema migrations", () => {
       const ver = store.db
         .query<{ value: string }, []>("SELECT value FROM schema_meta WHERE key='schema_version'")
         .get();
-      expect(ver?.value).toBe("18");
+      expect(ver?.value).toBe("19");
 
       // new columns exist
       const jcols = store.db.query<{ name: string }, []>("PRAGMA table_info(journal)").all();
@@ -248,6 +248,8 @@ describe("schema migrations", () => {
       expect(workspaces.some((c) => c.name === "owned")).toBe(true);
       expect(workspaces.some((c) => c.name === "active_holder_kind")).toBe(true);
       expect(workspaces.some((c) => c.name === "retention_policy")).toBe(true);
+      expect(workspaces.some((c) => c.name === "worktree_checkout_kind")).toBe(true);
+      expect(workspaces.some((c) => c.name === "worktree_branch_owned")).toBe(true);
 
       // existing rows preserved (additive) and seq backfilled per-run monotonic
       const rows = store.listJournalRows("r");
@@ -504,7 +506,7 @@ describe("schema migrations", () => {
     const ver = store.db
       .query<{ value: string }, []>("SELECT value FROM schema_meta WHERE key='schema_version'")
       .get();
-    expect(ver?.value).toBe("18");
+    expect(ver?.value).toBe("19");
     expect(
       store.db
         .query<{ name: string }, []>(
@@ -592,7 +594,7 @@ describe("schema migrations", () => {
       const ver = store.db
         .query<{ value: string }, []>("SELECT value FROM schema_meta WHERE key='schema_version'")
         .get();
-      expect(ver?.value).toBe("18");
+      expect(ver?.value).toBe("19");
 
       const schedule = store.db
         .query<{ enabled: number; workflow_ref: string }, []>(
@@ -899,9 +901,79 @@ describe("schema migrations", () => {
       expect(row).toMatchObject({
         sourceKind: "worktree-git",
         sourceMergeEligible: true,
+        worktreeCheckoutKind: "detached",
+        worktreeBranchOwned: false,
         workspaceIdentityHash: expect.any(String),
       });
       expect(row?.workspaceIdentityHash).not.toBe("");
+      store.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("v18 workspaces migrate worktree checkout metadata", () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-mig-v18-worktree-checkout-"));
+    try {
+      const path = join(dir, "old.db");
+      const db = new Database(path, { create: true });
+      db.exec(`
+        CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        INSERT INTO schema_meta (key, value) VALUES ('schema_version', '18');
+        CREATE TABLE agent_workspaces (
+          run_id TEXT NOT NULL, workspace_id TEXT NOT NULL, mode TEXT NOT NULL,
+          owner_kind TEXT NOT NULL, key TEXT NOT NULL, last_attempt INTEGER,
+          retention_policy TEXT, workspace_path TEXT NOT NULL, source_kind TEXT,
+          source_path TEXT, source_uri TEXT, source_bare INTEGER,
+          source_merge_eligible INTEGER NOT NULL DEFAULT 0, supplied_path TEXT,
+          source_ref TEXT, resolved_ref TEXT, checkout_branch TEXT, base_commit TEXT,
+          copy_baseline_path TEXT, creation_error_json TEXT,
+          workspace_identity_json TEXT NOT NULL, workspace_identity_hash TEXT NOT NULL,
+          owned INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL,
+          failure_seen INTEGER NOT NULL DEFAULT 0, last_turn_key TEXT,
+          last_turn_attempt INTEGER, active_holder_kind TEXT, active_holder_key TEXT,
+          active_holder_attempt INTEGER, active_started_at_ms INTEGER,
+          last_diff_event_seq INTEGER, last_error_event_seq INTEGER,
+          cleanup_error_json TEXT, created_at_ms INTEGER NOT NULL,
+          updated_at_ms INTEGER NOT NULL, merged_at_ms INTEGER, discarded_at_ms INTEGER,
+          removed_at_ms INTEGER, PRIMARY KEY (run_id, workspace_id)
+        );
+        INSERT INTO agent_workspaces (
+          run_id, workspace_id, mode, owner_kind, key, retention_policy,
+          workspace_path, source_kind, source_path, source_merge_eligible,
+          source_ref, resolved_ref, checkout_branch, base_commit,
+          workspace_identity_json, workspace_identity_hash, owned, status,
+          failure_seen, created_at_ms, updated_at_ms
+        ) VALUES
+          ('r', 'wt', 'worktree', 'workflow', 'wt', 'retain', '/store/wt',
+           'worktree-git', '/repo', 1, 'HEAD', 'HEAD', NULL, 'abc',
+           '{"sdkAbiVersion":6}', 'old-wt', 1, 'pending_review', 0, 1, 1),
+          ('r', 'clone', 'clone', 'workflow', 'clone', 'retain', '/store/clone',
+           'local-clone-git', '/repo', 1, NULL, 'main', 'main', 'def',
+           '{"sdkAbiVersion":6}', 'old-clone', 1, 'pending_review', 0, 1, 1);
+      `);
+      db.close();
+
+      const store = JournalStore.open(path);
+      const wt = store.getAgentWorkspace("r", "wt");
+      expect(wt).toMatchObject({
+        worktreeCheckoutKind: "detached",
+        worktreeBranchOwned: false,
+        checkoutBranch: null,
+      });
+      expect(JSON.parse(wt?.workspaceIdentityJson ?? "{}")).toMatchObject({
+        branchPolicy: "detached",
+        rulesVersion: 2,
+        sdkAbiVersion: 6,
+      });
+      expect(wt?.workspaceIdentityHash).not.toBe("old-wt");
+      const clone = store.getAgentWorkspace("r", "clone");
+      expect(clone).toMatchObject({
+        worktreeCheckoutKind: null,
+        worktreeBranchOwned: false,
+        checkoutBranch: "main",
+      });
+      expect(clone?.workspaceIdentityHash).toBe("old-clone");
       store.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });

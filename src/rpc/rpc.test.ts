@@ -20,7 +20,12 @@ import type { AgentSessionWorkspaceStatus, RunStatus } from "../journal/types.ts
 import { RUN_FINISHED_INLINE_OUTPUT_BYTES } from "../kernel/output.ts";
 import { RealmKernel } from "../kernel/realm/realm-host.ts";
 import { captureWorkflowFile } from "../workflow-definitions/capture.ts";
-import { createRetainedWorktree, retainedWorkspacePath } from "../workspace/worktree.ts";
+import {
+  classifyCloneSource,
+  createRetainedCopy,
+  createRetainedWorktree,
+  retainedWorkspacePath,
+} from "../workspace/worktree.ts";
 import { EventHub } from "./event-hub.ts";
 import { InProcessKeel } from "./in-process.ts";
 
@@ -868,6 +873,367 @@ describe("event subscription", () => {
 });
 
 describe("workspace lifecycle operations", () => {
+  test("clone source classification accepts user-less scp remotes", () => {
+    expect(classifyCloneSource("gitserver:org/repo.git")).toMatchObject({
+      repo: "gitserver:org/repo.git",
+      sourceKind: "remote-git",
+      sourceMergeEligible: false,
+    });
+    expect(classifyCloneSource("host:path")).toMatchObject({
+      repo: "host:path",
+      sourceKind: "remote-git",
+      sourceMergeEligible: false,
+    });
+    expect(classifyCloneSource("gitserver:/srv/repo.git")).toMatchObject({
+      repo: "gitserver:/srv/repo.git",
+      sourceKind: "remote-git",
+      sourceMergeEligible: false,
+    });
+    expect(() => classifyCloneSource("subdir/repo")).toThrow(/absolute path or remote git URL/);
+    expect(() => classifyCloneSource("C:/repo")).toThrow(/absolute path or remote git URL/);
+    expect(() => classifyCloneSource("C:\\repo")).toThrow(/absolute path or remote git URL/);
+  });
+
+  test("copy workspace diff and merge apply changes back to unchanged source", () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-rpc-copy-"));
+    const store = JournalStore.memory();
+    try {
+      const source = join(dir, "source");
+      const workspace = join(dir, "store", "copy");
+      const baseline = join(dir, "store", "copy-baseline");
+      mkdirSync(source, { recursive: true });
+      writeFileSync(join(source, "file.txt"), "base\n");
+      mkdirSync(join(source, ".git"), { recursive: true });
+      writeFileSync(join(source, ".git", "config"), "ignored\n");
+      createRetainedCopy(source, workspace, baseline);
+      writeFileSync(join(workspace, "file.txt"), "changed\n");
+      writeFileSync(join(workspace, "added.txt"), "added\n");
+      store.insertRun({
+        runId: "r-copy",
+        workflowName: "wf",
+        definitionVersion: "wf_sha256_fixture",
+        status: "finished",
+        parentRunId: null,
+        tenantId: null,
+        inputRef: "null",
+        outputRef: null,
+        errorJson: null,
+        heartbeatAtMs: null,
+        runtimeOwnerId: null,
+        createdAtMs: 1,
+        finishedAtMs: 2,
+        runTarget: source,
+      });
+      store.insertAgentWorkspace({
+        runId: "r-copy",
+        workspaceId: "copy",
+        mode: "copy",
+        ownerKind: "workflow",
+        key: "copy",
+        lastAttempt: null,
+        retentionPolicy: "retain",
+        workspacePath: workspace,
+        sourceKind: "local-copy",
+        sourcePath: source,
+        sourceUri: null,
+        sourceBare: null,
+        sourceMergeEligible: true,
+        suppliedPath: source,
+        sourceRef: null,
+        resolvedRef: null,
+        checkoutBranch: null,
+        baseCommit: null,
+        copyBaselinePath: baseline,
+        creationErrorJson: null,
+        workspaceIdentityJson: "{}",
+        workspaceIdentityHash: "copy",
+        owned: true,
+        status: "pending_review",
+        failureSeen: false,
+        lastTurnKey: null,
+        lastTurnAttempt: null,
+        activeHolderKind: null,
+        activeHolderKey: null,
+        activeHolderAttempt: null,
+        activeStartedAtMs: null,
+        lastDiffEventSeq: null,
+        lastErrorEventSeq: null,
+        cleanupErrorJson: null,
+        createdAtMs: 1,
+        updatedAtMs: 1,
+        mergedAtMs: null,
+        discardedAtMs: null,
+        removedAtMs: null,
+      });
+      const api = keel(store);
+      const diff = api.getRunWorkspaceDiff("r-copy", "copy");
+      expect(diff.diffKind).toBe("recursive-copy");
+      expect(diff.modified).toContain("file.txt");
+      expect(diff.added).toContain("added.txt");
+      expect(api.mergeRunWorkspace("r-copy", "copy").status).toBe("merged");
+      expect(readFileSync(join(source, "file.txt"), "utf8")).toBe("changed\n");
+      expect(readFileSync(join(source, "added.txt"), "utf8")).toBe("added\n");
+      expect(existsSync(join(source, ".git", "config"))).toBe(true);
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("copy merge rejects deleted directory when source subtree changed since baseline", () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-rpc-copy-conflict-"));
+    const store = JournalStore.memory();
+    try {
+      const source = join(dir, "source");
+      const workspace = join(dir, "store", "copy");
+      const baseline = join(dir, "store", "copy-baseline");
+      mkdirSync(join(source, "subdir"), { recursive: true });
+      writeFileSync(join(source, "subdir", "base.txt"), "base\n");
+      createRetainedCopy(source, workspace, baseline);
+      rmSync(join(workspace, "subdir"), { recursive: true, force: true });
+      writeFileSync(join(source, "subdir", "concurrent.txt"), "keep me\n");
+      store.insertRun({
+        runId: "r-copy-conflict",
+        workflowName: "wf",
+        definitionVersion: "wf_sha256_fixture",
+        status: "finished",
+        parentRunId: null,
+        tenantId: null,
+        inputRef: "null",
+        outputRef: null,
+        errorJson: null,
+        heartbeatAtMs: null,
+        runtimeOwnerId: null,
+        createdAtMs: 1,
+        finishedAtMs: 2,
+        runTarget: source,
+      });
+      store.insertAgentWorkspace({
+        runId: "r-copy-conflict",
+        workspaceId: "copy",
+        mode: "copy",
+        ownerKind: "workflow",
+        key: "copy",
+        lastAttempt: null,
+        retentionPolicy: "retain",
+        workspacePath: workspace,
+        sourceKind: "local-copy",
+        sourcePath: source,
+        sourceUri: null,
+        sourceBare: null,
+        sourceMergeEligible: true,
+        suppliedPath: source,
+        sourceRef: null,
+        resolvedRef: null,
+        checkoutBranch: null,
+        baseCommit: null,
+        copyBaselinePath: baseline,
+        creationErrorJson: null,
+        workspaceIdentityJson: "{}",
+        workspaceIdentityHash: "copy-conflict",
+        owned: true,
+        status: "pending_review",
+        failureSeen: false,
+        lastTurnKey: null,
+        lastTurnAttempt: null,
+        activeHolderKind: null,
+        activeHolderKey: null,
+        activeHolderAttempt: null,
+        activeStartedAtMs: null,
+        lastDiffEventSeq: null,
+        lastErrorEventSeq: null,
+        cleanupErrorJson: null,
+        createdAtMs: 1,
+        updatedAtMs: 1,
+        mergedAtMs: null,
+        discardedAtMs: null,
+        removedAtMs: null,
+      });
+      const api = keel(store);
+      expect(() => api.mergeRunWorkspace("r-copy-conflict", "copy")).toThrow(/source changed/);
+      expect(readFileSync(join(source, "subdir", "concurrent.txt"), "utf8")).toBe("keep me\n");
+      expect(store.getAgentWorkspace("r-copy-conflict", "copy")?.status).toBe("pending_review");
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("copy merge ignores nested git metadata while validating deleted directories", () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-rpc-copy-nested-git-"));
+    const store = JournalStore.memory();
+    try {
+      const source = join(dir, "source");
+      const workspace = join(dir, "store", "copy");
+      const baseline = join(dir, "store", "copy-baseline");
+      mkdirSync(join(source, "subdir", "vendor", ".git"), { recursive: true });
+      writeFileSync(join(source, "subdir", "base.txt"), "base\n");
+      writeFileSync(join(source, "subdir", "vendor", ".git", "config"), "ignored\n");
+      createRetainedCopy(source, workspace, baseline);
+      rmSync(join(workspace, "subdir"), { recursive: true, force: true });
+      store.insertRun({
+        runId: "r-copy-nested-git",
+        workflowName: "wf",
+        definitionVersion: "wf_sha256_fixture",
+        status: "finished",
+        parentRunId: null,
+        tenantId: null,
+        inputRef: "null",
+        outputRef: null,
+        errorJson: null,
+        heartbeatAtMs: null,
+        runtimeOwnerId: null,
+        createdAtMs: 1,
+        finishedAtMs: 2,
+        runTarget: source,
+      });
+      store.insertAgentWorkspace({
+        runId: "r-copy-nested-git",
+        workspaceId: "copy",
+        mode: "copy",
+        ownerKind: "workflow",
+        key: "copy",
+        lastAttempt: null,
+        retentionPolicy: "retain",
+        workspacePath: workspace,
+        sourceKind: "local-copy",
+        sourcePath: source,
+        sourceUri: null,
+        sourceBare: null,
+        sourceMergeEligible: true,
+        suppliedPath: source,
+        sourceRef: null,
+        resolvedRef: null,
+        checkoutBranch: null,
+        baseCommit: null,
+        copyBaselinePath: baseline,
+        creationErrorJson: null,
+        workspaceIdentityJson: "{}",
+        workspaceIdentityHash: "copy-nested-git",
+        owned: true,
+        status: "pending_review",
+        failureSeen: false,
+        lastTurnKey: null,
+        lastTurnAttempt: null,
+        activeHolderKind: null,
+        activeHolderKey: null,
+        activeHolderAttempt: null,
+        activeStartedAtMs: null,
+        lastDiffEventSeq: null,
+        lastErrorEventSeq: null,
+        cleanupErrorJson: null,
+        createdAtMs: 1,
+        updatedAtMs: 1,
+        mergedAtMs: null,
+        discardedAtMs: null,
+        removedAtMs: null,
+      });
+      const api = keel(store);
+      expect(api.mergeRunWorkspace("r-copy-nested-git", "copy").status).toBe("merged");
+      expect(existsSync(join(source, "subdir"))).toBe(false);
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("local clone merge includes committed changes after base commit", () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-rpc-clone-"));
+    const store = JournalStore.memory();
+    try {
+      const repo = join(dir, "repo");
+      const clone = join(dir, "clone");
+      mkdirSync(repo, { recursive: true });
+      const baseCommit = initGitRepo(repo);
+      execFileSync("git", ["clone", repo, clone]);
+      writeFileSync(join(clone, "committed.txt"), "committed\n");
+      execFileSync("git", ["add", "-A"], { cwd: clone });
+      execFileSync("git", ["config", "user.email", "t@t"], { cwd: clone });
+      execFileSync("git", ["config", "user.name", "t"], { cwd: clone });
+      execFileSync("git", ["commit", "-q", "-m", "agent commit"], { cwd: clone });
+      writeFileSync(join(clone, "unstaged.txt"), "unstaged\n");
+      writeFileSync(join(clone, "pre-staged.txt"), "pre-staged\n");
+      execFileSync("git", ["add", "pre-staged.txt"], { cwd: clone });
+      store.insertRun({
+        runId: "r-clone",
+        workflowName: "wf",
+        definitionVersion: "wf_sha256_fixture",
+        status: "finished",
+        parentRunId: null,
+        tenantId: null,
+        inputRef: "null",
+        outputRef: null,
+        errorJson: null,
+        heartbeatAtMs: null,
+        runtimeOwnerId: null,
+        createdAtMs: 1,
+        finishedAtMs: 2,
+        runTarget: repo,
+      });
+      store.insertAgentWorkspace({
+        runId: "r-clone",
+        workspaceId: "clone",
+        mode: "clone",
+        ownerKind: "workflow",
+        key: "clone",
+        lastAttempt: null,
+        retentionPolicy: "retain",
+        workspacePath: clone,
+        sourceKind: "local-clone-git",
+        sourcePath: repo,
+        sourceUri: repo,
+        sourceBare: false,
+        sourceMergeEligible: true,
+        suppliedPath: null,
+        sourceRef: null,
+        resolvedRef: "master",
+        checkoutBranch: "master",
+        baseCommit,
+        copyBaselinePath: null,
+        creationErrorJson: null,
+        workspaceIdentityJson: "{}",
+        workspaceIdentityHash: "clone",
+        owned: true,
+        status: "pending_review",
+        failureSeen: false,
+        lastTurnKey: null,
+        lastTurnAttempt: null,
+        activeHolderKind: null,
+        activeHolderKey: null,
+        activeHolderAttempt: null,
+        activeStartedAtMs: null,
+        lastDiffEventSeq: null,
+        lastErrorEventSeq: null,
+        cleanupErrorJson: null,
+        createdAtMs: 1,
+        updatedAtMs: 1,
+        mergedAtMs: null,
+        discardedAtMs: null,
+        removedAtMs: null,
+      });
+      const api = keel(store);
+      const diff = api.getRunWorkspaceDiff("r-clone", "clone");
+      expect(diff.mode).toBe("clone");
+      expect(diff.added).toContain("committed.txt");
+      expect(diff.added).toContain("unstaged.txt");
+      expect(diff.added).toContain("pre-staged.txt");
+      expect(
+        execFileSync("git", ["diff", "--cached", "--name-only"], {
+          cwd: clone,
+          encoding: "utf8",
+        })
+          .trim()
+          .split("\n"),
+      ).toEqual(["pre-staged.txt"]);
+      expect(api.mergeRunWorkspace("r-clone", "clone").status).toBe("merged");
+      expect(readFileSync(join(repo, "committed.txt"), "utf8")).toBe("committed\n");
+      expect(readFileSync(join(repo, "unstaged.txt"), "utf8")).toBe("unstaged\n");
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("merge, discard, and GC enforce lifecycle guards and are idempotent", () => {
     const dir = mkdtempSync(join(tmpdir(), "keel-rpc-workspace-"));
     const store = JournalStore.memory();
@@ -890,6 +1256,7 @@ describe("workspace lifecycle operations", () => {
         runStatus: "running",
         workspaceStatus: "pending_review",
       });
+      expect(api.getRunWorkspace("r-running", "ws_agent")?.mergeSupported).toBe(false);
       expect(() => api.mergeRunWorkspace("r-running", "ws_agent")).toThrow(/while run is running/);
       expect(() => api.discardRunWorkspace("r-running", "ws_agent")).toThrow(
         /while run is running/,

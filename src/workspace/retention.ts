@@ -6,7 +6,7 @@ import type {
   RunStatus,
   WorkspaceRetention,
 } from "../journal/types.ts";
-import { removeRetainedWorkspace } from "./worktree.ts";
+import { removeManagedWorkspace } from "./worktree.ts";
 
 export const DEFAULT_WORKSPACE_RETENTION: WorkspaceRetention = "remove";
 export const WORKSPACE_RETENTIONS: readonly WorkspaceRetention[] = [
@@ -77,8 +77,13 @@ export function cleanupTerminalWorkspace(
     return;
   }
   try {
-    if (!row.baseCommit) throw new Error(`workspace ${row.workspaceId} has no base commit`);
-    removeRetainedWorkspace(row.sourcePath, row.workspacePath, row.baseCommit);
+    removeManagedWorkspace({
+      mode: row.mode as "worktree" | "copy" | "clone",
+      sourcePath: row.sourcePath,
+      workspacePath: row.workspacePath,
+      baseCommit: row.baseCommit,
+      copyBaselinePath: row.copyBaselinePath,
+    });
     store.transaction(() => {
       store.updateAgentWorkspace(row.runId, row.workspaceId, {
         status: "removed",
@@ -99,6 +104,7 @@ export function cleanupTerminalWorkspace(
           key: row.key,
           workspacePath: row.workspacePath,
           sourcePath: row.sourcePath,
+          copyBaselinePath: row.copyBaselinePath,
         },
         atMs,
       );

@@ -29,7 +29,7 @@ the live Pi adapter and a deterministic mock; the two-tier artifact store; the
 review workload ported and run live; the frozen RPC contract and canonical
 RunProjection; the out-of-process daemon + thin CLI with CAS-fenced crash
 recovery; liveness (stall-retry, timeouts, blockage); agent capabilities,
-explicit git-worktree isolation, diff gate, and secrets side-channel; durable
+explicit managed workspaces, diff gate, and secrets side-channel; durable
 `ctx.sleep` with the supervisor and cron; full HITL (`ctx.human`/`ctx.signal`);
 time travel (retry/rewind/fork); immutable workflow definition snapshots;
 daemon-enforced bearer capabilities; explicit resumable run interruption;
@@ -61,9 +61,9 @@ Postgres-dialect discipline).
   reordering/inserting waits doesn't reattach a persisted wait to the wrong site.
 - **Capability *enforcement* landed (§11):** provider tool policies map to vendor
   flags; provider cwd always comes from a run workspace (explicit, scoped, or
-  the default direct workspace at `ctx.run.target`); Keel-owned worktrees are
-  explicit `ctx.workspace({ mode: "worktree" })` handles with retention, secrets
-  are injected as trusted-local provider env, `continueAsNew` is
+  the default direct workspace at `ctx.run.target`); Keel-owned worktree/copy/
+  clone workspaces are explicit `ctx.workspace(...)` handles with retention,
+  secrets are injected as trusted-local provider env, `continueAsNew` is
   an atomic transactional handoff with lineage, and fork is fenced to terminal
   runs. The OS-sandbox capability backstop remains the one unimplemented
   hardening.
@@ -995,18 +995,31 @@ unless they have operator-actionable metadata. Worktree workspaces are
 Keel-owned git worktrees under the workspace store, keyed by `(runId,
 workspaceId)`, checked out from a resolved source repo/ref, and reused across
 retries, parks, interrupts, daemon restarts, and session turns while the run can
-continue. Only one provider invocation may actively use a Keel-owned worktree at
-a time; durable `active_holder_*` row fields fail concurrent use closed and are
-cleared on every provider end path or startup recovery.
+continue. Copy workspaces are Keel-owned filesystem snapshots of local
+directories, including dirty files but excluding `.git` metadata and storing a
+second hidden baseline snapshot for diff/merge. Clone workspaces are Keel-owned
+git clones from explicit local paths, `file://` URLs, or remote git URLs; clone
+never infers a source from `ctx.run.target`. Only one provider invocation may
+actively use a Keel-owned workspace at a time; durable `active_holder_*` row
+fields fail concurrent use closed and are cleared on every provider end path or
+startup recovery.
 
-Terminal cleanup evaluates worktree retention: `remove`, `retain-on-failure`, or
-`retain`. Direct workspaces are never removed, diffed, merged, discarded, or GC'd
-by Keel. Changes are never auto-merged; operator merge/discard/GC commands act on
-retained worktrees by `(runId, workspaceId)`. Durable agent sessions fail closed
-if their worktree workspace was removed before retry/resume; workflows that need
+Terminal cleanup evaluates Keel-owned workspace retention: `remove`,
+`retain-on-failure`, or `retain`. Direct workspaces are never removed, diffed,
+merged, discarded, or GC'd by Keel. Changes are never auto-merged; operator
+merge/discard/GC commands act on retained workspaces by `(runId, workspaceId)`.
+Worktree and supported local-clone merge apply final-tree git patches. Copy merge
+compares workspace state to the copy baseline and writes back only if affected
+source paths still match that baseline. Remote clone and local bare clone merge
+are unsupported because this design does not add push credentials, branch gates,
+or commit-preserving merge semantics. Durable agent sessions fail closed if their
+Keel-owned workspace was removed before retry/resume; workflows that need
 terminal failed session runs to be retryable should use `retain-on-failure` or
-`retain`. The VCS lives behind an interface — git worktrees now; jj or container
-overlays swappable later (§17 L9).
+`retain`. These workspaces are trusted-local cwd/lifecycle conveniences, not
+filesystem or network sandboxes; provider tools may still access outside cwd
+according to host/tool behavior, and retained files may contain secrets. The VCS
+lives behind an interface — git worktrees/clones now; jj or container overlays
+swappable later (§17 L9).
 
 ### 11.4 Approval as a first-class dataflow node
 

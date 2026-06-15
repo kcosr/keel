@@ -450,7 +450,22 @@ sessions inside `fn`, while explicit per-agent/session `workspace` overrides the
 scope. `WorkspaceSpec.key` is required; `__default` is reserved for the run
 default workspace.
 
-Worktree retention controls terminal cleanup:
+Workspace modes:
+
+- `direct` points at an existing directory, defaults to `ctx.run.target`, is not
+  Keel-owned, and is never diffed, merged, discarded, GC'd, or removed by Keel.
+- `worktree` creates a Keel-owned detached git worktree from a local repository
+  path/ref. It is for committed local git state with patch merge support.
+- `copy` creates a Keel-owned filesystem snapshot of a local directory, including
+  dirty files, but excludes `.git` metadata at every level. It does not apply
+  `.gitignore`; pass a narrower `path` when large caches, dependencies, build
+  output, or virtualenvs should not be copied.
+- `clone` creates a Keel-owned git clone from an explicit local path, `file://`
+  URL, or remote git URL. It never defaults to `ctx.run.target`; pass
+  `repo: ctx.run.target` explicitly for the current repository. Remote clone
+  merge is unsupported in this release.
+
+Keel-owned workspace retention controls terminal cleanup:
 
 - `"remove"` (default): remove the filesystem at terminal run cleanup and hide
   the audit row from default listings.
@@ -458,10 +473,10 @@ Worktree retention controls terminal cleanup:
   diff errors, abandoned workspaces, or cleanup errors; remove clean successes.
 - `"retain"`: retain terminal workspaces for operator review.
 
-For durable `ctx.agentSession` participants that use a worktree workspace, choose
-`"retain-on-failure"` or `"retain"` when you expect to retry a terminal failed
-run. If terminal cleanup removes the worktree, Keel fails closed rather than
-resuming the existing backend conversation in a fresh empty worktree.
+For durable `ctx.agentSession` participants that use a Keel-owned workspace,
+choose `"retain-on-failure"` or `"retain"` when you expect to retry a terminal
+failed run. If terminal cleanup removes the workspace, Keel fails closed rather
+than resuming the existing backend conversation in a fresh empty workspace.
 
 Public per-agent `workspaceIsolation`, `workspaceRetention`, and `target` fields
 have been removed at the workflow SDK ABI 4 boundary. Drain non-terminal old-ABI
@@ -477,23 +492,32 @@ keel workspace gc [--older-than-ms ms] [--include-pending] [--include-removed]
 ```
 
 `RunWorkspaceView.workspaceId` is the canonical selector for show/diff/merge/
-discard. Views include `mode`, `ownerKind`, display `key`, provider
-`workspacePath`, `sourcePath`, ownership, retention, latest attempt/turn and
-active-holder metadata, `failureSeen`, timestamps, and cleanup errors. Default
-list output hides idle direct workspaces such as `__default`; `--all` includes
-removed audit rows and direct workspace rows.
+discard. Views include `mode`, `sourceKind`, display `key`, provider
+`workspacePath`, source path/URI/ref/branch/base commit metadata, copy baseline
+path, ownership, retention, merge/diff support, latest attempt/turn and active
+holder metadata, `failureSeen`, timestamps, and cleanup errors. Default list
+output hides idle direct workspaces such as `__default`; `--all` includes removed
+audit rows and direct workspace rows.
 
 Merge/discard are explicit operator actions and refuse while the run is
-non-terminal, a worktree provider invocation is active, the workspace is direct,
-or the workspace has already moved to a terminal lifecycle status such as
-`removed`, `merged`, or `discarded`. Merge applies the current workspace
-filesystem back to its recorded source repository. Durable `agent.diff` payloads
-include the `workspaceId`, `workspacePath`, `sourcePath`, and bounded
-`contentDiff` values that end with a truncation notice when the retained
-workspace should be inspected for the full patch; changed path arrays are capped
-with `omittedPathCounts`/`pathLimit` metadata. Direct workspaces do not produce
-review diffs in v1. Diff capture that exceeds Keel's explicit git status or diff
-buffers is recorded as `workspace.diff_error`.
+non-terminal, a Keel-owned provider invocation is active, the workspace is
+direct, remote clone/local bare clone merge is requested, or the workspace has
+already moved to a terminal lifecycle status such as `removed`, `merged`, or
+`discarded`. Worktree and local-clone merge apply a final-tree git patch; copy
+merge compares the workspace to its baseline and writes back only if the original
+source paths still match that baseline. Durable `agent.diff` payloads include the
+`workspaceId`, `workspacePath`, source metadata, mode/diff kind, bounded
+`contentDiff`, and `fileChanges`; changed path arrays are capped with
+`omittedPathCounts`/`pathLimit` metadata. Direct workspaces do not produce review
+diffs in v1. Diff capture that exceeds Keel's explicit git status or diff buffers
+is recorded as `workspace.diff_error`.
+
+Copy and clone workspaces are trusted-local filesystem conveniences, not
+sandboxes. Tool-capable providers may still read or write outside the cwd
+according to their tool policy and host behavior; remote clone uses the local
+user's git credentials, SSH agent, network, and git configuration. Retained
+workspaces may contain sensitive files and should be discarded or garbage
+collected when no longer needed.
 
 ### Authorization
 
@@ -990,7 +1014,7 @@ Filesystem capability levels:
 |---|---|
 | `"none"` | No file tools. |
 | `"read"` | Read, grep, and list. |
-| `"workspace-write"` | Edit/write through provider tools. Use a `mode: "worktree"` workspace when those edits should be staged in a retained worktree and reviewed as a diff. |
+| `"workspace-write"` | Edit/write through provider tools. Use `worktree`, `copy`, or supported local `clone` workspaces when edits should be staged in a Keel-owned workspace and reviewed as a diff before merge. |
 
 Secrets named in `secrets` are resolved from a side channel keyed by run and
 injected into the provider invocation environment. Secret names, not raw values,

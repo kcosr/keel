@@ -35,6 +35,7 @@ export type WorkerRequest =
         key: string;
         mode?: string | null;
         path?: string | null;
+        repo?: string | null;
         ref?: string | null;
         retention?: WorkspaceRetention | null;
       };

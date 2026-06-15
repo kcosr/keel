@@ -35,9 +35,13 @@ import {
 import type { WorkflowSourceInput } from "../workflow-definitions/source.ts";
 import { cleanupTerminalRunWorkspaces } from "../workspace/retention.ts";
 import {
+  diffCopyWorkspace,
+  diffGitFinalTree,
   diffWorkspace,
+  mergeCloneIntoTarget,
+  mergeCopyIntoSource,
   mergeWorkspaceIntoTarget,
-  removeRetainedWorkspace,
+  removeManagedWorkspace,
 } from "../workspace/worktree.ts";
 import type {
   EventEnvelope,
@@ -169,12 +173,13 @@ export class InProcessKeel implements KeelApi {
   }
 
   listRunWorkspaces(runId: string, opts: { includeRemoved?: boolean } = {}): RunWorkspaceView[] {
-    return this.store.listAgentWorkspaces(runId, opts).map(workspaceView);
+    const runStatus = this.store.getRun(runId)?.status ?? null;
+    return this.store.listAgentWorkspaces(runId, opts).map((row) => workspaceView(row, runStatus));
   }
 
   getRunWorkspace(runId: string, workspaceId: string): RunWorkspaceView | null {
     const row = this.store.getAgentWorkspace(runId, workspaceId);
-    return row ? workspaceView(row) : null;
+    return row ? workspaceView(row, this.store.getRun(runId)?.status ?? null) : null;
   }
 
   getRunWorkspaceDiff(runId: string, workspaceId: string): RunWorkspaceDiff {
@@ -185,8 +190,21 @@ export class InProcessKeel implements KeelApi {
     if (!existsSync(row.workspacePath)) {
       throw new Error(`workspace ${runId}/${workspaceId} is missing at ${row.workspacePath}`);
     }
-    const diff = diffWorkspace(row.workspacePath);
-    return { workspace: workspaceView(row), ...diff };
+    const diff =
+      row.mode === "copy"
+        ? diffCopyWorkspace(row.workspacePath, row.copyBaselinePath ?? "")
+        : row.mode === "clone"
+          ? diffGitFinalTree(row.workspacePath, row.baseCommit ?? "HEAD")
+          : diffWorkspace(row.workspacePath);
+    return {
+      workspace: workspaceView(row, this.store.getRun(runId)?.status ?? null),
+      ...diff,
+      mode: row.mode as "worktree" | "copy" | "clone",
+      diffKind: diff.diffKind ?? "git-patch",
+      baseLabel: diff.baseLabel ?? row.baseCommit ?? "HEAD",
+      workspaceLabel: diff.workspaceLabel ?? row.workspacePath,
+      fileChanges: diff.fileChanges ?? [],
+    };
   }
 
   reconcileWorkspaces(opts: { staleBeforeMs?: number; nowMs?: number } = {}): {
@@ -202,7 +220,9 @@ export class InProcessKeel implements KeelApi {
       if (!run || isTerminalRunStatus(run.status)) {
         if (run) cleanupTerminalRunWorkspaces(this.store, row.runId, run.status, nowMs);
         const next = this.store.getAgentWorkspace(row.runId, row.workspaceId);
-        if (next && next.updatedAtMs === nowMs) updated.push(workspaceView(next));
+        if (next && next.updatedAtMs === nowMs) {
+          updated.push(workspaceView(next, run?.status ?? null));
+        }
         continue;
       }
 
@@ -217,11 +237,17 @@ export class InProcessKeel implements KeelApi {
         (row.ownerKind !== "agent_session" ||
           !this.store.hasPendingAgentSessionTurn(row.runId, row.key))
       ) {
-        if (existsSync(row.workspacePath) && row.baseCommit) {
-          removeRetainedWorkspace(row.sourcePath, row.workspacePath, row.baseCommit);
+        if (existsSync(row.workspacePath)) {
+          removeManagedWorkspace({
+            mode: row.mode as "worktree" | "copy" | "clone",
+            sourcePath: row.sourcePath,
+            workspacePath: row.workspacePath,
+            baseCommit: row.baseCommit,
+            copyBaselinePath: row.copyBaselinePath,
+          });
         }
         this.store.deleteAgentWorkspace(row.runId, row.workspaceId);
-        deleted.push(workspaceView(row));
+        deleted.push(workspaceView(row, run?.status ?? null));
       }
     }
     return { updated, deleted };
@@ -233,7 +259,26 @@ export class InProcessKeel implements KeelApi {
     if (!existsSync(row.workspacePath)) {
       throw new Error(`workspace ${runId}/${workspaceId} is missing at ${row.workspacePath}`);
     }
-    mergeWorkspaceIntoTarget(row.workspacePath, row.sourcePath);
+    if (!row.sourceMergeEligible) {
+      throw new Error(`workspace ${runId}/${workspaceId} mode ${row.mode} does not support merge`);
+    }
+    if (row.mode === "copy") {
+      if (!row.copyBaselinePath)
+        throw new Error(`copy workspace ${runId}/${workspaceId} has no baseline`);
+      if (!row.sourcePath)
+        throw new Error(`copy workspace ${runId}/${workspaceId} has no source path`);
+      mergeCopyIntoSource(row.workspacePath, row.copyBaselinePath, row.sourcePath);
+    } else if (row.mode === "clone") {
+      if (!row.sourcePath || !row.baseCommit) {
+        throw new Error(
+          `clone workspace ${runId}/${workspaceId} cannot be merged without local source and base commit`,
+        );
+      }
+      mergeCloneIntoTarget(row.workspacePath, row.sourcePath, row.baseCommit);
+    } else {
+      if (!row.sourcePath) throw new Error(`workspace ${runId}/${workspaceId} has no source path`);
+      mergeWorkspaceIntoTarget(row.workspacePath, row.sourcePath);
+    }
     const at = Date.now();
     this.store.transaction(() => {
       this.store.updateAgentWorkspace(runId, workspaceId, {
@@ -256,14 +301,22 @@ export class InProcessKeel implements KeelApi {
         at,
       );
     });
-    return workspaceView(this.requireWorkspace(runId, workspaceId));
+    return workspaceView(
+      this.requireWorkspace(runId, workspaceId),
+      this.store.getRun(runId)?.status ?? null,
+    );
   }
 
   discardRunWorkspace(runId: string, workspaceId: string): RunWorkspaceView {
     const row = this.requireWorkspace(runId, workspaceId);
     this.assertWorkspaceOperatorAllowed(row, "discard");
-    if (!row.baseCommit) throw new Error(`workspace ${runId}/${workspaceId} has no base commit`);
-    removeRetainedWorkspace(row.sourcePath, row.workspacePath, row.baseCommit);
+    removeManagedWorkspace({
+      mode: row.mode as "worktree" | "copy" | "clone",
+      sourcePath: row.sourcePath,
+      workspacePath: row.workspacePath,
+      baseCommit: row.baseCommit,
+      copyBaselinePath: row.copyBaselinePath,
+    });
     const at = Date.now();
     this.store.transaction(() => {
       this.store.updateAgentWorkspace(runId, workspaceId, {
@@ -285,7 +338,10 @@ export class InProcessKeel implements KeelApi {
         at,
       );
     });
-    return workspaceView(this.requireWorkspace(runId, workspaceId));
+    return workspaceView(
+      this.requireWorkspace(runId, workspaceId),
+      this.store.getRun(runId)?.status ?? null,
+    );
   }
 
   gcWorkspaces(
@@ -312,13 +368,23 @@ export class InProcessKeel implements KeelApi {
     const removed: AgentWorkspaceRow[] = [];
     for (const row of rows) {
       const existed = existsSync(row.workspacePath);
-      if (existed && row.baseCommit) {
-        removeRetainedWorkspace(row.sourcePath, row.workspacePath, row.baseCommit);
+      if (existed) {
+        removeManagedWorkspace({
+          mode: row.mode as "worktree" | "copy" | "clone",
+          sourcePath: row.sourcePath,
+          workspacePath: row.workspacePath,
+          baseCommit: row.baseCommit,
+          copyBaselinePath: row.copyBaselinePath,
+        });
         removed.push(row);
       }
       this.store.deleteAgentWorkspace(row.runId, row.workspaceId);
     }
-    return { removed: removed.map(workspaceView) };
+    return {
+      removed: removed.map((row) =>
+        workspaceView(row, this.store.getRun(row.runId)?.status ?? null),
+      ),
+    };
   }
 
   listAgentProfiles(
@@ -621,7 +687,14 @@ function isTerminalRunStatus(status: RunStatus): boolean {
   );
 }
 
-function workspaceView(row: AgentWorkspaceRow): RunWorkspaceView {
+function workspaceView(row: AgentWorkspaceRow, runStatus: RunStatus | null): RunWorkspaceView {
+  const mergeSupported =
+    runStatus !== null &&
+    isTerminalRunStatus(runStatus) &&
+    row.owned &&
+    row.sourceMergeEligible &&
+    WORKSPACE_MERGEABLE_STATUSES.has(row.status) &&
+    !row.activeHolderKind;
   return {
     runId: row.runId,
     workspaceId: row.workspaceId,
@@ -631,10 +704,17 @@ function workspaceView(row: AgentWorkspaceRow): RunWorkspaceView {
     lastAttempt: row.lastAttempt,
     retentionPolicy: row.retentionPolicy,
     workspacePath: row.workspacePath,
+    sourceKind: row.sourceKind,
     sourcePath: row.sourcePath,
+    sourceUri: row.sourceUri,
+    sourceBare: row.sourceBare,
+    sourceMergeEligible: row.sourceMergeEligible,
     suppliedPath: row.suppliedPath,
     sourceRef: row.sourceRef,
+    resolvedRef: row.resolvedRef,
+    checkoutBranch: row.checkoutBranch,
     baseCommit: row.baseCommit,
+    copyBaselinePath: row.copyBaselinePath,
     owned: row.owned,
     status: row.status,
     failureSeen: row.failureSeen,
@@ -652,5 +732,7 @@ function workspaceView(row: AgentWorkspaceRow): RunWorkspaceView {
     mergedAtMs: row.mergedAtMs,
     discardedAtMs: row.discardedAtMs,
     removedAtMs: row.removedAtMs,
+    mergeSupported,
+    diffSupported: row.owned && row.mode !== "direct" && row.status !== "removed",
   };
 }

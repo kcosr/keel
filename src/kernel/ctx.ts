@@ -15,7 +15,8 @@ import type { AgentProviderRegistry, ProviderConfigMap } from "../agents/types.t
 import type { Json } from "../hash.ts";
 import type { JournalStore } from "../journal/store.ts";
 import { requireRunTarget } from "../target.ts";
-import { DEFAULT_WORKSPACE_ID } from "../workspace/identity.ts";
+import { WORKFLOW_SDK_ABI_VERSION } from "../workflow-definitions/snapshot.ts";
+import { DEFAULT_WORKSPACE_ID, workspaceIdentity } from "../workspace/identity.ts";
 import { resolveUsableDirectory } from "../workspace/worktree.ts";
 import { finalAgentMessageEvents } from "./agent-events.ts";
 import type { Schema } from "./schema.ts";
@@ -108,7 +109,7 @@ export interface AgentTurnSpec<T> {
   version?: string;
 }
 
-export type WorkspaceMode = "direct" | "worktree";
+export type WorkspaceMode = "direct" | "worktree" | "copy" | "clone";
 
 export type WorkspaceRetention = "remove" | "retain-on-failure" | "retain";
 
@@ -124,10 +125,24 @@ export type WorkspaceSpec =
       path?: string;
       ref?: string;
       retention?: WorkspaceRetention;
+    }
+  | {
+      key: string;
+      mode: "copy";
+      path?: string;
+      retention?: WorkspaceRetention;
+    }
+  | {
+      key: string;
+      mode: "clone";
+      repo: string;
+      ref?: string;
+      retention?: WorkspaceRetention;
     };
 
 export interface WorkspaceHandle {
   readonly id: string;
+  readonly identityHash?: string;
 }
 
 export interface AgentSession {
@@ -263,21 +278,27 @@ export class WorkflowCtx implements Ctx {
       );
     }
     if (normalized.mode !== "direct") {
-      throw new Error('ctx.workspace({ mode: "worktree" }) requires the realm kernel');
+      throw new Error(`ctx.workspace({ mode: "${normalized.mode}" }) requires the realm kernel`);
     }
     const now = Date.now();
+    const identity = workspaceIdentity({
+      key: normalized.key,
+      mode: "direct",
+      ownerKind: "workflow",
+      path: normalized.path,
+      sdkAbiVersion: WORKFLOW_SDK_ABI_VERSION,
+    });
     const existing = this.store.getAgentWorkspace(this.runId, normalized.key);
     if (existing) {
-      if (
-        existing.mode !== "direct" ||
-        existing.workspacePath !== normalized.path ||
-        existing.sourcePath !== normalized.path
-      ) {
+      if (existing.workspaceIdentityHash !== identity.hash) {
         throw new Error(
           `workspace "${normalized.key}" identity changed; use a new workspace key or a fresh run`,
         );
       }
-      return Object.freeze({ id: existing.workspaceId });
+      return Object.freeze({
+        id: existing.workspaceId,
+        identityHash: existing.workspaceIdentityHash,
+      });
     }
     this.store.insertAgentWorkspace({
       runId: this.runId,
@@ -288,10 +309,20 @@ export class WorkflowCtx implements Ctx {
       lastAttempt: null,
       retentionPolicy: null,
       workspacePath: normalized.path,
+      sourceKind: "direct-path",
       sourcePath: normalized.path,
+      sourceUri: null,
+      sourceBare: null,
+      sourceMergeEligible: false,
       suppliedPath: normalized.suppliedPath,
       sourceRef: null,
+      resolvedRef: null,
+      checkoutBranch: null,
       baseCommit: null,
+      copyBaselinePath: null,
+      creationErrorJson: null,
+      workspaceIdentityJson: identity.json,
+      workspaceIdentityHash: identity.hash,
       owned: false,
       status: "idle",
       failureSeen: false,
@@ -310,7 +341,7 @@ export class WorkflowCtx implements Ctx {
       discardedAtMs: null,
       removedAtMs: null,
     });
-    return Object.freeze({ id: normalized.key });
+    return Object.freeze({ id: normalized.key, identityHash: identity.hash });
   }
 
   async withWorkspace<T>(
@@ -394,7 +425,9 @@ export class WorkflowCtx implements Ctx {
       ...(spec.denyTools ? { denyTools: spec.denyTools } : {}),
     });
     const caps = tools.capabilities;
-    const workspaceId = this.resolveAgentWorkspaceId(spec.workspace);
+    const workspaceHandle = this.resolveAgentWorkspaceHandle(spec.workspace);
+    const workspaceId = workspaceHandle.id;
+    const workspaceIdentityHash = workspaceHandle.identityHash ?? null;
     const cwd = this.resolveInProcessWorkspace(workspaceId, spec.key);
     const identityFields = {
       prompt: spec.prompt,
@@ -406,6 +439,7 @@ export class WorkflowCtx implements Ctx {
       allowTools: tools.allowTools,
       denyTools: tools.denyTools,
       workspaceId,
+      ...(workspaceIdentityHash !== null ? { workspaceIdentityHash } : {}),
       capabilities: caps,
       secrets: spec.secrets ?? [],
     };
@@ -511,8 +545,8 @@ export class WorkflowCtx implements Ctx {
     }
   }
 
-  private resolveAgentWorkspaceId(handle: WorkspaceHandle | undefined): string {
-    return (handle ?? this.workspaceScope.getStore())?.id ?? DEFAULT_WORKSPACE_ID;
+  private resolveAgentWorkspaceHandle(handle: WorkspaceHandle | undefined): WorkspaceHandle {
+    return handle ?? this.workspaceScope.getStore() ?? { id: DEFAULT_WORKSPACE_ID };
   }
 
   private resolveInProcessWorkspace(workspaceId: string, agentKey: string): string {
@@ -522,6 +556,13 @@ export class WorkflowCtx implements Ctx {
       const existing = this.store.getAgentWorkspace(this.runId, DEFAULT_WORKSPACE_ID);
       if (!existing) {
         const now = Date.now();
+        const identity = workspaceIdentity({
+          key: DEFAULT_WORKSPACE_ID,
+          mode: "direct",
+          ownerKind: "workflow",
+          path,
+          sdkAbiVersion: WORKFLOW_SDK_ABI_VERSION,
+        });
         this.store.insertAgentWorkspace({
           runId: this.runId,
           workspaceId: DEFAULT_WORKSPACE_ID,
@@ -531,10 +572,20 @@ export class WorkflowCtx implements Ctx {
           lastAttempt: null,
           retentionPolicy: null,
           workspacePath: path,
+          sourceKind: "direct-path",
           sourcePath: path,
+          sourceUri: null,
+          sourceBare: null,
+          sourceMergeEligible: false,
           suppliedPath: target,
           sourceRef: null,
+          resolvedRef: null,
+          checkoutBranch: null,
           baseCommit: null,
+          copyBaselinePath: null,
+          creationErrorJson: null,
+          workspaceIdentityJson: identity.json,
+          workspaceIdentityHash: identity.hash,
           owned: false,
           status: "idle",
           failureSeen: false,
@@ -629,10 +680,17 @@ function normalizeWorkspaceSpec(
   | { key: string; mode: "direct"; path: string; suppliedPath: string | null }
   | {
       key: string;
-      mode: "worktree";
+      mode: "worktree" | "copy";
       path: string;
       suppliedPath: string | null;
-      ref: string;
+      ref?: string;
+      retention: WorkspaceRetention;
+    }
+  | {
+      key: string;
+      mode: "clone";
+      repo: string;
+      ref: string | null;
       retention: WorkspaceRetention;
     } {
   const raw = spec as Record<string, unknown>;
@@ -640,15 +698,15 @@ function normalizeWorkspaceSpec(
     throw new Error("WorkspaceSpec.key is required and must be a non-empty string");
   }
   const mode = raw.mode === undefined ? "direct" : raw.mode;
-  if (mode === "copy" || mode === "clone") {
-    throw new Error(`workspace mode ${String(mode)} is reserved for a future Keel release`);
-  }
-  if (mode !== "direct" && mode !== "worktree") {
-    throw new Error(`workspace mode must be direct or worktree, got ${String(mode)}`);
+  if (mode !== "direct" && mode !== "worktree" && mode !== "copy" && mode !== "clone") {
+    throw new Error(`workspace mode must be direct, worktree, copy, or clone, got ${String(mode)}`);
   }
   const suppliedPath = raw.path === undefined ? null : String(raw.path);
   const defaultPath = requireRunTarget(runTarget, `workspace "${raw.key}" run target`);
   if (mode === "direct") {
+    if (raw.repo !== undefined) {
+      throw new Error("direct workspaces do not accept repo");
+    }
     if (raw.retention !== undefined) {
       throw new Error(
         "direct workspaces do not accept retention because Keel does not own the directory",
@@ -664,6 +722,33 @@ function normalizeWorkspaceSpec(
       suppliedPath,
     };
   }
+  if (mode === "clone") {
+    if (raw.path !== undefined) throw new Error("clone workspaces do not accept path; use repo");
+    if (typeof raw.repo !== "string" || raw.repo.trim().length === 0) {
+      throw new Error("clone workspaces require repo");
+    }
+    return {
+      key: raw.key,
+      mode: "clone",
+      repo: raw.repo,
+      ref: typeof raw.ref === "string" && raw.ref.length > 0 ? raw.ref : null,
+      retention:
+        raw.retention === undefined ? "remove" : validateWorkspaceRetentionForCtx(raw.retention),
+    };
+  }
+  if (mode === "copy") {
+    if (raw.repo !== undefined) throw new Error("copy workspaces do not accept repo");
+    if (raw.ref !== undefined) throw new Error("copy workspaces do not accept ref");
+    return {
+      key: raw.key,
+      mode: "copy",
+      path: suppliedPath ?? defaultPath,
+      suppliedPath,
+      retention:
+        raw.retention === undefined ? "remove" : validateWorkspaceRetentionForCtx(raw.retention),
+    };
+  }
+  if (raw.repo !== undefined) throw new Error("worktree workspaces do not accept repo");
   return {
     key: raw.key,
     mode: "worktree",

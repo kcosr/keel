@@ -357,11 +357,14 @@ function currentWorkflowSettings(): WorkflowVisibleSettings {
 
 interface WorkspaceHandle {
   readonly id: string;
+  readonly identityHash?: string;
 }
 
 type WorkspaceSpec =
   | { key: string; mode?: "direct"; path?: string }
-  | { key: string; mode: "worktree"; path?: string; ref?: string; retention?: WorkspaceRetention };
+  | { key: string; mode: "worktree"; path?: string; ref?: string; retention?: WorkspaceRetention }
+  | { key: string; mode: "copy"; path?: string; retention?: WorkspaceRetention }
+  | { key: string; mode: "clone"; repo: string; ref?: string; retention?: WorkspaceRetention };
 
 function isWorkspaceHandle(value: WorkspaceSpec | WorkspaceHandle): value is WorkspaceHandle {
   return (
@@ -377,6 +380,10 @@ function resolveWorkspaceId(handle: WorkspaceHandle | undefined): string {
   return (handle ?? workspaceScope.getStore())?.id ?? DEFAULT_WORKSPACE_ID;
 }
 
+function resolveWorkspaceIdentityHash(handle: WorkspaceHandle | undefined): string | null {
+  return (handle ?? workspaceScope.getStore())?.identityHash ?? null;
+}
+
 async function resolveWorkspace(spec: WorkspaceSpec): Promise<WorkspaceHandle> {
   const reply = await rpc<WorkspaceHandle>({
     type: "workspace",
@@ -384,11 +391,12 @@ async function resolveWorkspace(spec: WorkspaceSpec): Promise<WorkspaceHandle> {
       key: (spec as { key?: string }).key ?? "",
       mode: (spec as { mode?: string }).mode ?? null,
       path: (spec as { path?: string }).path ?? null,
+      repo: (spec as { repo?: string }).repo ?? null,
       ref: (spec as { ref?: string }).ref ?? null,
       retention: (spec as { retention?: WorkspaceRetention }).retention ?? null,
     },
   });
-  return Object.freeze({ id: reply.id });
+  return Object.freeze(reply);
 }
 
 function rejectRemovedWorkspaceFields(spec: unknown, context: string): void {
@@ -566,6 +574,7 @@ const ctx = Object.freeze({
     const caps = tools.capabilities;
     rejectRemovedWorkspaceFields(rawSpec, `ctx.agent("${spec.key}")`);
     const workspaceId = resolveWorkspaceId(spec.workspace);
+    const workspaceIdentityHash = resolveWorkspaceIdentityHash(spec.workspace);
     const identityFields = {
       prompt: spec.prompt,
       provider,
@@ -576,6 +585,7 @@ const ctx = Object.freeze({
       allowTools: tools.allowTools,
       denyTools: tools.denyTools,
       workspaceId,
+      ...(workspaceIdentityHash !== null ? { workspaceIdentityHash } : {}),
       capabilities: caps,
       secrets: spec.secrets ?? [],
     };
@@ -682,6 +692,7 @@ const ctx = Object.freeze({
     const caps = tools.capabilities;
     rejectRemovedWorkspaceFields(rawSessionSpec, `ctx.agentSession("${sessionSpec.key}")`);
     const workspaceId = resolveWorkspaceId(sessionSpec.workspace);
+    const workspaceIdentityHash = resolveWorkspaceIdentityHash(sessionSpec.workspace);
     const identity = {
       agentKey: sessionSpec.key,
       provider,
@@ -692,6 +703,7 @@ const ctx = Object.freeze({
       allowTools: tools.allowTools,
       denyTools: tools.denyTools,
       workspaceId,
+      ...(workspaceIdentityHash !== null ? { workspaceIdentityHash } : {}),
       capabilities: caps,
       secrets: sessionSpec.secrets ?? [],
     };
@@ -735,6 +747,7 @@ const ctx = Object.freeze({
               allowTools: tools.allowTools,
               denyTools: tools.denyTools,
               workspaceId,
+              ...(workspaceIdentityHash !== null ? { workspaceIdentityHash } : {}),
               capabilities: caps,
               secrets: sessionSpec.secrets ?? [],
               participantIdentityHash: identityHash,
@@ -755,6 +768,7 @@ const ctx = Object.freeze({
           allowTools: tools.allowTools,
           denyTools: tools.denyTools,
           workspaceId,
+          ...(workspaceIdentityHash !== null ? { workspaceIdentityHash } : {}),
           capabilities: caps,
           secrets: sessionSpec.secrets ?? [],
           participantIdentityHash: identityHash,

@@ -45,6 +45,7 @@ import {
 import type { WorkflowVisibleSettings } from "../../settings/catalog.ts";
 import { optionalRunTarget, requireRunTarget } from "../../target.ts";
 import {
+  WORKFLOW_SDK_ABI_VERSION,
   defaultDefinitionCacheRoot,
   isWorkflowDefinitionHash,
   materializeWorkflowDefinition,
@@ -52,7 +53,11 @@ import {
   snapshotWorkflowSource,
 } from "../../workflow-definitions/snapshot.ts";
 import type { WorkflowSourceInput } from "../../workflow-definitions/source.ts";
-import { DEFAULT_WORKSPACE_ID, workflowWorkspaceId } from "../../workspace/identity.ts";
+import {
+  DEFAULT_WORKSPACE_ID,
+  workflowWorkspaceId,
+  workspaceIdentity,
+} from "../../workspace/identity.ts";
 import {
   DEFAULT_WORKSPACE_RETENTION,
   cleanupTerminalRunWorkspaces,
@@ -60,7 +65,13 @@ import {
 } from "../../workspace/retention.ts";
 import {
   assertUsableTargetDirectory,
+  classifyCloneSource,
+  copyBaselinePath,
+  createRetainedClone,
+  createRetainedCopy,
   createRetainedWorktree,
+  diffCopyWorkspace,
+  diffGitFinalTree,
   diffWorkspace,
   resolveGitRootTarget,
   resolveUsableDirectory,
@@ -160,6 +171,7 @@ interface WorkspaceSpecMessage {
   key: string;
   mode?: string | null;
   path?: string | null;
+  repo?: string | null;
   ref?: string | null;
   retention?: string | null;
 }
@@ -174,9 +186,10 @@ interface InvocationWorkspace {
   cwd: string;
   workspaceId: string;
   workspacePath: string;
-  sourcePath: string;
+  sourcePath: string | null;
   sourceRef?: string;
   baseCommit?: string;
+  copyBaselinePath?: string;
   mode: AgentWorkspaceRow["mode"];
   owned: boolean;
 }
@@ -222,6 +235,32 @@ function runFinishedPayload(output: unknown): unknown {
   const byteLength = Buffer.byteLength(text, "utf8");
   if (byteLength <= RUN_FINISHED_INLINE_OUTPUT_BYTES) return { output };
   return { outputOmitted: true, outputByteLength: byteLength };
+}
+
+function jsonFileChanges(
+  changes:
+    | Array<{
+        path: string;
+        status: string;
+        oldMode?: string | null;
+        newMode?: string | null;
+        oldSymlinkTarget?: string | null;
+        newSymlinkTarget?: string | null;
+        binary?: boolean;
+        textDiffIncluded?: boolean;
+      }>
+    | undefined,
+): Json {
+  return (changes ?? []).map((change) => ({
+    path: change.path,
+    status: change.status,
+    oldMode: change.oldMode ?? null,
+    newMode: change.newMode ?? null,
+    oldSymlinkTarget: change.oldSymlinkTarget ?? null,
+    newSymlinkTarget: change.newSymlinkTarget ?? null,
+    binary: change.binary ?? false,
+    textDiffIncluded: change.textDiffIncluded ?? false,
+  }));
 }
 
 /** Runs workflows defined as ES modules (default export) in a Worker realm. */
@@ -718,7 +757,7 @@ export class RealmKernel {
     runId: string,
     spec: WorkspaceSpecMessage,
     atMs: number,
-  ): { id: string } {
+  ): { id: string; identityHash: string } {
     if (typeof spec.key !== "string" || spec.key.trim().length === 0) {
       throw new Error("WorkspaceSpec.key is required and must be a non-empty string");
     }
@@ -728,11 +767,10 @@ export class RealmKernel {
       );
     }
     const mode = spec.mode ?? "direct";
-    if (mode === "copy" || mode === "clone") {
-      throw new Error(`workspace mode ${mode} is reserved for a future Keel release`);
-    }
-    if (mode !== "direct" && mode !== "worktree") {
-      throw new Error(`workspace mode must be direct or worktree, got ${String(mode)}`);
+    if (mode !== "direct" && mode !== "worktree" && mode !== "copy" && mode !== "clone") {
+      throw new Error(
+        `workspace mode must be direct, worktree, copy, or clone, got ${String(mode)}`,
+      );
     }
     const runTarget = requireRunTarget(
       this.store.getRun(runId)?.runTarget,
@@ -740,6 +778,7 @@ export class RealmKernel {
     );
     const workspaceId = workflowWorkspaceId(spec.key);
     if (mode === "direct") {
+      if (spec.repo != null) throw new Error("direct workspaces do not accept repo");
       if (spec.retention != null) {
         throw new Error(
           "direct workspaces do not accept retention because Keel does not own the directory",
@@ -748,6 +787,13 @@ export class RealmKernel {
       if (spec.ref != null) throw new Error("direct workspaces do not accept ref");
       const suppliedPath = spec.path ?? null;
       const path = resolveUsableDirectory(suppliedPath ?? runTarget);
+      const identity = workspaceIdentity({
+        key: spec.key,
+        mode: "direct",
+        ownerKind: "workflow",
+        path,
+        sdkAbiVersion: WORKFLOW_SDK_ABI_VERSION,
+      });
       this.store.transaction(() => {
         const existing = this.store.getAgentWorkspace(runId, workspaceId);
         if (!existing) {
@@ -760,10 +806,20 @@ export class RealmKernel {
             lastAttempt: null,
             retentionPolicy: null,
             workspacePath: path,
+            sourceKind: "direct-path",
             sourcePath: path,
+            sourceUri: null,
+            sourceBare: null,
+            sourceMergeEligible: false,
             suppliedPath,
             sourceRef: null,
+            resolvedRef: null,
+            checkoutBranch: null,
             baseCommit: null,
+            copyBaselinePath: null,
+            creationErrorJson: null,
+            workspaceIdentityJson: identity.json,
+            workspaceIdentityHash: identity.hash,
             owned: false,
             status: "idle",
             failureSeen: false,
@@ -784,26 +840,221 @@ export class RealmKernel {
           });
           return;
         }
-        if (
-          existing.mode !== "direct" ||
-          existing.workspacePath !== path ||
-          existing.sourcePath !== path ||
-          existing.retentionPolicy !== null ||
-          existing.owned
-        ) {
+        if (existing.workspaceIdentityHash !== identity.hash) {
           throw new Error(
             `workspace "${spec.key}" identity changed; use a new workspace key or a fresh run`,
           );
         }
       });
-      return { id: workspaceId };
+      return { id: workspaceId, identityHash: identity.hash };
     }
 
     if (!this.workspaceStore) {
       throw new Error(
-        `workspace "${spec.key}" requests mode worktree but the kernel has no workspaceStore configured`,
+        `workspace "${spec.key}" requests mode ${mode} but the kernel has no workspaceStore configured`,
       );
     }
+    if (mode === "copy") {
+      if (spec.repo != null) throw new Error("copy workspaces do not accept repo");
+      if (spec.ref != null) throw new Error("copy workspaces do not accept ref");
+      const suppliedPath = spec.path ?? null;
+      const sourcePath = resolveUsableDirectory(suppliedPath ?? runTarget);
+      const retentionPolicy =
+        spec.retention == null
+          ? DEFAULT_WORKSPACE_RETENTION
+          : validateWorkspaceRetention(spec.retention);
+      const defaultPath = retainedWorkspacePath(this.workspaceStore, runId, workspaceId);
+      const baselinePath = copyBaselinePath(this.workspaceStore, runId, workspaceId);
+      const identity = workspaceIdentity({
+        key: spec.key,
+        mode: "copy",
+        sourcePath,
+        retentionPolicy,
+        sdkAbiVersion: WORKFLOW_SDK_ABI_VERSION,
+      });
+      let needsCreate = false;
+      this.store.transaction(() => {
+        const existing = this.store.getAgentWorkspace(runId, workspaceId);
+        if (!existing) {
+          this.store.insertAgentWorkspace({
+            runId,
+            workspaceId,
+            mode: "copy",
+            ownerKind: "workflow",
+            key: spec.key,
+            lastAttempt: null,
+            retentionPolicy,
+            workspacePath: defaultPath,
+            sourceKind: "local-copy",
+            sourcePath,
+            sourceUri: null,
+            sourceBare: null,
+            sourceMergeEligible: true,
+            suppliedPath,
+            sourceRef: null,
+            resolvedRef: null,
+            checkoutBranch: null,
+            baseCommit: null,
+            copyBaselinePath: baselinePath,
+            creationErrorJson: null,
+            workspaceIdentityJson: identity.json,
+            workspaceIdentityHash: identity.hash,
+            owned: true,
+            status: "creating",
+            failureSeen: false,
+            lastTurnKey: null,
+            lastTurnAttempt: null,
+            activeHolderKind: null,
+            activeHolderKey: null,
+            activeHolderAttempt: null,
+            activeStartedAtMs: null,
+            lastDiffEventSeq: null,
+            lastErrorEventSeq: null,
+            cleanupErrorJson: null,
+            createdAtMs: atMs,
+            updatedAtMs: atMs,
+            mergedAtMs: null,
+            discardedAtMs: null,
+            removedAtMs: null,
+          });
+          needsCreate = true;
+          return;
+        }
+        if (existing.workspaceIdentityHash !== identity.hash) {
+          throw new Error(
+            `workspace "${spec.key}" identity changed; use a new workspace key or a fresh run`,
+          );
+        }
+        if (
+          existing.status === "creating" &&
+          (!existsSync(existing.workspacePath) || !existsSync(existing.copyBaselinePath ?? ""))
+        ) {
+          needsCreate = true;
+        }
+      });
+      if (needsCreate) {
+        try {
+          createRetainedCopy(sourcePath, defaultPath, baselinePath);
+          this.store.updateAgentWorkspace(runId, workspaceId, {
+            status: "idle",
+            updatedAtMs: atMs,
+          });
+        } catch (err) {
+          this.store.updateAgentWorkspace(runId, workspaceId, {
+            status: "abandoned",
+            failureSeen: true,
+            creationErrorJson: JSON.stringify(serializeError(err)),
+            updatedAtMs: this.host.clock(),
+          });
+          throw err;
+        }
+      }
+      return { id: workspaceId, identityHash: identity.hash };
+    }
+    if (mode === "clone") {
+      if (spec.path != null) throw new Error("clone workspaces do not accept path; use repo");
+      if (spec.repo == null || spec.repo.trim().length === 0) {
+        throw new Error("clone workspaces require repo");
+      }
+      const source = classifyCloneSource(spec.repo);
+      const sourceRef = spec.ref && spec.ref.length > 0 ? spec.ref : null;
+      const retentionPolicy =
+        spec.retention == null
+          ? DEFAULT_WORKSPACE_RETENTION
+          : validateWorkspaceRetention(spec.retention);
+      const defaultPath = retainedWorkspacePath(this.workspaceStore, runId, workspaceId);
+      const identity = workspaceIdentity({
+        key: spec.key,
+        mode: "clone",
+        repo: source.repo,
+        sourceKind: source.sourceKind,
+        sourcePath: source.sourcePath,
+        sourceRef,
+        retentionPolicy,
+        sdkAbiVersion: WORKFLOW_SDK_ABI_VERSION,
+      });
+      let needsCreate = false;
+      this.store.transaction(() => {
+        const existing = this.store.getAgentWorkspace(runId, workspaceId);
+        if (!existing) {
+          this.store.insertAgentWorkspace({
+            runId,
+            workspaceId,
+            mode: "clone",
+            ownerKind: "workflow",
+            key: spec.key,
+            lastAttempt: null,
+            retentionPolicy,
+            workspacePath: defaultPath,
+            sourceKind: source.sourceKind,
+            sourcePath: source.sourcePath,
+            sourceUri: source.repo,
+            sourceBare: source.sourceBare,
+            sourceMergeEligible: source.sourceMergeEligible,
+            suppliedPath: null,
+            sourceRef,
+            resolvedRef: null,
+            checkoutBranch: null,
+            baseCommit: null,
+            copyBaselinePath: null,
+            creationErrorJson: null,
+            workspaceIdentityJson: identity.json,
+            workspaceIdentityHash: identity.hash,
+            owned: true,
+            status: "creating",
+            failureSeen: false,
+            lastTurnKey: null,
+            lastTurnAttempt: null,
+            activeHolderKind: null,
+            activeHolderKey: null,
+            activeHolderAttempt: null,
+            activeStartedAtMs: null,
+            lastDiffEventSeq: null,
+            lastErrorEventSeq: null,
+            cleanupErrorJson: null,
+            createdAtMs: atMs,
+            updatedAtMs: atMs,
+            mergedAtMs: null,
+            discardedAtMs: null,
+            removedAtMs: null,
+          });
+          needsCreate = true;
+          return;
+        }
+        if (existing.workspaceIdentityHash !== identity.hash) {
+          throw new Error(
+            `workspace "${spec.key}" identity changed; use a new workspace key or a fresh run`,
+          );
+        }
+        if (existing.status === "creating" && !existsSync(existing.workspacePath))
+          needsCreate = true;
+      });
+      if (needsCreate) {
+        try {
+          const result = createRetainedClone(source, defaultPath, sourceRef);
+          this.store.updateAgentWorkspace(runId, workspaceId, {
+            status: "idle",
+            baseCommit: result.baseCommit,
+            checkoutBranch: result.checkoutBranch,
+            resolvedRef: result.resolvedRef,
+            sourceBare: result.sourceBare,
+            sourceMergeEligible: result.sourceMergeEligible,
+            updatedAtMs: atMs,
+          });
+        } catch (err) {
+          this.store.updateAgentWorkspace(runId, workspaceId, {
+            status: "abandoned",
+            failureSeen: true,
+            creationErrorJson: JSON.stringify(serializeError(err)),
+            updatedAtMs: this.host.clock(),
+          });
+          throw err;
+        }
+      }
+      return { id: workspaceId, identityHash: identity.hash };
+    }
+
+    if (spec.repo != null) throw new Error("worktree workspaces do not accept repo");
     const suppliedPath = spec.path ?? null;
     const sourceRef = spec.ref && spec.ref.length > 0 ? spec.ref : "HEAD";
     const retentionPolicy =
@@ -812,6 +1063,14 @@ export class RealmKernel {
         : validateWorkspaceRetention(spec.retention);
     const gitTarget = resolveGitRootTarget(suppliedPath ?? runTarget, sourceRef);
     const defaultPath = retainedWorkspacePath(this.workspaceStore, runId, workspaceId);
+    const identity = workspaceIdentity({
+      key: spec.key,
+      mode: "worktree",
+      sourcePath: gitTarget.target,
+      sourceRef,
+      retentionPolicy,
+      sdkAbiVersion: WORKFLOW_SDK_ABI_VERSION,
+    });
     let needsCreate = false;
     this.store.transaction(() => {
       const existing = this.store.getAgentWorkspace(runId, workspaceId);
@@ -825,10 +1084,20 @@ export class RealmKernel {
           lastAttempt: null,
           retentionPolicy,
           workspacePath: defaultPath,
+          sourceKind: "worktree-git",
           sourcePath: gitTarget.target,
+          sourceUri: null,
+          sourceBare: null,
+          sourceMergeEligible: true,
           suppliedPath,
           sourceRef,
+          resolvedRef: sourceRef,
+          checkoutBranch: null,
           baseCommit: gitTarget.baseCommit,
+          copyBaselinePath: null,
+          creationErrorJson: null,
+          workspaceIdentityJson: identity.json,
+          workspaceIdentityHash: identity.hash,
           owned: true,
           status: "creating",
           failureSeen: false,
@@ -850,13 +1119,7 @@ export class RealmKernel {
         needsCreate = true;
         return;
       }
-      if (
-        existing.mode !== "worktree" ||
-        existing.sourcePath !== gitTarget.target ||
-        existing.sourceRef !== sourceRef ||
-        existing.retentionPolicy !== retentionPolicy ||
-        !existing.owned
-      ) {
+      if (existing.workspaceIdentityHash !== identity.hash) {
         throw new Error(
           `workspace "${spec.key}" identity changed; use a new workspace key or a fresh run`,
         );
@@ -874,9 +1137,19 @@ export class RealmKernel {
           status: "creating",
           workspacePath: defaultPath,
           sourcePath: gitTarget.target,
+          sourceKind: "worktree-git",
+          sourceUri: null,
+          sourceBare: null,
+          sourceMergeEligible: true,
           suppliedPath,
           sourceRef,
+          resolvedRef: sourceRef,
+          checkoutBranch: null,
           baseCommit: gitTarget.baseCommit,
+          copyBaselinePath: null,
+          creationErrorJson: null,
+          workspaceIdentityJson: identity.json,
+          workspaceIdentityHash: identity.hash,
           retentionPolicy,
           failureSeen: false,
           lastDiffEventSeq: null,
@@ -906,7 +1179,7 @@ export class RealmKernel {
         throw err;
       }
     }
-    return { id: workspaceId };
+    return { id: workspaceId, identityHash: identity.hash };
   }
 
   private ensureDefaultWorkspace(runId: string, atMs: number): AgentWorkspaceRow {
@@ -915,6 +1188,13 @@ export class RealmKernel {
       "run default workspace target",
     );
     const path = resolveUsableDirectory(runTarget);
+    const identity = workspaceIdentity({
+      key: DEFAULT_WORKSPACE_ID,
+      mode: "direct",
+      ownerKind: "workflow",
+      path,
+      sdkAbiVersion: WORKFLOW_SDK_ABI_VERSION,
+    });
     let row = this.store.getAgentWorkspace(runId, DEFAULT_WORKSPACE_ID);
     if (!row) {
       this.store.insertAgentWorkspace({
@@ -926,10 +1206,20 @@ export class RealmKernel {
         lastAttempt: null,
         retentionPolicy: null,
         workspacePath: path,
+        sourceKind: "direct-path",
         sourcePath: path,
+        sourceUri: null,
+        sourceBare: null,
+        sourceMergeEligible: false,
         suppliedPath: runTarget,
         sourceRef: null,
+        resolvedRef: null,
+        checkoutBranch: null,
         baseCommit: null,
+        copyBaselinePath: null,
+        creationErrorJson: null,
+        workspaceIdentityJson: identity.json,
+        workspaceIdentityHash: identity.hash,
         owned: false,
         status: "idle",
         failureSeen: false,
@@ -951,7 +1241,7 @@ export class RealmKernel {
       row = this.store.getAgentWorkspace(runId, DEFAULT_WORKSPACE_ID);
     }
     if (!row) throw new Error("failed to create run default workspace");
-    if (row.mode !== "direct" || row.workspacePath !== path || row.sourcePath !== path) {
+    if (row.workspaceIdentityHash !== identity.hash) {
       throw new Error("run default workspace identity changed; refusing to continue");
     }
     return row;
@@ -987,6 +1277,17 @@ export class RealmKernel {
         updatedAtMs: this.host.clock(),
       });
       throw new Error(`workspace "${row.workspaceId}" is missing at ${row.workspacePath}`);
+    }
+    if (row.mode === "copy" && !existsSync(row.copyBaselinePath ?? "")) {
+      this.store.updateAgentWorkspace(runId, row.workspaceId, {
+        status: "abandoned",
+        failureSeen: true,
+        updatedAtMs: this.host.clock(),
+      });
+      throw new Error(`copy workspace "${row.workspaceId}" is missing baseline snapshot`);
+    }
+    if (row.mode === "clone" && !row.baseCommit) {
+      throw new Error(`clone workspace "${row.workspaceId}" is missing base commit`);
     }
     this.store.transaction(() => {
       const current = this.store.getAgentWorkspace(runId, row.workspaceId);
@@ -1027,6 +1328,7 @@ export class RealmKernel {
       sourcePath: row.sourcePath,
       ...(row.sourceRef ? { sourceRef: row.sourceRef } : {}),
       ...(row.baseCommit ? { baseCommit: row.baseCommit } : {}),
+      ...(row.copyBaselinePath ? { copyBaselinePath: row.copyBaselinePath } : {}),
       mode: row.mode,
       owned: true,
     };
@@ -1118,8 +1420,10 @@ export class RealmKernel {
         cwd: string;
         workspaceId?: string;
         workspacePath?: string;
-        workspaceTarget?: string;
+        workspaceTarget?: string | null;
         workspaceBaseCommit?: string;
+        workspaceCopyBaselinePath?: string;
+        workspaceMode?: AgentWorkspaceRow["mode"];
         workspaceOwned?: boolean;
         resumeToken?: string;
       } {
@@ -1260,7 +1564,11 @@ export class RealmKernel {
       workspacePath: workspace.workspacePath,
       workspaceTarget: workspace.sourcePath,
       workspaceOwned: workspace.owned,
+      workspaceMode: workspace.mode,
       ...(workspace.baseCommit ? { workspaceBaseCommit: workspace.baseCommit } : {}),
+      ...(workspace.copyBaselinePath
+        ? { workspaceCopyBaselinePath: workspace.copyBaselinePath }
+        : {}),
       ...(preflight.resumeToken ? { resumeToken: preflight.resumeToken } : {}),
     };
   }
@@ -1285,7 +1593,12 @@ export class RealmKernel {
   ): { events: DurableAgentEvent[]; status: "idle" | "diff_error" } {
     if (!workspace.owned) return { events: [], status: "idle" };
     try {
-      const bundle = diffWorkspace(workspace.workspacePath);
+      const bundle =
+        workspace.mode === "copy"
+          ? diffCopyWorkspace(workspace.workspacePath, workspace.copyBaselinePath ?? "")
+          : workspace.mode === "clone"
+            ? diffGitFinalTree(workspace.workspacePath, workspace.baseCommit ?? "HEAD")
+            : diffWorkspace(workspace.workspacePath);
       return {
         status: "idle",
         events: [
@@ -1297,12 +1610,15 @@ export class RealmKernel {
               workspacePath: workspace.workspacePath,
               sourcePath: workspace.sourcePath,
               baseCommit: workspace.baseCommit ?? null,
+              mode: workspace.mode,
+              diffKind: bundle.diffKind ?? "git-patch",
               modified: bundle.modified,
               added: bundle.added,
               deleted: bundle.deleted,
               omittedPathCounts: { ...bundle.omittedPathCounts },
               pathLimit: bundle.pathLimit,
               contentDiff: bundle.contentDiff,
+              fileChanges: jsonFileChanges(bundle.fileChanges),
             },
           },
         ],
@@ -1384,14 +1700,21 @@ export class RealmKernel {
       attempt: number;
       workspaceId?: string;
       workspacePath?: string;
-      workspaceTarget?: string;
+      workspaceTarget?: string | null;
       workspaceBaseCommit?: string;
+      workspaceCopyBaselinePath?: string;
+      workspaceMode?: AgentWorkspaceRow["mode"];
       workspaceOwned?: boolean;
     },
   ): { events: DurableAgentEvent[]; status: "idle" | "diff_error" } {
     if (!begun.workspaceOwned || !begun.workspacePath) return { events: [], status: "idle" };
     try {
-      const bundle = diffWorkspace(begun.workspacePath);
+      const bundle =
+        begun.workspaceMode === "copy"
+          ? diffCopyWorkspace(begun.workspacePath, begun.workspaceCopyBaselinePath ?? "")
+          : begun.workspaceMode === "clone"
+            ? diffGitFinalTree(begun.workspacePath, begun.workspaceBaseCommit ?? "HEAD")
+            : diffWorkspace(begun.workspacePath);
       return {
         status: "idle",
         events: [
@@ -1405,12 +1728,15 @@ export class RealmKernel {
               workspacePath: begun.workspacePath,
               sourcePath: begun.workspaceTarget ?? null,
               baseCommit: begun.workspaceBaseCommit ?? null,
+              mode: begun.workspaceMode ?? "worktree",
+              diffKind: bundle.diffKind ?? "git-patch",
               modified: bundle.modified,
               added: bundle.added,
               deleted: bundle.deleted,
               omittedPathCounts: { ...bundle.omittedPathCounts },
               pathLimit: bundle.pathLimit,
               contentDiff: bundle.contentDiff,
+              fileChanges: jsonFileChanges(bundle.fileChanges),
             },
           },
         ],

@@ -228,6 +228,67 @@ describe("ctx.agentSession", () => {
     expect(provider.calls.map((call) => call.timeoutMs)).toEqual([1234, 1234]);
   });
 
+  test("session turn identity ignores default timeout and stall settings", async () => {
+    const store = JournalStore.memory();
+    const provider = new RecordingSessionProvider();
+    let nextRun = 1;
+    const k = new TargetedRealmKernel(store, {
+      idgen: () => `run-settings-identity-${nextRun++}`,
+      clock: () => 1,
+      rng: () => 0.5,
+      agents: new AgentProviderRegistry().register(provider),
+    });
+    const workflow = {
+      source: `
+        import { type Ctx } from "@kcosr/keel";
+        export default async function wf(ctx: Ctx): Promise<string> {
+          const primary = ctx.agentSession({ key: "primary", provider: "session", toolPolicy: "read-only" });
+          return await primary.turn({ key: "one", prompt: "one" });
+        }
+      `,
+      name: "settings-session-identity",
+    };
+
+    store.putDaemonSettingRow({
+      key: "agent.defaultTimeoutMs",
+      valueJson: "1234",
+      nowMs: 1,
+    });
+    store.putDaemonSettingRow({
+      key: "agent.defaultStallRetries",
+      valueJson: "0",
+      nowMs: 1,
+    });
+    const first = await k.run<string>(workflow, null);
+    expect(first.status).toBe("finished");
+
+    store.putDaemonSettingRow({
+      key: "agent.defaultTimeoutMs",
+      valueJson: "9999",
+      nowMs: 2,
+    });
+    store.putDaemonSettingRow({
+      key: "agent.defaultStallRetries",
+      valueJson: "7",
+      nowMs: 2,
+    });
+    const second = await k.run<string>(workflow, null);
+    expect(second.status).toBe("finished");
+
+    const turnRows = store.db
+      .query<{ version: string; input_hash: string }, []>(
+        `SELECT version, input_hash
+         FROM journal
+         WHERE stable_key = '__session.primary.one'
+         ORDER BY run_id ASC`,
+      )
+      .all();
+    expect(turnRows).toHaveLength(2);
+    expect(turnRows[0]?.version).toBe(turnRows[1]?.version);
+    expect(turnRows[0]?.input_hash).toBe(turnRows[1]?.input_hash);
+    expect(provider.calls.map((call) => call.timeoutMs)).toEqual([1234, 9999]);
+  });
+
   test("missing settings snapshot fails a session run and releases the active guard", async () => {
     const store = JournalStore.memory();
     const provider = new RecordingSessionProvider();

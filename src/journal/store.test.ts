@@ -340,7 +340,7 @@ describe("JournalStore (in-memory)", () => {
     expect(store.getAgentSessionWorkspace("r1", "b")).toBeNull();
   });
 
-  test("agent session workspace status helpers transition only active lifecycle states", () => {
+  test("agent session workspace status helpers transition only intended lifecycle states", () => {
     for (const status of [
       "creating",
       "active",
@@ -354,23 +354,16 @@ describe("JournalStore (in-memory)", () => {
       store.insertAgentSessionWorkspace(workspaceRow("r", status, { status, updatedAtMs: 100 }));
     }
 
-    store.markRunWorkspacesPendingReview("r", 200);
-    expect(store.getAgentSessionWorkspace("r", "creating")?.status).toBe("pending_review");
-    expect(store.getAgentSessionWorkspace("r", "active")?.status).toBe("pending_review");
-    expect(store.getAgentSessionWorkspace("r", "idle")?.status).toBe("pending_review");
-    expect(store.getAgentSessionWorkspace("r", "creating")?.updatedAtMs).toBe(200);
+    store.reopenPendingReviewWorkspaces("r", 300);
+    expect(store.getAgentSessionWorkspace("r", "creating")?.status).toBe("creating");
+    expect(store.getAgentSessionWorkspace("r", "active")?.status).toBe("active");
+    expect(store.getAgentSessionWorkspace("r", "idle")?.status).toBe("idle");
+    expect(store.getAgentSessionWorkspace("r", "pending_review")?.status).toBe("idle");
+    expect(store.getAgentSessionWorkspace("r", "pending_review")?.updatedAtMs).toBe(300);
     expect(store.getAgentSessionWorkspace("r", "diff_error")?.status).toBe("diff_error");
     expect(store.getAgentSessionWorkspace("r", "merged")?.status).toBe("merged");
     expect(store.getAgentSessionWorkspace("r", "discarded")?.status).toBe("discarded");
     expect(store.getAgentSessionWorkspace("r", "abandoned")?.status).toBe("abandoned");
-
-    store.reopenPendingReviewWorkspaces("r", 300);
-    expect(store.getAgentSessionWorkspace("r", "creating")?.status).toBe("idle");
-    expect(store.getAgentSessionWorkspace("r", "active")?.status).toBe("idle");
-    expect(store.getAgentSessionWorkspace("r", "idle")?.status).toBe("idle");
-    expect(store.getAgentSessionWorkspace("r", "pending_review")?.status).toBe("idle");
-    expect(store.getAgentSessionWorkspace("r", "creating")?.updatedAtMs).toBe(300);
-    expect(store.getAgentSessionWorkspace("r", "diff_error")?.status).toBe("diff_error");
 
     expect(
       store

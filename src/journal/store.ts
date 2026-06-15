@@ -667,16 +667,6 @@ export class JournalStore {
       .run(params);
   }
 
-  markRunWorkspacesPendingReview(runId: string, atMs: number): void {
-    this.db
-      .query(
-        `UPDATE agent_workspaces
-         SET status = 'pending_review', updated_at_ms = ?
-         WHERE run_id = ? AND status IN ('idle', 'active', 'creating')`,
-      )
-      .run(atMs, runId);
-  }
-
   reopenPendingReviewWorkspaces(runId: string, atMs: number): void {
     this.db
       .query(

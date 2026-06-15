@@ -51,7 +51,7 @@ describe.if(LIVE)("LIVE review workload rehearsal", () => {
         }
       },
     });
-    await k1.run(reviewWorkflow, input, { name: "review-workload" }).catch(() => null);
+    await k1.run(reviewWorkflow, input, { name: "review-workload", target: targetRoot }).catch(() => null);
     expect(crashed).toBe(true);
     expect(store.getRun("tn")?.status).toBe("running"); // resumable
 

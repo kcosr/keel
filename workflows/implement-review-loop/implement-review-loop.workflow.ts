@@ -27,6 +27,8 @@ type ImplementReviewInput = {
   spec: string;
   task?: string;
   maxRounds?: number;
+  completionMode?: "auto" | "park-before-complete";
+  completionSignalName?: string;
   implementerProvider?: string;
   implementerModel?: string;
   implementerReasoning?: string;
@@ -43,6 +45,12 @@ type Round = {
   round: number;
   implementation: ImplementationResult;
   review: Review;
+};
+
+type CompletionSignal = {
+  action: "complete" | "continue";
+  instructions?: string;
+  reviewFocus?: string;
 };
 
 const FindingSchema = {
@@ -98,6 +106,7 @@ export default async function implementReviewLoop(
   blockedImplementation?: ImplementationResult;
 }> {
   const maxRounds = clampRounds(input.maxRounds ?? DEFAULT_MAX_ROUNDS);
+  const completionSignalName = input.completionSignalName ?? "implementation-completion";
   const implementer = ctx.agentSession({
     key: "implementer",
     provider: input.implementerProvider ?? "pi",
@@ -117,18 +126,23 @@ export default async function implementReviewLoop(
 
   const rounds: Round[] = [];
   let findings: Finding[] = [];
+  let followUp: CompletionSignal | undefined;
 
   for (let round = 1; round <= maxRounds; round++) {
     ctx.phase(`Implement ${round}`);
+    const followUpForRound = followUp;
     const implementation = await implementer.turn({
       key: round === 1 ? "implement-1" : `fix-${round}`,
       prompt:
         round === 1
           ? initialImplementationPrompt(input)
-          : fixImplementationPrompt(input, round, findings),
+          : followUpForRound
+            ? followUpImplementationPrompt(input, round, followUpForRound)
+            : fixImplementationPrompt(input, round, findings),
       schema: ImplementationSchema,
       lenient: true,
     });
+    followUp = undefined;
 
     ctx.log(`implementation.${round}`, implementation);
     if (implementation.status === "blocked") {
@@ -143,7 +157,7 @@ export default async function implementReviewLoop(
     ctx.phase(`Review ${round}`);
     const review = await reviewer.turn({
       key: `review-${round}`,
-      prompt: reviewPrompt(input, round, implementation, findings),
+      prompt: reviewPrompt(input, round, implementation, findings, followUpForRound?.reviewFocus),
       schema: ReviewSchema,
       lenient: true,
     });
@@ -152,11 +166,39 @@ export default async function implementReviewLoop(
     rounds.push({ round, implementation, review });
     findings = review.findings;
     if (findings.length === 0) {
+      if (input.completionMode === "park-before-complete") {
+        ctx.phase("Awaiting implementation completion");
+        const completion = await ctx.signal<CompletionSignal>(completionSignalName);
+        if (completion.action === "continue") {
+          followUp = completion;
+          findings = [];
+          continue;
+        }
+      }
       return { status: "clean", rounds, remainingFindings: [] };
     }
   }
 
   return { status: "max-rounds-reached", rounds, remainingFindings: findings };
+}
+
+function followUpImplementationPrompt(
+  input: ImplementReviewInput,
+  round: number,
+  followUp: CompletionSignal,
+): string {
+  return `Perform a human-requested follow-up implementation round ${round}.
+
+Repository: ${input.repository}
+Spec: ${input.spec}
+${input.task ? `Task: ${input.task}\n` : ""}${input.verificationCommand ? `Verification command: ${input.verificationCommand}\n` : ""}
+Follow-up instructions:
+${followUp.instructions ?? "Continue implementation review with another focused pass."}
+
+Modify files only inside the repository. Keep the change scoped to the spec and
+the follow-up instructions. Run focused verification when practical. Return a
+concise implementation summary, changed files, verification performed, and any
+notes.`;
 }
 
 function initialImplementationPrompt(input: ImplementReviewInput): string {
@@ -194,12 +236,15 @@ function reviewPrompt(
   round: number,
   implementation: ImplementationResult,
   priorFindings: Finding[],
+  followUpReviewFocus: string | undefined,
 ): string {
+  const focus = followUpReviewFocus ?? input.reviewFocus;
   return `Review implementation round ${round}.
 
 Repository: ${input.repository}
 Spec: ${input.spec}
-${input.task ? `Task: ${input.task}\n` : ""}${input.reviewFocus ? `Focus: ${input.reviewFocus}\n` : ""}
+${input.task ? `Task: ${input.task}\n` : ""}${focus ? `Focus: ${focus}\n` : ""}
+${input.completionMode === "park-before-complete" ? "The run may park after a clean review for a human completion or follow-up signal.\n" : ""}
 Implementation summary:
 ${JSON.stringify(implementation, null, 2)}
 ${priorFindings.length > 0 ? `\nPrior findings that should have been fixed:\n${JSON.stringify(priorFindings, null, 2)}\n` : ""}

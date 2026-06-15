@@ -8,7 +8,7 @@ correspondence to the spec file.
 The invoking creator updates the main design content outside the workflow, then
 signals this run to resume reviewer continuity.
 
-Launch:
+Launch for manual back-and-forth:
 
 ```bash
 keel launch --detach workflows/spec-review-loop/spec-review-loop.workflow.ts \
@@ -30,6 +30,34 @@ For iterative spec work, prefer `stopWhenClean: false` with a higher
 `maxReviews` such as `10`. That keeps the durable reviewer session parked after a
 clean review so the creator can make follow-up changes and re-invoke the same
 reviewer conversation. Stop the run explicitly when no further review is needed.
+
+For agent/orchestrator use, prefer watching the run after launch instead of
+ending the turn at the detached run id:
+
+```bash
+keel watch <run-id> --output text
+```
+
+Use `completionMode: "park-before-complete"` with the default
+`stopWhenClean: true` when the reviewer should stop at a clean review but the
+creator should decide whether to complete or ask for one more pass. In that mode,
+the workflow parks on `spec-review-completion` after a clean review. Complete it
+with:
+
+```bash
+KEEL_RUN_CAP=kc_run_... keel signal <run-id> spec-review-completion '{
+  "action": "complete"
+}'
+```
+
+Or ask the same reviewer session for another review:
+
+```bash
+KEEL_RUN_CAP=kc_run_... keel signal <run-id> spec-review-completion '{
+  "action": "continue",
+  "summary": "I updated the acceptance criteria after the clean review; please re-check them."
+}'
+```
 
 Signal after the creator updates the spec:
 
@@ -84,4 +112,6 @@ No round label is required; the timestamp and identity preserve history.
 | `reviewerToolPolicy` | no | Defaults to `workspace-write` so correspondence can be appended. |
 | `maxReviews` | no | Maximum reviewer turns. Defaults to `3`, capped at `20`. |
 | `signalName` | no | Defaults to `spec-review-cycle`. |
+| `completionMode` | no | `"auto"` by default. Use `"park-before-complete"` to wait for a final completion/continue signal after a clean review. |
+| `completionSignalName` | no | Signal name for parked clean completion. Defaults to `spec-review-completion`. |
 | `stopWhenClean` | no | Defaults to `true`. |

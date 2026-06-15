@@ -26,12 +26,19 @@ type SpecReviewInput = {
   reviewerToolPolicy?: ToolPolicy;
   maxReviews?: number;
   signalName?: string;
+  completionMode?: "auto" | "park-before-complete";
+  completionSignalName?: string;
   stopWhenClean?: boolean;
 };
 
 type CreatorSignal = {
   summary: string;
   done?: boolean;
+};
+
+type CompletionSignal = {
+  action: "complete" | "continue";
+  summary?: string;
 };
 
 type ReviewEntry = {
@@ -79,6 +86,7 @@ export default async function specReviewLoop(
 }> {
   const maxReviews = clampCount(input.maxReviews ?? DEFAULT_MAX_REVIEWS);
   const signalName = input.signalName ?? "spec-review-cycle";
+  const completionSignalName = input.completionSignalName ?? "spec-review-completion";
   const stopWhenClean = input.stopWhenClean ?? true;
   const identity = input.reviewerIdentity ?? reviewerIdentity(input);
   const reviewer = ctx.agentSession({
@@ -91,10 +99,14 @@ export default async function specReviewLoop(
 
   const reviews: ReviewEntry[] = [];
   let findings: Finding[] = [];
+  let pendingCreatorSignal: CreatorSignal | undefined;
 
   for (let reviewNumber = 1; reviewNumber <= maxReviews; reviewNumber++) {
     let creatorSignal: CreatorSignal | undefined;
-    if (reviewNumber > 1) {
+    if (pendingCreatorSignal) {
+      creatorSignal = pendingCreatorSignal;
+      pendingCreatorSignal = undefined;
+    } else if (reviewNumber > 1) {
       ctx.phase(`Awaiting spec update ${reviewNumber}`);
       creatorSignal = await ctx.signal<CreatorSignal>(signalName);
       if (creatorSignal.done === true) {
@@ -119,6 +131,18 @@ export default async function specReviewLoop(
     });
     findings = review.findings;
     if (stopWhenClean && review.status === "clean" && findings.length === 0) {
+      if (input.completionMode === "park-before-complete") {
+        ctx.phase("Awaiting spec review completion");
+        const completion = await ctx.signal<CompletionSignal>(completionSignalName);
+        if (completion.action === "continue") {
+          pendingCreatorSignal = {
+            summary:
+              completion.summary ??
+              "Creator requested another review pass after the clean review.",
+          };
+          continue;
+        }
+      }
       return { status: "clean", reviews, remainingFindings: [] };
     }
   }

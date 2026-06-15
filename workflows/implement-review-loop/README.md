@@ -11,7 +11,7 @@ conversation to park for manual re-invocation, use
 [`../iterative-review/`](../iterative-review/) with `stopWhenClean: false` and a
 higher `maxRounds` such as `10`.
 
-Launch:
+Launch for autonomous completion:
 
 ```bash
 keel launch --detach workflows/implement-review-loop/implement-review-loop.workflow.ts \
@@ -32,6 +32,34 @@ keel launch --detach workflows/implement-review-loop/implement-review-loop.workf
     "reviewerToolPolicy": "read-only",
     "verificationCommand": "bun test src/kernel/realm/agent-session.test.ts"
   }'
+```
+
+For agent/orchestrator use, prefer watching the run after launch instead of
+ending the turn at the detached run id:
+
+```bash
+keel watch <run-id> --output text
+```
+
+Use `completionMode: "park-before-complete"` when a human or orchestrator should
+make the final call after a clean review. In that mode, the workflow parks on
+`implementation-completion` instead of returning immediately. Complete it with:
+
+```bash
+KEEL_RUN_CAP=kc_run_... keel signal <run-id> implementation-completion '{
+  "action": "complete"
+}'
+```
+
+Or request another implementation/review round with the same implementer and
+reviewer sessions:
+
+```bash
+KEEL_RUN_CAP=kc_run_... keel signal <run-id> implementation-completion '{
+  "action": "continue",
+  "instructions": "Before completion, add a migration test for retained diff_error rows.",
+  "reviewFocus": "Check the new migration test and any touched cleanup paths."
+}'
 ```
 
 ## Safety Notes
@@ -57,6 +85,8 @@ keel launch --detach workflows/implement-review-loop/implement-review-loop.workf
 | `spec` | yes | Absolute path to the implementation spec or design note. |
 | `task` | no | Additional task wording for the implementer and reviewer. |
 | `maxRounds` | no | Maximum implement/review rounds. Defaults to `3`, capped at `10`. |
+| `completionMode` | no | `"auto"` by default. Use `"park-before-complete"` to wait for a final completion/continue signal after a clean review. |
+| `completionSignalName` | no | Signal name for parked clean completion. Defaults to `implementation-completion`. |
 | `implementerProvider` | no | Implementer provider. Defaults to `pi`. |
 | `implementerModel` | no | Implementer model name. |
 | `implementerReasoning` | no | Implementer reasoning effort. Defaults to `xhigh`. |

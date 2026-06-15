@@ -126,6 +126,9 @@
   `KEEL_CAP_DIR`.
 
 ### Fixed
+- Codex remote app-server transports now accept Desktop app-server response and
+  notification frames that omit the optional `jsonrpc: "2.0"` marker while still
+  rejecting malformed frames.
 - `keel watch` and attached lifecycle commands no longer exit on stale
   historical parked/terminal events when replaying a run that later resumed.
 - The live review workload fixture now uses a valid repository target when

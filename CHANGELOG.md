@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 ### Added
+- Typed daemon settings catalog with admin RPC/CLI management (`keel settings ...`), JSON value parsing, validation/check diagnostics, optimistic generation guards, and read-only snapshotted defaults such as `agent.defaultOnFailure`.
+- Journal schema v17 stores daemon setting overrides plus immutable run setting snapshot sets; migrating older journals backfills explicit workflow-visible default settings for every run and warning events for non-terminal pre-v17 runs.
 - Persistent daemon-owned agent profile catalog with admin RPC/CLI management (`keel profiles ...`), validation/check diagnostics, programmatic-profile coexistence, and frozen per-run profile snapshots for deterministic replay.
 - Journal schema v16 stores catalog profiles plus immutable run profile snapshot sets; migrating older journals backfills explicit empty snapshots and warning events for non-terminal pre-v16 runs.
 - First-cut `codex` app-server agent provider with stdio, WebSocket, and WebSocket-over-Unix-socket transports via `providerConfig.codex.transport`. Codex requires explicit unrestricted tools (`toolPolicy: "unrestricted"`), uses Keel's resolved workspace cwd, captures app-server thread ids as session tokens, and supports opt-in raw protocol logging with `KEEL_CODEX_RAW_LOG`.
@@ -49,6 +51,8 @@
   `run.interrupted` audit events and best-effort active worker/provider abort.
 
 ### Changed
+- `ctx.agent` and `ctx.agentSession().turn` default `maxRetries`, `lenient`, `onFailure`, `timeoutMs`, and `stallRetries` from each run's settings snapshot after explicit workflow and profile values, so resume/retry/rewind/fork do not observe later daemon setting edits. Codex `turn/completed` waits now receive the host-resolved per-call agent timeout.
+- `keel gc` / `gcDefinitions` use `workflowDefinition.gcTtlMs` as the default workflow definition TTL when the request does not supply `ttlMs`; `codex.rpcTimeoutMs` and `codex.connectTimeoutMs` apply when the Codex provider is constructed, normally at daemon restart.
 - Reusable implementation/review workflows now resolve `input.repository` to a
   direct workspace, defaulting to the run target when omitted, so prompts and
   agent cwd stay aligned while still supporting manually-created git worktrees

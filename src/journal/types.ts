@@ -246,6 +246,14 @@ export interface AgentProfileCatalogRow {
   updatedAtMs: number;
 }
 
+export interface DaemonSettingCatalogRow {
+  key: string;
+  valueJson: string;
+  generation: number;
+  createdAtMs: number;
+  updatedAtMs: number;
+}
+
 export interface RunProfileSnapshotSetRow {
   runId: string;
   catalogHash: string;
@@ -258,6 +266,23 @@ export interface RunProfileSnapshotRow {
   source: AgentProfileSource;
   configJson: string;
   configHash: string;
+  catalogGeneration: number | null;
+  capturedAtMs: number;
+}
+
+export interface RunSettingSnapshotSetRow {
+  runId: string;
+  settingsHash: string;
+  capturedAtMs: number;
+}
+
+export interface RunSettingSnapshotRow {
+  runId: string;
+  key: string;
+  class: "workflow-visible" | "daemon-operational";
+  valueJson: string;
+  defaultJson: string;
+  source: "catalog" | "default";
   catalogGeneration: number | null;
   capturedAtMs: number;
 }

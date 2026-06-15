@@ -82,6 +82,13 @@ Postgres-dialect discipline).
   profile catalog in `run_profile_snapshot_sets`/`run_profile_snapshots` so
   replay/resume never reads mutable catalog state. Profile catalog RPC/CLI
   operations require daemon admin authorization.
+- **Daemon settings are a typed catalog, not an arbitrary config bag.** Journal
+  schema v17 stores set daemon setting rows in `daemon_settings` and freezes the
+  complete workflow-visible default set per run in
+  `run_setting_snapshot_sets`/`run_setting_snapshots`. Agent default resolution
+  is `workflow spec > named profile > run settings snapshot`; a missing or
+  partial run settings snapshot is corrupt durable state and fails closed rather
+  than falling back to live code defaults.
 - **One surface is programmatic-only on the bundled daemon:** secret injection
   (`SecretStore`) requires constructing the
   daemon/kernel in code; the CLI wires capability credentials

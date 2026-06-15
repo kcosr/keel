@@ -479,12 +479,27 @@ describe("capability auth", () => {
         /different resource/,
       );
       await expect(scoped.listRuns()).rejects.toThrow(/admin/);
+      await expect(scoped.listSettings()).rejects.toThrow(/admin/);
+      await expect(scoped.getSetting("agent.defaultTimeoutMs")).rejects.toThrow(/admin/);
+      await expect(
+        scoped.putSetting({ key: "agent.defaultTimeoutMs", value: 7200000 }),
+      ).rejects.toThrow(/admin/);
+      await expect(scoped.deleteSetting({ key: "agent.defaultTimeoutMs" })).rejects.toThrow(
+        /admin/,
+      );
+      await expect(
+        scoped.checkSetting({ key: "agent.defaultTimeoutMs", value: 7200000 }),
+      ).rejects.toThrow(/admin/);
 
       const admin = await DaemonClient.connect(socketPath);
       await admin.authenticate(ADMIN_TOKEN);
       expect((await admin.listRuns()).map((r) => r.runId).sort()).toEqual(
         [first.runId, second.runId].sort(),
       );
+      expect(await admin.getSetting("agent.defaultTimeoutMs")).toMatchObject({
+        key: "agent.defaultTimeoutMs",
+        value: 3600000,
+      });
       launcher.close();
       scoped.close();
       admin.close();

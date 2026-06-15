@@ -38,6 +38,11 @@ import type {
   RunStatus,
 } from "../../journal/types.ts";
 import type { WorkflowProvenance } from "../../rpc/contract.ts";
+import {
+  captureWorkflowVisibleSettingsSnapshot,
+  workflowVisibleSettingsFromSnapshot,
+} from "../../settings/catalog.ts";
+import type { WorkflowVisibleSettings } from "../../settings/catalog.ts";
 import { optionalRunTarget, requireRunTarget } from "../../target.ts";
 import {
   defaultDefinitionCacheRoot,
@@ -140,6 +145,13 @@ class ProfileSnapshotIntegrityError extends Error {
   constructor(runId: string) {
     super(`run ${runId} is missing agent profile snapshot set`);
     this.name = "ProfileSnapshotIntegrityError";
+  }
+}
+
+class SettingSnapshotIntegrityError extends Error {
+  constructor(runId: string) {
+    super(`run ${runId} is missing daemon settings snapshot set`);
+    this.name = "SettingSnapshotIntegrityError";
   }
 }
 
@@ -328,6 +340,27 @@ export class RealmKernel {
     );
   }
 
+  private captureEffectiveSettingSnapshot(atMs: number): {
+    settingsHash: string;
+    capturedAtMs: number;
+    rows: Array<{
+      key: string;
+      class: "workflow-visible" | "daemon-operational";
+      valueJson: string;
+      defaultJson: string;
+      source: "catalog" | "default";
+      catalogGeneration: number | null;
+    }>;
+  } {
+    return captureWorkflowVisibleSettingsSnapshot(this.store.listDaemonSettingRows(), atMs);
+  }
+
+  private workflowSettingsForRun(runId: string): WorkflowVisibleSettings {
+    const set = this.store.getRunSettingSnapshotSet(runId);
+    if (!set) throw new SettingSnapshotIntegrityError(runId);
+    return workflowVisibleSettingsFromSnapshot(runId, this.store.listRunSettingSnapshots(runId));
+  }
+
   /** Start a run and return its id immediately, with a promise for completion.
    * The RPC layer/daemon uses this so launchRun returns before the run finishes. */
   launch<O>(
@@ -346,6 +379,7 @@ export class RealmKernel {
     });
     const runId = this.idgen();
     const profileSnapshot = this.captureEffectiveProfileSnapshot(at);
+    const settingSnapshot = this.captureEffectiveSettingSnapshot(at);
     this.store.transaction(() => {
       this.store.insertRun({
         runId,
@@ -364,6 +398,7 @@ export class RealmKernel {
         createdAtMs: at,
       });
       this.store.replaceRunProfileSnapshot(runId, profileSnapshot, profileSnapshot.rows);
+      this.store.replaceRunSettingSnapshot(runId, settingSnapshot, settingSnapshot.rows);
       this.store.appendEvent(
         runId,
         "run.started",
@@ -397,6 +432,7 @@ export class RealmKernel {
     const target = optionalRunTarget(meta.target, "RealmKernel.launchDefinition");
     const runId = this.idgen();
     const profileSnapshot = this.captureEffectiveProfileSnapshot(at);
+    const settingSnapshot = this.captureEffectiveSettingSnapshot(at);
     this.store.transaction(() => {
       this.store.insertRun({
         runId,
@@ -415,6 +451,7 @@ export class RealmKernel {
         createdAtMs: at,
       });
       this.store.replaceRunProfileSnapshot(runId, profileSnapshot, profileSnapshot.rows);
+      this.store.replaceRunSettingSnapshot(runId, settingSnapshot, settingSnapshot.rows);
       this.store.appendEvent(
         runId,
         "run.started",
@@ -542,7 +579,9 @@ export class RealmKernel {
         : undefined;
     // Reset the run to running and clear the previous terminal result; persist an
     // override input so a later input-less rerun does not silently use the old one.
-    const profileSnapshot = this.captureEffectiveProfileSnapshot(this.host.clock());
+    const snapshotAt = this.host.clock();
+    const profileSnapshot = this.captureEffectiveProfileSnapshot(snapshotAt);
+    const settingSnapshot = this.captureEffectiveSettingSnapshot(snapshotAt);
     this.store.transaction(() => {
       this.store.updateRun(runId, {
         status: "running",
@@ -554,6 +593,7 @@ export class RealmKernel {
       });
       this.store.updateRunDefinition(runId, definitionHash, workflowRef);
       this.store.replaceRunProfileSnapshot(runId, profileSnapshot, profileSnapshot.rows);
+      this.store.replaceRunSettingSnapshot(runId, settingSnapshot, settingSnapshot.rows);
       this.store.appendEvent(runId, "run.rerun", { definitionHash }, this.host.clock());
     });
     return { runId, done: this.execute<O>(runId, entryPath, effectiveInput) };
@@ -1580,6 +1620,7 @@ export class RealmKernel {
       sessionRunGuarded = true;
     }
     const runTarget = this.store.getRun(runId)?.runTarget ?? null;
+    const workflowSettings = this.workflowSettingsForRun(runId);
     this.recoverActiveWorkspaceHolders(runId, this.host.clock());
     const source = readSourceSafe(workflowUrl);
     const sourcePath = workflowUrl.startsWith("file:")
@@ -1672,6 +1713,7 @@ export class RealmKernel {
                 sab,
                 moduleHelpers,
                 agentProfiles: this.profilesForRun(runId),
+                workflowSettings,
                 runId,
                 runTarget,
               } satisfies HostReply);
@@ -1816,6 +1858,7 @@ export class RealmKernel {
                           ...(secretRefs.length > 0 ? { env: secretEnv } : {}),
                           ...(begun.resumeToken ? { resumeToken: begun.resumeToken } : {}),
                           abortSignal: signal,
+                          timeoutMs: m.timeoutMs ?? workflowSettings.agentDefaultTimeoutMs,
                         },
                         {
                           onSessionToken: (tok) => {
@@ -1838,8 +1881,8 @@ export class RealmKernel {
                         },
                       ),
                     {
-                      ...(m.timeoutMs != null ? { timeoutMs: m.timeoutMs } : {}),
-                      ...(m.stallRetries != null ? { stallRetries: m.stallRetries } : {}),
+                      timeoutMs: m.timeoutMs ?? workflowSettings.agentDefaultTimeoutMs,
+                      stallRetries: m.stallRetries ?? workflowSettings.agentDefaultStallRetries,
                       signal: runAbortController.signal,
                       onStall: (a) => engine.emit("agent.stalled", { key: m.key, attempt: a }),
                     },
@@ -2032,6 +2075,7 @@ export class RealmKernel {
                           ...(secretRefs.length > 0 ? { env: secretEnv } : {}),
                           ...(begun.resumeToken ? { resumeToken: begun.resumeToken } : {}),
                           abortSignal: signal,
+                          timeoutMs: m.timeoutMs ?? workflowSettings.agentDefaultTimeoutMs,
                         },
                         {
                           onSessionToken: (tok) => {
@@ -2059,8 +2103,8 @@ export class RealmKernel {
                         },
                       ),
                     {
-                      ...(m.timeoutMs != null ? { timeoutMs: m.timeoutMs } : {}),
-                      ...(m.stallRetries != null ? { stallRetries: m.stallRetries } : {}),
+                      timeoutMs: m.timeoutMs ?? workflowSettings.agentDefaultTimeoutMs,
+                      stallRetries: m.stallRetries ?? workflowSettings.agentDefaultStallRetries,
                       signal: runAbortController.signal,
                       onStall: (a) =>
                         engine.emit("agent.stalled", { key: m.stableKey, attempt: a }),
@@ -2277,6 +2321,7 @@ export class RealmKernel {
                   createdAtMs: at,
                 });
                 this.store.copyRunProfileSnapshot(runId, nextId);
+                this.store.copyRunSettingSnapshot(runId, nextId);
                 this.store.appendEvent(nextId, "run.started", { name, continuedFrom: runId }, at);
                 this.store.updateRun(runId, {
                   status: "continued",

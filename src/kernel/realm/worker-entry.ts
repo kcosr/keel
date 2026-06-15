@@ -16,17 +16,13 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { type ToolPolicy, resolveToolPolicy } from "../../agents/capabilities.ts";
-import {
-  DEFAULT_AGENT_LENIENT,
-  DEFAULT_AGENT_ON_FAILURE,
-  DEFAULT_AGENT_PROVIDER,
-  DEFAULT_SCHEMA_MAX_RETRIES,
-} from "../../agents/defaults.ts";
+import { DEFAULT_AGENT_PROVIDER } from "../../agents/defaults.ts";
 import { type AgentProfiles, resolveProfile } from "../../agents/profiles.ts";
 import { resolveSelectedProviderConfig } from "../../agents/provider-config.ts";
 import type { ProviderConfigMap } from "../../agents/types.ts";
 import { type Json, hashJson } from "../../hash.ts";
 import type { WorkspaceRetention } from "../../journal/types.ts";
+import type { WorkflowVisibleSettings } from "../../settings/catalog.ts";
 import { requireRunTarget } from "../../target.ts";
 import { DEFAULT_WORKSPACE_ID } from "../../workspace/identity.ts";
 import type { Schema } from "../schema.ts";
@@ -277,6 +273,7 @@ let control: Int32Array;
 let value: Float64Array;
 let moduleHelpers: Record<string, string> = {};
 let agentProfiles: AgentProfiles = {};
+let workflowSettings: WorkflowVisibleSettings | null = null;
 let runId: string | null = null;
 let runTarget: string | null = null;
 let nextId = 1;
@@ -351,6 +348,11 @@ function sessionStableKey(agentKey: string, turnKey: string): string {
 
 function currentRunTarget(context: string): string {
   return requireRunTarget(runTarget, context);
+}
+
+function currentWorkflowSettings(): WorkflowVisibleSettings {
+  if (!workflowSettings) throw new Error("workflow settings snapshot was not initialized");
+  return workflowSettings;
 }
 
 interface WorkspaceHandle {
@@ -541,6 +543,7 @@ const ctx = Object.freeze({
     // Resolve a named profile into concrete fields BEFORE versioning, so the
     // RESOLVED settings (not the profile name) enter the version/input hash.
     const spec = resolveProfile(rawSpec, agentProfiles) as Omit<typeof rawSpec, "profile">;
+    const settings = currentWorkflowSettings();
     assertNotReservedAuthorKey(spec.key, "ctx.agent");
     const provider = spec.provider ?? DEFAULT_AGENT_PROVIDER;
     const profileProviderConfig = rawSpec.profile
@@ -609,11 +612,11 @@ const ctx = Object.freeze({
       version,
       inputs,
       jsonSchema: schema?.structural?.() ?? null,
-      maxRetries: spec.maxRetries ?? DEFAULT_SCHEMA_MAX_RETRIES,
-      lenient: spec.lenient ?? DEFAULT_AGENT_LENIENT,
-      onFailure: spec.onFailure ?? DEFAULT_AGENT_ON_FAILURE,
-      timeoutMs: spec.timeoutMs ?? null,
-      stallRetries: spec.stallRetries ?? null,
+      maxRetries: spec.maxRetries ?? settings.agentDefaultMaxRetries,
+      lenient: spec.lenient ?? settings.agentDefaultLenient,
+      onFailure: spec.onFailure ?? settings.agentDefaultOnFailure,
+      timeoutMs: spec.timeoutMs ?? settings.agentDefaultTimeoutMs,
+      stallRetries: spec.stallRetries ?? settings.agentDefaultStallRetries,
       deps: null,
     });
     // The host applies onFailure: an accepted failure is journaled as a
@@ -657,6 +660,7 @@ const ctx = Object.freeze({
       typeof rawSessionSpec,
       "profile"
     >;
+    const settings = currentWorkflowSettings();
     assertSessionKey(sessionSpec.key, "agentSession");
     const provider = sessionSpec.provider ?? DEFAULT_AGENT_PROVIDER;
     const profileProviderConfig = rawSessionSpec.profile
@@ -710,11 +714,11 @@ const ctx = Object.freeze({
         const schema = rawTurnSpec.schema as Schema<unknown> | undefined;
         const stableKey = sessionStableKey(sessionSpec.key, rawTurnSpec.key);
         const controls = {
-          maxRetries: rawTurnSpec.maxRetries ?? DEFAULT_SCHEMA_MAX_RETRIES,
-          lenient: rawTurnSpec.lenient ?? DEFAULT_AGENT_LENIENT,
-          onFailure: rawTurnSpec.onFailure ?? DEFAULT_AGENT_ON_FAILURE,
-          timeoutMs: rawTurnSpec.timeoutMs ?? null,
-          stallRetries: rawTurnSpec.stallRetries ?? null,
+          maxRetries: rawTurnSpec.maxRetries ?? settings.agentDefaultMaxRetries,
+          lenient: rawTurnSpec.lenient ?? settings.agentDefaultLenient,
+          onFailure: rawTurnSpec.onFailure ?? settings.agentDefaultOnFailure,
+          timeoutMs: rawTurnSpec.timeoutMs ?? settings.agentDefaultTimeoutMs,
+          stallRetries: rawTurnSpec.stallRetries ?? settings.agentDefaultStallRetries,
         };
         const version =
           rawTurnSpec.version ??
@@ -874,6 +878,7 @@ self.onmessage = (e: { data: HostReply }) => {
     value = new Float64Array(m.sab, VALUE_OFFSET, 1);
     moduleHelpers = m.moduleHelpers;
     agentProfiles = m.agentProfiles as AgentProfiles;
+    workflowSettings = m.workflowSettings;
     runId = m.runId;
     runTarget = m.runTarget;
     void start(m.workflowUrl, m.input);

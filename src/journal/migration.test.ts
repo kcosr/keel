@@ -195,7 +195,7 @@ function insertOldWorkflowDefinition(
 }
 
 describe("schema migrations", () => {
-  test("a v4 DB migrates forward to v16 in place and idempotently", () => {
+  test("a v4 DB migrates forward to the current schema in place and idempotently", () => {
     const dir = mkdtempSync(join(tmpdir(), "keel-mig-"));
     try {
       const path = join(dir, "old.db");
@@ -208,7 +208,7 @@ describe("schema migrations", () => {
       const ver = store.db
         .query<{ value: string }, []>("SELECT value FROM schema_meta WHERE key='schema_version'")
         .get();
-      expect(ver?.value).toBe("16");
+      expect(ver?.value).toBe("17");
 
       // new columns exist
       const jcols = store.db.query<{ name: string }, []>("PRAGMA table_info(journal)").all();
@@ -504,8 +504,82 @@ describe("schema migrations", () => {
     const ver = store.db
       .query<{ value: string }, []>("SELECT value FROM schema_meta WHERE key='schema_version'")
       .get();
-    expect(ver?.value).toBe("16");
+    expect(ver?.value).toBe("17");
+    expect(
+      store.db
+        .query<{ name: string }, []>(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'daemon_settings'",
+        )
+        .get(),
+    ).not.toBeNull();
     store.close();
+  });
+
+  test("v16 databases receive explicit workflow-visible setting snapshots and warnings", () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-mig-v16-"));
+    try {
+      const path = join(dir, "old.db");
+      const db = new Database(path, { create: true });
+      db.exec(`
+        CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE runs (
+          run_id TEXT PRIMARY KEY,
+          workflow_name TEXT,
+          definition_version TEXT NOT NULL,
+          workflow_ref TEXT,
+          run_target TEXT,
+          status TEXT NOT NULL,
+          parent_run_id TEXT,
+          tenant_id TEXT,
+          input_ref TEXT,
+          output_ref TEXT,
+          error_json TEXT,
+          heartbeat_at_ms INTEGER,
+          runtime_owner_id TEXT,
+          created_at_ms INTEGER NOT NULL,
+          finished_at_ms INTEGER
+        );
+        CREATE TABLE events (
+          run_id TEXT NOT NULL,
+          seq INTEGER NOT NULL,
+          type TEXT NOT NULL,
+          payload_json TEXT NOT NULL,
+          emitted_at_ms INTEGER NOT NULL,
+          PRIMARY KEY (run_id, seq)
+        );
+      `);
+      db.query("INSERT INTO schema_meta (key, value) VALUES ('schema_version', '16')").run();
+      db.query(
+        `INSERT INTO runs (run_id, definition_version, status, created_at_ms)
+         VALUES ('r_running', 'wf_sha256_x', 'running', 1), ('r_finished', 'wf_sha256_x', 'finished', 2)`,
+      ).run();
+      db.close();
+
+      const store = JournalStore.open(path);
+      expect(store.getRunSettingSnapshotSet("r_running")).not.toBeNull();
+      expect(store.getRunSettingSnapshotSet("r_finished")).not.toBeNull();
+      const rows = store.listRunSettingSnapshots("r_running");
+      expect(rows.map((row) => row.key)).toEqual([
+        "agent.defaultLenient",
+        "agent.defaultMaxRetries",
+        "agent.defaultOnFailure",
+        "agent.defaultStallRetries",
+        "agent.defaultTimeoutMs",
+      ]);
+      expect(rows.every((row) => row.source === "default")).toBe(true);
+      expect(rows.find((row) => row.key === "agent.defaultTimeoutMs")?.valueJson).toBe("3600000");
+      const warning = store.db
+        .query<{ type: string }, []>("SELECT type FROM events WHERE run_id = 'r_running'")
+        .get();
+      expect(warning?.type).toBe("run.settingSnapshot.defaultMigration");
+      const finishedWarning = store.db
+        .query<{ type: string }, []>("SELECT type FROM events WHERE run_id = 'r_finished'")
+        .get();
+      expect(finishedWarning).toBeNull();
+      store.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("v8 path schedules are disabled and display-name columns become nullable", () => {
@@ -518,7 +592,7 @@ describe("schema migrations", () => {
       const ver = store.db
         .query<{ value: string }, []>("SELECT value FROM schema_meta WHERE key='schema_version'")
         .get();
-      expect(ver?.value).toBe("16");
+      expect(ver?.value).toBe("17");
 
       const schedule = store.db
         .query<{ enabled: number; workflow_ref: string }, []>(

@@ -182,6 +182,52 @@ describe("ctx.agentSession", () => {
     await expect(k.run(WORKFLOW, { second: false })).rejects.toThrow(/requires target/);
   });
 
+  test("session turns use the run settings snapshot after current settings change", async () => {
+    const store = JournalStore.memory();
+    store.putDaemonSettingRow({
+      key: "agent.defaultTimeoutMs",
+      valueJson: "1234",
+      nowMs: 1,
+    });
+    const provider = new RecordingSessionProvider();
+    let now = 1;
+    const k = new TargetedRealmKernel(store, {
+      idgen: () => "run-settings-session",
+      clock: () => now,
+      rng: () => 0.5,
+      agents: new AgentProviderRegistry().register(provider),
+    });
+    const workflow = {
+      source: `
+        import { type Ctx } from "@kcosr/keel";
+        export default async function wf(ctx: Ctx): Promise<string> {
+          const primary = ctx.agentSession({ key: "primary", provider: "session", toolPolicy: "read-only" });
+          await primary.turn({ key: "one", prompt: "one" });
+          await ctx.sleep("pause", 10);
+          await primary.turn({ key: "two", prompt: "two" });
+          return "done";
+        }
+      `,
+      name: "settings-session",
+    };
+
+    const launched = k.launch<string>(workflow, null);
+    await expect(launched.done).resolves.toMatchObject({ status: "waiting-timer" });
+    expect(provider.calls.map((call) => call.timeoutMs)).toEqual([1234]);
+
+    store.putDaemonSettingRow({
+      key: "agent.defaultTimeoutMs",
+      valueJson: "9999",
+      nowMs: 2,
+    });
+    now = 20;
+    await expect(k.resume<string>(launched.runId)).resolves.toMatchObject({
+      status: "finished",
+      output: "done",
+    });
+    expect(provider.calls.map((call) => call.timeoutMs)).toEqual([1234, 1234]);
+  });
+
   test("selected providerConfig is in session identity and passed to every turn", async () => {
     const store = JournalStore.memory();
     const provider = new RecordingSessionProvider();

@@ -33,13 +33,17 @@ import { redactCapabilityTokens } from "../auth/redaction.ts";
 import { DaemonClient } from "../daemon/client.ts";
 import { KeelDaemon } from "../daemon/server.ts";
 import { runExecuteScript } from "../execute/runtime.ts";
+import { JournalStore } from "../journal/store.ts";
 import type {
   AgentProfileCheckResult,
   AgentProfileView,
   RunOutcome,
+  SettingView,
+  SettingsDiagnostic,
   WorkflowProvenance,
 } from "../rpc/contract.ts";
 import type { RunReport } from "../rpc/projection.ts";
+import { effectiveOperationalSettings } from "../settings/catalog.ts";
 import { cliTargetPath } from "../target.ts";
 import { runTui } from "../tui/index.ts";
 import { displayName, formatDuration, formatListRuns, formatUtcTimestamp } from "./run-display.ts";
@@ -77,6 +81,19 @@ function closeTrackedClients(): void {
   trackedClients.clear();
 }
 
+function readOperationalSettingsForDaemonStartup(): {
+  codexRpcTimeoutMs: number;
+  codexConnectTimeoutMs: number;
+  workflowDefinitionGcTtlMs: number;
+} {
+  const store = JournalStore.open(DB);
+  try {
+    return effectiveOperationalSettings(store.listDaemonSettingRows());
+  } finally {
+    store.close();
+  }
+}
+
 /** [name, args, summary] — single source for help + dispatch. */
 const COMMANDS: [string, string, string][] = [
   ["daemon", "", "start the daemon (foreground; owns the journal + runs workflows)"],
@@ -107,6 +124,7 @@ const COMMANDS: [string, string, string][] = [
     "create or replace a cron schedule",
   ],
   ["profiles", "list|get|set|delete|check ...", "manage persistent agent profile catalog"],
+  ["settings", "list|get|set|unset|check ...", "manage daemon settings catalog"],
   [
     "workspace",
     "list|show|diff|merge|discard|gc ...",
@@ -178,10 +196,16 @@ async function dispatch(argv: string[]): Promise<number> {
   switch (cmd) {
     case "daemon": {
       await import("node:fs").then((fs) => fs.mkdirSync(KEEL_DIR, { recursive: true }));
+      const operational = readOperationalSettingsForDaemonStartup();
       const agents = new AgentProviderRegistry()
         .register(new PiProvider())
         .register(new ClaudeProvider())
-        .register(new CodexProvider());
+        .register(
+          new CodexProvider({
+            timeoutMs: operational.codexRpcTimeoutMs,
+            connectTimeoutMs: operational.codexConnectTimeoutMs,
+          }),
+        );
       const daemon = new KeelDaemon({
         socketPath: SOCKET,
         dbPath: DB,
@@ -397,6 +421,9 @@ async function dispatch(argv: string[]): Promise<number> {
     }
     case "profiles": {
       return handleProfiles(rest);
+    }
+    case "settings": {
+      return handleSettings(rest);
     }
     case "schedule": {
       const [sub, ...scheduleArgs] = rest;
@@ -1118,6 +1145,120 @@ async function handleProfiles(args: string[]): Promise<number> {
   }
 }
 
+async function handleSettings(args: string[]): Promise<number> {
+  const [sub, ...rest] = args;
+  const client = await openClient();
+  switch (sub) {
+    case "list": {
+      const parsed = parseSettingsOutputArgs(rest, "settings list");
+      if (parsed.key) return usage("settings needs list [--output text|json]");
+      const settings = await client.listSettings();
+      if (parsed.output === "json") process.stdout.write(`${JSON.stringify(settings, null, 2)}\n`);
+      else process.stdout.write(formatSettingsList(settings));
+      return 0;
+    }
+    case "get": {
+      const parsed = parseSettingsOutputArgs(rest, "settings get");
+      if (!parsed.key) return usage("settings needs get <key> [--output text|json]");
+      const setting = await client.getSetting(parsed.key);
+      if (!setting) throw new Error(`unknown setting "${parsed.key}"`);
+      if (parsed.output === "json") process.stdout.write(`${JSON.stringify(setting, null, 2)}\n`);
+      else process.stdout.write(formatSettingGet(setting));
+      return 0;
+    }
+    case "set": {
+      const parsed = parseSettingsMutationArgs(rest, "settings set", true);
+      if (!parsed.key || parsed.valueText === undefined) {
+        return usage("settings needs set <key> <json-value> [--if-generation n]");
+      }
+      const saved = await client.putSetting({
+        key: parsed.key,
+        value: parseJsonArgument(parsed.valueText, "json-value"),
+        ...(parsed.ifGeneration !== undefined ? { ifGeneration: parsed.ifGeneration } : {}),
+      });
+      process.stdout.write(`${JSON.stringify(saved, null, 2)}\n`);
+      return 0;
+    }
+    case "unset": {
+      const parsed = parseSettingsMutationArgs(rest, "settings unset", false);
+      if (!parsed.key) return usage("settings needs unset <key> [--if-generation n]");
+      const result = await client.deleteSetting({
+        key: parsed.key,
+        ...(parsed.ifGeneration !== undefined ? { ifGeneration: parsed.ifGeneration } : {}),
+      });
+      process.stdout.write(`${JSON.stringify(result)}\n`);
+      return 0;
+    }
+    case "check": {
+      const parsed = parseSettingsOutputArgs(rest, "settings check");
+      if (!parsed.key || parsed.valueText === undefined) {
+        return usage("settings needs check <key> <json-value> [--output text|json]");
+      }
+      const result = await client.checkSetting({
+        key: parsed.key,
+        value: parseJsonArgument(parsed.valueText, "json-value"),
+      });
+      if (parsed.output === "json") process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      else process.stdout.write(formatSettingsCheck(result));
+      return result.ok ? 0 : 1;
+    }
+    default:
+      return usage("settings needs list|get|set|unset|check");
+  }
+}
+
+function parseSettingsOutputArgs(
+  args: string[],
+  command: string,
+): { key?: string; valueText?: string; output: "text" | "json" } {
+  let output: "text" | "json" = "text";
+  const positional: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i] as string;
+    if (arg === "--output") {
+      output = parseTextJsonOutput(requireFlagValue(args, i, "--output"));
+      i += 1;
+    } else if (arg.startsWith("--")) throw new Error(`unknown ${command} flag ${arg}`);
+    else positional.push(arg);
+  }
+  if (positional.length > 2) throw new Error(`unexpected argument ${positional[2]} for ${command}`);
+  return { key: positional[0], valueText: positional[1], output };
+}
+
+function parseSettingsMutationArgs(
+  args: string[],
+  command: string,
+  needsValue: boolean,
+): { key?: string; valueText?: string; ifGeneration?: number } {
+  const positional: string[] = [];
+  let ifGeneration: number | undefined;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i] as string;
+    if (arg === "--if-generation") {
+      ifGeneration = parseNonnegativeInteger(
+        requireFlagValue(args, i, "--if-generation"),
+        "--if-generation",
+      );
+      i += 1;
+    } else if (arg.startsWith("--")) throw new Error(`unknown ${command} flag ${arg}`);
+    else positional.push(arg);
+  }
+  const max = needsValue ? 2 : 1;
+  if (positional.length > max)
+    throw new Error(`unexpected argument ${positional[max]} for ${command}`);
+  return { key: positional[0], valueText: positional[1], ifGeneration };
+}
+
+function parseJsonArgument(value: string, label: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch (err) {
+    throw new Error(
+      `${label} must be valid JSON: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
 function parseProfilesListArgs(args: string[]): {
   source: "all" | "catalog" | "programmatic";
   output: "text" | "json";
@@ -1268,6 +1409,51 @@ function formatProfileList(profiles: AgentProfileView[]): string {
       profile.updatedAtMs == null ? "-" : formatUtcTimestamp(profile.updatedAtMs),
     ]),
   );
+}
+
+function formatSettingsList(settings: SettingView[]): string {
+  return formatTable(
+    ["KEY", "CLASS", "VALUE", "DEFAULT", "READONLY", "GENERATION", "UPDATED"],
+    settings.map((setting) => [
+      setting.key,
+      setting.class,
+      setting.isDefault ? "default" : settingText(setting.value),
+      settingText(setting.defaultValue),
+      setting.readOnly ? "yes" : "no",
+      setting.generation == null ? "-" : String(setting.generation),
+      setting.updatedAtMs == null ? "-" : formatUtcTimestamp(setting.updatedAtMs),
+    ]),
+  );
+}
+
+function formatSettingGet(setting: SettingView): string {
+  return [
+    `key: ${setting.key}`,
+    `class: ${setting.class}`,
+    `value: ${settingText(setting.value)}`,
+    `defaultValue: ${settingText(setting.defaultValue)}`,
+    `isDefault: ${setting.isDefault ? "yes" : "no"}`,
+    `readOnly: ${setting.readOnly ? "yes" : "no"}`,
+    `generation: ${setting.generation ?? "-"}`,
+    `updatedAt: ${setting.updatedAtMs == null ? "-" : formatUtcTimestamp(setting.updatedAtMs)}`,
+    `description: ${setting.description}`,
+    "",
+  ].join("\n");
+}
+
+function formatSettingsCheck(result: {
+  ok: boolean;
+  diagnostics: SettingsDiagnostic[];
+}): string {
+  const lines = [result.ok ? "ok" : "failed"];
+  for (const diagnostic of result.diagnostics) {
+    lines.push(`${diagnostic.level}\t${diagnostic.path}\t${diagnostic.message}`);
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+function settingText(value: unknown): string {
+  return typeof value === "string" ? value : JSON.stringify(value);
 }
 
 function formatProfileGet(profile: AgentProfileView): string {

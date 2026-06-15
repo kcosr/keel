@@ -24,9 +24,9 @@ import { Supervisor } from "../kernel/supervisor.ts";
 import type { EventEnvelope, WorkflowProvenance } from "../rpc/contract.ts";
 import { EventHub } from "../rpc/event-hub.ts";
 import { InProcessKeel } from "../rpc/in-process.ts";
+import { effectiveOperationalSettings } from "../settings/catalog.ts";
 import { requireRunTarget } from "../target.ts";
 import {
-  DEFAULT_WORKFLOW_DEFINITION_TTL_MS,
   evictWorkflowDefinitionCache,
   isUnsupportedWorkflowSdkAbiError,
   keelPackageRoot,
@@ -483,9 +483,25 @@ export class KeelDaemon {
       case "checkAgentProfile":
         this.authorizeAdmin(conn);
         return this.api.checkAgentProfile(p as never);
+      case "listSettings":
+        this.authorizeAdmin(conn);
+        return this.api.listSettings();
+      case "getSetting":
+        this.authorizeAdmin(conn);
+        return this.api.getSetting(p.key as string);
+      case "putSetting":
+        this.authorizeAdmin(conn);
+        return this.api.putSetting(p as never);
+      case "deleteSetting":
+        this.authorizeAdmin(conn);
+        return this.api.deleteSetting(p as never);
+      case "checkSetting":
+        this.authorizeAdmin(conn);
+        return this.api.checkSetting(p as never);
       case "gcDefinitions": {
         this.authorizeAdmin(conn);
-        const ttlMs = typeof p.ttlMs === "number" ? p.ttlMs : definitionTtlMsFromEnv();
+        const operational = effectiveOperationalSettings(this.store.listDaemonSettingRows());
+        const ttlMs = typeof p.ttlMs === "number" ? p.ttlMs : operational.workflowDefinitionGcTtlMs;
         const cacheMinAgeMs =
           typeof p.cacheMinAgeMs === "number"
             ? p.cacheMinAgeMs
@@ -570,14 +586,4 @@ export class KeelDaemon {
       );
     });
   }
-}
-
-function definitionTtlMsFromEnv(): number {
-  const raw = process.env.KEEL_DEFINITION_TTL_MS;
-  if (raw === undefined) return DEFAULT_WORKFLOW_DEFINITION_TTL_MS;
-  const value = Number(raw);
-  if (!Number.isFinite(value) || value < 0) {
-    throw new Error("KEEL_DEFINITION_TTL_MS must be a non-negative number of milliseconds");
-  }
-  return value;
 }

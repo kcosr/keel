@@ -141,6 +141,7 @@ bun src/cli/keel.ts <command> [args]
 | `list [--output text\|json]` | List runs as an aligned table or JSON envelope. Requires admin. |
 | `schedule put <name> [workflow.ts] --interval-ms ms [--target dir]` | Create or replace a pinned workflow schedule. Requires admin. |
 | `profiles list/get/set/delete/check ...` | Manage daemon-wide persistent agent profiles. Requires admin. |
+| `settings list/get/set/unset/check ...` | Manage typed daemon settings. Requires admin. |
 | `workspace list/show/diff/merge/discard/gc ...` | Inspect and manage retained isolated agent/session workspaces by `workspaceId`. |
 | `tui [runId] [--status status] [--limit n] [--output text]` | Open an interactive run browser or direct run detail/watch view. Browser mode requires admin. |
 | `gc` | Prune unreferenced workflow definition rows and cache entries. Requires admin. |
@@ -682,10 +683,10 @@ const finding = await ctx.agent({
 | `capabilities?` | Explicit normalized capability declaration used when `toolPolicy` is omitted. |
 | `secrets?` | Secret names to inject from the side channel. |
 | `onFailure?` | `"throw"` by default, or `"null"` to tolerate terminal failure. |
-| `maxRetries?` | In-session structured-output validation retries. Default: `2`. |
-| `lenient?` | Opt into tolerant structured-output coercion. Default: strict validation. |
-| `timeoutMs?` | Per-attempt stall timeout. Default: `1 hour`. |
-| `stallRetries?` | Retries after stalled attempts. Default: `1`. |
+| `maxRetries?` | In-session structured-output validation retries. Default: `agent.defaultMaxRetries`. |
+| `lenient?` | Opt into tolerant structured-output coercion. Default: `agent.defaultLenient`. |
+| `timeoutMs?` | Per-attempt stall timeout. Default: `agent.defaultTimeoutMs`. |
+| `stallRetries?` | Retries after stalled attempts. Default: `agent.defaultStallRetries`. |
 | `bump?` / `version?` | Explicit version controls for invalidation. |
 
 ### Persistent Agent Profiles
@@ -704,6 +705,57 @@ keel profiles check --file <path|-> [--connect] [--output text|json]
 All profile commands use the daemon connection (`KEEL_SOCKET`/`KEEL_DIR`) and require an admin credential (`KEEL_ADMIN_TOKEN` or an admin capability file). Profile JSON may include provider/model/reasoning, tool policy, allow/deny tools, capabilities, retry/timeout options, and provider-keyed `providerConfig`. It must not include prompt/key/schema/workspace/secret fields or legacy `workspaceIsolation`, `workspaceRetention`, or `target` fields.
 
 The daemon snapshots the complete effective catalog (programmatic plus persisted catalog profiles) when a run is launched or rerun. Resume, retry, rewind, daemon restart, provider retries, and default forks keep the existing snapshot; editing or deleting a profile only affects future launches and reruns.
+
+### Persistent Daemon Settings
+
+Operators can inspect and tune a small typed daemon settings catalog:
+
+```bash
+keel settings list [--output text|json]
+keel settings get <key> [--output text|json]
+keel settings set <key> <json-value> [--if-generation <n>]
+keel settings unset <key> [--if-generation <n>]
+keel settings check <key> <json-value> [--output text|json]
+```
+
+All settings commands require admin authority. Values are parsed as JSON, so use
+`true`, `false`, numbers, or quoted JSON strings as appropriate. Unknown keys,
+invalid values, generation mismatches, and writes to read-only settings fail
+clearly.
+
+Workflow-visible agent defaults are snapshotted onto each run at launch:
+
+```text
+explicit workflow spec > named profile value > run settings snapshot
+```
+
+The snapshot is terminal at runtime. Resume, retry, rewind, daemon restart, and
+fork keep the run's original workflow-visible setting values even if the live
+catalog changes. Schedules capture current settings each time they fire a new
+run, not when the schedule is created.
+
+Initial workflow-visible settings:
+
+| Key | Type | Default | Settable |
+|---|---|---:|---|
+| `agent.defaultTimeoutMs` | integer `> 0` | `3600000` | yes |
+| `agent.defaultStallRetries` | integer `>= 0` | `1` | yes |
+| `agent.defaultMaxRetries` | integer `>= 0` | `2` | yes |
+| `agent.defaultLenient` | boolean | `false` | yes |
+| `agent.defaultOnFailure` | `"throw"` or `"null"` | `"throw"` | no |
+
+Initial daemon-operational settings:
+
+| Key | Type | Default | Apply timing |
+|---|---|---:|---|
+| `codex.rpcTimeoutMs` | integer `> 0` | `60000` | next Codex provider construction, normally daemon restart |
+| `codex.connectTimeoutMs` | integer `> 0` | `15000` | next Codex provider construction, normally daemon restart |
+| `workflowDefinition.gcTtlMs` | integer `>= 0` | `2592000000` | next `gcDefinitions`/`keel gc` call unless explicitly overridden |
+
+Named profiles remain the preferred way to configure reusable agent roles.
+Settings are global fallbacks used only after the workflow spec and selected
+profile leave a field unset. Settings must not contain secrets, credentials,
+tokens, provider environment maps, or arbitrary provider config.
 
 ### Provider Config
 
@@ -1071,6 +1123,14 @@ interface KeelApi {
     includePending?: boolean;
     includeRemoved?: boolean;
   }): WorkspaceGcResult;
+  listSettings(): SettingView[];
+  getSetting(key: string): SettingView | null;
+  putSetting(req: { key: string; value: unknown; ifGeneration?: number }): SettingView;
+  deleteSetting(req: { key: string; ifGeneration?: number }): { key: string; deleted: boolean };
+  checkSetting(req: {
+    key: string;
+    value: unknown;
+  }): { ok: boolean; diagnostics: SettingsDiagnostic[] };
   waitForRun(runId: string): Promise<RunOutcome>;
   getRunOutput(runId: string): Promise<RunOutcome>;
   gcDefinitions(opts?: { ttlMs?: number; cacheMinAgeMs?: number }): Promise<{
@@ -1183,8 +1243,9 @@ Refcounts are recomputed from the journal, so GC self-heals after rewind/fork.
 evict rebuildable materialized cache directories. It requires admin authority.
 Rows are kept when any run references their `definition_version` or any enabled
 schedule references their pinned hash. Cache directories are not evicted while a
-running or parked run uses that definition. `KEEL_DEFINITION_TTL_MS` overrides
-the default row TTL of 30 days.
+running or parked run uses that definition. `workflowDefinition.gcTtlMs` is the
+default row TTL when the API/CLI call does not supply `ttlMs`; the shipped
+default is 30 days.
 
 ### Multiple Processes
 

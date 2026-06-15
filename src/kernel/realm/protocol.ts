@@ -9,6 +9,7 @@
 import type { Capabilities, ToolPolicy } from "../../agents/capabilities.ts";
 import type { ProviderConfigValue } from "../../agents/types.ts";
 import type { InputDep, WorkspaceRetention } from "../../journal/types.ts";
+import type { WorkflowVisibleSettings } from "../../settings/catalog.ts";
 
 /** SAB layout: Int32 control[0] is the ambient handshake flag; Float64 holds
  * the returned number. */
@@ -160,6 +161,7 @@ export type HostReply =
       sab: SharedArrayBuffer;
       moduleHelpers: Record<string, string>;
       agentProfiles: Record<string, unknown>;
+      workflowSettings: WorkflowVisibleSettings;
       runId: string;
       runTarget: string | null;
     }

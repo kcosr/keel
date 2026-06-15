@@ -299,8 +299,9 @@ export class CodexProvider implements AgentProvider {
       if (!state.turnId) throw new Error("codex: turn/start did not return turn.id");
       turnStartedResolve();
 
+      const turnTimeoutMs = invocation.timeoutMs ?? this.turnTimeoutMs;
       const terminal = await raceAbort(
-        timeoutPromise(turnTerminal, this.turnTimeoutMs, "codex: turn/completed was not received"),
+        timeoutPromise(turnTerminal, turnTimeoutMs, "codex: turn/completed was not received"),
       );
       state.turnInFlight = false;
       const finalText = finalizeCodexTurn(terminal, state, invocation.key);

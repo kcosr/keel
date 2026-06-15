@@ -17,6 +17,7 @@ import type {
   AgentWorkspaceStatus,
   ArtifactRow,
   CapabilityRow,
+  DaemonSettingCatalogRow,
   EventRow,
   InputDep,
   JournalRow,
@@ -27,6 +28,8 @@ import type {
   RunProfileSnapshotRow,
   RunProfileSnapshotSetRow,
   RunRow,
+  RunSettingSnapshotRow,
+  RunSettingSnapshotSetRow,
   WorkflowDefinitionRow,
 } from "./types.ts";
 
@@ -1239,6 +1242,155 @@ export class JournalStore {
     );
   }
 
+  // ---- daemon settings catalog and run snapshots -------------------------
+
+  listDaemonSettingRows(): DaemonSettingCatalogRow[] {
+    return this.db
+      .query<RawDaemonSettingCatalogRow, []>("SELECT * FROM daemon_settings ORDER BY key ASC")
+      .all()
+      .map(mapDaemonSettingCatalogRow);
+  }
+
+  getDaemonSettingRow(key: string): DaemonSettingCatalogRow | null {
+    const row = this.db
+      .query<RawDaemonSettingCatalogRow, [string]>("SELECT * FROM daemon_settings WHERE key = ?")
+      .get(key);
+    return row ? mapDaemonSettingCatalogRow(row) : null;
+  }
+
+  putDaemonSettingRow(row: {
+    key: string;
+    valueJson: string;
+    nowMs: number;
+    ifGeneration?: number;
+  }): DaemonSettingCatalogRow {
+    return this.transaction(() => {
+      const existing = this.getDaemonSettingRow(row.key);
+      if (row.ifGeneration !== undefined) {
+        if (!existing) throw new Error(`setting "${row.key}" generation precondition failed`);
+        if (existing.generation !== row.ifGeneration) {
+          throw new Error(
+            `setting "${row.key}" generation precondition failed (expected ${row.ifGeneration}, got ${existing.generation})`,
+          );
+        }
+      }
+      if (existing) {
+        this.db
+          .query(
+            `UPDATE daemon_settings
+             SET value_json = ?, generation = generation + 1, updated_at_ms = ?
+             WHERE key = ?`,
+          )
+          .run(row.valueJson, row.nowMs, row.key);
+      } else {
+        this.db
+          .query(
+            `INSERT INTO daemon_settings (key, value_json, generation, created_at_ms, updated_at_ms)
+             VALUES (?, ?, 1, ?, ?)`,
+          )
+          .run(row.key, row.valueJson, row.nowMs, row.nowMs);
+      }
+      const saved = this.getDaemonSettingRow(row.key);
+      if (!saved) throw new Error(`setting "${row.key}" was not saved`);
+      return saved;
+    });
+  }
+
+  deleteDaemonSettingRow(key: string, ifGeneration?: number): boolean {
+    return this.transaction(() => {
+      const existing = this.getDaemonSettingRow(key);
+      if (!existing) {
+        if (ifGeneration !== undefined) {
+          throw new Error(`setting "${key}" generation precondition failed`);
+        }
+        return false;
+      }
+      if (ifGeneration !== undefined && existing.generation !== ifGeneration) {
+        throw new Error(
+          `setting "${key}" generation precondition failed (expected ${ifGeneration}, got ${existing.generation})`,
+        );
+      }
+      this.db.query("DELETE FROM daemon_settings WHERE key = ?").run(key);
+      return true;
+    });
+  }
+
+  replaceRunSettingSnapshot(
+    runId: string,
+    set: { settingsHash: string; capturedAtMs: number },
+    rows: Array<{
+      key: string;
+      class: "workflow-visible" | "daemon-operational";
+      valueJson: string;
+      defaultJson: string;
+      source: "catalog" | "default";
+      catalogGeneration: number | null;
+    }>,
+  ): void {
+    this.transaction(() => {
+      this.db.query("DELETE FROM run_setting_snapshots WHERE run_id = ?").run(runId);
+      this.db.query("DELETE FROM run_setting_snapshot_sets WHERE run_id = ?").run(runId);
+      this.db
+        .query(
+          `INSERT INTO run_setting_snapshot_sets (run_id, settings_hash, captured_at_ms)
+           VALUES (?, ?, ?)`,
+        )
+        .run(runId, set.settingsHash, set.capturedAtMs);
+      const insert = this.db.query(
+        `INSERT INTO run_setting_snapshots (
+           run_id, key, class, value_json, default_json, source, catalog_generation, captured_at_ms
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      for (const row of rows) {
+        insert.run(
+          runId,
+          row.key,
+          row.class,
+          row.valueJson,
+          row.defaultJson,
+          row.source,
+          row.catalogGeneration,
+          set.capturedAtMs,
+        );
+      }
+    });
+  }
+
+  getRunSettingSnapshotSet(runId: string): RunSettingSnapshotSetRow | null {
+    const row = this.db
+      .query<RawRunSettingSnapshotSetRow, [string]>(
+        "SELECT * FROM run_setting_snapshot_sets WHERE run_id = ?",
+      )
+      .get(runId);
+    return row ? mapRunSettingSnapshotSet(row) : null;
+  }
+
+  listRunSettingSnapshots(runId: string): RunSettingSnapshotRow[] {
+    return this.db
+      .query<RawRunSettingSnapshotRow, [string]>(
+        "SELECT * FROM run_setting_snapshots WHERE run_id = ? ORDER BY key ASC",
+      )
+      .all(runId)
+      .map(mapRunSettingSnapshotRow);
+  }
+
+  copyRunSettingSnapshot(srcRunId: string, dstRunId: string): void {
+    const set = this.getRunSettingSnapshotSet(srcRunId);
+    if (!set) throw new Error(`run ${srcRunId} is missing daemon settings snapshot set`);
+    this.replaceRunSettingSnapshot(
+      dstRunId,
+      { settingsHash: set.settingsHash, capturedAtMs: set.capturedAtMs },
+      this.listRunSettingSnapshots(srcRunId).map((row) => ({
+        key: row.key,
+        class: row.class,
+        valueJson: row.valueJson,
+        defaultJson: row.defaultJson,
+        source: row.source,
+        catalogGeneration: row.catalogGeneration,
+      })),
+    );
+  }
+
   // ---- time travel (retry/rewind/fork, §18) ------------------------------
 
   /** Delete the failed rows of a run (retry: the failed step re-executes). */
@@ -1319,6 +1471,7 @@ export class JournalStore {
         createdAtMs: atMs,
       });
       this.copyRunProfileSnapshot(srcRunId, newRunId);
+      this.copyRunSettingSnapshot(srcRunId, newRunId);
       const cutoff = atStableKey
         ? (this.db
             .query<{ m: number | null }, [string, string]>(
@@ -1694,6 +1847,14 @@ interface RawAgentProfileCatalogRow {
   updated_at_ms: number;
 }
 
+interface RawDaemonSettingCatalogRow {
+  key: string;
+  value_json: string;
+  generation: number;
+  created_at_ms: number;
+  updated_at_ms: number;
+}
+
 interface RawRunProfileSnapshotSetRow {
   run_id: string;
   catalog_hash: string;
@@ -1710,11 +1871,38 @@ interface RawRunProfileSnapshotRow {
   captured_at_ms: number;
 }
 
+interface RawRunSettingSnapshotSetRow {
+  run_id: string;
+  settings_hash: string;
+  captured_at_ms: number;
+}
+
+interface RawRunSettingSnapshotRow {
+  run_id: string;
+  key: string;
+  class: string;
+  value_json: string;
+  default_json: string;
+  source: string;
+  catalog_generation: number | null;
+  captured_at_ms: number;
+}
+
 function mapAgentProfileCatalogRow(r: RawAgentProfileCatalogRow): AgentProfileCatalogRow {
   return {
     name: r.name,
     configJson: r.config_json,
     configHash: r.config_hash,
+    generation: r.generation,
+    createdAtMs: r.created_at_ms,
+    updatedAtMs: r.updated_at_ms,
+  };
+}
+
+function mapDaemonSettingCatalogRow(r: RawDaemonSettingCatalogRow): DaemonSettingCatalogRow {
+  return {
+    key: r.key,
+    valueJson: r.value_json,
     generation: r.generation,
     createdAtMs: r.created_at_ms,
     updatedAtMs: r.updated_at_ms,
@@ -1736,6 +1924,27 @@ function mapRunProfileSnapshotRow(r: RawRunProfileSnapshotRow): RunProfileSnapsh
     source: r.source as RunProfileSnapshotRow["source"],
     configJson: r.config_json,
     configHash: r.config_hash,
+    catalogGeneration: r.catalog_generation,
+    capturedAtMs: r.captured_at_ms,
+  };
+}
+
+function mapRunSettingSnapshotSet(r: RawRunSettingSnapshotSetRow): RunSettingSnapshotSetRow {
+  return {
+    runId: r.run_id,
+    settingsHash: r.settings_hash,
+    capturedAtMs: r.captured_at_ms,
+  };
+}
+
+function mapRunSettingSnapshotRow(r: RawRunSettingSnapshotRow): RunSettingSnapshotRow {
+  return {
+    runId: r.run_id,
+    key: r.key,
+    class: r.class as RunSettingSnapshotRow["class"],
+    valueJson: r.value_json,
+    defaultJson: r.default_json,
+    source: r.source as RunSettingSnapshotRow["source"],
     catalogGeneration: r.catalog_generation,
     capturedAtMs: r.captured_at_ms,
   };

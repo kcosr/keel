@@ -14,11 +14,13 @@
 // → v13 run targets and retained agent session workspaces
 // → v14 unified agent workspace retention policy table
 // → v15 workflow-scoped direct/worktree workspace rows
-// → v16 persistent agent profile catalog and run profile snapshots.
+// → v16 persistent agent profile catalog and run profile snapshots
+// → v17 daemon settings catalog and run setting snapshots.
 
 import type { Database } from "bun:sqlite";
 import { parse } from "acorn";
 import { canonicalJson, sha256Hex } from "../hash.ts";
+import { captureWorkflowVisibleSettingsSnapshot } from "../settings/catalog.ts";
 
 const DEFINITION_PREFIX = "wf_sha256_";
 const WORKFLOW_SDK_ABI_V12 = 1;
@@ -322,8 +324,91 @@ export function applyMigration(db: Database, fromVersion: number): void {
     case 15: // → v16: persistent agent profile catalog and frozen run snapshots.
       migrateAgentProfileCatalogToV16(db);
       break;
+    case 16: // → v17: daemon settings catalog and frozen workflow-visible defaults.
+      migrateDaemonSettingsToV17(db);
+      break;
     default:
       throw new Error(`no migration defined from schema version ${fromVersion}`);
+  }
+}
+
+function migrateDaemonSettingsToV17(db: Database): void {
+  db.exec(`CREATE TABLE IF NOT EXISTS daemon_settings (
+    key           TEXT PRIMARY KEY,
+    value_json    TEXT NOT NULL,
+    generation    INTEGER NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+  )`);
+  db.exec(`CREATE TABLE IF NOT EXISTS run_setting_snapshot_sets (
+    run_id         TEXT PRIMARY KEY,
+    settings_hash  TEXT NOT NULL,
+    captured_at_ms INTEGER NOT NULL
+  )`);
+  db.exec(`CREATE TABLE IF NOT EXISTS run_setting_snapshots (
+    run_id             TEXT NOT NULL,
+    key                TEXT NOT NULL,
+    class              TEXT NOT NULL,
+    value_json         TEXT NOT NULL,
+    default_json       TEXT NOT NULL,
+    source             TEXT NOT NULL,
+    catalog_generation INTEGER,
+    captured_at_ms     INTEGER NOT NULL,
+    PRIMARY KEY (run_id, key)
+  )`);
+  db.exec(`CREATE INDEX IF NOT EXISTS run_setting_snapshots_by_run
+    ON run_setting_snapshots (run_id)`);
+
+  const snapshot = captureWorkflowVisibleSettingsSnapshot([], 0);
+  const insertSet = db.query(
+    `INSERT OR IGNORE INTO run_setting_snapshot_sets (run_id, settings_hash, captured_at_ms)
+     VALUES (?, ?, ?)`,
+  );
+  const insertRow = db.query(
+    `INSERT OR IGNORE INTO run_setting_snapshots (
+       run_id, key, class, value_json, default_json, source, catalog_generation, captured_at_ms
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  const runs = db
+    .query<{ run_id: string; status: string }, []>("SELECT run_id, status FROM runs")
+    .all();
+  for (const run of runs) {
+    insertSet.run(run.run_id, snapshot.settingsHash, snapshot.capturedAtMs);
+    for (const row of snapshot.rows) {
+      insertRow.run(
+        run.run_id,
+        row.key,
+        row.class,
+        row.valueJson,
+        row.defaultJson,
+        row.source,
+        row.catalogGeneration,
+        snapshot.capturedAtMs,
+      );
+    }
+  }
+
+  const active = runs.filter(
+    (run) => !["finished", "failed", "cancelled", "continued"].includes(run.status),
+  );
+  const nextSeq = db.query<{ seq: number | null }, [string]>(
+    "SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM events WHERE run_id = ?",
+  );
+  const insertEvent = db.query(
+    `INSERT INTO events (run_id, seq, type, payload_json, emitted_at_ms)
+     VALUES (?, ?, 'run.settingSnapshot.defaultMigration', ?, 0)`,
+  );
+  for (const run of active) {
+    const seq = nextSeq.get(run.run_id)?.seq ?? 1;
+    insertEvent.run(
+      run.run_id,
+      seq,
+      canonicalJson({
+        runId: run.run_id,
+        message:
+          "Migrated pre-v17 run with explicit workflow-visible daemon setting defaults; historical settings catalog state was not durable.",
+      }),
+    );
   }
 }
 

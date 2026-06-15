@@ -17,7 +17,8 @@
 // → v16 persistent agent profile catalog and run profile snapshots
 // → v17 daemon settings catalog and run setting snapshots
 // → v18 managed workspace copy/clone metadata and workspace identities
-// → v19 branch-backed worktree checkout metadata.
+// → v19 branch-backed worktree checkout metadata
+// → v20 saved workflow registry tables.
 
 import type { Database } from "bun:sqlite";
 import { parse } from "acorn";
@@ -346,9 +347,49 @@ export function applyMigration(db: Database, fromVersion: number): void {
       );
       migrateWorktreeIdentitiesToV19(db);
       break;
+    case 19: // → v20: saved workflow registry tables.
+      createSavedWorkflowRegistry(db);
+      break;
     default:
       throw new Error(`no migration defined from schema version ${fromVersion}`);
   }
+}
+
+function createSavedWorkflowRegistry(db: Database): void {
+  db.exec(`CREATE TABLE IF NOT EXISTS saved_workflows (
+    name              TEXT PRIMARY KEY,
+    title             TEXT,
+    description       TEXT,
+    tags_json         TEXT,
+    created_at_ms     INTEGER NOT NULL,
+    updated_at_ms     INTEGER NOT NULL,
+    disabled_at_ms    INTEGER,
+    deleted_at_ms     INTEGER
+  )`);
+  db.exec(`CREATE TABLE IF NOT EXISTS saved_workflow_versions (
+    name                  TEXT NOT NULL,
+    version               INTEGER NOT NULL,
+    definition_hash        TEXT NOT NULL,
+    workflow_name          TEXT,
+    input_schema_json      TEXT,
+    default_input_json     TEXT,
+    default_target         TEXT,
+    metadata_json          TEXT,
+    source_provenance_json TEXT,
+    created_by            TEXT,
+    created_at_ms          INTEGER NOT NULL,
+    enabled                INTEGER NOT NULL DEFAULT 1,
+    deprecated_at_ms       INTEGER,
+    deprecation_message    TEXT,
+    deleted_at_ms          INTEGER,
+    PRIMARY KEY (name, version)
+  )`);
+  db.exec(`CREATE INDEX IF NOT EXISTS saved_workflow_versions_by_definition
+    ON saved_workflow_versions (definition_hash)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS saved_workflow_versions_by_name_version
+    ON saved_workflow_versions (name, version DESC)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS saved_workflow_versions_by_name_created
+    ON saved_workflow_versions (name, created_at_ms DESC)`);
 }
 
 function migrateDaemonSettingsToV17(db: Database): void {

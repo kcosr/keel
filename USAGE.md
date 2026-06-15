@@ -140,7 +140,8 @@ bun src/cli/keel.ts <command> [args]
 | `output <runId> [--output json\|text]` | Print the terminal workflow output. |
 | `report <runId> [--output json\|text]` | Print a journaled per-node result digest. |
 | `list [--output text\|json]` | List runs as an aligned table or JSON envelope. Requires admin. |
-| `schedule put <name> [workflow.ts] --interval-ms ms [--target dir]` | Create or replace a pinned workflow schedule. Requires admin. |
+| `workflow save/list/show/source/run/disable/enable/...` | Manage saved workflow names and immutable versions. |
+| `schedule put <name> [workflow.ts\|--workflow saved-name] --interval-ms ms [--target dir]` | Create or replace a pinned workflow schedule. Requires admin. |
 | `profiles list/get/set/delete/check ...` | Manage daemon-wide persistent agent profiles. Requires admin. |
 | `settings list/get/set/unset/check ...` | Manage typed daemon settings. Requires admin. |
 | `workspace list/show/diff/merge/discard/gc ...` | Inspect and manage retained isolated agent/session workspaces by `workspaceId`. |
@@ -1140,6 +1141,52 @@ recreated from current source. If a pinned definition requires an unsupported
 workflow SDK ABI or has an invalid persisted target, the daemon disables that
 schedule and persists the error instead of retrying it on every supervisor tick.
 
+Schedules can also be created from a saved workflow:
+
+```bash
+keel schedule put hourly-review --workflow review-loop --version 3 --interval-ms 3600000
+```
+
+The daemon resolves the saved ref at creation time, stores the resolved
+definition hash, and does not track later `latest` versions. Creating or
+replacing schedules is admin-only for both source and saved-ref forms.
+
+### Saved Workflows
+
+Saved workflows are a naming layer over immutable workflow definitions. Saving a
+workflow captures the same client-side source bundle as `keel run`, writes a new
+append-only version, and points that version at the stored `wf_sha256_...`
+definition hash.
+
+```bash
+keel workflow save review-loop ./review.workflow.ts \
+  --title "Review loop" --tag review --default-input '{"n":2}' --default-target "$PWD"
+keel workflow list --output json
+keel workflow show review-loop --output text
+keel workflow source review-loop --all
+keel workflow run review-loop --input '{"n":3}' --allow-deprecated
+keel workflow disable review-loop
+keel workflow enable review-loop
+keel workflow deprecate review-loop 2 "use v3"
+keel workflow delete-version review-loop 1 --yes
+```
+
+Names must be lowercase identifiers such as `review-loop`; `wf_` and
+`wf_sha256...` prefixes are reserved for definition hashes. Omitting a version
+resolves to the highest enabled, non-deprecated, non-deleted version. Deprecated
+versions require an explicit version or `--allow-deprecated`; disabled or deleted
+rows are not launchable.
+
+`workflow source` prints exact stored TypeScript source. Single-file definitions
+default to the entry file; `--all` prints every captured module with stable
+`--- path` headers. The command never reads the original client path or the
+materialized cache.
+
+Auth: `workflow:save` can save versions and update non-delete lifecycle metadata
+for its scoped workflow. `workflow:run` can launch saved workflows. `workflow:read`
+can show/source scoped workflows. `workflow list`, `delete`, `delete-version`,
+and all schedule creation remain admin-only in v1.
+
 ## API Reference
 
 All clients speak the same `KeelApi` contract. The daemon exposes it over the
@@ -1169,6 +1216,30 @@ target strings instead of falling back to daemon cwd.
 ```ts
 interface KeelApi {
   launchRun(req: LaunchRequest): Promise<RunLaunchResult>;
+  saveWorkflow(req: SaveWorkflowRequest): SavedWorkflowVersionView;
+  listSavedWorkflows(opts?: {
+    includeDisabled?: boolean;
+    includeDeprecated?: boolean;
+    includeDeleted?: boolean;
+  }): SavedWorkflowSummary[];
+  getSavedWorkflow(name: string): SavedWorkflowView | null;
+  getSavedWorkflowSource(req: {
+    name: string;
+    version?: number | "latest";
+    file?: string;
+    all?: boolean;
+    allowDeprecated?: boolean;
+  }): SavedWorkflowSourceView;
+  launchSavedWorkflow(req: {
+    ref: { name: string; version?: number | "latest"; allowDeprecated?: boolean };
+    input?: unknown;
+    target?: string;
+    name?: string | null;
+  }): Promise<RunLaunchResult>;
+  putSchedule(req:
+    | { name: string; source: WorkflowSourceInput; workflowName?: string | null; input?: unknown; target?: string; intervalMs: number; firstFireMs?: number }
+    | { name: string; savedRef: { name: string; version?: number | "latest"; allowDeprecated?: boolean }; input?: unknown; target?: string; intervalMs: number; firstFireMs?: number }
+  ): { ok: boolean };
   resumeRun(runId: string): Promise<RunStart>;
   interruptRun(runId: string, reason?: string): Promise<{ runId: string; status: "interrupted" }>;
   rerunRun(

@@ -6,6 +6,7 @@
 // the kernel (Phase 2), not here.
 
 import { Database } from "bun:sqlite";
+import { canonicalJson } from "../hash.ts";
 import { workspaceIdentity } from "../workspace/identity.ts";
 import { applyMigration } from "./migrations.ts";
 import { DDL, SCHEMA_VERSION } from "./schema.ts";
@@ -31,10 +32,50 @@ import type {
   RunRow,
   RunSettingSnapshotRow,
   RunSettingSnapshotSetRow,
+  SavedWorkflowRow,
+  SavedWorkflowVersionRow,
   WorkflowDefinitionRow,
 } from "./types.ts";
 
 const LEGACY_SESSION_WORKSPACE_IDENTITY_SDK_ABI_VERSION = 6;
+const SAVED_WORKFLOW_NAME_RE = /^[a-z][a-z0-9]*(?:[-_.][a-z0-9]+)*$/;
+
+export interface SavedWorkflowVersionView {
+  name: string;
+  version: number;
+  definitionHash: string;
+  workflowName: string | null;
+  inputSchema: unknown | null;
+  inputSchemaSet: boolean;
+  defaultInput: unknown | null;
+  defaultInputSet: boolean;
+  defaultTarget: string | null;
+  metadata: unknown | null;
+  sourceProvenance: unknown | null;
+  createdBy: string | null;
+  createdAtMs: number;
+  enabled: boolean;
+  deprecatedAtMs: number | null;
+  deprecationMessage: string | null;
+  deletedAtMs: number | null;
+}
+
+export interface SavedWorkflowView {
+  name: string;
+  title: string | null;
+  description: string | null;
+  tags: string[];
+  createdAtMs: number;
+  updatedAtMs: number;
+  disabledAtMs: number | null;
+  deletedAtMs: number | null;
+  versions: SavedWorkflowVersionView[];
+}
+
+export interface SavedWorkflowSummary extends SavedWorkflowView {
+  latestVersion: number | null;
+  latestDefinitionHash: string | null;
+}
 
 export class JournalStore {
   readonly db: Database;
@@ -1001,7 +1042,10 @@ export class JournalStore {
           `SELECT COUNT(*) AS c FROM workflow_definitions
            WHERE created_at_ms < ?
              AND hash NOT IN (SELECT definition_version FROM runs)
-             AND hash NOT IN (SELECT workflow_ref FROM schedules WHERE enabled = 1)`,
+             AND hash NOT IN (SELECT workflow_ref FROM schedules WHERE enabled = 1)
+             AND hash NOT IN (
+               SELECT definition_hash FROM saved_workflow_versions WHERE deleted_at_ms IS NULL
+             )`,
         )
         .get(cutoff)?.c ?? 0;
     this.db
@@ -1009,10 +1053,349 @@ export class JournalStore {
         `DELETE FROM workflow_definitions
          WHERE created_at_ms < ?
            AND hash NOT IN (SELECT definition_version FROM runs)
-           AND hash NOT IN (SELECT workflow_ref FROM schedules WHERE enabled = 1)`,
+           AND hash NOT IN (SELECT workflow_ref FROM schedules WHERE enabled = 1)
+           AND hash NOT IN (
+             SELECT definition_hash FROM saved_workflow_versions WHERE deleted_at_ms IS NULL
+           )`,
       )
       .run(cutoff);
     return removed;
+  }
+
+  // ---- saved workflow registry ------------------------------------------
+
+  putSavedWorkflowVersion(req: {
+    name: string;
+    version?: number;
+    definition?: NewWorkflowDefinitionRow;
+    definitionHash?: string;
+    workflowName?: string | null;
+    title?: string | null;
+    description?: string | null;
+    tags?: string[];
+    inputSchema?: unknown;
+    defaultInput?: unknown;
+    defaultTarget?: string | null;
+    metadata?: unknown;
+    sourceProvenance?: unknown;
+    createdBy?: string | null;
+    createdAtMs: number;
+    allowDuplicateDefinition?: boolean;
+  }): SavedWorkflowVersionView {
+    assertValidSavedWorkflowName(req.name);
+    const definitionHash = req.definition?.hash ?? req.definitionHash;
+    if (!definitionHash) throw new Error("saved workflow version requires definitionHash");
+    return this.transaction(() => {
+      if (req.definition) this.putWorkflowDefinition(req.definition);
+      if (!this.getWorkflowDefinition(definitionHash)) {
+        throw new Error(`workflow definition ${definitionHash} does not exist`);
+      }
+      const existing = this.getSavedWorkflowRow(req.name);
+      const tagsJson =
+        req.tags === undefined ? (existing?.tagsJson ?? null) : canonicalJson(req.tags);
+      if (existing) {
+        if (existing.deletedAtMs !== null) {
+          throw new Error(`saved workflow "${req.name}" is deleted`);
+        }
+        this.db
+          .query(
+            `UPDATE saved_workflows
+             SET title = ?, description = ?, tags_json = ?, updated_at_ms = ?
+             WHERE name = ?`,
+          )
+          .run(
+            req.title ?? existing.title,
+            req.description ?? existing.description,
+            tagsJson,
+            req.createdAtMs,
+            req.name,
+          );
+      } else {
+        this.db
+          .query(
+            `INSERT INTO saved_workflows (
+              name, title, description, tags_json, created_at_ms, updated_at_ms,
+              disabled_at_ms, deleted_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL)`,
+          )
+          .run(
+            req.name,
+            req.title ?? null,
+            req.description ?? null,
+            tagsJson,
+            req.createdAtMs,
+            req.createdAtMs,
+          );
+      }
+      const duplicate = this.db
+        .query<{ version: number }, [string, string]>(
+          `SELECT version FROM saved_workflow_versions
+           WHERE name = ? AND definition_hash = ? AND deleted_at_ms IS NULL
+           ORDER BY version ASC LIMIT 1`,
+        )
+        .get(req.name, definitionHash);
+      if (duplicate && !req.allowDuplicateDefinition) {
+        throw new Error(
+          `saved workflow "${req.name}" already has definition ${definitionHash} at version ${duplicate.version}`,
+        );
+      }
+      const version =
+        req.version ??
+        (this.db
+          .query<{ version: number | null }, [string]>(
+            "SELECT MAX(version) AS version FROM saved_workflow_versions WHERE name = ?",
+          )
+          .get(req.name)?.version ?? 0) + 1;
+      if (!Number.isSafeInteger(version) || version <= 0) {
+        throw new Error(`saved workflow version must be a positive integer, got ${version}`);
+      }
+      const existingVersion = this.getSavedWorkflowVersion(req.name, version);
+      if (existingVersion) {
+        throw new Error(`saved workflow "${req.name}" version ${version} already exists`);
+      }
+      this.db
+        .query(
+          `INSERT INTO saved_workflow_versions (
+            name, version, definition_hash, workflow_name, input_schema_json,
+            default_input_json, default_target, metadata_json, source_provenance_json,
+            created_by, created_at_ms, enabled, deprecated_at_ms,
+            deprecation_message, deleted_at_ms
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, NULL, NULL)`,
+        )
+        .run(
+          req.name,
+          version,
+          definitionHash,
+          req.workflowName ?? null,
+          req.inputSchema === undefined ? null : canonicalJson(req.inputSchema),
+          req.defaultInput === undefined ? null : canonicalJson(req.defaultInput),
+          req.defaultTarget ?? null,
+          req.metadata === undefined ? null : canonicalJson(req.metadata),
+          req.sourceProvenance === undefined ? null : canonicalJson(req.sourceProvenance),
+          req.createdBy ?? null,
+          req.createdAtMs,
+        );
+      const saved = this.getSavedWorkflowVersion(req.name, version);
+      if (!saved) throw new Error(`saved workflow "${req.name}" version ${version} was not saved`);
+      return saved;
+    });
+  }
+
+  listSavedWorkflows(
+    opts: {
+      includeDisabled?: boolean;
+      includeDeprecated?: boolean;
+      includeDeleted?: boolean;
+    } = {},
+  ): SavedWorkflowSummary[] {
+    const workflows = this.db
+      .query<RawSavedWorkflowRow, []>("SELECT * FROM saved_workflows ORDER BY name ASC")
+      .all()
+      .map(mapSavedWorkflow);
+    const out: SavedWorkflowSummary[] = [];
+    for (const workflow of workflows) {
+      if (!opts.includeDeleted && workflow.deletedAtMs !== null) continue;
+      if (!opts.includeDisabled && workflow.disabledAtMs !== null) continue;
+      const versions = this.listSavedWorkflowVersionRows(workflow.name).filter((version) => {
+        if (!opts.includeDeleted && version.deletedAtMs !== null) return false;
+        if (!opts.includeDeprecated && version.deprecatedAtMs !== null) return false;
+        return true;
+      });
+      let latest: SavedWorkflowVersionView | null = null;
+      try {
+        latest = this.resolveSavedWorkflowRef({
+          name: workflow.name,
+          version: "latest",
+          allowDeprecated: opts.includeDeprecated,
+        });
+      } catch {
+        latest = null;
+      }
+      out.push({
+        ...savedWorkflowBaseView(workflow),
+        latestVersion: latest?.version ?? null,
+        latestDefinitionHash: latest?.definitionHash ?? null,
+        versions,
+      });
+    }
+    return out;
+  }
+
+  getSavedWorkflow(name: string): SavedWorkflowView | null {
+    assertValidSavedWorkflowName(name);
+    const row = this.getSavedWorkflowRow(name);
+    if (!row) return null;
+    return {
+      ...savedWorkflowBaseView(row),
+      versions: this.listSavedWorkflowVersionRows(name),
+    };
+  }
+
+  getSavedWorkflowVersion(name: string, version: number): SavedWorkflowVersionView | null {
+    assertValidSavedWorkflowName(name);
+    const row = this.db
+      .query<RawSavedWorkflowVersionRow, [string, number]>(
+        "SELECT * FROM saved_workflow_versions WHERE name = ? AND version = ?",
+      )
+      .get(name, version);
+    return row ? savedWorkflowVersionView(mapSavedWorkflowVersion(row)) : null;
+  }
+
+  resolveSavedWorkflowRef(ref: {
+    name: string;
+    version?: number | "latest";
+    allowDeprecated?: boolean;
+  }): SavedWorkflowVersionView {
+    assertValidSavedWorkflowName(ref.name);
+    const workflow = this.getSavedWorkflowRow(ref.name);
+    if (!workflow || workflow.deletedAtMs !== null) {
+      throw new Error(`saved workflow "${ref.name}" does not exist`);
+    }
+    if (workflow.disabledAtMs !== null) throw new Error(`saved workflow "${ref.name}" is disabled`);
+    const version =
+      ref.version === undefined || ref.version === "latest"
+        ? this.db
+            .query<RawSavedWorkflowVersionRow, [string]>(
+              `SELECT * FROM saved_workflow_versions
+               WHERE name = ?
+                 AND enabled = 1
+                 ${ref.allowDeprecated ? "" : "AND deprecated_at_ms IS NULL"}
+                 AND deleted_at_ms IS NULL
+               ORDER BY version DESC LIMIT 1`,
+            )
+            .get(ref.name)
+        : this.db
+            .query<RawSavedWorkflowVersionRow, [string, number]>(
+              "SELECT * FROM saved_workflow_versions WHERE name = ? AND version = ?",
+            )
+            .get(ref.name, ref.version);
+    if (!version) throw new Error(`saved workflow "${ref.name}" has no matching version`);
+    const row = mapSavedWorkflowVersion(version);
+    if (row.deletedAtMs !== null) {
+      throw new Error(`saved workflow "${ref.name}" version ${row.version} is deleted`);
+    }
+    if (!row.enabled) {
+      throw new Error(`saved workflow "${ref.name}" version ${row.version} is disabled`);
+    }
+    if (row.deprecatedAtMs !== null && !ref.allowDeprecated) {
+      throw new Error(
+        `saved workflow "${ref.name}" version ${row.version} is deprecated; pass allowDeprecated to launch it`,
+      );
+    }
+    return savedWorkflowVersionView(row);
+  }
+
+  setSavedWorkflowDisabled(name: string, disabled: boolean, atMs = Date.now()): SavedWorkflowView {
+    assertValidSavedWorkflowName(name);
+    return this.transaction(() => {
+      const row = this.getSavedWorkflowRow(name);
+      if (!row || row.deletedAtMs !== null)
+        throw new Error(`saved workflow "${name}" does not exist`);
+      this.db
+        .query("UPDATE saved_workflows SET disabled_at_ms = ?, updated_at_ms = ? WHERE name = ?")
+        .run(disabled ? atMs : null, atMs, name);
+      const saved = this.getSavedWorkflow(name);
+      if (!saved) throw new Error(`saved workflow "${name}" does not exist`);
+      return saved;
+    });
+  }
+
+  setSavedWorkflowVersionEnabled(
+    name: string,
+    version: number,
+    enabled: boolean,
+  ): SavedWorkflowVersionView {
+    assertValidSavedWorkflowName(name);
+    return this.transaction(() => {
+      const row = this.getSavedWorkflowVersion(name, version);
+      if (!row || row.deletedAtMs !== null) {
+        throw new Error(`saved workflow "${name}" version ${version} does not exist`);
+      }
+      this.db
+        .query("UPDATE saved_workflow_versions SET enabled = ? WHERE name = ? AND version = ?")
+        .run(enabled ? 1 : 0, name, version);
+      const saved = this.getSavedWorkflowVersion(name, version);
+      if (!saved) throw new Error(`saved workflow "${name}" version ${version} does not exist`);
+      return saved;
+    });
+  }
+
+  deprecateSavedWorkflowVersion(
+    name: string,
+    version: number,
+    message: string | null | undefined,
+    atMs = Date.now(),
+  ): SavedWorkflowVersionView {
+    assertValidSavedWorkflowName(name);
+    return this.transaction(() => {
+      const row = this.getSavedWorkflowVersion(name, version);
+      if (!row || row.deletedAtMs !== null) {
+        throw new Error(`saved workflow "${name}" version ${version} does not exist`);
+      }
+      this.db
+        .query(
+          `UPDATE saved_workflow_versions
+           SET deprecated_at_ms = ?, deprecation_message = ?
+           WHERE name = ? AND version = ?`,
+        )
+        .run(atMs, message ?? null, name, version);
+      const saved = this.getSavedWorkflowVersion(name, version);
+      if (!saved) throw new Error(`saved workflow "${name}" version ${version} does not exist`);
+      return saved;
+    });
+  }
+
+  deleteSavedWorkflow(name: string, atMs = Date.now()): SavedWorkflowView {
+    assertValidSavedWorkflowName(name);
+    return this.transaction(() => {
+      const row = this.getSavedWorkflowRow(name);
+      if (!row || row.deletedAtMs !== null)
+        throw new Error(`saved workflow "${name}" does not exist`);
+      this.db
+        .query("UPDATE saved_workflows SET deleted_at_ms = ?, updated_at_ms = ? WHERE name = ?")
+        .run(atMs, atMs, name);
+      const saved = this.getSavedWorkflow(name);
+      if (!saved) throw new Error(`saved workflow "${name}" does not exist`);
+      return saved;
+    });
+  }
+
+  deleteSavedWorkflowVersion(
+    name: string,
+    version: number,
+    atMs = Date.now(),
+  ): SavedWorkflowVersionView {
+    assertValidSavedWorkflowName(name);
+    return this.transaction(() => {
+      const row = this.getSavedWorkflowVersion(name, version);
+      if (!row || row.deletedAtMs !== null) {
+        throw new Error(`saved workflow "${name}" version ${version} does not exist`);
+      }
+      this.db
+        .query(
+          "UPDATE saved_workflow_versions SET deleted_at_ms = ? WHERE name = ? AND version = ?",
+        )
+        .run(atMs, name, version);
+      const saved = this.getSavedWorkflowVersion(name, version);
+      if (!saved) throw new Error(`saved workflow "${name}" version ${version} does not exist`);
+      return saved;
+    });
+  }
+
+  private getSavedWorkflowRow(name: string): SavedWorkflowRow | null {
+    const row = this.db
+      .query<RawSavedWorkflowRow, [string]>("SELECT * FROM saved_workflows WHERE name = ?")
+      .get(name);
+    return row ? mapSavedWorkflow(row) : null;
+  }
+
+  private listSavedWorkflowVersionRows(name: string): SavedWorkflowVersionView[] {
+    return this.db
+      .query<RawSavedWorkflowVersionRow, [string]>(
+        "SELECT * FROM saved_workflow_versions WHERE name = ? ORDER BY version DESC",
+      )
+      .all(name)
+      .map((row) => savedWorkflowVersionView(mapSavedWorkflowVersion(row)));
   }
 
   // ---- capabilities ------------------------------------------------------
@@ -1979,6 +2362,35 @@ interface RawWorkflowDefinitionRow {
   created_at_ms: number;
 }
 
+interface RawSavedWorkflowRow {
+  name: string;
+  title: string | null;
+  description: string | null;
+  tags_json: string | null;
+  created_at_ms: number;
+  updated_at_ms: number;
+  disabled_at_ms: number | null;
+  deleted_at_ms: number | null;
+}
+
+interface RawSavedWorkflowVersionRow {
+  name: string;
+  version: number;
+  definition_hash: string;
+  workflow_name: string | null;
+  input_schema_json: string | null;
+  default_input_json: string | null;
+  default_target: string | null;
+  metadata_json: string | null;
+  source_provenance_json: string | null;
+  created_by: string | null;
+  created_at_ms: number;
+  enabled: number;
+  deprecated_at_ms: number | null;
+  deprecation_message: string | null;
+  deleted_at_ms: number | null;
+}
+
 interface RawCapabilityRow {
   id: string;
   secret_hash: string;
@@ -2100,6 +2512,83 @@ function mapRunSettingSnapshotRow(r: RawRunSettingSnapshotRow): RunSettingSnapsh
     catalogGeneration: r.catalog_generation,
     capturedAtMs: r.captured_at_ms,
   };
+}
+
+function mapSavedWorkflow(r: RawSavedWorkflowRow): SavedWorkflowRow {
+  return {
+    name: r.name,
+    title: r.title,
+    description: r.description,
+    tagsJson: r.tags_json,
+    createdAtMs: r.created_at_ms,
+    updatedAtMs: r.updated_at_ms,
+    disabledAtMs: r.disabled_at_ms,
+    deletedAtMs: r.deleted_at_ms,
+  };
+}
+
+function mapSavedWorkflowVersion(r: RawSavedWorkflowVersionRow): SavedWorkflowVersionRow {
+  return {
+    name: r.name,
+    version: r.version,
+    definitionHash: r.definition_hash,
+    workflowName: r.workflow_name,
+    inputSchemaJson: r.input_schema_json,
+    defaultInputJson: r.default_input_json,
+    defaultTarget: r.default_target,
+    metadataJson: r.metadata_json,
+    sourceProvenanceJson: r.source_provenance_json,
+    createdBy: r.created_by,
+    createdAtMs: r.created_at_ms,
+    enabled: r.enabled !== 0,
+    deprecatedAtMs: r.deprecated_at_ms,
+    deprecationMessage: r.deprecation_message,
+    deletedAtMs: r.deleted_at_ms,
+  };
+}
+
+function savedWorkflowBaseView(row: SavedWorkflowRow): Omit<SavedWorkflowView, "versions"> {
+  return {
+    name: row.name,
+    title: row.title,
+    description: row.description,
+    tags: row.tagsJson ? (JSON.parse(row.tagsJson) as string[]) : [],
+    createdAtMs: row.createdAtMs,
+    updatedAtMs: row.updatedAtMs,
+    disabledAtMs: row.disabledAtMs,
+    deletedAtMs: row.deletedAtMs,
+  };
+}
+
+function savedWorkflowVersionView(row: SavedWorkflowVersionRow): SavedWorkflowVersionView {
+  return {
+    name: row.name,
+    version: row.version,
+    definitionHash: row.definitionHash,
+    workflowName: row.workflowName,
+    inputSchema: row.inputSchemaJson ? JSON.parse(row.inputSchemaJson) : null,
+    inputSchemaSet: row.inputSchemaJson !== null,
+    defaultInput: row.defaultInputJson ? JSON.parse(row.defaultInputJson) : null,
+    defaultInputSet: row.defaultInputJson !== null,
+    defaultTarget: row.defaultTarget,
+    metadata: row.metadataJson ? JSON.parse(row.metadataJson) : null,
+    sourceProvenance: row.sourceProvenanceJson ? JSON.parse(row.sourceProvenanceJson) : null,
+    createdBy: row.createdBy,
+    createdAtMs: row.createdAtMs,
+    enabled: row.enabled,
+    deprecatedAtMs: row.deprecatedAtMs,
+    deprecationMessage: row.deprecationMessage,
+    deletedAtMs: row.deletedAtMs,
+  };
+}
+
+function assertValidSavedWorkflowName(name: string): void {
+  if (name.trim() !== name || !SAVED_WORKFLOW_NAME_RE.test(name)) {
+    throw new Error(`invalid saved workflow name "${name}"`);
+  }
+  if (name.startsWith("wf_") || name.startsWith("wf_sha256")) {
+    throw new Error(`saved workflow name "${name}" uses a reserved workflow definition prefix`);
+  }
 }
 
 function mapRun(r: RawRunRow): RunRow {

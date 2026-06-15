@@ -3,6 +3,13 @@
 ## [Unreleased]
 
 ### Added
+- Saved workflow registry schema v20 and RPC/CLI commands (`keel workflow ...`)
+  for saving captured workflow bundles as `name@version`, listing/showing
+  metadata, printing exact stored source, launching pinned saved versions, and
+  enable/disable/deprecate/tombstone lifecycle operations.
+- Saved-ref schedule creation (`keel schedule put <name> --workflow saved-name`)
+  resolves the saved version once at schedule creation and persists the immutable
+  definition hash. Schedule creation remains admin-only.
 - Typed daemon settings catalog with admin RPC/CLI management (`keel settings ...`), JSON value parsing, validation/check diagnostics, optimistic generation guards, and read-only snapshotted defaults such as `agent.defaultOnFailure`.
 - Journal schema v17 stores daemon setting overrides plus immutable run setting snapshot sets; migrating older journals backfills explicit workflow-visible default settings for every run and warning events for non-terminal pre-v17 runs.
 - Persistent daemon-owned agent profile catalog with admin RPC/CLI management (`keel profiles ...`), validation/check diagnostics, programmatic-profile coexistence, and frozen per-run profile snapshots for deterministic replay.

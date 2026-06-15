@@ -1201,6 +1201,104 @@ describe("keel CLI", () => {
   );
 
   test(
+    "workflow commands save, list, source, run, and update lifecycle",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "keel-cli-workflow-"));
+      const socketPath = join(dir, "keel.sock");
+      const dbPath = join(dir, "keel.db");
+      const daemon = new KeelDaemon({
+        socketPath,
+        dbPath,
+        adminToken: "kc_admin_workflow_test",
+      });
+      await daemon.start();
+      try {
+        const env = {
+          KEEL_SOCKET: socketPath,
+          KEEL_DB: dbPath,
+          KEEL_CAP_DIR: join(dir, "caps"),
+          KEEL_ADMIN_TOKEN: "kc_admin_workflow_test",
+        };
+        const saved = await runCli(
+          [
+            "workflow",
+            "save",
+            "review-loop",
+            chainUrl,
+            "--default-input",
+            '{"n":2}',
+            "--default-target",
+            dir,
+            "--title",
+            "Review Loop",
+          ],
+          dir,
+          env,
+        );
+        expect(saved.code).toBe(0);
+        const payload = JSON.parse(saved.stdout) as { version: number; definitionHash: string };
+        expect(payload.version).toBe(1);
+        expect(payload.definitionHash.startsWith("wf_sha256_")).toBe(true);
+
+        const listed = await runCli(["workflow", "list", "--output", "json"], dir, env);
+        expect(listed.code).toBe(0);
+        expect(JSON.parse(listed.stdout).workflows[0]).toMatchObject({
+          name: "review-loop",
+          latestVersion: 1,
+          title: "Review Loop",
+        });
+
+        const source = await runCli(["workflow", "source", "review-loop", "--all"], dir, env);
+        expect(source.code).toBe(0);
+        expect(source.stdout).toContain("--- chain.workflow.ts");
+        expect(source.stdout).toContain("export default async function chain");
+
+        const run = await runCli(["workflow", "run", "review-loop"], dir, env);
+        expect(run.code).toBe(0);
+        expect(JSON.parse(run.stdout).output).toBe(2);
+
+        const deprecated = await runCli(
+          ["workflow", "deprecate", "review-loop", "1", "audit"],
+          dir,
+          env,
+        );
+        expect(deprecated.code).toBe(0);
+        const deprecatedSource = await runCli(
+          ["workflow", "source", "review-loop", "--version", "1"],
+          dir,
+          env,
+        );
+        expect(deprecatedSource.code).toBe(0);
+        expect(deprecatedSource.stdout).toContain("export default async function chain");
+
+        const disabled = await runCli(
+          ["workflow", "disable-version", "review-loop", "1"],
+          dir,
+          env,
+        );
+        expect(disabled.code).toBe(0);
+        const disabledSource = await runCli(
+          ["workflow", "source", "review-loop", "--version", "1"],
+          dir,
+          env,
+        );
+        expect(disabledSource.code).toBe(0);
+        expect(disabledSource.stdout).toContain("export default async function chain");
+        const deleted = await runCli(
+          ["workflow", "delete-version", "review-loop", "1", "--yes"],
+          dir,
+          env,
+        );
+        expect(deleted.code).toBe(0);
+      } finally {
+        daemon.stop();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    DAEMON_TEST_TIMEOUT_MS,
+  );
+
+  test(
     "execute runs a stateless TypeScript control script over the daemon",
     async () => {
       const dir = mkdtempSync(join(tmpdir(), "keel-execute-"));

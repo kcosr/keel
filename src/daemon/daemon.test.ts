@@ -512,6 +512,182 @@ describe("daemon multi-client over the socket", () => {
       daemon.stop();
     }
   });
+
+  test("saved workflow save, source, launch, and saved-ref schedule pin one definition hash", async () => {
+    const socketPath = join(dir, "saved.sock");
+    const dbPath = join(dir, "saved.db");
+    const daemon = new KeelDaemon({
+      socketPath,
+      dbPath,
+      adminToken: ADMIN_TOKEN,
+      clock: () => 1000,
+    });
+    await daemon.start();
+    try {
+      const admin = await DaemonClient.connect(socketPath);
+      await admin.authenticate(ADMIN_TOKEN);
+      const saved = await admin.saveWorkflow({
+        name: "review-loop",
+        source: chainUrl.source,
+        workflowName: "review",
+        defaultInput: { n: 2 },
+        defaultTarget: dir,
+        title: "Review loop",
+      });
+      expect(saved.version).toBe(1);
+      expect(saved.definitionHash.startsWith("wf_sha256_")).toBe(true);
+      const source = await admin.getSavedWorkflowSource({ name: "review-loop", all: true });
+      expect(source.files.some((file) => file.path.endsWith("chain.workflow.ts"))).toBe(true);
+
+      const launched = await admin.launchSavedWorkflow({ ref: { name: "review-loop" } });
+      if (launched.capability) await admin.authenticate(launched.capability);
+      const out = await admin.waitForRun(launched.runId);
+      expect(out.status).toBe("finished");
+      expect(out.output).toBe(2);
+      await admin.authenticate(ADMIN_TOKEN);
+      const run = await admin.getRun(launched.runId);
+      expect(run?.definitionVersion).toBe(saved.definitionHash);
+      const runRow = new Database(dbPath)
+        .query<{ workflow_ref: string | null }, [string]>(
+          "SELECT workflow_ref FROM runs WHERE run_id = ?",
+        )
+        .get(launched.runId);
+      expect(runRow?.workflow_ref).toBe(`saved:review-loop@1 ${saved.definitionHash}`);
+
+      await admin.putSchedule({
+        name: "hourly-review",
+        savedRef: { name: "review-loop", version: 1 },
+        intervalMs: 60_000,
+      });
+      const row = new Database(dbPath)
+        .query<{ workflow_ref: string }, [string]>(
+          "SELECT workflow_ref FROM schedules WHERE name = ?",
+        )
+        .get("hourly-review");
+      expect(row?.workflow_ref).toBe(saved.definitionHash);
+      await admin.deprecateSavedWorkflowVersion({
+        name: "review-loop",
+        version: 1,
+        message: "audit",
+      });
+      await admin.setSavedWorkflowVersionEnabled("review-loop", 1, false);
+      expect(
+        (await admin.getSavedWorkflowSource({ name: "review-loop", version: 1 })).files[0]?.code,
+      ).toContain("export default async function chain");
+      admin.close();
+    } finally {
+      daemon.stop();
+    }
+  });
+
+  test("saved workflow schedule validates selector exclusivity before writing", async () => {
+    const socketPath = join(dir, "saved-schedule-invalid.sock");
+    const dbPath = join(dir, "saved-schedule-invalid.db");
+    const daemon = new KeelDaemon({ socketPath, dbPath, adminToken: ADMIN_TOKEN });
+    await daemon.start();
+    try {
+      const both = await rawAdminRpc(socketPath, "putSchedule", {
+        name: "bad",
+        source: chainUrl.source,
+        savedRef: { name: "missing" },
+        target: dir,
+        intervalMs: 60_000,
+      });
+      expect(both.error?.message).toMatch(/exactly one/);
+      const neither = await rawAdminRpc(socketPath, "putSchedule", {
+        name: "bad",
+        target: dir,
+        intervalMs: 60_000,
+      });
+      expect(neither.error?.message).toMatch(/exactly one/);
+      const count = new Database(dbPath)
+        .query<{ count: number }, []>("SELECT count(*) AS count FROM schedules")
+        .get();
+      expect(count?.count).toBe(0);
+    } finally {
+      daemon.stop();
+    }
+  });
+
+  test("saved workflow schedule validates referenced definitions before writing", async () => {
+    const socketPath = join(dir, "saved-schedule-definition.sock");
+    const dbPath = join(dir, "saved-schedule-definition.db");
+    const daemon = new KeelDaemon({ socketPath, dbPath, adminToken: ADMIN_TOKEN });
+    await daemon.start();
+    try {
+      const admin = await DaemonClient.connect(socketPath);
+      await admin.authenticate(ADMIN_TOKEN);
+      const saved = await admin.saveWorkflow({
+        name: "review-loop",
+        source: chainUrl.source,
+        defaultTarget: dir,
+      });
+      const db = new Database(dbPath);
+      db.query("DELETE FROM workflow_definitions WHERE hash = ?").run(saved.definitionHash);
+      db.close();
+      await expect(
+        admin.putSchedule({
+          name: "bad-saved-ref",
+          savedRef: { name: "review-loop" },
+          intervalMs: 60_000,
+        }),
+      ).rejects.toThrow(/not found/);
+      const count = new Database(dbPath)
+        .query<{ count: number }, []>("SELECT count(*) AS count FROM schedules")
+        .get();
+      expect(count?.count).toBe(0);
+      admin.close();
+    } finally {
+      daemon.stop();
+    }
+  });
+
+  test("saved workflow raw auth, default target, and disabled launch fail closed", async () => {
+    const socketPath = join(dir, "saved-fail-closed.sock");
+    const dbPath = join(dir, "saved-fail-closed.db");
+    const daemon = new KeelDaemon({ socketPath, dbPath, adminToken: ADMIN_TOKEN });
+    await daemon.start();
+    try {
+      const unauthSave = await rawRpc(socketPath, "saveWorkflow", {
+        name: "hidden",
+        source: chainUrl.source,
+      });
+      expect(unauthSave.error?.message).toMatch(/no capability presented/);
+      const unauthRun = await rawRpc(socketPath, "launchSavedWorkflow", {
+        ref: { name: "hidden" },
+      });
+      expect(unauthRun.error?.message).toMatch(/no capability presented/);
+      const unauthSource = await rawRpc(socketPath, "getSavedWorkflowSource", {
+        name: "hidden",
+      });
+      expect(unauthSource.error?.message).toMatch(/no capability presented/);
+      const unauthList = await rawRpc(socketPath, "listSavedWorkflows", {});
+      expect(unauthList.error?.message).toMatch(/no capability presented/);
+
+      const admin = await DaemonClient.connect(socketPath);
+      await admin.authenticate(ADMIN_TOKEN);
+      await admin.saveWorkflow({
+        name: "bad-target",
+        source: chainUrl.source,
+        defaultTarget: "   ",
+      });
+      await expect(admin.launchSavedWorkflow({ ref: { name: "bad-target" } })).rejects.toThrow(
+        /non-empty target/,
+      );
+      await admin.saveWorkflow({
+        name: "disabled-name",
+        source: chainUrl.source,
+        defaultTarget: dir,
+      });
+      await admin.setSavedWorkflowDisabled("disabled-name", true);
+      await expect(admin.launchSavedWorkflow({ ref: { name: "disabled-name" } })).rejects.toThrow(
+        /disabled/,
+      );
+      admin.close();
+    } finally {
+      daemon.stop();
+    }
+  });
 });
 
 describe("capability auth", () => {
@@ -587,6 +763,95 @@ describe("capability auth", () => {
       launcher.close();
       scoped.close();
       admin.close();
+    } finally {
+      daemon.stop();
+    }
+  });
+
+  test("saved workflow scoped capabilities separate read, save, run, list, and delete", async () => {
+    const socketPath = join(dir, "workflow-auth.sock");
+    const dbPath = join(dir, "workflow-auth.db");
+    const store = JournalStore.open(dbPath);
+    const readToken = "kc_workflow_read";
+    const saveToken = "kc_workflow_save";
+    const runToken = "kc_workflow_run";
+    try {
+      store.putCapability({
+        id: "cap_workflow_read",
+        secretHash: hashCapabilityToken(readToken),
+        resourceJson: JSON.stringify({ kind: "workflow", name: "review-loop" }),
+        actionsJson: JSON.stringify(["workflow:read"]),
+        createdAtMs: 1,
+        expiresAtMs: null,
+        revokedAtMs: null,
+        note: null,
+      });
+      store.putCapability({
+        id: "cap_workflow_save",
+        secretHash: hashCapabilityToken(saveToken),
+        resourceJson: JSON.stringify({ kind: "workflow", name: "review-loop" }),
+        actionsJson: JSON.stringify(["workflow:save"]),
+        createdAtMs: 1,
+        expiresAtMs: null,
+        revokedAtMs: null,
+        note: null,
+      });
+      store.putCapability({
+        id: "cap_workflow_run",
+        secretHash: hashCapabilityToken(runToken),
+        resourceJson: JSON.stringify({ kind: "workflow", name: "review-loop", version: 1 }),
+        actionsJson: JSON.stringify(["workflow:run"]),
+        createdAtMs: 1,
+        expiresAtMs: null,
+        revokedAtMs: null,
+        note: null,
+      });
+    } finally {
+      store.close();
+    }
+    const daemon = new KeelDaemon({ socketPath, dbPath, adminToken: ADMIN_TOKEN });
+    await daemon.start();
+    try {
+      const saver = await DaemonClient.connect(socketPath);
+      await saver.authenticate(saveToken);
+      await saver.saveWorkflow({
+        name: "review-loop",
+        version: 1,
+        source: chainUrl.source,
+        defaultTarget: dir,
+      });
+      await expect(saver.getSavedWorkflow("review-loop")).rejects.toThrow(/workflow:read/);
+      await expect(saver.deleteSavedWorkflow("review-loop")).rejects.toThrow(/admin/);
+
+      const reader = await DaemonClient.connect(socketPath);
+      await reader.authenticate(readToken);
+      expect(await reader.getSavedWorkflow("review-loop")).toMatchObject({ name: "review-loop" });
+      await expect(reader.listSavedWorkflows()).rejects.toThrow(/admin/);
+
+      await saver.authenticate(ADMIN_TOKEN);
+      await saver.saveWorkflow({
+        name: "review-loop",
+        version: 2,
+        source: chainUrl.source,
+        defaultTarget: dir,
+        allowDuplicateDefinition: true,
+      });
+
+      const runner = await DaemonClient.connect(socketPath);
+      await runner.authenticate(runToken);
+      await expect(runner.launchSavedWorkflow({ ref: { name: "review-loop" } })).rejects.toThrow(
+        /different resource/,
+      );
+      const launched = await runner.launchSavedWorkflow({
+        ref: { name: "review-loop", version: 1 },
+        input: { n: 1 },
+      });
+      expect(launched.capability?.startsWith("kc_run_")).toBe(true);
+      await runner.authenticate(launched.capability as string);
+      expect((await runner.waitForRun(launched.runId)).output).toBe(1);
+      saver.close();
+      reader.close();
+      runner.close();
     } finally {
       daemon.stop();
     }

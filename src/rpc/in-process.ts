@@ -30,7 +30,10 @@ import type { SettingView, SettingsDiagnostic } from "../settings/catalog.ts";
 import { requireRunTarget } from "../target.ts";
 import {
   DEFAULT_WORKFLOW_DEFINITION_TTL_MS,
+  createWorkflowDefinitionSnapshot,
   evictWorkflowDefinitionCache,
+  materializeWorkflowDefinition,
+  snapshotWorkflowSource,
 } from "../workflow-definitions/snapshot.ts";
 import type { WorkflowSourceInput } from "../workflow-definitions/source.ts";
 import { cleanupTerminalRunWorkspaces } from "../workspace/retention.ts";
@@ -45,10 +48,14 @@ import type {
   EventEnvelope,
   KeelApi,
   LaunchRequest,
+  LaunchSavedWorkflowRequest,
+  PutScheduleRequest,
   RunOutcome,
   RunStart,
   RunWorkspaceDiff,
   RunWorkspaceView,
+  SaveWorkflowRequest,
+  SavedWorkflowSourceView,
   WorkflowProvenance,
   WorkspaceGcResult,
 } from "./contract.ts";
@@ -110,6 +117,188 @@ export class InProcessKeel implements KeelApi {
       done.catch((err) => ({ runId, status: "failed", output: undefined }) as RunHandle<unknown>),
     );
     return { runId };
+  }
+
+  saveWorkflow(req: SaveWorkflowRequest) {
+    const at = this.opts.clock?.() ?? Date.now();
+    const snapshot = createWorkflowDefinitionSnapshot(req.source, {
+      name: req.workflowName ?? req.name,
+      nowMs: at,
+    });
+    return this.store.putSavedWorkflowVersion({
+      name: req.name,
+      ...(req.version !== undefined ? { version: req.version } : {}),
+      definition: {
+        hash: snapshot.hash,
+        name: snapshot.name,
+        kind: snapshot.kind,
+        code: snapshot.code,
+        sourceMap: null,
+        manifestJson: canonicalJson(snapshot.manifest),
+        createdAtMs: at,
+      },
+      workflowName: req.workflowName ?? null,
+      title: req.title ?? null,
+      description: req.description ?? null,
+      ...(req.tags !== undefined ? { tags: req.tags } : {}),
+      ...(req.inputSchema !== undefined ? { inputSchema: req.inputSchema } : {}),
+      ...(req.defaultInput !== undefined ? { defaultInput: req.defaultInput } : {}),
+      defaultTarget: req.defaultTarget ?? null,
+      ...(req.metadata !== undefined ? { metadata: req.metadata } : {}),
+      ...(req.provenance !== undefined ? { sourceProvenance: req.provenance } : {}),
+      createdAtMs: at,
+      allowDuplicateDefinition: req.allowDuplicateDefinition ?? false,
+    });
+  }
+
+  listSavedWorkflows(opts: Parameters<KeelApi["listSavedWorkflows"]>[0] = {}) {
+    return this.store.listSavedWorkflows(opts);
+  }
+
+  getSavedWorkflow(name: string) {
+    return this.store.getSavedWorkflow(name);
+  }
+
+  getSavedWorkflowSource(req: {
+    name: string;
+    version?: number | "latest";
+    file?: string;
+    all?: boolean;
+    allowDeprecated?: boolean;
+  }): SavedWorkflowSourceView {
+    const workflow = this.store.getSavedWorkflow(req.name);
+    if (!workflow || workflow.deletedAtMs !== null) {
+      throw new Error(`saved workflow "${req.name}" does not exist`);
+    }
+    const version =
+      typeof req.version === "number"
+        ? this.store.getSavedWorkflowVersion(req.name, req.version)
+        : (workflow.versions.find((candidate) => candidate.deletedAtMs === null) ?? null);
+    if (!version || version.deletedAtMs !== null) {
+      throw new Error(`saved workflow "${req.name}" has no matching version`);
+    }
+    const definition = this.store.getWorkflowDefinition(version.definitionHash);
+    if (!definition)
+      throw new Error(`workflow definition ${version.definitionHash} does not exist`);
+    const manifest = definition.manifestJson
+      ? (JSON.parse(definition.manifestJson) as {
+          entry?: unknown;
+          modules?: Array<{ path?: unknown; code?: unknown }>;
+        })
+      : null;
+    let entry = "entry.ts";
+    let files: Array<{ path: string; code: string; entry: boolean }>;
+    if (manifest?.modules && Array.isArray(manifest.modules)) {
+      if (manifest.modules.length === 0) {
+        files = [{ path: "entry.ts", code: definition.code, entry: true }];
+      } else if (typeof manifest.entry !== "string") {
+        throw new Error(`workflow definition ${definition.hash} is missing manifest entry`);
+      } else {
+        entry = manifest.entry;
+        files = manifest.modules.map((module) => {
+          if (typeof module.path !== "string" || typeof module.code !== "string") {
+            throw new Error(`workflow definition ${definition.hash} has invalid source module`);
+          }
+          return { path: module.path, code: module.code, entry: module.path === entry };
+        });
+      }
+    } else if (definition.code) {
+      files = [{ path: "entry.ts", code: definition.code, entry: true }];
+    } else {
+      throw new Error(`workflow definition ${definition.hash} cannot display source`);
+    }
+    if (req.file) {
+      const file = files.find((candidate) => candidate.path === req.file);
+      if (!file) throw new Error(`workflow source file ${req.file} does not exist`);
+      files = [file];
+    } else if (!req.all) {
+      files = [files.find((candidate) => candidate.entry) ?? (files[0] as (typeof files)[number])];
+    }
+    return {
+      name: version.name,
+      version: version.version,
+      definitionHash: version.definitionHash,
+      entry,
+      files,
+    };
+  }
+
+  async launchSavedWorkflow(req: LaunchSavedWorkflowRequest): Promise<{ runId: string }> {
+    const saved = this.store.resolveSavedWorkflowRef(req.ref);
+    const target = requireRunTarget(req.target ?? saved.defaultTarget, "launchSavedWorkflow");
+    const input =
+      req.input !== undefined ? req.input : saved.defaultInputSet ? saved.defaultInput : {};
+    const name = req.name ?? saved.workflowName ?? saved.name;
+    const { runId, done } = this.kernel.launchDefinition(saved.definitionHash, input, {
+      name,
+      workflowRef: `saved:${saved.name}@${saved.version} ${saved.definitionHash}`,
+      target,
+    });
+    this.running.set(
+      runId,
+      done.catch((err) => ({ runId, status: "failed", output: undefined }) as RunHandle<unknown>),
+    );
+    return { runId };
+  }
+
+  setSavedWorkflowDisabled(name: string, disabled: boolean) {
+    return this.store.setSavedWorkflowDisabled(name, disabled, this.opts.clock?.() ?? Date.now());
+  }
+
+  setSavedWorkflowVersionEnabled(name: string, version: number, enabled: boolean) {
+    return this.store.setSavedWorkflowVersionEnabled(name, version, enabled);
+  }
+
+  deprecateSavedWorkflowVersion(req: { name: string; version: number; message?: string | null }) {
+    return this.store.deprecateSavedWorkflowVersion(
+      req.name,
+      req.version,
+      req.message,
+      this.opts.clock?.() ?? Date.now(),
+    );
+  }
+
+  deleteSavedWorkflow(name: string) {
+    return this.store.deleteSavedWorkflow(name, this.opts.clock?.() ?? Date.now());
+  }
+
+  deleteSavedWorkflowVersion(name: string, version: number) {
+    return this.store.deleteSavedWorkflowVersion(name, version, this.opts.clock?.() ?? Date.now());
+  }
+
+  putSchedule(req: PutScheduleRequest): { ok: boolean } {
+    const hasSource = "source" in req && req.source !== undefined;
+    const hasSavedRef = "savedRef" in req && req.savedRef !== undefined;
+    if (hasSource === hasSavedRef) {
+      throw new Error("putSchedule requires exactly one of source or savedRef");
+    }
+    let workflowRef: string;
+    let defaultTarget: string | null = null;
+    if (hasSavedRef) {
+      if ("workflowName" in req && req.workflowName !== undefined) {
+        throw new Error("putSchedule workflowName is only valid with source");
+      }
+      const saved = this.store.resolveSavedWorkflowRef(req.savedRef);
+      materializeWorkflowDefinition(this.store, saved.definitionHash);
+      workflowRef = saved.definitionHash;
+      defaultTarget = saved.defaultTarget;
+    } else {
+      const snapshot = snapshotWorkflowSource(this.store, req.source, {
+        name: req.workflowName ?? req.name,
+        nowMs: this.opts.clock?.() ?? Date.now(),
+      }).snapshot;
+      workflowRef = snapshot.hash;
+    }
+    const target = requireRunTarget(req.target ?? defaultTarget, "putSchedule");
+    this.store.putSchedule({
+      name: req.name,
+      workflowRef,
+      inputJson: req.input != null ? JSON.stringify(req.input) : null,
+      scheduleTarget: target,
+      intervalMs: req.intervalMs,
+      nextFireMs: req.firstFireMs ?? this.opts.clock?.() ?? Date.now(),
+    });
+    return { ok: true };
   }
 
   async resumeRun(runId: string): Promise<RunStart> {

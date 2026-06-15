@@ -521,6 +521,11 @@ Launch stores an immutable workflow definition snapshot in
 provenance. The daemon materializes definitions from the DB into a cache for Bun
 import; the cache is not the source of truth.
 
+Saved workflows are a durable naming layer over these immutable definitions:
+`name@version` rows store metadata and a pointer to one definition hash. Launch
+and schedule creation resolve the saved ref to a concrete hash before inserting
+durable state, so later saves do not mutate existing runs or schedules.
+
 Client-captured workflow v1 is intentionally single-file. The only external
 import allowed in workflow source is the exact SDK specifier `@kcosr/keel`,
 linked from the daemon's installed package during materialization. That SDK is a

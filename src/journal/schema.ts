@@ -4,7 +4,7 @@
 // or tricks. Integers are epoch-ms; JSON travels as TEXT. Reserved tables
 // (approvals/signals/timers) are created now though their effects land later.
 
-export const SCHEMA_VERSION = 19;
+export const SCHEMA_VERSION = 20;
 
 export const DDL = /* sql */ `
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -205,6 +205,45 @@ CREATE TABLE IF NOT EXISTS workflow_definitions (
   manifest_json TEXT,
   created_at_ms INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS saved_workflows (
+  name              TEXT PRIMARY KEY,
+  title             TEXT,
+  description       TEXT,
+  tags_json         TEXT,
+  created_at_ms     INTEGER NOT NULL,
+  updated_at_ms     INTEGER NOT NULL,
+  disabled_at_ms    INTEGER,
+  deleted_at_ms     INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS saved_workflow_versions (
+  name                  TEXT NOT NULL,
+  version               INTEGER NOT NULL,
+  definition_hash        TEXT NOT NULL,
+  workflow_name          TEXT,
+  input_schema_json      TEXT,
+  default_input_json     TEXT,
+  default_target         TEXT,
+  metadata_json          TEXT,
+  source_provenance_json TEXT,
+  created_by            TEXT,
+  created_at_ms          INTEGER NOT NULL,
+  enabled                INTEGER NOT NULL DEFAULT 1,
+  deprecated_at_ms       INTEGER,
+  deprecation_message    TEXT,
+  deleted_at_ms          INTEGER,
+  PRIMARY KEY (name, version)
+);
+
+CREATE INDEX IF NOT EXISTS saved_workflow_versions_by_definition
+  ON saved_workflow_versions (definition_hash);
+
+CREATE INDEX IF NOT EXISTS saved_workflow_versions_by_name_version
+  ON saved_workflow_versions (name, version DESC);
+
+CREATE INDEX IF NOT EXISTS saved_workflow_versions_by_name_created
+  ON saved_workflow_versions (name, created_at_ms DESC);
 
 CREATE TABLE IF NOT EXISTS capabilities (
   id             TEXT PRIMARY KEY,

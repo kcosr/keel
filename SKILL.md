@@ -5,7 +5,9 @@ do work through `ctx`; Keel runs it durably and survives crashes. For a single
 workflow, run inline TypeScript with `keel run <<'TS'` so no workflow file is
 needed. `keel run` prints a structured JSON envelope by default.
 For reusable operational workflows, check `workflows/README.md` and launch the
-documented workflow file instead of copying fixture code.
+documented workflow file instead of copying fixture code. Once a workflow is
+stable, operators can save it with `keel workflow save <name> <workflow.ts>` and
+launch future pinned versions with `keel workflow run <name>`.
 
 Assume the daemon is already running and the `keel` CLI is already configured to
 reach it. Do not start the daemon, restart systemd, or use admin credentials from
@@ -44,6 +46,8 @@ The body runs in a sandbox. Stay inside it or the run is rejected:
 - Shared helper modules are good for deterministic prompt fragments, review
   rubrics, task lists, and render functions. Keep them pure and deterministic,
   and keep raw secrets out of workflow source and helper modules.
+- Saved workflows capture those helper modules as TypeScript source in the
+  immutable bundle. Do not import agent-pack YAML or mutable task state directly.
 - **A `ctx.step` callback must use only its `inputs`** — don't read outer variables
   inside a `step` function; pass them in through `inputs`. (Agent prompts can use
   any variable freely.)

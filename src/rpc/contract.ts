@@ -23,6 +23,7 @@ import type {
   RunProjection,
   RunReport,
   RunSummary,
+  ScheduleErrorProjection,
   ScheduleSummary,
   ScheduleView,
 } from "./projection.ts";
@@ -136,7 +137,7 @@ export interface GetScheduleRequest {
 }
 
 export type { SavedWorkflowSummary, SavedWorkflowVersionView, SavedWorkflowView };
-export type { ScheduleSummary, ScheduleView };
+export type { ScheduleErrorProjection, ScheduleSummary, ScheduleView };
 
 export interface RunOutcome {
   runId: string;

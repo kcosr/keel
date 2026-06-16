@@ -14,6 +14,7 @@ changes.
 | `README.md` | Project orientation, quick routing, broad maturity/status, checks. | Full command syntax, volatile test counts, detailed architecture. |
 | `USAGE.md` | Human/operator reference: install, daemon operation, CLI syntax, API notes, paths, workspaces, providers, limits. | Historical rationale or spec-only future plans. |
 | `SKILL.md` | Workflow authoring guide for agents and humans, including deterministic workflow rules and compact examples. | Daemon operations, exhaustive CLI/API reference. |
+| `docs/api.md` | Source-backed daemon API orientation, operation families, authority notes, and event-delivery contract. | Exact copied TypeScript contract definitions that can drift from source. |
 | `workflows/README.md` | Catalog and conventions for reusable workflow files. | Per-workflow runbooks beyond catalog-level notes. |
 | `workflows/*/README.md` | One workflow's inputs, launch examples, safety notes, signals, outputs, and retention/cleanup behavior. | Global workflow SDK reference. |
 | `docs/documentation.md` | Documentation ownership map, update checklist, and durable documentation debt categories. | Product behavior, API syntax, or implementation plans that belong in other docs or `.specs/`. |
@@ -33,7 +34,8 @@ branch:
   command defaults: update `USAGE.md`, `docs/control-surfaces.md`, tests, and
   `CHANGELOG.md`.
 - Daemon RPC/API contracts or execute methods: update contract tests,
-  `USAGE.md` API notes, `docs/control-surfaces.md`, and `CHANGELOG.md`.
+  `docs/api.md`, `USAGE.md` API notes, `docs/control-surfaces.md`, and
+  `CHANGELOG.md`.
 - Workflow SDK authoring behavior, `ctx.*` semantics, source capture, or replay
   visible behavior: update `SKILL.md`; update `DESIGN.md` if the architecture or
   durable semantics changed; evaluate `WORKFLOW_SDK_ABI_VERSION`.

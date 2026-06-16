@@ -101,16 +101,28 @@ workflow source capture semantics. If SDK exposure is `required`, also evaluate
 
 | Operation | RPC | CLI | Execute | Web | TUI | MCP | SDK | Authority |
 |---|---|---|---|---|---|---|---|---|
-| run list/get/report/output/watch | implemented | implemented | partial | deferred | implemented | deferred | not-applicable | `admin`, `run:read`, `run:watch`, `run:events`, `run:output` |
-| launch run | implemented | implemented | implemented | deferred | not-applicable | deferred | not-applicable | open on local socket; follow-up uses minted run capability |
-| resume/retry/rewind/fork | implemented | implemented | implemented | deferred | partial | deferred | not-applicable | `run:resume`, `run:retry`, `run:rewind`, `run:fork` |
+| run launch from captured source | implemented | implemented | implemented | deferred | not-applicable | deferred | not-applicable | open on local socket; follow-up uses minted run capability |
+| run list | implemented | implemented | deferred | deferred | implemented | deferred | not-applicable | `admin` |
+| run get/report/output/blockage | implemented | implemented | implemented | deferred | implemented | deferred | not-applicable | `run:read`, `run:output` |
+| run watch/events/wait | implemented | implemented | implemented | deferred | partial | deferred | not-applicable | `run:watch`, `run:events` |
+| resume/retry | implemented | implemented | implemented | deferred | implemented | deferred | not-applicable | `run:resume`, `run:retry` |
+| rewind/fork | implemented | implemented | implemented | deferred | partial | deferred | not-applicable | `run:rewind`, `run:fork` |
+| rerun/source override | implemented | deferred | deferred | deferred | deferred | deferred | not-applicable | `run:retry` |
 | interrupt run | implemented | implemented | implemented | deferred | not-applicable | deferred | not-applicable | `run:interrupt` |
 | signal delivery | implemented | implemented | implemented | deferred | implemented | deferred | `ctx.signal` implemented | `run:signal` |
 | approval decision | implemented | implemented | implemented | deferred | implemented | deferred | `ctx.human` implemented | `admin` |
-| schedule put/list/show | implemented | implemented | partial | deferred | not-applicable | deferred | not-applicable | `admin` |
-| saved workflow registry | implemented | implemented | deferred | deferred | not-applicable | deferred | not-applicable | `admin`, `workflow:read`, `workflow:run`, `workflow:save` |
-| profile/settings catalog | implemented | implemented | deferred | deferred | not-applicable | deferred | not-applicable | `admin` |
-| workspace list/show/diff/merge/discard/gc | implemented | implemented | implemented | deferred | partial | deferred | not-applicable | `run:read` for read/diff; `admin` for merge/discard/GC |
+| schedule put | implemented | implemented | deferred | deferred | not-applicable | deferred | not-applicable | `admin` |
+| schedule list/show | implemented | implemented | implemented | deferred | not-applicable | deferred | not-applicable | `admin` |
+| saved workflow save/install | implemented | implemented | deferred | deferred | not-applicable | deferred | not-applicable | `admin`, `workflow:save` |
+| saved workflow list/show/source | implemented | implemented | deferred | deferred | not-applicable | deferred | not-applicable | `admin`, `workflow:read` |
+| saved workflow run | implemented | implemented | deferred | deferred | not-applicable | deferred | not-applicable | `workflow:run`; follow-up uses minted run capability |
+| saved workflow enable/disable/deprecate/delete | implemented | implemented | deferred | deferred | not-applicable | deferred | not-applicable | `admin`, `workflow:save` for scoped non-delete metadata |
+| workflow definition preview/source | implemented | implemented | deferred | deferred | not-applicable | deferred | not-applicable | `admin`, `run:source` depending selector |
+| workflow definition GC | implemented | implemented | deferred | deferred | not-applicable | deferred | not-applicable | `admin` |
+| profile catalog | implemented | implemented | deferred | deferred | not-applicable | deferred | `profile` field consumes snapshots | `admin` for catalog management |
+| settings catalog | implemented | implemented | deferred | deferred | not-applicable | deferred | workflow-visible settings snapshot | `admin` |
+| workspace list/show/diff | implemented | implemented | implemented | deferred | deferred | deferred | not-applicable | `run:read` |
+| workspace merge/discard/gc | implemented | implemented | implemented | deferred | deferred | deferred | not-applicable | `admin` |
 
 Keep this table descriptive until the API stabilizes enough to justify generated
 surface documentation.

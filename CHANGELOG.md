@@ -87,6 +87,11 @@
   `run.interrupted` audit events and best-effort active worker/provider abort.
 
 ### Changed
+- `keel signal`, `keel approve`, `keel deny`, and the matching daemon/execute
+  APIs now acknowledge durable delivery and wake-start handling instead of
+  waiting for the resumed workflow to finish, fail, or park again. Use
+  `keel watch <runId> --output text` or `waitForRun`/`keel.wait` to observe
+  follow-up progress.
 - `ctx.agent` and `ctx.agentSession().turn` default `maxRetries`, `lenient`, `onFailure`, `timeoutMs`, and `stallRetries` from each run's settings snapshot after explicit workflow and profile values, so resume/retry/rewind/fork do not observe later daemon setting edits. Codex `turn/completed` waits now receive the host-resolved per-call agent timeout.
 - `keel gc` / `gcDefinitions` use `workflowDefinition.gcTtlMs` as the default workflow definition TTL when the request does not supply `ttlMs`; `KEEL_DEFINITION_TTL_MS` is no longer honored. `codex.rpcTimeoutMs` and `codex.connectTimeoutMs` apply when the Codex provider is constructed, normally at daemon restart.
 - Reusable implementation/review workflows now resolve `input.repository` to a

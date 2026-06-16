@@ -586,6 +586,8 @@ can self-correct from (§6).
 It runs outside the deterministic workflow realm, receives injected `keel`,
 `args`, `state`, and `env`, and writes only its returned JSON value to stdout.
 It is useful for short launch/resume/wait/inspect loops and output shaping.
+The tracked control-surface convention and CLI interaction matrix live in
+`docs/control-surfaces.md`.
 
 `execute` is not a durable workflow engine: it does not pause and resume its own
 stack, and its `--state` input is only an ephemeral convenience for non-secret

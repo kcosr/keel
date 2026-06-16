@@ -267,6 +267,25 @@ describe("settings RPC", () => {
 });
 
 describe("saved workflow RPC", () => {
+  test("previews workflow definitions without mutating saved workflow registry", () => {
+    const store = JournalStore.memory();
+    const api = keel(store);
+    const preview = api.previewWorkflowDefinition({ source: chainUrl.source });
+    expect(preview.definitionHash.startsWith("wf_sha256_")).toBe(true);
+    expect(store.getWorkflowDefinition(preview.definitionHash)).not.toBeNull();
+    expect(api.listSavedWorkflows()).toEqual([]);
+
+    const saved = api.saveWorkflow({
+      name: "review-loop",
+      source: chainUrl.source,
+      defaultTarget: process.cwd(),
+    });
+    expect(saved.definitionHash).toBe(preview.definitionHash);
+    expect(api.getSavedWorkflow("review-loop")?.versions[0]?.definitionHash).toBe(
+      preview.definitionHash,
+    );
+  });
+
   test("saves source, displays captured source, launches by saved ref, and schedules by hash", async () => {
     const store = JournalStore.memory();
     const api = keel(store);

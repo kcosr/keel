@@ -18,6 +18,13 @@ export interface PlanReviewPromptInput {
   appendCorrespondence?: boolean;
 }
 
+export interface DocsReviewPromptInput {
+  repository: string;
+  task?: string;
+  focus?: string[];
+  maxFindings?: number;
+}
+
 export function buildCodeReviewPrompt(input: CodeReviewPromptInput): string {
   const rubric = selectRubric("code");
   return compactLines([
@@ -66,6 +73,29 @@ export function buildPlanReviewPrompt(input: PlanReviewPromptInput): string {
     renderCleanCriteria(rubric),
     "",
     renderFindingContract("plan"),
+  ]);
+}
+
+export function buildDocsReviewPrompt(input: DocsReviewPromptInput): string {
+  const rubric = selectRubric("docs");
+  return compactLines([
+    "Review the repository documentation against the actual public surface.",
+    "",
+    `Repository: ${input.repository}`,
+    input.task ? `Task: ${input.task}` : "",
+    renderFocus(input.focus),
+    input.maxFindings !== undefined
+      ? `Advisory finding cap: ${input.maxFindings}. Do not hide findings solely because the cap is exceeded; mention the excess in the summary.`
+      : "",
+    "Read the relevant docs, command help, source, tests, and examples yourself. Report only concrete documentation findings grounded in evidence.",
+    "",
+    renderChecklist(rubric),
+    "",
+    renderSeverityRules(rubric),
+    "",
+    renderCleanCriteria(rubric),
+    "",
+    renderFindingContract("docs"),
   ]);
 }
 

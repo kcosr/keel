@@ -526,6 +526,9 @@ describe("daemon multi-client over the socket", () => {
     try {
       const admin = await DaemonClient.connect(socketPath);
       await admin.authenticate(ADMIN_TOKEN);
+      const preview = await admin.previewWorkflowDefinition({ source: chainUrl.source });
+      expect(preview.definitionHash.startsWith("wf_sha256_")).toBe(true);
+      expect(new Database(dbPath).query("SELECT name FROM saved_workflows").all()).toEqual([]);
       const saved = await admin.saveWorkflow({
         name: "review-loop",
         source: chainUrl.source,
@@ -535,6 +538,7 @@ describe("daemon multi-client over the socket", () => {
         title: "Review loop",
       });
       expect(saved.version).toBe(1);
+      expect(saved.definitionHash).toBe(preview.definitionHash);
       expect(saved.definitionHash.startsWith("wf_sha256_")).toBe(true);
       const source = await admin.getSavedWorkflowSource({ name: "review-loop", all: true });
       expect(source.files.some((file) => file.path.endsWith("chain.workflow.ts"))).toBe(true);
@@ -663,6 +667,10 @@ describe("daemon multi-client over the socket", () => {
       expect(unauthSource.error?.message).toMatch(/no capability presented/);
       const unauthList = await rawRpc(socketPath, "listSavedWorkflows", {});
       expect(unauthList.error?.message).toMatch(/no capability presented/);
+      const unauthPreview = await rawRpc(socketPath, "previewWorkflowDefinition", {
+        source: chainUrl.source,
+      });
+      expect(unauthPreview.error?.message).toMatch(/no capability presented/);
 
       const admin = await DaemonClient.connect(socketPath);
       await admin.authenticate(ADMIN_TOKEN);
@@ -868,6 +876,9 @@ describe("capability auth", () => {
         source: chainUrl.source,
         defaultTarget: dir,
       });
+      await expect(saver.previewWorkflowDefinition({ source: chainUrl.source })).rejects.toThrow(
+        /admin/,
+      );
       await expect(saver.getSavedWorkflow("review-loop")).rejects.toThrow(/workflow:read/);
       await expect(saver.deleteSavedWorkflow("review-loop")).rejects.toThrow(/admin/);
 

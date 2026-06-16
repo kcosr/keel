@@ -28,6 +28,9 @@ const taskCodeReviewUrl = captureWorkflowFile(
 const taskPlanReviewUrl = captureWorkflowFile(
   new URL("plan-review.workflow.ts", TASK_REVIEW).pathname,
 );
+const taskDocsReviewUrl = captureWorkflowFile(
+  new URL("docs-review.workflow.ts", TASK_REVIEW).pathname,
+);
 
 function kernel(
   store: JournalStore,
@@ -326,6 +329,67 @@ describe("task review guidance workflows", () => {
         { name: "task-plan-review", target: process.cwd() },
       ),
     ).rejects.toThrow(/correspondence confirmation failed/);
+  });
+
+  test("docs review validates output with read-only tools and resolved repository cwd", async () => {
+    const store = JournalStore.memory();
+    const target = mkdtempSync(join(tmpdir(), "keel-task-docs-review-"));
+    const provider = new RecordingProvider({
+      review: {
+        status: "clean",
+        findings: [],
+        summary: "Docs are accurate.",
+      },
+    });
+    try {
+      const clean = await kernel(store, provider, { agentProfiles: mockProfiles }).run<{
+        status: string;
+        findings: unknown[];
+        summary: string;
+      }>(
+        taskDocsReviewUrl,
+        { repository: ".", task: "review docs", focus: ["quickstart"], maxFindings: 2 },
+        { name: "task-docs-review", target },
+      );
+      expect(clean.status).toBe("finished");
+      expect(clean.output).toEqual({
+        status: "clean",
+        findings: [],
+        summary: "Docs are accurate.",
+      });
+      expect(provider.calls[0]?.toolPolicy).toBe("read-only");
+      expect(provider.calls[0]?.cwd).toBe(target);
+      expect(provider.calls[0]?.prompt).toContain(`Repository: ${target}`);
+      expect(provider.calls[0]?.prompt).toContain("docs.quickstart");
+      expect(provider.calls[0]?.prompt).toContain("Advisory finding cap: 2");
+    } finally {
+      rmSync(target, { recursive: true, force: true });
+    }
+
+    const escapingStore = JournalStore.memory();
+    await expect(
+      kernel(escapingStore, new RecordingProvider({}), { agentProfiles: mockProfiles }).run(
+        taskDocsReviewUrl,
+        { repository: "../outside", task: "review docs" },
+        { name: "task-docs-review", target: process.cwd() },
+      ),
+    ).rejects.toThrow(/repository must stay inside the run target/);
+
+    const invalidStore = JournalStore.memory();
+    const invalidProvider = new RecordingProvider({
+      review: {
+        status: "changes-requested",
+        summary: "bad",
+        findings: [],
+      },
+    });
+    await expect(
+      kernel(invalidStore, invalidProvider, { agentProfiles: mockProfiles }).run(
+        taskDocsReviewUrl,
+        { repository: process.cwd(), task: "review docs" },
+        { name: "task-docs-review", target: process.cwd() },
+      ),
+    ).rejects.toThrow(/requires one or more findings/);
   });
 });
 

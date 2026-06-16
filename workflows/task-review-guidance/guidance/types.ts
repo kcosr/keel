@@ -19,7 +19,7 @@ export interface ReviewChecklistItem {
 export interface ReviewRubric {
   id: string;
   title: string;
-  audience: "code" | "plan";
+  audience: "code" | "plan" | "docs";
   checklist: ReviewChecklistItem[];
   cleanCriteria: string[];
   severityRules: Record<ReviewSeverity, string>;

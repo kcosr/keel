@@ -8,6 +8,10 @@ For reusable operational workflows, check `workflows/README.md` and launch the
 documented workflow file instead of copying fixture code. Once a workflow is
 stable, operators can save it with `keel workflow save <name> <workflow.ts>` and
 launch future pinned versions with `keel workflow run <name>`.
+For Keel's curated one-shot review workflows, an operator with admin authority
+can install the package with `keel workflow install task-review-guidance`; this
+creates ordinary saved workflow versions for `task-code-review`,
+`task-plan-review`, and `task-docs-review`.
 
 Assume the daemon is already running and the `keel` CLI is already configured to
 reach it. Do not start the daemon, restart systemd, or use admin credentials from

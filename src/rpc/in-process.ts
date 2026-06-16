@@ -30,27 +30,35 @@ import type { SettingView, SettingsDiagnostic } from "../settings/catalog.ts";
 import { requireRunTarget } from "../target.ts";
 import {
   DEFAULT_WORKFLOW_DEFINITION_TTL_MS,
+  createWorkflowDefinitionSnapshot,
   evictWorkflowDefinitionCache,
+  materializeWorkflowDefinition,
+  snapshotWorkflowSource,
 } from "../workflow-definitions/snapshot.ts";
+import { workflowDefinitionSourceSelection } from "../workflow-definitions/source-view.ts";
 import type { WorkflowSourceInput } from "../workflow-definitions/source.ts";
 import { cleanupTerminalRunWorkspaces } from "../workspace/retention.ts";
 import {
   diffCopyWorkspace,
   diffGitFinalTree,
-  diffWorkspace,
   mergeCloneIntoTarget,
   mergeCopyIntoSource,
-  mergeWorkspaceIntoTarget,
   removeManagedWorkspace,
 } from "../workspace/worktree.ts";
 import type {
   EventEnvelope,
+  GetWorkflowDefinitionSourceRequest,
   KeelApi,
   LaunchRequest,
+  LaunchSavedWorkflowRequest,
+  PutScheduleRequest,
   RunOutcome,
   RunStart,
   RunWorkspaceDiff,
   RunWorkspaceView,
+  SaveWorkflowRequest,
+  SavedWorkflowSourceView,
+  WorkflowDefinitionSourceView,
   WorkflowProvenance,
   WorkspaceGcResult,
 } from "./contract.ts";
@@ -112,6 +120,188 @@ export class InProcessKeel implements KeelApi {
       done.catch((err) => ({ runId, status: "failed", output: undefined }) as RunHandle<unknown>),
     );
     return { runId };
+  }
+
+  saveWorkflow(req: SaveWorkflowRequest) {
+    const at = this.opts.clock?.() ?? Date.now();
+    const snapshot = createWorkflowDefinitionSnapshot(req.source, {
+      name: req.workflowName ?? req.name,
+      nowMs: at,
+    });
+    return this.store.putSavedWorkflowVersion({
+      name: req.name,
+      ...(req.version !== undefined ? { version: req.version } : {}),
+      definition: {
+        hash: snapshot.hash,
+        name: snapshot.name,
+        kind: snapshot.kind,
+        code: snapshot.code,
+        sourceMap: null,
+        manifestJson: canonicalJson(snapshot.manifest),
+        createdAtMs: at,
+      },
+      workflowName: req.workflowName ?? null,
+      title: req.title ?? null,
+      description: req.description ?? null,
+      ...(req.tags !== undefined ? { tags: req.tags } : {}),
+      ...(req.inputSchema !== undefined ? { inputSchema: req.inputSchema } : {}),
+      ...(req.defaultInput !== undefined ? { defaultInput: req.defaultInput } : {}),
+      defaultTarget: req.defaultTarget ?? null,
+      ...(req.metadata !== undefined ? { metadata: req.metadata } : {}),
+      ...(req.provenance !== undefined ? { sourceProvenance: req.provenance } : {}),
+      createdAtMs: at,
+      allowDuplicateDefinition: req.allowDuplicateDefinition ?? false,
+    });
+  }
+
+  listSavedWorkflows(opts: Parameters<KeelApi["listSavedWorkflows"]>[0] = {}) {
+    return this.store.listSavedWorkflows(opts);
+  }
+
+  getSavedWorkflow(name: string) {
+    return this.store.getSavedWorkflow(name);
+  }
+
+  getSavedWorkflowSource(req: {
+    name: string;
+    version?: number | "latest";
+    file?: string;
+    all?: boolean;
+    allowDeprecated?: boolean;
+  }): SavedWorkflowSourceView {
+    const workflow = this.store.getSavedWorkflow(req.name);
+    if (!workflow || workflow.deletedAtMs !== null) {
+      throw new Error(`saved workflow "${req.name}" does not exist`);
+    }
+    const version =
+      typeof req.version === "number"
+        ? this.store.getSavedWorkflowVersion(req.name, req.version)
+        : (workflow.versions.find((candidate) => candidate.deletedAtMs === null) ?? null);
+    if (!version || version.deletedAtMs !== null) {
+      throw new Error(`saved workflow "${req.name}" has no matching version`);
+    }
+    const definition = this.store.getWorkflowDefinition(version.definitionHash);
+    if (!definition)
+      throw new Error(`workflow definition ${version.definitionHash} does not exist`);
+    const { entry, files } = workflowDefinitionSourceSelection(definition, {
+      ...(req.file !== undefined ? { file: req.file } : {}),
+      ...(req.all !== undefined ? { all: req.all } : {}),
+    });
+    return {
+      name: version.name,
+      version: version.version,
+      definitionHash: version.definitionHash,
+      entry,
+      files,
+    };
+  }
+
+  getWorkflowDefinitionSource(
+    req: GetWorkflowDefinitionSourceRequest,
+  ): WorkflowDefinitionSourceView {
+    const definitionHash =
+      req.lookup.kind === "run"
+        ? this.definitionHashForRunSourceLookup(req.lookup.runId)
+        : req.lookup.definitionHash;
+    const definition = this.store.getWorkflowDefinition(definitionHash);
+    if (!definition) throw new Error(`workflow definition ${definitionHash} not found`);
+    const { entry, files } = workflowDefinitionSourceSelection(definition, {
+      ...(req.file !== undefined ? { file: req.file } : {}),
+      ...(req.all !== undefined ? { all: req.all } : {}),
+    });
+    return {
+      kind: "workflow-definition-source",
+      lookup: req.lookup,
+      definitionHash,
+      definitionName: definition.name,
+      createdAtMs: definition.createdAtMs,
+      entry,
+      files,
+    };
+  }
+
+  private definitionHashForRunSourceLookup(runId: string): string {
+    const run = this.store.getRun(runId);
+    if (!run) throw new Error(`run ${runId} not found`);
+    return run.definitionVersion;
+  }
+
+  async launchSavedWorkflow(req: LaunchSavedWorkflowRequest): Promise<{ runId: string }> {
+    const saved = this.store.resolveSavedWorkflowRef(req.ref);
+    const target = requireRunTarget(req.target ?? saved.defaultTarget, "launchSavedWorkflow");
+    const input =
+      req.input !== undefined ? req.input : saved.defaultInputSet ? saved.defaultInput : {};
+    const name = req.name ?? saved.workflowName ?? saved.name;
+    const { runId, done } = this.kernel.launchDefinition(saved.definitionHash, input, {
+      name,
+      workflowRef: `saved:${saved.name}@${saved.version} ${saved.definitionHash}`,
+      target,
+    });
+    this.running.set(
+      runId,
+      done.catch((err) => ({ runId, status: "failed", output: undefined }) as RunHandle<unknown>),
+    );
+    return { runId };
+  }
+
+  setSavedWorkflowDisabled(name: string, disabled: boolean) {
+    return this.store.setSavedWorkflowDisabled(name, disabled, this.opts.clock?.() ?? Date.now());
+  }
+
+  setSavedWorkflowVersionEnabled(name: string, version: number, enabled: boolean) {
+    return this.store.setSavedWorkflowVersionEnabled(name, version, enabled);
+  }
+
+  deprecateSavedWorkflowVersion(req: { name: string; version: number; message?: string | null }) {
+    return this.store.deprecateSavedWorkflowVersion(
+      req.name,
+      req.version,
+      req.message,
+      this.opts.clock?.() ?? Date.now(),
+    );
+  }
+
+  deleteSavedWorkflow(name: string) {
+    return this.store.deleteSavedWorkflow(name, this.opts.clock?.() ?? Date.now());
+  }
+
+  deleteSavedWorkflowVersion(name: string, version: number) {
+    return this.store.deleteSavedWorkflowVersion(name, version, this.opts.clock?.() ?? Date.now());
+  }
+
+  putSchedule(req: PutScheduleRequest): { ok: boolean } {
+    const hasSource = "source" in req && req.source !== undefined;
+    const hasSavedRef = "savedRef" in req && req.savedRef !== undefined;
+    if (hasSource === hasSavedRef) {
+      throw new Error("putSchedule requires exactly one of source or savedRef");
+    }
+    let workflowRef: string;
+    let defaultTarget: string | null = null;
+    if (hasSavedRef) {
+      if ("workflowName" in req && req.workflowName !== undefined) {
+        throw new Error("putSchedule workflowName is only valid with source");
+      }
+      const saved = this.store.resolveSavedWorkflowRef(req.savedRef);
+      materializeWorkflowDefinition(this.store, saved.definitionHash);
+      workflowRef = saved.definitionHash;
+      defaultTarget = saved.defaultTarget;
+    } else {
+      const snapshot = snapshotWorkflowSource(this.store, req.source, {
+        name: req.workflowName ?? req.name,
+        nowMs: this.opts.clock?.() ?? Date.now(),
+      }).snapshot;
+      workflowRef = snapshot.hash;
+    }
+    const target = requireRunTarget(req.target ?? defaultTarget, "putSchedule");
+    this.store.putSchedule({
+      name: req.name,
+      workflowRef,
+      inputJson: req.input != null ? JSON.stringify(req.input) : null,
+      scheduleTarget: target,
+      intervalMs: req.intervalMs,
+      nextFireMs: req.firstFireMs ?? this.opts.clock?.() ?? Date.now(),
+    });
+    return { ok: true };
   }
 
   async resumeRun(runId: string): Promise<RunStart> {
@@ -193,9 +383,13 @@ export class InProcessKeel implements KeelApi {
     const diff =
       row.mode === "copy"
         ? diffCopyWorkspace(row.workspacePath, row.copyBaselinePath ?? "")
-        : row.mode === "clone"
+        : row.mode === "clone" || row.mode === "worktree"
           ? diffGitFinalTree(row.workspacePath, row.baseCommit ?? "HEAD")
-          : diffWorkspace(row.workspacePath);
+          : (() => {
+              throw new Error(
+                `workspace ${runId}/${workspaceId} mode ${row.mode} does not support diff`,
+              );
+            })();
     return {
       workspace: workspaceView(row, this.store.getRun(runId)?.status ?? null),
       ...diff,
@@ -276,8 +470,12 @@ export class InProcessKeel implements KeelApi {
       }
       mergeCloneIntoTarget(row.workspacePath, row.sourcePath, row.baseCommit);
     } else {
-      if (!row.sourcePath) throw new Error(`workspace ${runId}/${workspaceId} has no source path`);
-      mergeWorkspaceIntoTarget(row.workspacePath, row.sourcePath);
+      if (!row.sourcePath || !row.baseCommit) {
+        throw new Error(
+          `worktree workspace ${runId}/${workspaceId} cannot be merged without source and base commit`,
+        );
+      }
+      mergeCloneIntoTarget(row.workspacePath, row.sourcePath, row.baseCommit);
     }
     const at = Date.now();
     this.store.transaction(() => {
@@ -713,6 +911,8 @@ function workspaceView(row: AgentWorkspaceRow, runStatus: RunStatus | null): Run
     sourceRef: row.sourceRef,
     resolvedRef: row.resolvedRef,
     checkoutBranch: row.checkoutBranch,
+    worktreeCheckoutKind: row.worktreeCheckoutKind,
+    worktreeBranchOwned: row.worktreeBranchOwned,
     baseCommit: row.baseCommit,
     copyBaselinePath: row.copyBaselinePath,
     owned: row.owned,

@@ -37,6 +37,9 @@ const FIX = new URL("../kernel/realm/fixtures/", import.meta.url);
 const chainUrl = new URL("chain.workflow.ts", FIX).pathname;
 const flakyUrl = new URL("flaky.workflow.ts", FIX).pathname;
 const gateUrl = new URL("gate.workflow.ts", FIX).pathname;
+const TASK_REVIEW = new URL("../../workflows/task-review-guidance/", import.meta.url);
+const taskCodeReviewUrl = new URL("code-review.workflow.ts", TASK_REVIEW).pathname;
+const taskPlanReviewUrl = new URL("plan-review.workflow.ts", TASK_REVIEW).pathname;
 const DAEMON_TEST_TIMEOUT_MS = 20_000;
 
 async function runCli(
@@ -1201,6 +1204,226 @@ describe("keel CLI", () => {
   );
 
   test(
+    "workflow commands save, list, source, run, and update lifecycle",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "keel-cli-workflow-"));
+      const socketPath = join(dir, "keel.sock");
+      const dbPath = join(dir, "keel.db");
+      const daemon = new KeelDaemon({
+        socketPath,
+        dbPath,
+        adminToken: "kc_admin_workflow_test",
+      });
+      await daemon.start();
+      try {
+        const env = {
+          KEEL_SOCKET: socketPath,
+          KEEL_DB: dbPath,
+          KEEL_CAP_DIR: join(dir, "caps"),
+          KEEL_ADMIN_TOKEN: "kc_admin_workflow_test",
+        };
+        const saved = await runCli(
+          [
+            "workflow",
+            "save",
+            "review-loop",
+            chainUrl,
+            "--default-input",
+            '{"n":2}',
+            "--default-target",
+            dir,
+            "--title",
+            "Review Loop",
+          ],
+          dir,
+          env,
+        );
+        expect(saved.code).toBe(0);
+        const payload = JSON.parse(saved.stdout) as { version: number; definitionHash: string };
+        expect(payload.version).toBe(1);
+        expect(payload.definitionHash.startsWith("wf_sha256_")).toBe(true);
+
+        const listed = await runCli(["workflow", "list", "--output", "json"], dir, env);
+        expect(listed.code).toBe(0);
+        expect(JSON.parse(listed.stdout).workflows[0]).toMatchObject({
+          name: "review-loop",
+          latestVersion: 1,
+          title: "Review Loop",
+        });
+
+        const source = await runCli(["workflow", "source", "review-loop", "--all"], dir, env);
+        expect(source.code).toBe(0);
+        expect(source.stdout).toContain("--- chain.workflow.ts");
+        expect(source.stdout).toContain("export default async function chain");
+        const savedJson = await runCli(
+          ["workflow", "source", "review-loop", "--output", "json"],
+          dir,
+          env,
+        );
+        expect(savedJson.code).toBe(0);
+        expect(JSON.parse(savedJson.stdout)).toMatchObject({
+          name: "review-loop",
+          version: 1,
+          definitionHash: payload.definitionHash,
+        });
+
+        const codeReviewSaved = await runCli(
+          ["workflow", "save", "task-code-review", taskCodeReviewUrl, "--version", "1"],
+          dir,
+          env,
+        );
+        expect(codeReviewSaved.code).toBe(0);
+        const planReviewSaved = await runCli(
+          ["workflow", "save", "task-plan-review", taskPlanReviewUrl, "--version", "1"],
+          dir,
+          env,
+        );
+        expect(planReviewSaved.code).toBe(0);
+        const planSource = await runCli(
+          ["workflow", "source", "task-plan-review", "--version", "1", "--all"],
+          dir,
+          env,
+        );
+        expect(planSource.code).toBe(0);
+        const planFiles = [...planSource.stdout.matchAll(/^--- (.+)$/gm)].map((match) => match[1]);
+        expect(planFiles).toEqual([
+          "plan-review.workflow.ts",
+          "guidance/checklist.ts",
+          "guidance/finding.ts",
+          "guidance/prompt.ts",
+          "guidance/rubric.ts",
+          "guidance/types.ts",
+        ]);
+        const codeSourceJson = await runCli(
+          ["workflow", "source", "task-code-review", "--version", "1", "--all", "--output", "json"],
+          dir,
+          env,
+        );
+        expect(codeSourceJson.code).toBe(0);
+        expect(
+          (JSON.parse(codeSourceJson.stdout) as { files: Array<{ path: string }> }).files.map(
+            (file) => file.path,
+          ),
+        ).toEqual([
+          "code-review.workflow.ts",
+          "guidance/checklist.ts",
+          "guidance/finding.ts",
+          "guidance/prompt.ts",
+          "guidance/rubric.ts",
+          "guidance/types.ts",
+        ]);
+
+        const run = await runCli(["workflow", "run", "review-loop"], dir, env);
+        expect(run.code).toBe(0);
+        const runPayload = JSON.parse(run.stdout) as { runId: string; output: unknown };
+        expect(runPayload.output).toBe(2);
+        const runSource = await runCli(["workflow", "source", "--run", runPayload.runId], dir, env);
+        expect(runSource.code).toBe(0);
+        expect(runSource.stdout).toContain("export default async function chain");
+        const runSourceJson = await runCli(
+          ["workflow", "source", "--run", runPayload.runId, "--output", "json"],
+          dir,
+          env,
+        );
+        expect(runSourceJson.code).toBe(0);
+        expect(JSON.parse(runSourceJson.stdout)).toMatchObject({
+          kind: "workflow-definition-source",
+          lookup: { kind: "run", runId: runPayload.runId },
+          definitionHash: payload.definitionHash,
+        });
+        const definitionSource = await runCli(
+          ["workflow", "source", "--definition", payload.definitionHash, "--all"],
+          dir,
+          env,
+        );
+        expect(definitionSource.code).toBe(0);
+        expect(definitionSource.stdout).toContain("--- chain.workflow.ts");
+        const definitionSourceJson = await runCli(
+          ["workflow", "source", "--definition", payload.definitionHash, "--output", "json"],
+          dir,
+          env,
+        );
+        expect(definitionSourceJson.code).toBe(0);
+        expect(JSON.parse(definitionSourceJson.stdout)).toMatchObject({
+          kind: "workflow-definition-source",
+          lookup: { kind: "definition", definitionHash: payload.definitionHash },
+          definitionName: "chain.workflow.ts",
+        });
+        const conflict = await runCli(
+          ["workflow", "source", "review-loop", "--run", runPayload.runId],
+          dir,
+          env,
+        );
+        expect(conflict.code).toBe(1);
+        expect(conflict.stderr).toContain("workflow source accepts exactly one selector");
+        const invalidHash = await runCli(
+          ["workflow", "source", "--definition", "wf_sha256_nothex"],
+          dir,
+          env,
+        );
+        expect(invalidHash.code).toBe(1);
+        expect(invalidHash.stderr).toContain(
+          "workflow definition hash must match wf_sha256_<64 hex chars>",
+        );
+        const invalidVersion = await runCli(
+          ["workflow", "source", "--run", runPayload.runId, "--version", "1"],
+          dir,
+          env,
+        );
+        expect(invalidVersion.code).toBe(1);
+        expect(invalidVersion.stderr).toContain(
+          "--version is only valid with a saved workflow name",
+        );
+        const invalidFileAll = await runCli(
+          ["workflow", "source", "review-loop", "--file", "chain.workflow.ts", "--all"],
+          dir,
+          env,
+        );
+        expect(invalidFileAll.code).toBe(1);
+        expect(invalidFileAll.stderr).toContain("--file and --all are mutually exclusive");
+
+        const deprecated = await runCli(
+          ["workflow", "deprecate", "review-loop", "1", "audit"],
+          dir,
+          env,
+        );
+        expect(deprecated.code).toBe(0);
+        const deprecatedSource = await runCli(
+          ["workflow", "source", "review-loop", "--version", "1"],
+          dir,
+          env,
+        );
+        expect(deprecatedSource.code).toBe(0);
+        expect(deprecatedSource.stdout).toContain("export default async function chain");
+
+        const disabled = await runCli(
+          ["workflow", "disable-version", "review-loop", "1"],
+          dir,
+          env,
+        );
+        expect(disabled.code).toBe(0);
+        const disabledSource = await runCli(
+          ["workflow", "source", "review-loop", "--version", "1"],
+          dir,
+          env,
+        );
+        expect(disabledSource.code).toBe(0);
+        expect(disabledSource.stdout).toContain("export default async function chain");
+        const deleted = await runCli(
+          ["workflow", "delete-version", "review-loop", "1", "--yes"],
+          dir,
+          env,
+        );
+        expect(deleted.code).toBe(0);
+      } finally {
+        daemon.stop();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    DAEMON_TEST_TIMEOUT_MS,
+  );
+
+  test(
     "execute runs a stateless TypeScript control script over the daemon",
     async () => {
       const dir = mkdtempSync(join(tmpdir(), "keel-execute-"));
@@ -1424,6 +1647,38 @@ describe("keel CLI", () => {
       const runTools = await runCli(["run", "--tools", "wf.ts"], dir, env);
       expect(runTools.code).toBe(1);
       expect(runTools.stderr).toContain("--tools is only available for attached run --output text");
+
+      const workflowSourceMissing = await runCli(["workflow", "source"], dir, env);
+      expect(workflowSourceMissing.code).toBe(1);
+      expect(workflowSourceMissing.stderr).toContain(
+        "workflow source requires a saved name, --run, or --definition",
+      );
+
+      const workflowSourceInvalidHash = await runCli(
+        ["workflow", "source", "--definition", "wf_sha256_nothex"],
+        dir,
+        env,
+      );
+      expect(workflowSourceInvalidHash.code).toBe(1);
+      expect(workflowSourceInvalidHash.stderr).toContain(
+        "workflow definition hash must match wf_sha256_<64 hex chars>",
+      );
+
+      const workflowSourceEmptyHash = await runCli(
+        ["workflow", "source", "--definition", ""],
+        dir,
+        env,
+      );
+      expect(workflowSourceEmptyHash.code).toBe(1);
+      expect(workflowSourceEmptyHash.stderr).toContain(
+        "workflow definition hash must match wf_sha256_<64 hex chars>",
+      );
+
+      const workflowSourceEmptyRun = await runCli(["workflow", "source", "--run", ""], dir, env);
+      expect(workflowSourceEmptyRun.code).toBe(1);
+      expect(workflowSourceEmptyRun.stderr).toContain(
+        "workflow source --run needs a non-empty run id",
+      );
 
       const attached = await runCli(["launch", "--output", "json", "wf.ts"], dir, env);
       expect(attached.code).toBe(1);

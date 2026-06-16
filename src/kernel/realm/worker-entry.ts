@@ -362,7 +362,14 @@ interface WorkspaceHandle {
 
 type WorkspaceSpec =
   | { key: string; mode?: "direct"; path?: string }
-  | { key: string; mode: "worktree"; path?: string; ref?: string; retention?: WorkspaceRetention }
+  | {
+      key: string;
+      mode: "worktree";
+      path?: string;
+      ref?: string;
+      retention?: WorkspaceRetention;
+      branch?: boolean;
+    }
   | { key: string; mode: "copy"; path?: string; retention?: WorkspaceRetention }
   | { key: string; mode: "clone"; repo: string; ref?: string; retention?: WorkspaceRetention };
 
@@ -394,6 +401,7 @@ async function resolveWorkspace(spec: WorkspaceSpec): Promise<WorkspaceHandle> {
       repo: (spec as { repo?: string }).repo ?? null,
       ref: (spec as { ref?: string }).ref ?? null,
       retention: (spec as { retention?: WorkspaceRetention }).retention ?? null,
+      branch: (spec as { branch?: boolean }).branch ?? null,
     },
   });
   return Object.freeze(reply);

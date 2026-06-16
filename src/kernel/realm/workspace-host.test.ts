@@ -17,7 +17,12 @@ import type {
 import { AgentProviderRegistry } from "../../agents/types.ts";
 import { JournalStore } from "../../journal/store.ts";
 import { captureWorkflowFile } from "../../workflow-definitions/capture.ts";
-import { GIT_DIFF_MAX_BUFFER_BYTES } from "../../workspace/worktree.ts";
+import { workspaceIdentity } from "../../workspace/identity.ts";
+import {
+  GIT_DIFF_MAX_BUFFER_BYTES,
+  generatedWorktreeBranchName,
+  retainedWorkspacePath,
+} from "../../workspace/worktree.ts";
 import { RealmKernel } from "./realm-host.ts";
 
 const writeUrl = captureWorkflowFile(
@@ -421,6 +426,73 @@ describe("durable diff + worktree cleanup", () => {
   });
   afterEach(() => rmSync(repo, { recursive: true, force: true }));
 
+  function insertCreatingBranchWorkspace(input: {
+    store: JournalStore;
+    runId: string;
+    key: string;
+    workspaceStore: string;
+    branchName: string;
+    baseCommit: string;
+    retentionPolicy?: "remove" | "retain-on-failure" | "retain";
+    acquired?: boolean;
+  }): string {
+    const retentionPolicy = input.retentionPolicy ?? "retain";
+    const workspacePath = retainedWorkspacePath(input.workspaceStore, input.runId, input.key);
+    const identity = workspaceIdentity({
+      key: input.key,
+      mode: "worktree",
+      sourcePath: repo,
+      sourceRef: "HEAD",
+      retentionPolicy,
+      branchPolicy: "generated",
+      sdkAbiVersion: 7,
+    });
+    input.store.insertAgentWorkspace({
+      runId: input.runId,
+      workspaceId: input.key,
+      mode: "worktree",
+      ownerKind: "workflow",
+      key: input.key,
+      lastAttempt: null,
+      retentionPolicy,
+      workspacePath,
+      sourceKind: "worktree-git",
+      sourcePath: repo,
+      sourceUri: null,
+      sourceBare: null,
+      sourceMergeEligible: true,
+      suppliedPath: null,
+      sourceRef: "HEAD",
+      resolvedRef: "HEAD",
+      checkoutBranch: input.branchName,
+      worktreeCheckoutKind: "branch",
+      worktreeBranchOwned: true,
+      baseCommit: input.baseCommit,
+      copyBaselinePath: null,
+      creationErrorJson: null,
+      workspaceIdentityJson: identity.json,
+      workspaceIdentityHash: identity.hash,
+      owned: true,
+      status: "creating",
+      failureSeen: true,
+      lastTurnKey: input.acquired ? "edit" : null,
+      lastTurnAttempt: input.acquired ? 1 : null,
+      activeHolderKind: input.acquired ? "agent" : null,
+      activeHolderKey: input.acquired ? "edit" : null,
+      activeHolderAttempt: input.acquired ? 1 : null,
+      activeStartedAtMs: input.acquired ? 1 : null,
+      lastDiffEventSeq: null,
+      lastErrorEventSeq: null,
+      cleanupErrorJson: null,
+      createdAtMs: 1,
+      updatedAtMs: 1,
+      mergedAtMs: null,
+      discardedAtMs: null,
+      removedAtMs: null,
+    });
+    return workspacePath;
+  }
+
   test("two agents sharing one worktree handle observe the same cwd", async () => {
     const store = JournalStore.memory();
     const calls: AgentInvocation[] = [];
@@ -596,7 +668,11 @@ describe("durable diff + worktree cleanup", () => {
     // the real tree is untouched (changes stay in the worktree until approval)
     expect(existsSync(join(repo, "added-by-agent.txt"))).toBe(false);
     expect(store.listAgentWorkspaces("r")).toEqual([]);
-    expect(store.listAgentWorkspaces("r", { includeRemoved: true })[0]?.status).toBe("removed");
+    expect(
+      store
+        .listAgentWorkspaces("r", { includeRemoved: true })
+        .find((row) => row.key === "edit-workspace")?.status,
+    ).toBe("removed");
   });
 
   test("retention retain keeps a one-shot success workspace for review", async () => {
@@ -730,6 +806,410 @@ describe("durable diff + worktree cleanup", () => {
     expect(cwd).toBe(row?.workspacePath);
   });
 
+  test("branch-backed worktree uses default direct source and generated branch cwd", async () => {
+    const store = JournalStore.memory();
+    const baseCommit = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: repo,
+      encoding: "utf8",
+    }).trim();
+    let cwd: string | undefined;
+    const provider: AgentProvider = {
+      name: "writer",
+      async generate(inv: AgentInvocation): Promise<AgentResult> {
+        cwd = inv.cwd;
+        if (inv.cwd) writeFileSync(join(inv.cwd, "branch-agent.txt"), "agent\n");
+        return { text: "branched", transcript: [] };
+      },
+    };
+    const workflow = {
+      source: `
+        import { type Ctx } from "@kcosr/keel";
+        export default async function wf(ctx: Ctx): Promise<string> {
+          const workspace = await ctx.workspace({ key: "feature / odd key?!", mode: "worktree", branch: true, retention: "retain" });
+          return await ctx.agent({ key: "edit", provider: "writer", prompt: "edit", workspace, capabilities: { fs: "workspace-write" } });
+        }
+      `,
+      name: "branch-worktree",
+    };
+    const kernel = new RealmKernel(store, {
+      idgen: () => "r-branch",
+      agents: new AgentProviderRegistry().register(provider),
+      workspaceStore: mkdtempSync(join(tmpdir(), "keel-workspaces-")),
+    });
+    const handle = await kernel.run<string>(workflow, null, { target: repo });
+    expect(handle.status).toBe("finished");
+    const row = store.getAgentWorkspace("r-branch", "feature / odd key?!");
+    expect(row).toMatchObject({
+      mode: "worktree",
+      sourcePath: repo,
+      suppliedPath: null,
+      worktreeCheckoutKind: "branch",
+      worktreeBranchOwned: true,
+      baseCommit,
+      status: "pending_review",
+    });
+    expect(store.getAgentWorkspace("r-branch", "__default")).toMatchObject({
+      mode: "direct",
+      workspacePath: repo,
+    });
+    expect(cwd).toBe(row?.workspacePath);
+    const checkoutBranch = row?.checkoutBranch;
+    const workspacePath = row?.workspacePath;
+    if (!checkoutBranch || !workspacePath) throw new Error("branch workspace row was incomplete");
+    expect(checkoutBranch).toMatch(/^keel\/[0-9a-f]{16}\/feature-odd-key-[0-9a-f]{12}$/);
+    expect(
+      execFileSync("git", ["check-ref-format", "--branch", checkoutBranch], {
+        cwd: repo,
+        encoding: "utf8",
+      }).trim(),
+    ).toBe(checkoutBranch);
+    expect(
+      execFileSync("git", ["rev-parse", `refs/heads/${checkoutBranch}`], {
+        cwd: repo,
+        encoding: "utf8",
+      }).trim(),
+    ).toBe(baseCommit);
+    expect(
+      execFileSync("git", ["branch", "--show-current"], {
+        cwd: workspacePath,
+        encoding: "utf8",
+      }).trim(),
+    ).toBe(checkoutBranch);
+  });
+
+  test("removed branch-backed worktree reattaches to the persisted branch without reset", async () => {
+    const store = JournalStore.memory();
+    let calls = 0;
+    let branchName: string | null = null;
+    const provider: AgentProvider = {
+      name: "writer",
+      async generate(inv: AgentInvocation): Promise<AgentResult> {
+        calls += 1;
+        if (calls === 1) throw new Error("first attempt fails");
+        expect(inv.cwd ? existsSync(join(inv.cwd, "human.txt")) : false).toBe(true);
+        return { text: "reattached", transcript: [] };
+      },
+    };
+    const workflow = {
+      source: `
+        import { type Ctx } from "@kcosr/keel";
+        export default async function wf(ctx: Ctx): Promise<string> {
+          const workspace = await ctx.workspace({ key: "impl", mode: "worktree", branch: true });
+          return await ctx.agent({ key: "edit", provider: "writer", prompt: "edit", workspace });
+        }
+      `,
+      name: "branch-reattach",
+    };
+    const kernel = new RealmKernel(store, {
+      idgen: () => "r-reattach",
+      agents: new AgentProviderRegistry().register(provider),
+      workspaceStore: mkdtempSync(join(tmpdir(), "keel-workspaces-")),
+    });
+
+    await kernel.run<string>(workflow, null, { target: repo }).catch(() => null);
+    const removed = store.getAgentWorkspace("r-reattach", "impl");
+    expect(removed?.status).toBe("removed");
+    branchName = removed?.checkoutBranch ?? null;
+    expect(branchName).toBeTruthy();
+
+    const humanWorktree = mkdtempSync(join(tmpdir(), "keel-human-branch-"));
+    rmSync(humanWorktree, { recursive: true, force: true });
+    execFileSync("git", ["worktree", "add", humanWorktree, branchName as string], { cwd: repo });
+    writeFileSync(join(humanWorktree, "human.txt"), "human commit\n");
+    execFileSync("git", ["add", "-A"], { cwd: humanWorktree });
+    execFileSync("git", ["commit", "-q", "-m", "human"], { cwd: humanWorktree });
+    execFileSync("git", ["worktree", "remove", "--force", humanWorktree], { cwd: repo });
+
+    const retried = await kernel.retry<string>("r-reattach");
+    expect(retried).toMatchObject({ status: "finished", output: "reattached" });
+    expect(calls).toBe(2);
+    expect(store.getAgentWorkspace("r-reattach", "impl")?.checkoutBranch).toBe(branchName);
+  });
+
+  test("removed branch-backed worktree fails closed when the persisted branch is missing", async () => {
+    const store = JournalStore.memory();
+    let calls = 0;
+    const provider: AgentProvider = {
+      name: "writer",
+      async generate(): Promise<AgentResult> {
+        calls += 1;
+        throw new Error("first attempt fails");
+      },
+    };
+    const workflow = {
+      source: `
+        import { type Ctx } from "@kcosr/keel";
+        export default async function wf(ctx: Ctx): Promise<string> {
+          const workspace = await ctx.workspace({ key: "impl", mode: "worktree", branch: true });
+          return await ctx.agent({ key: "edit", provider: "writer", prompt: "edit", workspace });
+        }
+      `,
+      name: "branch-missing-reattach",
+    };
+    const kernel = new RealmKernel(store, {
+      idgen: () => "r-missing-branch",
+      agents: new AgentProviderRegistry().register(provider),
+      workspaceStore: mkdtempSync(join(tmpdir(), "keel-workspaces-")),
+    });
+
+    await kernel.run<string>(workflow, null, { target: repo }).catch(() => null);
+    const removed = store.getAgentWorkspace("r-missing-branch", "impl");
+    const branchName = removed?.checkoutBranch;
+    if (!branchName) throw new Error("branch workspace row was incomplete");
+    execFileSync("git", ["branch", "-D", branchName], { cwd: repo });
+
+    await expect(kernel.retry<string>("r-missing-branch")).rejects.toThrow(
+      /cannot be reattached because branch .* is missing/,
+    );
+    expect(calls).toBe(1);
+  });
+
+  test("branch-backed worktree refuses an existing generated branch collision", async () => {
+    const store = JournalStore.memory();
+    let called = false;
+    const provider: AgentProvider = {
+      name: "writer",
+      async generate(): Promise<AgentResult> {
+        called = true;
+        return { text: "unexpected", transcript: [] };
+      },
+    };
+    const branchName = generatedWorktreeBranchName("r-collision", "impl");
+    execFileSync("git", ["branch", branchName, "HEAD"], { cwd: repo });
+    const workflow = {
+      source: `
+        import { type Ctx } from "@kcosr/keel";
+        export default async function wf(ctx: Ctx): Promise<string> {
+          const workspace = await ctx.workspace({ key: "impl", mode: "worktree", branch: true });
+          return await ctx.agent({ key: "edit", provider: "writer", prompt: "edit", workspace });
+        }
+      `,
+      name: "branch-collision",
+    };
+    const kernel = new RealmKernel(store, {
+      idgen: () => "r-collision",
+      agents: new AgentProviderRegistry().register(provider),
+      workspaceStore: mkdtempSync(join(tmpdir(), "keel-workspaces-")),
+    });
+
+    await expect(kernel.run<string>(workflow, null, { target: repo })).rejects.toThrow(
+      /worktree branch .* already exists/,
+    );
+    expect(store.getAgentWorkspace("r-collision", "impl")).toMatchObject({
+      status: "removed",
+      checkoutBranch: null,
+      worktreeBranchOwned: false,
+    });
+    await expect(kernel.retry<string>("r-collision")).rejects.toThrow(
+      /removed but has no persisted branch metadata/,
+    );
+    expect(called).toBe(false);
+  });
+
+  test("creating branch-backed worktree recovers a verified branch and stale worktree path", async () => {
+    const store = JournalStore.memory();
+    const workspaceStore = mkdtempSync(join(tmpdir(), "keel-workspaces-"));
+    const runId = "r-create-recover";
+    const key = "impl";
+    const baseCommit = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: repo,
+      encoding: "utf8",
+    }).trim();
+    const branchName = generatedWorktreeBranchName(runId, key);
+    execFileSync("git", ["branch", branchName, baseCommit], { cwd: repo });
+    const workspacePath = insertCreatingBranchWorkspace({
+      store,
+      runId,
+      key,
+      workspaceStore,
+      branchName,
+      baseCommit,
+    });
+    execFileSync("git", ["worktree", "add", workspacePath, branchName], { cwd: repo });
+    rmSync(workspacePath, { recursive: true, force: true });
+    let cwd: string | undefined;
+    const provider: AgentProvider = {
+      name: "writer",
+      async generate(inv: AgentInvocation): Promise<AgentResult> {
+        cwd = inv.cwd;
+        return { text: "recovered", transcript: [] };
+      },
+    };
+    const workflow = {
+      source: `
+        import { type Ctx } from "@kcosr/keel";
+        export default async function wf(ctx: Ctx): Promise<string> {
+          const workspace = await ctx.workspace({ key: "impl", mode: "worktree", branch: true, retention: "retain" });
+          return await ctx.agent({ key: "edit", provider: "writer", prompt: "edit", workspace });
+        }
+      `,
+      name: "branch-creating-recover",
+    };
+    const kernel = new RealmKernel(store, {
+      idgen: () => runId,
+      agents: new AgentProviderRegistry().register(provider),
+      workspaceStore,
+    });
+
+    const handle = await kernel.run<string>(workflow, null, { target: repo });
+    expect(handle).toMatchObject({ status: "finished", output: "recovered" });
+    expect(cwd).toBe(workspacePath);
+    expect(store.getAgentWorkspace(runId, key)).toMatchObject({
+      status: "pending_review",
+      checkoutBranch: branchName,
+    });
+  });
+
+  test("creating branch-backed worktree recovery fails closed after stale provider acquisition", async () => {
+    const store = JournalStore.memory();
+    const workspaceStore = mkdtempSync(join(tmpdir(), "keel-workspaces-"));
+    const runId = "r-create-acquired";
+    const key = "impl";
+    const baseCommit = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: repo,
+      encoding: "utf8",
+    }).trim();
+    const branchName = generatedWorktreeBranchName(runId, key);
+    execFileSync("git", ["branch", branchName, baseCommit], { cwd: repo });
+    insertCreatingBranchWorkspace({
+      store,
+      runId,
+      key,
+      workspaceStore,
+      branchName,
+      baseCommit,
+      acquired: true,
+    });
+    let called = false;
+    const provider: AgentProvider = {
+      name: "writer",
+      async generate(): Promise<AgentResult> {
+        called = true;
+        return { text: "unexpected", transcript: [] };
+      },
+    };
+    const workflow = {
+      source: `
+        import { type Ctx } from "@kcosr/keel";
+        export default async function wf(ctx: Ctx): Promise<string> {
+          const workspace = await ctx.workspace({ key: "impl", mode: "worktree", branch: true, retention: "retain" });
+          return await ctx.agent({ key: "edit", provider: "writer", prompt: "edit", workspace });
+        }
+      `,
+      name: "branch-creating-acquired",
+    };
+    const kernel = new RealmKernel(store, {
+      idgen: () => runId,
+      agents: new AgentProviderRegistry().register(provider),
+      workspaceStore,
+    });
+
+    await expect(kernel.run<string>(workflow, null, { target: repo })).rejects.toThrow(
+      /missing at/,
+    );
+    expect(called).toBe(false);
+  });
+
+  test("distinct branch-backed workspace keys with the same slug get distinct branches", async () => {
+    const store = JournalStore.memory();
+    const workflow = {
+      source: `
+        import { type Ctx } from "@kcosr/keel";
+        export default async function wf(ctx: Ctx): Promise<string> {
+          await ctx.workspace({ key: "same slug", mode: "worktree", branch: true, retention: "retain" });
+          await ctx.workspace({ key: "same/slug", mode: "worktree", branch: true, retention: "retain" });
+          return "ok";
+        }
+      `,
+      name: "branch-slug-collision",
+    };
+    const kernel = new RealmKernel(store, {
+      idgen: () => "r-same-slug",
+      agents: new AgentProviderRegistry().register(writerProvider),
+      workspaceStore: mkdtempSync(join(tmpdir(), "keel-workspaces-")),
+    });
+
+    const handle = await kernel.run<string>(workflow, null, { target: repo });
+    expect(handle.status).toBe("finished");
+    const first = store.getAgentWorkspace("r-same-slug", "same slug")?.checkoutBranch;
+    const second = store.getAgentWorkspace("r-same-slug", "same/slug")?.checkoutBranch;
+    expect(first).toMatch(/^keel\/[0-9a-f]{16}\/same-slug-[0-9a-f]{12}$/);
+    expect(second).toMatch(/^keel\/[0-9a-f]{16}\/same-slug-[0-9a-f]{12}$/);
+    expect(first).not.toBe(second);
+  });
+
+  test("branch-backed worktree identity flips fail through ctx.workspace", async () => {
+    const store = JournalStore.memory();
+    const workflow = {
+      source: `
+        import { type Ctx } from "@kcosr/keel";
+        export default async function wf(ctx: Ctx): Promise<string> {
+          await ctx.workspace({ key: "impl", mode: "worktree", retention: "retain" });
+          await ctx.workspace({ key: "impl", mode: "worktree", branch: true, retention: "retain" });
+          return "unreachable";
+        }
+      `,
+      name: "branch-identity-flip",
+    };
+    const kernel = new RealmKernel(store, {
+      idgen: () => "r-identity-flip",
+      agents: new AgentProviderRegistry().register(writerProvider),
+      workspaceStore: mkdtempSync(join(tmpdir(), "keel-workspaces-")),
+    });
+
+    await expect(kernel.run<string>(workflow, null, { target: repo })).rejects.toThrow(
+      /workspace "impl" identity changed/,
+    );
+  });
+
+  test("branch-backed worktree acquisition fails if the branch no longer contains the base commit", async () => {
+    const store = JournalStore.memory();
+    const calls: string[] = [];
+    const provider: AgentProvider = {
+      name: "writer",
+      async generate(inv: AgentInvocation): Promise<AgentResult> {
+        calls.push(inv.prompt);
+        return { text: inv.prompt, transcript: [] };
+      },
+    };
+    const workflow = {
+      source: `
+        import { type Ctx } from "@kcosr/keel";
+        export default async function wf(ctx: Ctx): Promise<string> {
+          const workspace = await ctx.workspace({ key: "impl", mode: "worktree", branch: true, retention: "retain" });
+          await ctx.agent({ key: "first", provider: "writer", prompt: "first", workspace });
+          await ctx.signal("go");
+          return await ctx.agent({ key: "second", provider: "writer", prompt: "second", workspace });
+        }
+      `,
+      name: "branch-reset-before-acquire",
+    };
+    const kernel = new RealmKernel(store, {
+      idgen: () => "r-reset-branch",
+      agents: new AgentProviderRegistry().register(provider),
+      workspaceStore: mkdtempSync(join(tmpdir(), "keel-workspaces-")),
+    });
+
+    const parked = await kernel.run<string>(workflow, null, { target: repo });
+    expect(parked.status).toBe("waiting-signal");
+    expect(calls).toEqual(["first"]);
+    const branchName = store.getAgentWorkspace("r-reset-branch", "impl")?.checkoutBranch;
+    if (!branchName) throw new Error("branch workspace row was incomplete");
+    const unrelatedCommit = execFileSync("git", ["commit-tree", "HEAD^{tree}", "-m", "unrelated"], {
+      cwd: repo,
+      encoding: "utf8",
+    }).trim();
+    execFileSync("git", ["update-ref", `refs/heads/${branchName}`, unrelatedCommit], {
+      cwd: repo,
+    });
+    store.putSignal("r-reset-branch", "go", {}, 1);
+
+    await expect(kernel.resume<string>("r-reset-branch")).rejects.toThrow(
+      /expected branch .* to contain base commit/,
+    );
+    expect(calls).toEqual(["first"]);
+  });
+
   test("clone workspace rejects relative local-looking repo paths before git clone", async () => {
     const store = JournalStore.memory();
     const workflow = {
@@ -846,7 +1326,11 @@ describe("durable diff + worktree cleanup", () => {
 
     await kernel.run<string>(workflow, null, { name: "w", target: repo }).catch(() => null);
     expect(store.getRun("r")?.status).toBe("failed");
-    expect(store.listAgentWorkspaces("r", { includeRemoved: true })[0]?.status).toBe("removed");
+    expect(
+      store
+        .listAgentWorkspaces("r", { includeRemoved: true })
+        .find((row) => row.key === "edit-workspace")?.status,
+    ).toBe("removed");
     expect(firstCwd ? existsSync(firstCwd) : true).toBe(false);
 
     const retried = await kernel.retry<string>("r");
@@ -854,7 +1338,11 @@ describe("durable diff + worktree cleanup", () => {
     expect(retried.output).toBe("ok");
     expect(calls).toBe(2);
     expect(secondSawFirstAttempt).toBe(false);
-    expect(store.listAgentWorkspaces("r", { includeRemoved: true })[0]?.status).toBe("removed");
+    expect(
+      store
+        .listAgentWorkspaces("r", { includeRemoved: true })
+        .find((row) => row.key === "edit-workspace")?.status,
+    ).toBe("removed");
   });
 
   test("one-shot oversized diff emits diff_error without failing the agent step", async () => {

@@ -11,6 +11,11 @@ import type {
   AgentProfileView,
   PersistentAgentProfileConfig,
 } from "../agents/profiles.ts";
+import type {
+  SavedWorkflowSummary,
+  SavedWorkflowVersionView,
+  SavedWorkflowView,
+} from "../journal/store.ts";
 import type { SettingClass, SettingView, SettingsDiagnostic } from "../settings/catalog.ts";
 import type { WorkflowSourceInput } from "../workflow-definitions/source.ts";
 import type { Blockage, RunProjection, RunReport, RunSummary } from "./projection.ts";
@@ -28,6 +33,85 @@ export interface LaunchRequest {
   /** Display-only provenance. It is never opened or parsed for execution. */
   provenance?: WorkflowProvenance;
 }
+
+export interface SaveWorkflowRequest {
+  name: string;
+  source: WorkflowSourceInput;
+  workflowName?: string | null;
+  provenance?: WorkflowProvenance;
+  title?: string | null;
+  description?: string | null;
+  tags?: string[];
+  inputSchema?: unknown;
+  defaultInput?: unknown;
+  defaultTarget?: string | null;
+  metadata?: unknown;
+  version?: number;
+  allowDuplicateDefinition?: boolean;
+}
+
+export interface SavedWorkflowRef {
+  name: string;
+  version?: number | "latest";
+  allowDeprecated?: boolean;
+}
+
+export interface LaunchSavedWorkflowRequest {
+  ref: SavedWorkflowRef;
+  input?: unknown;
+  target?: string;
+  name?: string | null;
+}
+
+export interface SavedWorkflowSourceView {
+  name: string;
+  version: number;
+  definitionHash: string;
+  entry: string;
+  files: Array<{ path: string; code: string; entry: boolean }>;
+}
+
+export type WorkflowDefinitionSourceLookup =
+  | { kind: "run"; runId: string }
+  | { kind: "definition"; definitionHash: string };
+
+export interface GetWorkflowDefinitionSourceRequest {
+  lookup: WorkflowDefinitionSourceLookup;
+  file?: string;
+  all?: boolean;
+}
+
+export interface WorkflowDefinitionSourceView {
+  kind: "workflow-definition-source";
+  lookup: WorkflowDefinitionSourceLookup;
+  definitionHash: string;
+  definitionName: string | null;
+  createdAtMs: number;
+  entry: string;
+  files: Array<{ path: string; code: string; entry: boolean }>;
+}
+
+export type PutScheduleBaseRequest = {
+  name: string;
+  input?: unknown;
+  target?: string;
+  intervalMs: number;
+  firstFireMs?: number;
+};
+
+export type PutScheduleRequest =
+  | (PutScheduleBaseRequest & {
+      source: WorkflowSourceInput;
+      workflowName?: string | null;
+      savedRef?: never;
+    })
+  | (PutScheduleBaseRequest & {
+      savedRef: SavedWorkflowRef;
+      source?: never;
+      workflowName?: never;
+    });
+
+export type { SavedWorkflowSummary, SavedWorkflowVersionView, SavedWorkflowView };
 
 export interface RunOutcome {
   runId: string;
@@ -76,6 +160,8 @@ export interface RunWorkspaceView {
   sourceRef: string | null;
   resolvedRef: string | null;
   checkoutBranch: string | null;
+  worktreeCheckoutKind?: "detached" | "branch" | null;
+  worktreeBranchOwned?: boolean;
   baseCommit: string | null;
   copyBaselinePath: string | null;
   owned: boolean;
@@ -184,6 +270,46 @@ export interface DeleteSettingRequest {
 export interface KeelApi {
   /** Start a run; returns its id immediately (the run executes in the background). */
   launchRun(req: LaunchRequest): Promise<RunLaunchResult>;
+  saveWorkflow(
+    req: SaveWorkflowRequest,
+  ): Promise<SavedWorkflowVersionView> | SavedWorkflowVersionView;
+  listSavedWorkflows(opts?: {
+    includeDisabled?: boolean;
+    includeDeprecated?: boolean;
+    includeDeleted?: boolean;
+  }): Promise<SavedWorkflowSummary[]> | SavedWorkflowSummary[];
+  getSavedWorkflow(name: string): Promise<SavedWorkflowView | null> | SavedWorkflowView | null;
+  getSavedWorkflowSource(req: {
+    name: string;
+    version?: number | "latest";
+    file?: string;
+    all?: boolean;
+    allowDeprecated?: boolean;
+  }): Promise<SavedWorkflowSourceView> | SavedWorkflowSourceView;
+  getWorkflowDefinitionSource(
+    req: GetWorkflowDefinitionSourceRequest,
+  ): Promise<WorkflowDefinitionSourceView> | WorkflowDefinitionSourceView;
+  launchSavedWorkflow(req: LaunchSavedWorkflowRequest): Promise<RunLaunchResult>;
+  setSavedWorkflowDisabled(
+    name: string,
+    disabled: boolean,
+  ): Promise<SavedWorkflowView> | SavedWorkflowView;
+  setSavedWorkflowVersionEnabled(
+    name: string,
+    version: number,
+    enabled: boolean,
+  ): Promise<SavedWorkflowVersionView> | SavedWorkflowVersionView;
+  deprecateSavedWorkflowVersion(req: {
+    name: string;
+    version: number;
+    message?: string | null;
+  }): Promise<SavedWorkflowVersionView> | SavedWorkflowVersionView;
+  deleteSavedWorkflow(name: string): Promise<SavedWorkflowView> | SavedWorkflowView;
+  deleteSavedWorkflowVersion(
+    name: string,
+    version: number,
+  ): Promise<SavedWorkflowVersionView> | SavedWorkflowVersionView;
+  putSchedule(req: PutScheduleRequest): Promise<{ ok: boolean }> | { ok: boolean };
   /** Resume a non-terminal run in the background. */
   resumeRun(runId: string): Promise<RunStart>;
   /** Park a non-terminal run until an explicit resume. */

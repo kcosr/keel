@@ -9,7 +9,9 @@ import type {
   DeleteAgentProfileRequest,
   DeleteSettingRequest,
   EventEnvelope,
+  GetWorkflowDefinitionSourceRequest,
   LaunchRequest,
+  LaunchSavedWorkflowRequest,
   PutAgentProfileRequest,
   PutSettingRequest,
   RunLaunchResult,
@@ -17,8 +19,15 @@ import type {
   RunStart,
   RunWorkspaceDiff,
   RunWorkspaceView,
+  SaveWorkflowRequest,
+  SavedWorkflowRef,
+  SavedWorkflowSourceView,
+  SavedWorkflowSummary,
+  SavedWorkflowVersionView,
+  SavedWorkflowView,
   SettingView,
   SettingsDiagnostic,
+  WorkflowDefinitionSourceView,
   WorkspaceGcResult,
 } from "../rpc/contract.ts";
 import type { RunProjection, RunReport, RunSummary } from "../rpc/projection.ts";
@@ -125,6 +134,64 @@ export class DaemonClient {
       target: clientRunTargetOrCwd(req.target, "launchRun"),
     });
   }
+  saveWorkflow(req: SaveWorkflowRequest): Promise<SavedWorkflowVersionView> {
+    return this.rpc("saveWorkflow", req);
+  }
+  listSavedWorkflows(
+    req: {
+      includeDisabled?: boolean;
+      includeDeprecated?: boolean;
+      includeDeleted?: boolean;
+    } = {},
+  ): Promise<SavedWorkflowSummary[]> {
+    return this.rpc("listSavedWorkflows", req);
+  }
+  getSavedWorkflow(name: string): Promise<SavedWorkflowView | null> {
+    return this.rpc("getSavedWorkflow", { name });
+  }
+  getSavedWorkflowSource(req: {
+    name: string;
+    version?: number | "latest";
+    file?: string;
+    all?: boolean;
+    allowDeprecated?: boolean;
+  }): Promise<SavedWorkflowSourceView> {
+    return this.rpc("getSavedWorkflowSource", req);
+  }
+  getWorkflowDefinitionSource(
+    req: GetWorkflowDefinitionSourceRequest,
+  ): Promise<WorkflowDefinitionSourceView> {
+    return this.rpc("getWorkflowDefinitionSource", req);
+  }
+  launchSavedWorkflow(req: LaunchSavedWorkflowRequest): Promise<RunLaunchResult> {
+    return this.rpc("launchSavedWorkflow", {
+      ...req,
+      clientDefaultTarget: clientRunTargetOrCwd(undefined, "launchSavedWorkflow"),
+    });
+  }
+  setSavedWorkflowDisabled(name: string, disabled: boolean): Promise<SavedWorkflowView> {
+    return this.rpc("setSavedWorkflowDisabled", { name, disabled });
+  }
+  setSavedWorkflowVersionEnabled(
+    name: string,
+    version: number,
+    enabled: boolean,
+  ): Promise<SavedWorkflowVersionView> {
+    return this.rpc("setSavedWorkflowVersionEnabled", { name, version, enabled });
+  }
+  deprecateSavedWorkflowVersion(req: {
+    name: string;
+    version: number;
+    message?: string | null;
+  }): Promise<SavedWorkflowVersionView> {
+    return this.rpc("deprecateSavedWorkflowVersion", req);
+  }
+  deleteSavedWorkflow(name: string): Promise<SavedWorkflowView> {
+    return this.rpc("deleteSavedWorkflow", { name });
+  }
+  deleteSavedWorkflowVersion(name: string, version: number): Promise<SavedWorkflowVersionView> {
+    return this.rpc("deleteSavedWorkflowVersion", { name, version });
+  }
   resumeRun(runId: string): Promise<RunStart> {
     return this.rpc("resumeRun", { runId });
   }
@@ -175,7 +242,8 @@ export class DaemonClient {
   }
   putSchedule(req: {
     name: string;
-    source: WorkflowSourceInput;
+    source?: WorkflowSourceInput;
+    savedRef?: SavedWorkflowRef;
     workflowName?: string | null;
     input?: unknown;
     target?: string;
@@ -184,7 +252,9 @@ export class DaemonClient {
   }): Promise<{ ok: boolean }> {
     return this.rpc("putSchedule", {
       ...req,
-      target: clientRunTargetOrCwd(req.target, "putSchedule"),
+      ...(req.target !== undefined
+        ? { target: clientRunTargetOrCwd(req.target, "putSchedule") }
+        : { clientDefaultTarget: clientRunTargetOrCwd(undefined, "putSchedule") }),
     });
   }
   listRunWorkspaces(

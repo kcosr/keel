@@ -11,6 +11,7 @@ export type CapabilityResource =
 
 export type CapabilityAction =
   | "run:read"
+  | "run:source"
   | "run:watch"
   | "run:events"
   | "run:output"
@@ -21,6 +22,7 @@ export type CapabilityAction =
   | "run:fork"
   | "run:signal"
   | "run:cancel"
+  | "workflow:read"
   | "workflow:run"
   | "workflow:save"
   | "task:run"
@@ -45,6 +47,7 @@ export class AuthorizationError extends Error {
 
 export const DEFAULT_RUN_CAPABILITY_ACTIONS: readonly CapabilityAction[] = [
   "run:read",
+  "run:source",
   "run:watch",
   "run:events",
   "run:output",
@@ -158,7 +161,7 @@ function sameResource(a: CapabilityResource, b: CapabilityResource): boolean {
       return (
         b.kind === "workflow" &&
         a.name === b.name &&
-        (a.version === undefined || b.version === undefined || a.version === b.version)
+        (a.version === undefined || (b.version !== undefined && a.version === b.version))
       );
   }
 }

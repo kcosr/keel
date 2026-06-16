@@ -208,7 +208,7 @@ describe("schema migrations", () => {
       const ver = store.db
         .query<{ value: string }, []>("SELECT value FROM schema_meta WHERE key='schema_version'")
         .get();
-      expect(ver?.value).toBe("18");
+      expect(ver?.value).toBe("20");
 
       // new columns exist
       const jcols = store.db.query<{ name: string }, []>("PRAGMA table_info(journal)").all();
@@ -248,6 +248,8 @@ describe("schema migrations", () => {
       expect(workspaces.some((c) => c.name === "owned")).toBe(true);
       expect(workspaces.some((c) => c.name === "active_holder_kind")).toBe(true);
       expect(workspaces.some((c) => c.name === "retention_policy")).toBe(true);
+      expect(workspaces.some((c) => c.name === "worktree_checkout_kind")).toBe(true);
+      expect(workspaces.some((c) => c.name === "worktree_branch_owned")).toBe(true);
 
       // existing rows preserved (additive) and seq backfilled per-run monotonic
       const rows = store.listJournalRows("r");
@@ -504,7 +506,22 @@ describe("schema migrations", () => {
     const ver = store.db
       .query<{ value: string }, []>("SELECT value FROM schema_meta WHERE key='schema_version'")
       .get();
-    expect(ver?.value).toBe("18");
+    expect(ver?.value).toBe("20");
+    const savedWorkflows = store.db
+      .query<{ name: string }, []>("PRAGMA table_info(saved_workflows)")
+      .all();
+    expect(savedWorkflows.some((c) => c.name === "name")).toBe(true);
+    const savedVersions = store.db
+      .query<{ name: string }, []>("PRAGMA table_info(saved_workflow_versions)")
+      .all();
+    expect(savedVersions.some((c) => c.name === "definition_hash")).toBe(true);
+    const indexes = store.db
+      .query<{ name: string }, []>("PRAGMA index_list(saved_workflow_versions)")
+      .all()
+      .map((row) => row.name);
+    expect(indexes).toContain("saved_workflow_versions_by_definition");
+    expect(indexes).toContain("saved_workflow_versions_by_name_version");
+    expect(indexes).toContain("saved_workflow_versions_by_name_created");
     expect(
       store.db
         .query<{ name: string }, []>(
@@ -592,7 +609,7 @@ describe("schema migrations", () => {
       const ver = store.db
         .query<{ value: string }, []>("SELECT value FROM schema_meta WHERE key='schema_version'")
         .get();
-      expect(ver?.value).toBe("18");
+      expect(ver?.value).toBe("20");
 
       const schedule = store.db
         .query<{ enabled: number; workflow_ref: string }, []>(
@@ -899,12 +916,206 @@ describe("schema migrations", () => {
       expect(row).toMatchObject({
         sourceKind: "worktree-git",
         sourceMergeEligible: true,
+        worktreeCheckoutKind: "detached",
+        worktreeBranchOwned: false,
         workspaceIdentityHash: expect.any(String),
       });
       expect(row?.workspaceIdentityHash).not.toBe("");
       store.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("v18 workspaces migrate worktree checkout metadata", () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-mig-v18-worktree-checkout-"));
+    try {
+      const path = join(dir, "old.db");
+      const db = new Database(path, { create: true });
+      db.exec(`
+        CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        INSERT INTO schema_meta (key, value) VALUES ('schema_version', '18');
+        CREATE TABLE agent_workspaces (
+          run_id TEXT NOT NULL, workspace_id TEXT NOT NULL, mode TEXT NOT NULL,
+          owner_kind TEXT NOT NULL, key TEXT NOT NULL, last_attempt INTEGER,
+          retention_policy TEXT, workspace_path TEXT NOT NULL, source_kind TEXT,
+          source_path TEXT, source_uri TEXT, source_bare INTEGER,
+          source_merge_eligible INTEGER NOT NULL DEFAULT 0, supplied_path TEXT,
+          source_ref TEXT, resolved_ref TEXT, checkout_branch TEXT, base_commit TEXT,
+          copy_baseline_path TEXT, creation_error_json TEXT,
+          workspace_identity_json TEXT NOT NULL, workspace_identity_hash TEXT NOT NULL,
+          owned INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL,
+          failure_seen INTEGER NOT NULL DEFAULT 0, last_turn_key TEXT,
+          last_turn_attempt INTEGER, active_holder_kind TEXT, active_holder_key TEXT,
+          active_holder_attempt INTEGER, active_started_at_ms INTEGER,
+          last_diff_event_seq INTEGER, last_error_event_seq INTEGER,
+          cleanup_error_json TEXT, created_at_ms INTEGER NOT NULL,
+          updated_at_ms INTEGER NOT NULL, merged_at_ms INTEGER, discarded_at_ms INTEGER,
+          removed_at_ms INTEGER, PRIMARY KEY (run_id, workspace_id)
+        );
+        INSERT INTO agent_workspaces (
+          run_id, workspace_id, mode, owner_kind, key, retention_policy,
+          workspace_path, source_kind, source_path, source_merge_eligible,
+          source_ref, resolved_ref, checkout_branch, base_commit,
+          workspace_identity_json, workspace_identity_hash, owned, status,
+          failure_seen, created_at_ms, updated_at_ms
+        ) VALUES
+          ('r', 'wt', 'worktree', 'workflow', 'wt', 'retain', '/store/wt',
+           'worktree-git', '/repo', 1, 'HEAD', 'HEAD', NULL, 'abc',
+           '{"sdkAbiVersion":6}', 'old-wt', 1, 'pending_review', 0, 1, 1),
+          ('r', 'clone', 'clone', 'workflow', 'clone', 'retain', '/store/clone',
+           'local-clone-git', '/repo', 1, NULL, 'main', 'main', 'def',
+           '{"sdkAbiVersion":6}', 'old-clone', 1, 'pending_review', 0, 1, 1);
+      `);
+      db.close();
+
+      const store = JournalStore.open(path);
+      const wt = store.getAgentWorkspace("r", "wt");
+      expect(wt).toMatchObject({
+        worktreeCheckoutKind: "detached",
+        worktreeBranchOwned: false,
+        checkoutBranch: null,
+      });
+      expect(JSON.parse(wt?.workspaceIdentityJson ?? "{}")).toMatchObject({
+        branchPolicy: "detached",
+        rulesVersion: 2,
+        sdkAbiVersion: 6,
+      });
+      expect(wt?.workspaceIdentityHash).not.toBe("old-wt");
+      const clone = store.getAgentWorkspace("r", "clone");
+      expect(clone).toMatchObject({
+        worktreeCheckoutKind: null,
+        worktreeBranchOwned: false,
+        checkoutBranch: "main",
+      });
+      expect(clone?.workspaceIdentityHash).toBe("old-clone");
+      store.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("v19 migration creates saved workflow registry tables and indexes", () => {
+    const db = new Database(":memory:");
+    try {
+      applyMigration(db, 19);
+      const workflows = db.query<{ name: string }, []>("PRAGMA table_info(saved_workflows)").all();
+      expect(workflows.some((column) => column.name === "name")).toBe(true);
+      const versions = db
+        .query<{ name: string }, []>("PRAGMA table_info(saved_workflow_versions)")
+        .all();
+      expect(versions.some((column) => column.name === "definition_hash")).toBe(true);
+      const indexes = db
+        .query<{ name: string }, []>("PRAGMA index_list(saved_workflow_versions)")
+        .all()
+        .map((row) => row.name);
+      expect(indexes).toContain("saved_workflow_versions_by_definition");
+      expect(indexes).toContain("saved_workflow_versions_by_name_version");
+      expect(indexes).toContain("saved_workflow_versions_by_name_created");
+    } finally {
+      db.close();
+    }
+  });
+
+  test("saved workflow store validates names, duplicates, latest, and tombstones", () => {
+    const store = JournalStore.memory();
+    try {
+      const definition = {
+        hash: "wf_sha256_savedtest",
+        name: "wf",
+        kind: "source",
+        code: "export default async () => 1;",
+        sourceMap: null,
+        manifestJson: JSON.stringify({
+          format: "keel.workflow-definition.v1",
+          entry: "entry.ts",
+          modules: [{ path: "entry.ts", code: "export default async () => 1;" }],
+          externalImports: [],
+          externalPackages: [],
+          sourceRoot: "client-captured://source",
+          runtime: {
+            bunVersion: Bun.version,
+            keelDefinitionAbi: 1,
+            workflowSdkAbi: WORKFLOW_SDK_ABI_VERSION,
+          },
+        }),
+        createdAtMs: 1,
+      };
+      expect(() =>
+        store.putSavedWorkflowVersion({
+          name: "wf_sha256_deadbeef",
+          definition,
+          createdAtMs: 1,
+        }),
+      ).toThrow(/reserved/);
+      expect(() =>
+        store.putSavedWorkflowVersion({
+          name: "missing-def",
+          definitionHash: "wf_sha256_missing",
+          createdAtMs: 1,
+        }),
+      ).toThrow(/does not exist/);
+      const v1 = store.putSavedWorkflowVersion({
+        name: "review-loop",
+        version: 1,
+        definition,
+        createdAtMs: 10,
+      });
+      expect(v1.version).toBe(1);
+      expect(() =>
+        store.putSavedWorkflowVersion({
+          name: "review-loop",
+          definitionHash: definition.hash,
+          createdAtMs: 11,
+        }),
+      ).toThrow(/already has definition/);
+      const v3 = store.putSavedWorkflowVersion({
+        name: "review-loop",
+        version: 3,
+        definitionHash: definition.hash,
+        createdAtMs: 1,
+        allowDuplicateDefinition: true,
+      });
+      expect(v3.version).toBe(3);
+      expect(store.resolveSavedWorkflowRef({ name: "review-loop" }).version).toBe(3);
+      store.deprecateSavedWorkflowVersion("review-loop", 3, "old", 20);
+      expect(store.resolveSavedWorkflowRef({ name: "review-loop" }).version).toBe(1);
+      expect(
+        store.resolveSavedWorkflowRef({ name: "review-loop", allowDeprecated: true }).version,
+      ).toBe(3);
+      expect(() => store.resolveSavedWorkflowRef({ name: "review-loop", version: 3 })).toThrow(
+        /deprecated/,
+      );
+      expect(
+        store.resolveSavedWorkflowRef({
+          name: "review-loop",
+          version: 3,
+          allowDeprecated: true,
+        }).version,
+      ).toBe(3);
+      store.deleteSavedWorkflowVersion("review-loop", 1, 30);
+      expect(() => store.resolveSavedWorkflowRef({ name: "review-loop" })).toThrow(/matching/);
+      expect(store.getWorkflowDefinition(definition.hash)).not.toBeNull();
+      expect(store.pruneWorkflowDefinitions({ nowMs: 100_000, ttlMs: 1 })).toBe(0);
+
+      expect(() =>
+        store.putSavedWorkflowVersion({
+          name: "partial-failure",
+          version: 0,
+          definition,
+          createdAtMs: 40,
+          allowDuplicateDefinition: true,
+        }),
+      ).toThrow(/positive integer/);
+      expect(store.getSavedWorkflow("partial-failure")).toBeNull();
+      const partialVersions = store.db
+        .query<{ count: number }, [string]>(
+          "SELECT count(*) AS count FROM saved_workflow_versions WHERE name = ?",
+        )
+        .get("partial-failure");
+      expect(partialVersions?.count).toBe(0);
+    } finally {
+      store.close();
     }
   });
 });

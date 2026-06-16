@@ -140,7 +140,8 @@ bun src/cli/keel.ts <command> [args]
 | `output <runId> [--output json\|text]` | Print the terminal workflow output. |
 | `report <runId> [--output json\|text]` | Print a journaled per-node result digest. |
 | `list [--output text\|json]` | List runs as an aligned table or JSON envelope. Requires admin. |
-| `schedule put <name> [workflow.ts] --interval-ms ms [--target dir]` | Create or replace a pinned workflow schedule. Requires admin. |
+| `workflow save/list/show/source/run/disable/enable/...` | Manage saved workflow names and immutable versions, and display retained workflow definition source. |
+| `schedule put <name> [workflow.ts\|--workflow saved-name] --interval-ms ms [--target dir]` | Create or replace a pinned workflow schedule. Requires admin. |
 | `profiles list/get/set/delete/check ...` | Manage daemon-wide persistent agent profiles. Requires admin. |
 | `settings list/get/set/unset/check ...` | Manage typed daemon settings. Requires admin. |
 | `workspace list/show/diff/merge/discard/gc ...` | Inspect and manage retained isolated agent/session workspaces by `workspaceId`. |
@@ -430,10 +431,12 @@ the innermost `ctx.withWorkspace`, then the lazy default direct workspace:
 ```
 
 Direct workspaces use an existing directory and are not owned, diffed, merged,
-discarded, or removed by Keel. Worktree workspaces are Keel-owned git worktrees
-created under `KEEL_WORKSPACE_STORE` (default: beside the journal under
-`KEEL_DIR/workspaces`). Worktree `path` defaults to `ctx.run.target` and may be a
-subdirectory; Keel resolves it to the enclosing git repository root. Worktree
+discarded, or removed by Keel. The run target is first modeled as the lazy
+`__default` direct workspace; omitted `path` for `direct`, `copy`, and
+`worktree` resolves through that canonical default workspace path. Worktree
+workspaces are Keel-owned git worktrees created under `KEEL_WORKSPACE_STORE`
+(default: beside the journal under `KEEL_DIR/workspaces`). Worktree `path` may be
+a subdirectory; Keel resolves it to the enclosing git repository root. Worktree
 `ref` defaults to `HEAD`.
 
 ```ts
@@ -445,6 +448,23 @@ const workspace = await ctx.workspace({
 await ctx.agent({ key: "impl", workspace, toolPolicy: "workspace-write", prompt: "..." });
 ```
 
+Branch-backed worktrees opt into a generated Keel-owned branch while keeping
+`mode: "worktree"`:
+
+```ts
+const workspace = await ctx.workspace({
+  key: "implementation",
+  mode: "worktree",
+  branch: true,
+  retention: "retain",
+});
+```
+
+`branch` is boolean-only. `branch: true` creates a valid generated ref such as
+`keel/<run-hash>/<workspace-slug>-<key-hash>` at the workspace `baseCommit` and
+attaches the worktree to it. Omitted or `false` keeps detached worktree behavior.
+Keel does not accept user-supplied branch names in this release.
+
 `ctx.withWorkspace(specOrHandle, fn)` binds a scoped default for all agents and
 sessions inside `fn`, while explicit per-agent/session `workspace` overrides the
 scope. `WorkspaceSpec.key` is required; `__default` is reserved for the run
@@ -454,8 +474,10 @@ Workspace modes:
 
 - `direct` points at an existing directory, defaults to `ctx.run.target`, is not
   Keel-owned, and is never diffed, merged, discarded, GC'd, or removed by Keel.
-- `worktree` creates a Keel-owned detached git worktree from a local repository
-  path/ref. It is for committed local git state with patch merge support.
+- `worktree` creates a Keel-owned git worktree from a local repository path/ref.
+  It is detached by default; `branch: true` attaches it to a generated branch.
+  Both variants use final-tree patch diff/merge relative to `baseCommit`, so
+  committed, staged, unstaged, untracked, deleted, and mode changes are included.
 - `copy` creates a Keel-owned filesystem snapshot of a local directory, including
   dirty files, but excludes `.git` metadata at every level. It does not apply
   `.gitignore`; pass a narrower `path` when large caches, dependencies, build
@@ -503,14 +525,23 @@ Merge/discard are explicit operator actions and refuse while the run is
 non-terminal, a Keel-owned provider invocation is active, the workspace is
 direct, remote clone/local bare clone merge is requested, or the workspace has
 already moved to a terminal lifecycle status such as `removed`, `merged`, or
-`discarded`. Worktree and local-clone merge apply a final-tree git patch; copy
-merge compares the workspace to its baseline and writes back only if the original
-source paths still match that baseline. Durable `agent.diff` payloads include the
+`discarded`. Worktree and local-clone merge apply a final-tree git patch and do
+not preserve commits as commits; a true commit-preserving git merge is not part
+of this release. Copy merge compares the workspace to its baseline and writes
+back only if the original source paths still match that baseline. Durable
+`agent.diff` payloads include the
 `workspaceId`, `workspacePath`, source metadata, mode/diff kind, bounded
 `contentDiff`, and `fileChanges`; changed path arrays are capped with
 `omittedPathCounts`/`pathLimit` metadata. Direct workspaces do not produce review
 diffs in v1. Diff capture that exceeds Keel's explicit git status or diff buffers
 is recorded as `workspace.diff_error`.
+
+Terminal cleanup, `workspace discard`, and `workspace gc` remove generated
+branch-backed worktree filesystem state according to retention, but do not delete
+the generated branch ref. Workspace views expose `worktreeCheckoutKind`,
+`checkoutBranch`, and `worktreeBranchOwned` so operators can inspect, push, or
+manually delete generated branches. Branch refs are trusted-local metadata and
+are not a sandbox or exfiltration boundary.
 
 Copy and clone workspaces are trusted-local filesystem conveniences, not
 sandboxes. Tool-capable providers may still read or write outside the cwd
@@ -1110,6 +1141,119 @@ recreated from current source. If a pinned definition requires an unsupported
 workflow SDK ABI or has an invalid persisted target, the daemon disables that
 schedule and persists the error instead of retrying it on every supervisor tick.
 
+Schedules can also be created from a saved workflow:
+
+```bash
+keel schedule put hourly-review --workflow review-loop --version 3 --interval-ms 3600000
+```
+
+The daemon resolves the saved ref at creation time, stores the resolved
+definition hash, and does not track later `latest` versions. Creating or
+replacing schedules is admin-only for both source and saved-ref forms.
+
+### Saved Workflows
+
+Saved workflows are a naming layer over immutable workflow definitions. Saving a
+workflow captures the same client-side source bundle as `keel run`, writes a new
+append-only version, and points that version at the stored `wf_sha256_...`
+definition hash.
+
+```bash
+keel workflow save review-loop ./review.workflow.ts \
+  --title "Review loop" --tag review --default-input '{"n":2}' --default-target "$PWD"
+keel workflow list --output json
+keel workflow show review-loop --output text
+keel workflow source review-loop --all
+keel workflow source --run run_123 --output json
+keel workflow source --definition wf_sha256_<64-hex-chars> --all
+keel workflow run review-loop --input '{"n":3}' --allow-deprecated
+keel workflow disable review-loop
+keel workflow enable review-loop
+keel workflow deprecate review-loop 2 "use v3"
+keel workflow delete-version review-loop 1 --yes
+```
+
+Multi-file workflow packages are saved the same way. For the reusable task
+review guidance package:
+
+```bash
+keel workflow save task-code-review workflows/task-review-guidance/code-review.workflow.ts --version 1
+keel workflow save task-plan-review workflows/task-review-guidance/plan-review.workflow.ts --version 1
+keel workflow run task-code-review --version 1 \
+  --input '{"repository":".","task":"review the current change"}'
+keel workflow source task-plan-review --version 1 --all
+```
+
+The `workflow source --all` text output lists captured files with one stable
+header per file. The entry file appears first, followed by helper paths in
+lexical order:
+
+```text
+--- plan-review.workflow.ts
+...
+--- guidance/checklist.ts
+...
+--- guidance/finding.ts
+...
+```
+
+For scripts, use `--output json` and read `files`, an array of `{ path, code,
+entry }` objects in the same order. Saved workflow source reads the registry
+bundle; path-based launch previews and new saves read the current filesystem
+capture.
+
+Names must be lowercase identifiers such as `review-loop`; `wf_` and
+`wf_sha256...` prefixes are reserved for definition hashes. Omitting a version
+resolves to the highest enabled, non-deprecated, non-deleted version. Deprecated
+versions require an explicit version or `--allow-deprecated`; disabled or deleted
+rows are not launchable.
+
+`workflow source` prints exact stored TypeScript source from retained
+`workflow_definitions` rows. It supports exactly one selector:
+
+```bash
+keel workflow source <saved-name> [--version N|latest] [--file path|--all] [--output text|json]
+keel workflow source --run <runId> [--file path|--all] [--output text|json]
+keel workflow source --definition <wf_sha256_hash> [--file path|--all] [--output text|json]
+```
+
+Single-file definitions default to the entry file; `--all` prints every captured
+module with stable `--- path` headers, entry first and then non-entry files in
+lexical order. `--file` selects one exact POSIX bundle path and is mutually
+exclusive with `--all`. A bare positional
+`wf_sha256_...` is treated as a saved workflow name; direct hash lookup requires
+`--definition` and the hash must match `wf_sha256_<64 hex chars>`.
+
+`--output json` for saved-name lookup returns `SavedWorkflowSourceView`. Run and
+definition selectors return:
+
+```ts
+interface WorkflowDefinitionSourceView {
+  kind: "workflow-definition-source";
+  lookup:
+    | { kind: "run"; runId: string }
+    | { kind: "definition"; definitionHash: string };
+  definitionHash: string;
+  definitionName: string | null;
+  createdAtMs: number;
+  entry: string;
+  files: Array<{ path: string; code: string; entry: boolean }>;
+}
+```
+
+Source display is a journal view. It never reads the original client path,
+branch/worktree paths, managed workspaces, or the materialized definition cache,
+and it does not redact source bytes. Keep raw secrets out of workflow source and
+helper modules.
+
+Auth: `workflow:save` can save versions and update non-delete lifecycle metadata
+for its scoped workflow. `workflow:run` can launch saved workflows. `workflow:read`
+can show/source scoped saved workflows. Launch-minted run capabilities include
+`run:source` for `--run` source lookup; older run capabilities without
+`run:source` fail closed. Direct `--definition` lookup is admin-only because it
+is daemon-wide. `workflow list`, `delete`, `delete-version`, and all schedule
+creation remain admin-only in v1.
+
 ## API Reference
 
 All clients speak the same `KeelApi` contract. The daemon exposes it over the
@@ -1139,6 +1283,37 @@ target strings instead of falling back to daemon cwd.
 ```ts
 interface KeelApi {
   launchRun(req: LaunchRequest): Promise<RunLaunchResult>;
+  saveWorkflow(req: SaveWorkflowRequest): SavedWorkflowVersionView;
+  listSavedWorkflows(opts?: {
+    includeDisabled?: boolean;
+    includeDeprecated?: boolean;
+    includeDeleted?: boolean;
+  }): SavedWorkflowSummary[];
+  getSavedWorkflow(name: string): SavedWorkflowView | null;
+  getSavedWorkflowSource(req: {
+    name: string;
+    version?: number | "latest";
+    file?: string;
+    all?: boolean;
+    allowDeprecated?: boolean;
+  }): SavedWorkflowSourceView;
+  getWorkflowDefinitionSource(req: {
+    lookup:
+      | { kind: "run"; runId: string }
+      | { kind: "definition"; definitionHash: string };
+    file?: string;
+    all?: boolean;
+  }): WorkflowDefinitionSourceView;
+  launchSavedWorkflow(req: {
+    ref: { name: string; version?: number | "latest"; allowDeprecated?: boolean };
+    input?: unknown;
+    target?: string;
+    name?: string | null;
+  }): Promise<RunLaunchResult>;
+  putSchedule(req:
+    | { name: string; source: WorkflowSourceInput; workflowName?: string | null; input?: unknown; target?: string; intervalMs: number; firstFireMs?: number }
+    | { name: string; savedRef: { name: string; version?: number | "latest"; allowDeprecated?: boolean }; input?: unknown; target?: string; intervalMs: number; firstFireMs?: number }
+  ): { ok: boolean };
   resumeRun(runId: string): Promise<RunStart>;
   interruptRun(runId: string, reason?: string): Promise<{ runId: string; status: "interrupted" }>;
   rerunRun(

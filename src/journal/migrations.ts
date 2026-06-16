@@ -16,7 +16,9 @@
 // → v15 workflow-scoped direct/worktree workspace rows
 // → v16 persistent agent profile catalog and run profile snapshots
 // → v17 daemon settings catalog and run setting snapshots
-// → v18 managed workspace copy/clone metadata and workspace identities.
+// → v18 managed workspace copy/clone metadata and workspace identities
+// → v19 branch-backed worktree checkout metadata
+// → v20 saved workflow registry tables.
 
 import type { Database } from "bun:sqlite";
 import { parse } from "acorn";
@@ -27,6 +29,8 @@ import { workspaceIdentity } from "../workspace/identity.ts";
 const DEFINITION_PREFIX = "wf_sha256_";
 const WORKFLOW_SDK_ABI_V12 = 1;
 const WORKFLOW_SDK_ABI_V18 = 6;
+const DIRECT_WORKSPACE_RULES_VERSION_V18 = 1;
+const WORKTREE_WORKSPACE_RULES_VERSION_V18 = 1;
 const tsTranspiler = new Bun.Transpiler({ loader: "tsx" });
 
 /** True if `table` already has `column` (so we don't re-add it). */
@@ -333,9 +337,59 @@ export function applyMigration(db: Database, fromVersion: number): void {
     case 17: // → v18: managed copy/clone workspace metadata and identity hashes.
       migrateAgentWorkspacesToV18(db);
       break;
+    case 18: // → v19: worktree checkout kind and branch ownership metadata.
+      addColumn(db, "agent_workspaces", "worktree_checkout_kind", "TEXT");
+      addColumn(db, "agent_workspaces", "worktree_branch_owned", "INTEGER NOT NULL DEFAULT 0");
+      db.exec(
+        `UPDATE agent_workspaces
+         SET worktree_checkout_kind = CASE WHEN mode = 'worktree' THEN 'detached' ELSE NULL END,
+             worktree_branch_owned = 0`,
+      );
+      migrateWorktreeIdentitiesToV19(db);
+      break;
+    case 19: // → v20: saved workflow registry tables.
+      createSavedWorkflowRegistry(db);
+      break;
     default:
       throw new Error(`no migration defined from schema version ${fromVersion}`);
   }
+}
+
+function createSavedWorkflowRegistry(db: Database): void {
+  db.exec(`CREATE TABLE IF NOT EXISTS saved_workflows (
+    name              TEXT PRIMARY KEY,
+    title             TEXT,
+    description       TEXT,
+    tags_json         TEXT,
+    created_at_ms     INTEGER NOT NULL,
+    updated_at_ms     INTEGER NOT NULL,
+    disabled_at_ms    INTEGER,
+    deleted_at_ms     INTEGER
+  )`);
+  db.exec(`CREATE TABLE IF NOT EXISTS saved_workflow_versions (
+    name                  TEXT NOT NULL,
+    version               INTEGER NOT NULL,
+    definition_hash        TEXT NOT NULL,
+    workflow_name          TEXT,
+    input_schema_json      TEXT,
+    default_input_json     TEXT,
+    default_target         TEXT,
+    metadata_json          TEXT,
+    source_provenance_json TEXT,
+    created_by            TEXT,
+    created_at_ms          INTEGER NOT NULL,
+    enabled                INTEGER NOT NULL DEFAULT 1,
+    deprecated_at_ms       INTEGER,
+    deprecation_message    TEXT,
+    deleted_at_ms          INTEGER,
+    PRIMARY KEY (name, version)
+  )`);
+  db.exec(`CREATE INDEX IF NOT EXISTS saved_workflow_versions_by_definition
+    ON saved_workflow_versions (definition_hash)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS saved_workflow_versions_by_name_version
+    ON saved_workflow_versions (name, version DESC)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS saved_workflow_versions_by_name_created
+    ON saved_workflow_versions (name, created_at_ms DESC)`);
 }
 
 function migrateDaemonSettingsToV17(db: Database): void {
@@ -481,16 +535,14 @@ function migrateAgentWorkspacesToV18(db: Database): void {
     const retention = mode === "direct" ? null : (row.retention_policy ?? "remove");
     const identity =
       mode === "direct"
-        ? workspaceIdentity({
+        ? frozenV18DirectWorkspaceIdentity({
             key: row.key,
-            mode,
-            ownerKind: row.owner_kind as "workflow" | "agent" | "agent_session",
+            ownerKind: row.owner_kind,
             path: row.workspace_path,
             sdkAbiVersion: WORKFLOW_SDK_ABI_V18,
           })
-        : workspaceIdentity({
+        : frozenV18WorktreeWorkspaceIdentity({
             key: row.key,
-            mode,
             sourcePath: row.source_path,
             sourceRef: row.source_ref ?? "HEAD",
             retentionPolicy: retention as "remove" | "retain-on-failure" | "retain",
@@ -539,6 +591,89 @@ function migrateAgentWorkspacesToV18(db: Database): void {
     );
   }
   db.exec("DROP TABLE agent_workspaces_old");
+}
+
+function frozenV18DirectWorkspaceIdentity(input: {
+  key: string;
+  ownerKind: string;
+  path: string;
+  sdkAbiVersion: number;
+}): { json: string; hash: string } {
+  const value = {
+    key: input.key,
+    mode: "direct",
+    ownerKind: input.ownerKind,
+    path: input.path,
+    rulesVersion: DIRECT_WORKSPACE_RULES_VERSION_V18,
+    sdkAbiVersion: input.sdkAbiVersion,
+  };
+  const json = canonicalJson(value);
+  return { json, hash: sha256Hex(json) };
+}
+
+function frozenV18WorktreeWorkspaceIdentity(input: {
+  key: string;
+  sourcePath: string;
+  sourceRef: string;
+  retentionPolicy: "remove" | "retain-on-failure" | "retain";
+  sdkAbiVersion: number;
+}): { json: string; hash: string } {
+  const value = {
+    key: input.key,
+    mode: "worktree",
+    sourcePath: input.sourcePath,
+    sourceRef: input.sourceRef,
+    retentionPolicy: input.retentionPolicy,
+    rulesVersion: WORKTREE_WORKSPACE_RULES_VERSION_V18,
+    sdkAbiVersion: input.sdkAbiVersion,
+  };
+  const json = canonicalJson(value);
+  return { json, hash: sha256Hex(json) };
+}
+
+function migrateWorktreeIdentitiesToV19(db: Database): void {
+  const rows = db
+    .query<
+      {
+        run_id: string;
+        workspace_id: string;
+        key: string;
+        source_path: string | null;
+        source_ref: string | null;
+        retention_policy: string | null;
+        workspace_identity_json: string;
+      },
+      []
+    >(
+      `SELECT run_id, workspace_id, key, source_path, source_ref, retention_policy,
+              workspace_identity_json
+       FROM agent_workspaces
+       WHERE mode = 'worktree'`,
+    )
+    .all();
+  const update = db.query(
+    `UPDATE agent_workspaces
+     SET workspace_identity_json = ?, workspace_identity_hash = ?
+     WHERE run_id = ? AND workspace_id = ?`,
+  );
+  for (const row of rows) {
+    const previous = JSON.parse(row.workspace_identity_json) as { sdkAbiVersion?: unknown };
+    const sdkAbiVersion =
+      typeof previous.sdkAbiVersion === "number" ? previous.sdkAbiVersion : WORKFLOW_SDK_ABI_V18;
+    const identity = workspaceIdentity({
+      key: row.key,
+      mode: "worktree",
+      sourcePath: row.source_path ?? "",
+      sourceRef: row.source_ref ?? "HEAD",
+      retentionPolicy: (row.retention_policy ?? "remove") as
+        | "remove"
+        | "retain-on-failure"
+        | "retain",
+      branchPolicy: "detached",
+      sdkAbiVersion,
+    });
+    update.run(identity.json, identity.hash, row.run_id, row.workspace_id);
+  }
 }
 
 function migrateAgentProfileCatalogToV16(db: Database): void {

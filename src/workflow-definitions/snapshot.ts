@@ -74,7 +74,7 @@ export interface SnapshotWorkflowOptions {
 
 const DEFINITION_PREFIX = "wf_sha256_";
 export const WORKFLOW_DEFINITION_ABI_VERSION = 1;
-export const WORKFLOW_SDK_ABI_VERSION = 6;
+export const WORKFLOW_SDK_ABI_VERSION = 7;
 export const CURRENT_WORKFLOW_SDK_ABI_VERSION = WORKFLOW_SDK_ABI_VERSION;
 export const MAX_WORKFLOW_SOURCE_BYTES = 256 * 1024;
 export const MAX_WORKFLOW_BUNDLE_BYTES = MAX_WORKFLOW_SOURCE_BYTES;
@@ -291,7 +291,7 @@ export function isWorkflowDefinitionHash(value: string): boolean {
   return value.startsWith(DEFINITION_PREFIX);
 }
 
-function createWorkflowDefinitionSnapshot(
+export function createWorkflowDefinitionSnapshot(
   source: WorkflowSourceInput,
   opts: SnapshotWorkflowOptions,
 ): WorkflowDefinitionSnapshot {

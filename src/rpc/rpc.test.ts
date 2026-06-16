@@ -21,6 +21,10 @@ import { RUN_FINISHED_INLINE_OUTPUT_BYTES } from "../kernel/output.ts";
 import { RealmKernel } from "../kernel/realm/realm-host.ts";
 import { captureWorkflowFile } from "../workflow-definitions/capture.ts";
 import {
+  WORKFLOW_SDK_ABI_VERSION,
+  materializeWorkflowDefinition,
+} from "../workflow-definitions/snapshot.ts";
+import {
   classifyCloneSource,
   createRetainedCopy,
   createRetainedWorktree,
@@ -67,6 +71,35 @@ function keel(store: JournalStore, mock?: MockProvider): InProcessKeel {
     ...(mock ? { agents: new AgentProviderRegistry().register(mock) } : {}),
   });
   return new TestInProcessKeel(kernel, store);
+}
+
+function putDisplayableWorkflowDefinition(
+  store: JournalStore,
+  hash: string,
+  source: string,
+  createdAtMs: number,
+): void {
+  store.putWorkflowDefinition({
+    hash,
+    name: "displayable",
+    kind: "source",
+    code: source,
+    sourceMap: null,
+    manifestJson: JSON.stringify({
+      format: "keel.workflow-definition.v1",
+      entry: "entry.ts",
+      modules: [{ path: "entry.ts", code: source }],
+      externalImports: [],
+      externalPackages: [],
+      sourceRoot: "client-captured://source",
+      runtime: {
+        bunVersion: Bun.version,
+        keelDefinitionAbi: 1,
+        workflowSdkAbi: WORKFLOW_SDK_ABI_VERSION,
+      },
+    }),
+    createdAtMs,
+  });
 }
 
 function streamingKeel(store: JournalStore, provider: AgentProvider): InProcessKeel {
@@ -230,6 +263,227 @@ describe("settings RPC", () => {
       key: "agent.defaultTimeoutMs",
       deleted: false,
     });
+  });
+});
+
+describe("saved workflow RPC", () => {
+  test("saves source, displays captured source, launches by saved ref, and schedules by hash", async () => {
+    const store = JournalStore.memory();
+    const api = keel(store);
+    const saved = api.saveWorkflow({
+      name: "review-loop",
+      source: chainUrl.source,
+      defaultInput: { n: 2 },
+      defaultTarget: process.cwd(),
+    });
+    expect(saved.version).toBe(1);
+    const source = api.getSavedWorkflowSource({ name: "review-loop", all: true });
+    expect(
+      source.files.some((file) => file.code.includes("export default async function chain")),
+    ).toBe(true);
+    const definitionSource = api.getWorkflowDefinitionSource({
+      lookup: { kind: "definition", definitionHash: saved.definitionHash },
+      all: true,
+    });
+    expect(definitionSource).toMatchObject({
+      kind: "workflow-definition-source",
+      lookup: { kind: "definition", definitionHash: saved.definitionHash },
+      definitionHash: saved.definitionHash,
+      definitionName: "review-loop",
+    });
+    expect(definitionSource.createdAtMs).toBeGreaterThan(0);
+    expect(definitionSource.files).toEqual(source.files);
+    expect(() =>
+      api.getWorkflowDefinitionSource({
+        lookup: { kind: "definition", definitionHash: saved.definitionHash },
+        file: "missing.ts",
+      }),
+    ).toThrow(/workflow source file missing\.ts does not exist/);
+
+    const unsaved = await api.launchRun({
+      source: chainUrl.source,
+      input: { n: 3 },
+      target: process.cwd(),
+      name: "ad-hoc",
+    });
+    const runSource = api.getWorkflowDefinitionSource({
+      lookup: { kind: "run", runId: unsaved.runId },
+    });
+    expect(runSource.lookup).toEqual({ kind: "run", runId: unsaved.runId });
+    expect(runSource.files).toHaveLength(1);
+    expect(runSource.files[0]?.entry).toBe(true);
+    expect((await api.waitForRun(unsaved.runId)).output).toBe(3);
+    const launched = await api.launchSavedWorkflow({ ref: { name: "review-loop" } });
+    const out = await api.waitForRun(launched.runId);
+    expect(out.output).toBe(2);
+    api.putSchedule({
+      name: "hourly",
+      savedRef: { name: "review-loop" },
+      intervalMs: 60_000,
+    });
+    expect(() =>
+      api.putSchedule({
+        name: "bad",
+        savedRef: { name: "review-loop" },
+        workflowName: "ignored",
+        intervalMs: 60_000,
+      } as never),
+    ).toThrow(/workflowName/);
+    const row = store.db
+      .query<{ workflow_ref: string }, [string]>(
+        "SELECT workflow_ref FROM schedules WHERE name = ?",
+      )
+      .get("hourly");
+    expect(row?.workflow_ref).toBe(saved.definitionHash);
+
+    api.saveWorkflow({
+      name: "null-default",
+      source:
+        'import { passthrough } from "@kcosr/keel";\nexport default async (_ctx: unknown, input: unknown) => passthrough<unknown>().parse(input);\n',
+      defaultInput: null,
+      defaultTarget: process.cwd(),
+    });
+    const nullRun = await api.launchSavedWorkflow({ ref: { name: "null-default" } });
+    expect((await api.waitForRun(nullRun.runId)).output).toBeNull();
+
+    api.deprecateSavedWorkflowVersion({ name: "review-loop", version: 1, message: "audit" });
+    api.setSavedWorkflowVersionEnabled("review-loop", 1, false);
+    expect(
+      api.getSavedWorkflowSource({ name: "review-loop", version: 1 }).files[0]?.code,
+    ).toContain("export default async function chain");
+
+    store.putWorkflowDefinition({
+      hash: "wf_sha256_emptymodules",
+      name: "legacy",
+      kind: "source",
+      code: "export default async () => 7;\n",
+      sourceMap: null,
+      manifestJson: JSON.stringify({
+        format: "keel.workflow-definition.v1",
+        entry: "entry.ts",
+        modules: [],
+        externalImports: [],
+        externalPackages: [],
+        sourceRoot: "client-captured://source",
+        runtime: {
+          bunVersion: Bun.version,
+          keelDefinitionAbi: 1,
+          workflowSdkAbi: 7,
+        },
+      }),
+      createdAtMs: 1,
+    });
+    store.putSavedWorkflowVersion({
+      name: "legacy-source",
+      definitionHash: "wf_sha256_emptymodules",
+      createdAtMs: 1,
+    });
+    expect(api.getSavedWorkflowSource({ name: "legacy-source" }).files).toEqual([
+      { path: "entry.ts", code: "export default async () => 7;\n", entry: true },
+    ]);
+    expect(
+      api.getWorkflowDefinitionSource({
+        lookup: { kind: "definition", definitionHash: "wf_sha256_emptymodules" },
+      }).files,
+    ).toEqual([{ path: "entry.ts", code: "export default async () => 7;\n", entry: true }]);
+
+    store.putWorkflowDefinition({
+      hash: "wf_sha256_codeonly_rpc",
+      name: "legacy-code",
+      kind: "source",
+      code: "export default async () => 8;\n",
+      sourceMap: null,
+      manifestJson: null,
+      createdAtMs: 2,
+    });
+    store.insertRun({
+      runId: "run_codeonly",
+      workflowName: "legacy-code",
+      definitionVersion: "wf_sha256_codeonly_rpc",
+      workflowRef: null,
+      runTarget: process.cwd(),
+      status: "finished",
+      parentRunId: null,
+      tenantId: null,
+      inputRef: null,
+      outputRef: null,
+      errorJson: null,
+      heartbeatAtMs: null,
+      runtimeOwnerId: null,
+      createdAtMs: 2,
+      finishedAtMs: 2,
+    });
+    expect(
+      api.getWorkflowDefinitionSource({ lookup: { kind: "run", runId: "run_codeonly" } }).files,
+    ).toEqual([{ path: "entry.ts", code: "export default async () => 8;\n", entry: true }]);
+    expect(() =>
+      api.getWorkflowDefinitionSource({ lookup: { kind: "run", runId: "run_missing" } }),
+    ).toThrow(/run run_missing not found/);
+    expect(() =>
+      api.getWorkflowDefinitionSource({
+        lookup: { kind: "definition", definitionHash: "wf_sha256_missing" },
+      }),
+    ).toThrow(/workflow definition wf_sha256_missing not found/);
+  });
+
+  test("definition source display remains journal-backed across cache deletion and GC", async () => {
+    const store = JournalStore.memory();
+    const api = keel(store);
+    const retainedHash = `wf_sha256_${"1".repeat(64)}`;
+    const prunedHash = `wf_sha256_${"2".repeat(64)}`;
+    const cacheHash = `wf_sha256_${"3".repeat(64)}`;
+    const cacheRoot = mkdtempSync(join(tmpdir(), "keel-source-cache-delete-"));
+    try {
+      putDisplayableWorkflowDefinition(store, cacheHash, "export default async () => 9;\n", 1);
+      materializeWorkflowDefinition(store, cacheHash, cacheRoot);
+      rmSync(join(cacheRoot, cacheHash), { recursive: true, force: true });
+      expect(
+        api.getWorkflowDefinitionSource({
+          lookup: { kind: "definition", definitionHash: cacheHash },
+        }).files,
+      ).toEqual([{ path: "entry.ts", code: "export default async () => 9;\n", entry: true }]);
+
+      putDisplayableWorkflowDefinition(store, retainedHash, "export default async () => 10;\n", 1);
+      putDisplayableWorkflowDefinition(store, prunedHash, "export default async () => 11;\n", 1);
+      store.insertRun({
+        runId: "run_retains_definition",
+        workflowName: "retained",
+        definitionVersion: retainedHash,
+        workflowRef: null,
+        runTarget: process.cwd(),
+        status: "finished",
+        parentRunId: null,
+        tenantId: null,
+        inputRef: null,
+        outputRef: null,
+        errorJson: null,
+        heartbeatAtMs: null,
+        runtimeOwnerId: null,
+        createdAtMs: 1,
+        finishedAtMs: 1,
+      });
+
+      const gc = await api.gcDefinitions({ ttlMs: 0 });
+      expect(gc.workflowDefinitionsRemoved).toBe(2);
+      expect(() =>
+        api.getWorkflowDefinitionSource({
+          lookup: { kind: "definition", definitionHash: prunedHash },
+        }),
+      ).toThrow(`workflow definition ${prunedHash} not found`);
+      expect(
+        api.getWorkflowDefinitionSource({
+          lookup: { kind: "run", runId: "run_retains_definition" },
+        }).files,
+      ).toEqual([{ path: "entry.ts", code: "export default async () => 10;\n", entry: true }]);
+      expect(
+        api.getWorkflowDefinitionSource({
+          lookup: { kind: "definition", definitionHash: retainedHash },
+        }).files,
+      ).toEqual([{ path: "entry.ts", code: "export default async () => 10;\n", entry: true }]);
+    } finally {
+      store.close();
+      rmSync(cacheRoot, { recursive: true, force: true });
+    }
   });
 });
 
@@ -1226,6 +1480,94 @@ describe("workspace lifecycle operations", () => {
           .split("\n"),
       ).toEqual(["pre-staged.txt"]);
       expect(api.mergeRunWorkspace("r-clone", "clone").status).toBe("merged");
+      expect(readFileSync(join(repo, "committed.txt"), "utf8")).toBe("committed\n");
+      expect(readFileSync(join(repo, "unstaged.txt"), "utf8")).toBe("unstaged\n");
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("worktree diff and merge include commits after base commit", () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-rpc-worktree-"));
+    const store = JournalStore.memory();
+    try {
+      const repo = join(dir, "repo");
+      const worktree = join(dir, "worktree");
+      mkdirSync(repo, { recursive: true });
+      const baseCommit = initGitRepo(repo);
+      createRetainedWorktree(repo, worktree, baseCommit);
+      writeFileSync(join(worktree, "committed.txt"), "committed\n");
+      execFileSync("git", ["add", "-A"], { cwd: worktree });
+      execFileSync("git", ["config", "user.email", "t@t"], { cwd: worktree });
+      execFileSync("git", ["config", "user.name", "t"], { cwd: worktree });
+      execFileSync("git", ["commit", "-q", "-m", "agent commit"], { cwd: worktree });
+      writeFileSync(join(worktree, "unstaged.txt"), "unstaged\n");
+      store.insertRun({
+        runId: "r-worktree",
+        workflowName: "wf",
+        definitionVersion: "wf_sha256_fixture",
+        status: "finished",
+        parentRunId: null,
+        tenantId: null,
+        inputRef: "null",
+        outputRef: null,
+        errorJson: null,
+        heartbeatAtMs: null,
+        runtimeOwnerId: null,
+        createdAtMs: 1,
+        finishedAtMs: 2,
+        runTarget: repo,
+      });
+      store.insertAgentWorkspace({
+        runId: "r-worktree",
+        workspaceId: "wt",
+        mode: "worktree",
+        ownerKind: "workflow",
+        key: "wt",
+        lastAttempt: null,
+        retentionPolicy: "retain",
+        workspacePath: worktree,
+        sourceKind: "worktree-git",
+        sourcePath: repo,
+        sourceUri: null,
+        sourceBare: null,
+        sourceMergeEligible: true,
+        suppliedPath: null,
+        sourceRef: "HEAD",
+        resolvedRef: "HEAD",
+        checkoutBranch: null,
+        worktreeCheckoutKind: "detached",
+        worktreeBranchOwned: false,
+        baseCommit,
+        copyBaselinePath: null,
+        creationErrorJson: null,
+        workspaceIdentityJson: "{}",
+        workspaceIdentityHash: "worktree",
+        owned: true,
+        status: "pending_review",
+        failureSeen: false,
+        lastTurnKey: null,
+        lastTurnAttempt: null,
+        activeHolderKind: null,
+        activeHolderKey: null,
+        activeHolderAttempt: null,
+        activeStartedAtMs: null,
+        lastDiffEventSeq: null,
+        lastErrorEventSeq: null,
+        cleanupErrorJson: null,
+        createdAtMs: 1,
+        updatedAtMs: 1,
+        mergedAtMs: null,
+        discardedAtMs: null,
+        removedAtMs: null,
+      });
+      const api = keel(store);
+      const diff = api.getRunWorkspaceDiff("r-worktree", "wt");
+      expect(diff.mode).toBe("worktree");
+      expect(diff.added).toContain("committed.txt");
+      expect(diff.added).toContain("unstaged.txt");
+      expect(api.mergeRunWorkspace("r-worktree", "wt").status).toBe("merged");
       expect(readFileSync(join(repo, "committed.txt"), "utf8")).toBe("committed\n");
       expect(readFileSync(join(repo, "unstaged.txt"), "utf8")).toBe("unstaged\n");
     } finally {

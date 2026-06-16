@@ -5,7 +5,9 @@ do work through `ctx`; Keel runs it durably and survives crashes. For a single
 workflow, run inline TypeScript with `keel run <<'TS'` so no workflow file is
 needed. `keel run` prints a structured JSON envelope by default.
 For reusable operational workflows, check `workflows/README.md` and launch the
-documented workflow file instead of copying fixture code.
+documented workflow file instead of copying fixture code. Once a workflow is
+stable, operators can save it with `keel workflow save <name> <workflow.ts>` and
+launch future pinned versions with `keel workflow run <name>`.
 
 Assume the daemon is already running and the `keel` CLI is already configured to
 reach it. Do not start the daemon, restart systemd, or use admin credentials from
@@ -44,6 +46,14 @@ The body runs in a sandbox. Stay inside it or the run is rejected:
 - Shared helper modules are good for deterministic prompt fragments, review
   rubrics, task lists, and render functions. Keep them pure and deterministic,
   and keep raw secrets out of workflow source and helper modules.
+- Saved workflows capture those helper modules as TypeScript source in the
+  immutable bundle. Prefer these Keel-native helpers for reusable guidance. Do
+  not import agent-pack YAML, mutable task state, task-note files, or external
+  runtime guidance packages.
+- Bump and save a new workflow version when prompt text, reusable rubrics,
+  severity rules, output contracts, or workflow input/output contracts change.
+  Pure helper refactors that render byte-identical prompts can keep the same
+  saved version.
 - **A `ctx.step` callback must use only its `inputs`** — don't read outer variables
   inside a `step` function; pass them in through `inputs`. (Agent prompts can use
   any variable freely.)
@@ -145,7 +155,9 @@ Use `ctx.workspace` when agents should run somewhere other than the default
 direct workspace at `ctx.run.target`. Choose the mode deliberately:
 
 - `direct`: intentional use of an existing directory.
-- `worktree`: local git committed state with patch merge support.
+- `worktree`: local git committed state with final-tree patch merge support.
+  Add `branch: true` when the implementation should live on a generated
+  Keel-owned branch instead of a detached worktree.
 - `copy`: dirty local filesystem state without `.git` metadata. V1 excludes only
   `.git`, so pass a narrow `path` for large repos with caches or dependencies.
 - `clone`: explicit local or remote git checkout. Use `repo: ctx.run.target` to
@@ -157,6 +169,7 @@ Pass the returned handle explicitly or bind it with `ctx.withWorkspace`:
 const workspace = await ctx.workspace({
   key: "implementation",
   mode: "worktree",
+  // branch: true,
   retention: "retain-on-failure",
 });
 await ctx.agent({ key: "impl", workspace, toolPolicy: "workspace-write", prompt });
@@ -167,7 +180,11 @@ applies only to Keel-owned `worktree`, `copy`, and `clone` workspaces. Direct
 workspaces, including the default `__default` workspace at `ctx.run.target`, are
 never removed by Keel and are not review diff staging areas. Workspace mode is
 not a secret, filesystem, or network security boundary, and Keel never
-auto-merges retained workspaces.
+auto-merges retained workspaces. For `worktree`, omitted `path` resolves through
+the run's canonical `__default` direct workspace path, not daemon cwd. Generated
+branches from `branch: true` are retained for manual inspection/cleanup; Keel
+removes filesystem worktrees according to retention but does not delete branch
+refs in this release.
 
 For `ctx.agentSession` participants using Keel-owned workspaces, use
 `"retain-on-failure"` or `"retain"` if a terminal failed run should be

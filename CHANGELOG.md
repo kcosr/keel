@@ -3,6 +3,17 @@
 ## [Unreleased]
 
 ### Added
+- Saved workflow registry schema v20 and RPC/CLI commands (`keel workflow ...`)
+  for saving captured workflow bundles as `name@version`, listing/showing
+  metadata, printing exact stored source, launching pinned saved versions, and
+  enable/disable/deprecate/tombstone lifecycle operations.
+- `keel workflow source` can now display exact retained workflow definition
+  source by `--run <runId>` or admin-only `--definition <wf_sha256_hash>`, with
+  text and JSON output. Launch-minted run capabilities now include explicit
+  `run:source`; existing run capabilities without that action fail closed.
+- Saved-ref schedule creation (`keel schedule put <name> --workflow saved-name`)
+  resolves the saved version once at schedule creation and persists the immutable
+  definition hash. Schedule creation remains admin-only.
 - Typed daemon settings catalog with admin RPC/CLI management (`keel settings ...`), JSON value parsing, validation/check diagnostics, optimistic generation guards, and read-only snapshotted defaults such as `agent.defaultOnFailure`.
 - Journal schema v17 stores daemon setting overrides plus immutable run setting snapshot sets; migrating older journals backfills explicit workflow-visible default settings for every run and warning events for non-terminal pre-v17 runs.
 - Persistent daemon-owned agent profile catalog with admin RPC/CLI management (`keel profiles ...`), validation/check diagnostics, programmatic-profile coexistence, and frozen per-run profile snapshots for deterministic replay.
@@ -11,6 +22,8 @@
 - Provider-keyed `providerConfig` for `ctx.agent`, `ctx.agentSession`, and agent profiles. Keel validates the full map as strict JSON, includes only the selected provider's config in replay identity, and passes only that immutable selected config to provider adapters.
 - Workflow-scoped `ctx.workspace`/`ctx.withWorkspace` with direct and git-worktree modes, `WorkspaceHandle` sharing across agents/sessions, and a lazy `__default` direct workspace at `ctx.run.target`.
 - Managed workspace `copy` and `clone` modes. `copy` snapshots dirty local directories without `.git` metadata and supports baseline diff/merge back to unchanged sources; `clone` creates explicit local or remote git clones, supports local non-bare clone merge, and reports remote/local-bare clone merge as unsupported. Workspace RPC/CLI views now expose source kind, source URI/ref/branch/base commit, copy baseline path, merge/diff support, and mode-aware diff metadata.
+- Branch-backed worktree workspaces via `ctx.workspace({ mode: "worktree", branch: true })`. Keel generates and records a valid `keel/...` branch name, attaches the managed worktree to it, reattaches removed workspaces to the persisted branch, and leaves generated branch refs for manual cleanup while retention/discard/GC remove filesystem state only.
+- Journal schema v19 adds worktree checkout kind and branch ownership metadata. Workflow SDK ABI bumped to 7 and `WORKTREE_WORKSPACE_RULES_VERSION` to 2 for the `branch` workspace option and branch-policy workspace identity input; drain non-terminal older-ABI runs before upgrade or accept the existing unsupported-ABI resume failure.
 - Workflow SDK ABI bumped to 6 and journal schema to v17 for copy/clone workspace modes and canonical workspace identity hashes. Non-terminal runs captured with older SDK ABIs must be drained before upgrade or will fail resume with the existing unsupported-ABI error.
 - Workspace lifecycle metadata now distinguishes `mode`, `ownerKind`, source path, provider cwd, ownership, retention, and active worktree holders in RPC/CLI/execute views.
 - `keel execute` control scripts can list/get/diff/merge/discard/GC run workspaces through the daemon client.
@@ -23,6 +36,10 @@
   preserves reviewer correspondence while the invoking agent owns the main spec,
   and a fully orchestrated `spec-author-review-loop` that loops a spec creator
   with a correspondence reviewer.
+- Reusable `workflows/task-review-guidance/` package with shared TypeScript
+  checklist/rubric/prompt helpers, one-shot `task-code-review` and
+  `task-plan-review` saved workflow packaging examples, strict in-workflow
+  review-output validation, and captured helper source display coverage.
 - `ctx.agentSession({ key, ... }).turn({ key, prompt, ... })` for realm
   workflows that need one logical Pi/Codex or Claude backend conversation across
   multiple durable turns in the same run. Session runs fail closed for
@@ -84,6 +101,13 @@
   CLI/client wrappers still capture their own cwd as the default target. The
   supervisor disables persisted schedules with invalid targets instead of letting
   one bad schedule break a tick.
+- Omitted `path` for `direct`, `copy`, and `worktree` modes now resolves through
+  the run's persisted `__default` direct workspace row. Worktree diff and merge
+  now use final-tree patches relative to `baseCommit`, so commits made inside
+  detached or branch-backed worktrees are included along with dirty state.
+  Clone/worktree final-tree `contentDiff` output is capped at the same durable
+  diff byte limit and includes the retained-workspace truncation notice when
+  exceeded.
 - Workflow SDK ABI bumped to 5 for workflow-visible provider-specific agent config. Pre-bump workflow definitions must be re-registered, and suspended/non-terminal runs pinned to older SDK ABIs must be drained before upgrade or will fail resume with the existing unsupported-ABI error. The journal schema is unchanged for this provider-config change.
 - Workflow SDK ABI bumped to 4 and journal schema to v15 for the workflow workspace API; non-terminal runs captured with older SDK ABIs must be drained before upgrade or will fail resume with the existing unsupported-ABI error.
 - Public `workspaceIsolation`, `workspaceRetention`, and per-agent/profile `target` options were removed. Use `ctx.workspace({ key, mode: "worktree", retention })` and pass the returned handle to agents/sessions.

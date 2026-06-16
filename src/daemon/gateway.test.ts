@@ -74,6 +74,7 @@ class FakeGatewaySession implements GatewaySession {
 interface GatewayHarness {
   store: JournalStore;
   eventHub: EventHub;
+  api: InProcessKeel;
   gateway: KeelOperationGateway;
   launchedClaims: string[];
   fencedClaims: string[];
@@ -95,6 +96,7 @@ function createHarness(): GatewayHarness {
   const harness: GatewayHarness = {
     store,
     eventHub,
+    api,
     launchedClaims: [],
     fencedClaims: [],
     rejectClaims: false,
@@ -395,8 +397,11 @@ describe("KeelOperationGateway", () => {
           },
           ADMIN_TOKEN,
         ),
-      ).resolves.toMatchObject({ status: "finished" });
+      ).resolves.toMatchObject({ status: "running" });
       expect(harness.fencedClaims).toContain(gate.runId);
+      await expect(
+        ok(harness, session, "waitForRun", { runId: gate.runId }, gate.capability),
+      ).resolves.toMatchObject({ status: "finished" });
 
       const signal = await ok<{ runId: string; capability: string }>(
         harness,
@@ -420,8 +425,44 @@ describe("KeelOperationGateway", () => {
           },
           signal.capability,
         ),
-      ).resolves.toMatchObject({ status: "finished" });
+      ).resolves.toMatchObject({ status: "running" });
       expect(harness.fencedClaims).toContain(signal.runId);
+      await expect(
+        ok(harness, session, "waitForRun", { runId: signal.runId }, signal.capability),
+      ).resolves.toMatchObject({ status: "finished" });
+    } finally {
+      harness.close();
+    }
+  });
+
+  test("coalesces concurrent delivery wakes for the same run in one daemon", async () => {
+    const harness = createHarness();
+    const session = new FakeGatewaySession("wake-coalesce");
+    const runId = "run_gateway_coalesce";
+    const token = "kc_run_gateway_coalesce";
+    let resumeCalls = 0;
+    try {
+      insertRun(harness.store, runId, "waiting-signal");
+      putCapability(harness.store, token, { kind: "run", runId }, ["run:signal"]);
+      harness.api.resumeRun = async (id: string) => {
+        resumeCalls += 1;
+        await Bun.sleep(50);
+        return { runId: id, status: "waiting-signal" };
+      };
+      harness.api.waitForRun = async (id: string) => {
+        await Bun.sleep(50);
+        return { runId: id, status: "waiting-signal", error: null };
+      };
+
+      const [first, second] = await Promise.all([
+        ok(harness, session, "sendSignal", { runId, name: "proceed", payload: 1 }, token),
+        ok(harness, session, "sendSignal", { runId, name: "proceed", payload: 2 }, token),
+      ]);
+
+      expect(first).toEqual({ status: "running" });
+      expect(second).toEqual({ status: "running" });
+      expect(resumeCalls).toBe(1);
+      expect(harness.fencedClaims).toEqual([runId]);
     } finally {
       harness.close();
     }

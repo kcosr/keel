@@ -40,6 +40,7 @@ const FIX = new URL("../kernel/realm/fixtures/", import.meta.url);
 const chainUrl = new URL("chain.workflow.ts", FIX).pathname;
 const flakyUrl = new URL("flaky.workflow.ts", FIX).pathname;
 const gateUrl = new URL("gate.workflow.ts", FIX).pathname;
+const signalThenAgentUrl = new URL("signal-then-agent.workflow.ts", FIX).pathname;
 const TASK_REVIEW = new URL("../../workflows/task-review-guidance/", import.meta.url);
 const taskCodeReviewUrl = new URL("code-review.workflow.ts", TASK_REVIEW).pathname;
 const taskPlanReviewUrl = new URL("plan-review.workflow.ts", TASK_REVIEW).pathname;
@@ -917,6 +918,7 @@ describe("keel CLI", () => {
 
         const approved = await runCli(["approve", payload.runId, "approve-deploy"], dir, env);
         expect(approved.code).toBe(0);
+        expect(approved.stdout).toBe("running\n");
         await waitForCliStatus(payload.runId, dir, env);
 
         const watched = await runCli(["watch", payload.runId, "--output", "text"], dir, env);
@@ -991,6 +993,53 @@ describe("keel CLI", () => {
         expect(resumed.code).toBe(0);
         expect(resumed.stdout).toContain("run.resumed");
         expect(resumed.stdout).toContain("run.finished");
+      } finally {
+        daemon.stop();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    DAEMON_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "signal command acknowledges delivery without waiting for resumed work",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "keel-signal-ack-"));
+      const socketPath = join(dir, "keel.sock");
+      const dbPath = join(dir, "keel.db");
+      const daemon = new KeelDaemon({
+        socketPath,
+        dbPath,
+        agents: new AgentProviderRegistry().register(
+          new MockProvider({ default: { outputs: ['{"value":5}'], delayMs: 1000 } }),
+        ),
+      });
+      await daemon.start();
+      try {
+        const env = {
+          KEEL_SOCKET: socketPath,
+          KEEL_DB: dbPath,
+          KEEL_DIR: dir,
+        };
+        const launched = await runCli(["launch", "--detach", signalThenAgentUrl], dir, env);
+        expect(launched.code).toBe(0);
+        const payload = JSON.parse(launched.stdout) as { runId: string; capabilityRef: string };
+        const runEnv = { ...env, KEEL_CAP_FILE: payload.capabilityRef };
+        await waitForCliStatus(payload.runId, dir, runEnv, "waiting-signal");
+
+        const signaled = await runCli(
+          ["signal", payload.runId, "proceed", '{"go":true}'],
+          dir,
+          runEnv,
+          undefined,
+          500,
+        );
+        expect(signaled.timedOut).toBe(false);
+        expect(signaled.code).toBe(0);
+        expect(signaled.stdout).toBe("running\n");
+        const immediate = await runCli(["get", payload.runId], dir, runEnv);
+        expect(JSON.parse(immediate.stdout).status).not.toBe("finished");
+        await waitForCliStatus(payload.runId, dir, runEnv);
       } finally {
         daemon.stop();
         rmSync(dir, { recursive: true, force: true });
@@ -1666,7 +1715,7 @@ describe("keel CLI", () => {
         });
         expect(out.code).toBe(0);
         expect(JSON.parse(out.stdout)).toEqual({
-          decision: "finished",
+          decision: "running",
           output: "deploy:approved",
         });
       } finally {

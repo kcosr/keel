@@ -10,7 +10,9 @@ Use this file as the operational reference: install, run, command syntax, paths,
 workflow API, agent API, daemon behavior, and current limitations. For a compact
 agent-facing authoring guide, read [`SKILL.md`](./SKILL.md). For repository
 working conventions, read [`AGENTS.md`](./AGENTS.md). `DESIGN.md` is architecture
-and design-history material, not the command/API reference.
+and design-history material, not the command/API reference. For the cross-surface
+exposure and CLI interaction convention, read
+[`docs/control-surfaces.md`](./docs/control-surfaces.md).
 
 ## Contents
 
@@ -155,9 +157,9 @@ bun src/cli/keel.ts <command> [args]
 | `rewind [--detach] [--tools] <runId> <stepKey>` | Discard everything after a step and re-run. Watches by default. |
 | `fork <runId> [atStepKey]` | Copy a terminal run into a new independent run. |
 | `execute [file] [--entry name] [--state file] [--cap-file file] [--output json] [--emit-capability] [-- args...]` | Run a stateless TypeScript control script over the daemon API. Omit `file` to read stdin. |
-| `approve <runId> <key> [note]` | Approve a `ctx.human` gate. |
-| `deny <runId> <key> [note]` | Deny a `ctx.human` gate. |
-| `signal <runId> <name> [json]` | Deliver a payload to `ctx.signal(name)`. |
+| `approve <runId> <key> [note]` | Approve a `ctx.human` gate and acknowledge delivery/wake start. |
+| `deny <runId> <key> [note]` | Deny a `ctx.human` gate and acknowledge delivery/wake start. |
+| `signal <runId> <name> [json]` | Deliver a payload to `ctx.signal(name)` and acknowledge delivery/wake start. |
 
 ### Attach And Detach Behavior
 
@@ -186,6 +188,12 @@ transcript. Detached `launch` defaults to `--output json` and prints `runId` plu
 follow-up control of that run. Detached `resume`, `retry`, and `rewind` print the
 run id and status separated by a tab. `interrupt` is always a single lifecycle
 mutation and prints `<runId>\tinterrupted`.
+
+`signal`, `approve`, and `deny` are delivery-acknowledgement commands. They
+print the immediate acknowledgement status after the input is durable and any
+eligible wake has started. They do not stream or wait for resumed workflow work,
+and they do not have `--wait`, `--attach`, or `--detach`; use `keel watch <runId>
+--output text` to observe progress.
 
 `launch --output json` is only valid with `--detach`; attached launch streams
 events, so `--output json` is rejected there. `launch --detach --output ndjson`
@@ -625,6 +633,12 @@ return {
   status: settled.status,
 };
 ```
+
+`keel.signal(runId, name, payload)`, `keel.approve(runId, key, opts)`, and
+`keel.deny(runId, key, opts)` follow the daemon delivery-acknowledgement
+contract: they return after durable delivery and wake-start handling, not after
+the resumed workflow finishes. Call `keel.wait(runId)` afterwards when the script
+needs the final status or output.
 
 `execute` can also manage run workspaces without shelling out to the CLI:
 `keel.listRunWorkspaces`, `keel.getRunWorkspace`, `keel.getRunWorkspaceDiff`,
@@ -1104,7 +1118,12 @@ Deliver a decision from the CLI:
 ```bash
 keel approve "$RUN" approve-deploy "looks good"
 keel deny "$RUN" approve-deploy "needs changes"
+keel watch "$RUN" --output text
 ```
+
+`approve` and `deny` print the acknowledgement status and exit after the decision
+is durable and any eligible wake has started. They do not wait for the resumed
+workflow to finish, fail, or park again.
 
 ### Signals
 
@@ -1116,10 +1135,13 @@ Deliver a signal:
 
 ```bash
 keel signal "$RUN" proceed '{"go":true}'
+keel watch "$RUN" --output text
 ```
 
 Signals are ordered. The Nth `ctx.signal(name)` consumes the Nth delivered signal
-with that name.
+with that name. `signal` prints the acknowledgement status and exits after the
+payload is durable and any eligible wake has started; it does not watch resumed
+workflow progress.
 
 ### Run Interruption
 
@@ -1475,11 +1497,13 @@ interface RunProjection {
 Lifecycle methods start work in the background and return a `RunStart` or run id.
 `interruptRun` persists `status: "interrupted"`, appends `run.interrupted`, and
 aborts active in-process work best-effort; only `resumeRun` leaves that status.
-Use `waitForRun` to wait for terminal status or `subscribeEvents` to stream
-events. The daemon returns a raw run capability on launch/fork so clients can
-establish authority for follow-up operations. The CLI writes that capability to a
-local cap file by default and only prints raw tokens with `--emit-capability`.
-`gcDefinitions` is an admin operation.
+Signal delivery and approval decisions acknowledge durable delivery and
+wake-start handling; they do not imply the resumed workflow reached a parked or
+terminal status. Use `waitForRun` to wait for terminal or parked status, or
+`subscribeEvents` to stream events. The daemon returns a raw run capability on
+launch/fork so clients can establish authority for follow-up operations. The CLI
+writes that capability to a local cap file by default and only prints raw tokens
+with `--emit-capability`. `gcDefinitions` is an admin operation.
 
 ### EventEnvelope
 

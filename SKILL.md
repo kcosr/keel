@@ -349,10 +349,15 @@ await keel.output(runId);
 await keel.retry(runId);
 await keel.interrupt(runId, "operator inspection");
 await keel.resume(runId);
+await keel.signal(runId, "proceed", { ok: true });
+await keel.approve(runId, "approve-deploy");
 ```
 
 `interrupt` is resumable, not terminal cancellation: it stops active work
 best-effort and parks the run as `interrupted`; only `resume` continues it.
+`signal`, `approve`, and `deny` acknowledge durable delivery and wake-start
+handling; call `keel.wait(runId)` afterwards when you need the final status or
+output.
 
 `execute` is stateless. Return the small JSON result the caller needs: usually
 `runId`, `capabilityRef`, `status`, `output`, and any next-step context. Use

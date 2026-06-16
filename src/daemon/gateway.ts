@@ -84,10 +84,16 @@ interface GatewayMethod {
   handle: GatewayHandler;
 }
 
+interface ActiveDeliveryWake {
+  ack: Promise<{ status: string }>;
+}
+
 const AUTH_RECHECK_MS = 100;
 const DEFAULT_DEFINITION_CACHE_MIN_AGE_MS = 60_000;
 
 export class KeelOperationGateway {
+  private readonly activeDeliveryWakes = new Map<string, ActiveDeliveryWake>();
+
   private readonly methods: Record<string, GatewayMethod> = {
     authenticate: {
       kind: "session",
@@ -357,7 +363,7 @@ export class KeelOperationGateway {
           p.decision as { status: "approved" | "denied"; note?: string; grantedCaps?: unknown },
           this.opts.clock(),
         );
-        return this.wakeParked(runId);
+        return this.startWakeAfterDelivery(runId);
       },
     },
     sendSignal: {
@@ -366,7 +372,7 @@ export class KeelOperationGateway {
         const runId = p.runId as string;
         this.authorizeRunCredential(credential, runId, "run:signal");
         this.opts.store.putSignal(runId, p.name as string, p.payload, this.opts.clock());
-        return this.wakeParked(runId);
+        return this.startWakeAfterDelivery(runId);
       },
     },
     putSchedule: {
@@ -753,24 +759,43 @@ export class KeelOperationGateway {
     return { subId };
   }
 
-  /** Resume a run waiting on a just-delivered decision/signal. */
-  private async wakeParked(runId: string): Promise<{ status: string }> {
+  /** Start, but do not await, a wake made eligible by a delivered decision/signal. */
+  private async startWakeAfterDelivery(runId: string): Promise<{ status: string }> {
     const run = this.opts.store.getRun(runId);
     if (!run) throw new Error(`run ${runId} not found`);
     if (run.status.startsWith("waiting-")) {
-      this.opts.claimOrReject(runId);
+      const active = this.activeDeliveryWakes.get(runId);
+      if (active) return active.ack;
+      const wake: ActiveDeliveryWake = { ack: this.startDeliveryWake(runId) };
+      this.activeDeliveryWakes.set(runId, wake);
       try {
-        await this.opts.api.resumeRun(runId);
+        return await wake.ack;
       } catch (err) {
-        if (isUnsupportedWorkflowSdkAbiError(err)) {
-          failRunWithError(this.opts.store, runId, err, this.opts.clock());
-        }
+        if (this.activeDeliveryWakes.get(runId) === wake) this.activeDeliveryWakes.delete(runId);
         throw err;
       }
-      const out = await this.opts.api.waitForRun(runId);
-      return { status: out.status };
     }
     return { status: run.status };
+  }
+
+  private async startDeliveryWake(runId: string): Promise<{ status: string }> {
+    this.opts.claimOrReject(runId);
+    try {
+      await this.opts.api.resumeRun(runId);
+    } catch (err) {
+      if (isUnsupportedWorkflowSdkAbiError(err)) {
+        failRunWithError(this.opts.store, runId, err, this.opts.clock());
+      }
+      throw err;
+    }
+    const wake = this.activeDeliveryWakes.get(runId);
+    void this.opts.api
+      .waitForRun(runId)
+      .catch(() => undefined)
+      .finally(() => {
+        if (this.activeDeliveryWakes.get(runId) === wake) this.activeDeliveryWakes.delete(runId);
+      });
+    return { status: "running" };
   }
 }
 

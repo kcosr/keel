@@ -36,6 +36,12 @@ const signalUrl = captureWorkflowFile(
 const gateUrl = captureWorkflowFile(
   new URL("../kernel/realm/fixtures/gate.workflow.ts", import.meta.url).pathname,
 );
+const gateThenAgentUrl = captureWorkflowFile(
+  new URL("../kernel/realm/fixtures/gate-then-agent.workflow.ts", import.meta.url).pathname,
+);
+const signalThenAgentUrl = captureWorkflowFile(
+  new URL("../kernel/realm/fixtures/signal-then-agent.workflow.ts", import.meta.url).pathname,
+);
 const ADMIN_TOKEN = "kc_admin_test";
 
 let dir: string;
@@ -1446,6 +1452,73 @@ describe("daemon supervisor tick over the socket", () => {
 });
 
 describe("HITL over the socket", () => {
+  test("signal delivery acknowledges wake start without waiting for resumed work", async () => {
+    const socketPath = join(dir, "signal-ack.sock");
+    const daemon = new KeelDaemon({
+      socketPath,
+      dbPath: join(dir, "signal-ack.db"),
+      agents: new AgentProviderRegistry().register(
+        new MockProvider({ default: { outputs: ['{"value":7}'], delayMs: 1000 } }),
+      ),
+      superviseMs: 100_000,
+    });
+    await daemon.start();
+    try {
+      const c = await DaemonClient.connect(socketPath);
+      const { runId, capability } = await c.launchRun({
+        ...signalThenAgentUrl,
+        input: null,
+        name: "signal-ack",
+      });
+      await c.authenticate(capability as string);
+      await c.waitForRun(runId);
+      expect((await c.getRun(runId))?.status).toBe("waiting-signal");
+
+      const ack = await c.sendSignal(runId, "proceed", { go: true });
+      expect(ack).toEqual({ status: "running" });
+      expect((await c.getRun(runId))?.status).not.toBe("finished");
+      await expect(c.waitForRun(runId)).resolves.toMatchObject({ status: "finished", output: 7 });
+      c.close();
+    } finally {
+      daemon.stop();
+    }
+  }, 10000);
+
+  test("approval delivery acknowledges wake start without waiting for resumed work", async () => {
+    const socketPath = join(dir, "approval-ack.sock");
+    const daemon = new KeelDaemon({
+      socketPath,
+      dbPath: join(dir, "approval-ack.db"),
+      agents: new AgentProviderRegistry().register(
+        new MockProvider({ default: { outputs: ['{"value":11}'], delayMs: 1000 } }),
+      ),
+      superviseMs: 100_000,
+      adminToken: ADMIN_TOKEN,
+    });
+    await daemon.start();
+    try {
+      const c = await DaemonClient.connect(socketPath);
+      const { runId, capability } = await c.launchRun({
+        ...gateThenAgentUrl,
+        input: null,
+        name: "approval-ack",
+      });
+      await c.authenticate(capability as string);
+      await c.waitForRun(runId);
+      expect((await c.getRun(runId))?.status).toBe("waiting-human");
+
+      await c.authenticate(ADMIN_TOKEN);
+      const ack = await c.decideApproval(runId, "approve-deploy", { status: "approved" });
+      expect(ack).toEqual({ status: "running" });
+      expect((await c.getRun(runId))?.status).not.toBe("finished");
+      await c.authenticate(capability as string);
+      await expect(c.waitForRun(runId)).resolves.toMatchObject({ status: "finished", output: 11 });
+      c.close();
+    } finally {
+      daemon.stop();
+    }
+  }, 10000);
+
   test("a run parks on ctx.human and a decideApproval over the socket finishes it", async () => {
     const socketPath = join(dir, "h.sock");
     const gateUrl = captureWorkflowFile(
@@ -1476,7 +1549,9 @@ describe("HITL over the socket", () => {
       ).rejects.toThrow(/admin/);
       await c.authenticate(ADMIN_TOKEN);
       const out = await c.decideApproval(runId, "approve-deploy", { status: "denied" });
-      expect(out.status).toBe("finished");
+      expect(out.status).toBe("running");
+      await c.authenticate(capability as string);
+      await expect(c.waitForRun(runId)).resolves.toMatchObject({ status: "finished" });
       expect((await c.getRun(runId))?.status).toBe("finished");
       c.close();
     } finally {

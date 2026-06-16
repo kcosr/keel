@@ -29,13 +29,14 @@ exposure and CLI interaction convention, read
 
 ## Quick Start
 
-Keel runs on [Bun](https://bun.sh). The repo is self-contained.
+Keel runs on [Bun](https://bun.sh) 1.3.0 or newer. The repo is self-contained.
 
 ### Install The CLI
 
 ```bash
 export PATH="$HOME/.bun/bin:$PATH"
 cd /path/to/keel
+bun install
 bun link
 keel help
 ```
@@ -49,13 +50,33 @@ bun /path/to/keel/src/cli/keel.ts help
 
 ### Start The Daemon
 
+Run the daemon in a separate terminal:
+
 ```bash
 keel daemon
 ```
 
-For local systemd usage in this workspace, see [`AGENTS.md`](./AGENTS.md).
+Leave it running while other terminals use the CLI. For systemd or other local
+service setup, use the same daemon environment variables described in
+[Daemon State](#daemon-state) and [Development And Operations](#development-and-operations).
 
 ### Launch A Workflow
+
+For a copy-paste smoke workflow:
+
+```bash
+keel run --input '{"n":3}' <<'TS'
+import { jsonSchema, type Ctx } from "@kcosr/keel";
+
+const num = jsonSchema<number>({ type: "number" });
+
+export default async function workflow(ctx: Ctx, input: { n: number }) {
+  return ctx.step("double", num, { n: input.n }, ({ n }) => n * 2);
+}
+TS
+```
+
+To launch a workflow file:
 
 ```bash
 keel launch ./path/to/workflow.ts --input '{"n":3}'
@@ -71,7 +92,8 @@ cat ./path/to/workflow.ts | keel run --input '{"n":3}'
 ```
 
 Lifecycle commands watch by default. Attached `launch` streams newline-delimited
-JSON frame envelopes by default until the run reaches a terminal state:
+JSON frame envelopes by default until the run finishes, fails, parks, or is
+interrupted:
 
 ```json
 {"kind":"durable","seq":1,"type":"run.started","payload":{"name":"workflow.ts"},"atMs":...}
@@ -652,8 +674,9 @@ reads, so they restore the execute control credential/admin capability.
 
 `execute` is not durable orchestration. It can be re-invoked with non-secret
 state handles, but durable pauses belong in workflow code via `ctx.human`,
-`ctx.signal`, and `ctx.sleep`. Saved workflows/tasks and `ctx.spawn` are
-deferred.
+`ctx.signal`, and `ctx.sleep`. Saved workflows are implemented as daemon-pinned
+workflow definitions; saved tasks, durable task pause/re-entry, and durable child
+workflow spawning (`ctx.spawn`) are deferred.
 
 ### Diagnostics
 
@@ -758,7 +781,7 @@ const finding = await ctx.agent({
 |---|---|
 | `key` | Required stable key for this agent effect. |
 | `prompt` | Prompt text sent to the provider. |
-| `profile?` | Named preset resolved before identity/versioning. Programmatic only on the bundled daemon. |
+| `profile?` | Named preset resolved before identity/versioning from the run's snapshotted programmatic and persistent daemon profile catalog. |
 | `provider?` | `"pi"`, `"claude"`, `"codex"`, or `"mock"`. |
 | `providerConfig?` | Provider-keyed JSON object map for provider-owned execution settings. Only the selected provider's entry affects identity and invocation. |
 | `schema?` | Structured output schema. If present, replies are validated. |
@@ -1586,16 +1609,18 @@ daemons from driving the same run; after restart, the daemon reclaims orphaned
   re-park or wait for a new signal.
 - Partial `fork` does not copy durable waits. Treat divergent forks of
   wait-heavy workflows with care.
-- Saved workflows, saved tasks, durable task pause/re-entry, and durable child
-  workflow spawning (`ctx.spawn`) are not implemented in this v1 execute/auth
-  pass.
+- Saved tasks, durable task pause/re-entry, and durable child workflow spawning
+  (`ctx.spawn`) are not implemented. Saved workflows are implemented through the
+  workflow registry.
 - Workflow definition manifests include runtime/import metadata and a workflow
   SDK ABI for the daemon-provided `@kcosr/keel` bridge. Keel does not vendor
   arbitrary external packages into the journal or provide lockfile-level
   package-store replay in v1.
 - SQLite is the only implemented store. Postgres compatibility is a discipline
   enforced by tests, not a working backend.
-- Secrets and profiles are programmatic-only on the bundled daemon.
+- Secrets are trusted-local environment injection through the side channel.
+  Persistent agent profiles and daemon settings are available through the CLI and
+  daemon APIs.
 - The full 111-agent workload remains budget/target-repo dependent; shape,
   durability, and crash-resume are covered by mock scale tests and reduced live
   runs.

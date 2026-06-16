@@ -51,12 +51,17 @@ sees the implementer's uncommitted and committed changes. Prompts instruct both
 agents to use the current working directory rather than the source repository
 path.
 
+Because this workflow uses durable `ctx.agentSession` participants, crash-resume
+and turn retry are supported, but rerun, rewind, and fork are rejected for runs
+that used those sessions. See the Agent Sessions section in `USAGE.md` for the
+general rule.
+
 After launch, inspect the retained workspace with:
 
 ```bash
-keel workspace list
-keel workspace show <run-id> implementation
-keel workspace diff <run-id> implementation
+keel workspace list <run-id> --all
+keel workspace show <run-id> <workspaceId>
+keel workspace diff <run-id> <workspaceId>
 ```
 
 Use `completionMode: "park-before-complete"` when a human or orchestrator should

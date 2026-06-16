@@ -83,14 +83,23 @@ Agent permissions should fail closed.
 
 Documentation is part of the change.
 
+- Use [`docs/documentation.md`](./docs/documentation.md) as the ownership guide
+  for deciding where durable documentation belongs.
 - Maintain `CHANGELOG.md` under `[Unreleased]` for user-visible behavior,
   commands, API changes, defaults, migrations, and notable docs/convention
   changes.
+- Update `README.md` for orientation-level feature/status changes and routing to
+  new major docs.
 - Update `USAGE.md` when CLI commands, command output, environment variables,
   daemon operation, API/RPC behavior, or workflow execution semantics change.
 - Update `SKILL.md` when agent-facing workflow authoring guidance changes.
 - Update `DESIGN.md` when durable architecture, execution model, liveness,
   isolation, or replay semantics change.
+- Update `docs/control-surfaces.md` when RPC, CLI, execute, TUI, web, MCP, SDK
+  exposure, authorization, output shape, attach/watch behavior, or surface
+  status changes.
+- Keep `CLAUDE.md` synchronized with this file when changing repository rules,
+  or explicitly leave `AGENTS.md` as canonical and `CLAUDE.md` as a pointer.
 - Keep this file focused on repository conventions and local operating notes.
 - Avoid brittle section-number references in code comments and docs. Prefer
   stable file names, API names, or concept names unless a numbered section is the

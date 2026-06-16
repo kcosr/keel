@@ -1,0 +1,764 @@
+import { randomUUID } from "node:crypto";
+import {
+  AuthorizationError,
+  type CapabilityAction,
+  authorize,
+  issueRunCapability,
+} from "../auth/capabilities.ts";
+import { redactCapabilityTokensInValue } from "../auth/redaction.ts";
+import type { JournalStore } from "../journal/store.ts";
+import { failRunWithError } from "../kernel/run-errors.ts";
+import type {
+  EventEnvelope,
+  SaveWorkflowRequest,
+  SavedWorkflowRef,
+  WorkflowProvenance,
+} from "../rpc/contract.ts";
+import type { InProcessKeel } from "../rpc/in-process.ts";
+import { effectiveOperationalSettings } from "../settings/catalog.ts";
+import { requireRunTarget } from "../target.ts";
+import {
+  evictWorkflowDefinitionCache,
+  isUnsupportedWorkflowSdkAbiError,
+  materializeWorkflowDefinition,
+  snapshotWorkflowSource,
+} from "../workflow-definitions/snapshot.ts";
+import type { WorkflowSourceInput } from "../workflow-definitions/source.ts";
+
+export interface GatewaySession {
+  readonly id: string;
+  getCredential(): string | null;
+  setCredential(token: string | null): void;
+  sendEvent(event: GatewayEventFrame): void;
+  addCleanup(cleanup: () => void): void;
+  removeCleanup(cleanup: () => void): void;
+  close(): void;
+}
+
+export interface GatewayRequest {
+  id?: unknown;
+  method: string;
+  params?: unknown;
+  credential?: string | null;
+}
+
+export interface GatewayResponse {
+  id?: unknown;
+  result?: unknown;
+  error?: GatewayErrorEnvelope;
+}
+
+export type GatewayErrorEnvelope =
+  | {
+      code: string;
+      message: string;
+      action: string;
+      resource: unknown;
+    }
+  | {
+      message: string;
+    };
+
+export type GatewayEventFrame = {
+  subId: string;
+} & EventEnvelope;
+
+export interface KeelOperationGatewayOptions {
+  ownerId: string;
+  api: InProcessKeel;
+  store: JournalStore;
+  clock: () => number;
+  claimLaunchedRun(runId: string): void;
+  claimOrReject(runId: string): void;
+  definitionCacheRoot: string;
+}
+
+type GatewayHandler = (
+  session: GatewaySession,
+  params: Record<string, unknown>,
+  credential: string | null,
+) => Promise<unknown> | unknown;
+
+interface GatewayMethod {
+  kind: "session" | "health" | "core" | "daemon";
+  handle: GatewayHandler;
+}
+
+const AUTH_RECHECK_MS = 100;
+const DEFAULT_DEFINITION_CACHE_MIN_AGE_MS = 60_000;
+
+export class KeelOperationGateway {
+  private readonly methods: Record<string, GatewayMethod> = {
+    authenticate: {
+      kind: "session",
+      handle: (session, p) => {
+        session.setCredential((p.token as string | null | undefined) ?? null);
+        return { ok: true };
+      },
+    },
+    launchRun: {
+      kind: "core",
+      handle: async (_session, p) => {
+        const target = requireRunTarget(p.target, "launchRun");
+        const res = await this.opts.api.launchRun({
+          source: p.source as WorkflowSourceInput,
+          input: p.input,
+          target,
+          name: (p.name as string | null | undefined) ?? null,
+          provenance: p.provenance as WorkflowProvenance | undefined,
+        });
+        this.opts.claimLaunchedRun(res.runId);
+        const cap = issueRunCapability(this.opts.store, res.runId, this.opts.clock());
+        return { ...res, capability: cap.token, capabilityId: cap.capabilityId };
+      },
+    },
+    saveWorkflow: {
+      kind: "core",
+      handle: (_session, p, credential) => {
+        const name = p.name as string;
+        this.authorizeWorkflow(credential, name, p.version as number | undefined, "workflow:save");
+        return this.opts.api.saveWorkflow(p as unknown as SaveWorkflowRequest);
+      },
+    },
+    previewWorkflowDefinition: {
+      kind: "core",
+      handle: (_session, p, credential) => {
+        this.authorizeAdmin(credential);
+        return this.opts.api.previewWorkflowDefinition({ source: p.source as WorkflowSourceInput });
+      },
+    },
+    listSavedWorkflows: {
+      kind: "core",
+      handle: (_session, p, credential) => {
+        this.authorizeAdmin(credential);
+        return this.opts.api.listSavedWorkflows({
+          ...(p.includeDisabled === true ? { includeDisabled: true } : {}),
+          ...(p.includeDeprecated === true ? { includeDeprecated: true } : {}),
+          ...(p.includeDeleted === true ? { includeDeleted: true } : {}),
+        });
+      },
+    },
+    getSavedWorkflow: {
+      kind: "core",
+      handle: (_session, p, credential) => {
+        this.authorizeWorkflow(credential, p.name as string, undefined, "workflow:read");
+        return this.opts.api.getSavedWorkflow(p.name as string);
+      },
+    },
+    getSavedWorkflowSource: {
+      kind: "core",
+      handle: (_session, p, credential) => {
+        this.authorizeWorkflow(
+          credential,
+          p.name as string,
+          typeof p.version === "number" ? (p.version as number) : undefined,
+          "workflow:read",
+        );
+        return this.opts.api.getSavedWorkflowSource(p as never);
+      },
+    },
+    getWorkflowDefinitionSource: {
+      kind: "core",
+      handle: (_session, p, credential) => {
+        const lookup = (p.lookup ?? {}) as Record<string, unknown>;
+        if (lookup.kind === "run") {
+          this.authorizeRunCredential(credential, lookup.runId as string, "run:source");
+        } else if (lookup.kind === "definition") {
+          this.authorizeAdmin(credential);
+        } else {
+          throw new Error("workflow definition source lookup must be run or definition");
+        }
+        return this.opts.api.getWorkflowDefinitionSource(p as never);
+      },
+    },
+    launchSavedWorkflow: {
+      kind: "core",
+      handle: async (_session, p, credential) => {
+        const ref = (p.ref ?? {}) as SavedWorkflowRef;
+        this.authorizeWorkflow(
+          credential,
+          ref.name,
+          typeof ref.version === "number" ? ref.version : undefined,
+          "workflow:run",
+        );
+        const saved = this.opts.store.resolveSavedWorkflowRef(ref);
+        this.authorizeWorkflow(credential, ref.name, saved.version, "workflow:run");
+        const target =
+          (p.target as string | undefined) ??
+          saved.defaultTarget ??
+          (p.clientDefaultTarget as string | undefined);
+        const res = await this.opts.api.launchSavedWorkflow({
+          ref,
+          input: p.input,
+          target,
+          name: (p.name as string | null | undefined) ?? null,
+        });
+        this.opts.claimLaunchedRun(res.runId);
+        const cap = issueRunCapability(this.opts.store, res.runId, this.opts.clock());
+        return { ...res, capability: cap.token, capabilityId: cap.capabilityId };
+      },
+    },
+    setSavedWorkflowDisabled: {
+      kind: "core",
+      handle: (_session, p, credential) => {
+        this.authorizeWorkflow(credential, p.name as string, undefined, "workflow:save");
+        return this.opts.api.setSavedWorkflowDisabled(p.name as string, p.disabled === true);
+      },
+    },
+    setSavedWorkflowVersionEnabled: {
+      kind: "core",
+      handle: (_session, p, credential) => {
+        this.authorizeWorkflow(credential, p.name as string, p.version as number, "workflow:save");
+        return this.opts.api.setSavedWorkflowVersionEnabled(
+          p.name as string,
+          p.version as number,
+          p.enabled === true,
+        );
+      },
+    },
+    deprecateSavedWorkflowVersion: {
+      kind: "core",
+      handle: (_session, p, credential) => {
+        this.authorizeWorkflow(credential, p.name as string, p.version as number, "workflow:save");
+        return this.opts.api.deprecateSavedWorkflowVersion(p as never);
+      },
+    },
+    deleteSavedWorkflow: {
+      kind: "core",
+      handle: (_session, p, credential) => {
+        this.authorizeAdmin(credential);
+        return this.opts.api.deleteSavedWorkflow(p.name as string);
+      },
+    },
+    deleteSavedWorkflowVersion: {
+      kind: "core",
+      handle: (_session, p, credential) => {
+        this.authorizeAdmin(credential);
+        return this.opts.api.deleteSavedWorkflowVersion(p.name as string, p.version as number);
+      },
+    },
+    resumeRun: {
+      kind: "core",
+      handle: (_session, p, credential) => {
+        this.authorizeRunCredential(credential, p.runId as string, "run:resume");
+        this.opts.claimOrReject(p.runId as string);
+        return this.opts.api.resumeRun(p.runId as string);
+      },
+    },
+    interruptRun: {
+      kind: "core",
+      handle: (_session, p, credential) => {
+        this.authorizeRunCredential(credential, p.runId as string, "run:interrupt");
+        this.opts.claimOrReject(p.runId as string);
+        return this.opts.api.interruptRun(p.runId as string, p.reason as string | undefined);
+      },
+    },
+    rerunRun: {
+      kind: "core",
+      handle: (_session, p, credential) => {
+        this.authorizeRunCredential(credential, p.runId as string, "run:retry");
+        this.opts.claimOrReject(p.runId as string);
+        return this.opts.api.rerunRun(
+          p.runId as string,
+          p.opts as {
+            source?: WorkflowSourceInput;
+            input?: unknown;
+            name?: string | null;
+            provenance?: WorkflowProvenance;
+          },
+        );
+      },
+    },
+    getRun: {
+      kind: "core",
+      handle: (_session, p, credential) => {
+        this.authorizeRunCredential(credential, p.runId as string, "run:read");
+        return this.opts.api.getRun(p.runId as string);
+      },
+    },
+    getRunReport: {
+      kind: "core",
+      handle: (_session, p, credential) => {
+        this.authorizeRunCredential(credential, p.runId as string, "run:read");
+        return this.opts.api.getRunReport(p.runId as string);
+      },
+    },
+    getBlockage: {
+      kind: "core",
+      handle: (_session, p, credential) => {
+        this.authorizeRunCredential(credential, p.runId as string, "run:read");
+        return this.opts.api.getBlockage(p.runId as string);
+      },
+    },
+    listRuns: {
+      kind: "core",
+      handle: (_session, _p, credential) => {
+        this.authorizeAdmin(credential);
+        return this.opts.api.listRuns();
+      },
+    },
+    waitForRun: {
+      kind: "core",
+      handle: (_session, p, credential) => {
+        this.authorizeRunCredential(credential, p.runId as string, "run:watch");
+        return this.waitForRunAuthorized(credential, p.runId as string);
+      },
+    },
+    getRunOutput: {
+      kind: "core",
+      handle: (_session, p, credential) => {
+        this.authorizeRunCredential(credential, p.runId as string, "run:output");
+        return this.opts.api.getRunOutput(p.runId as string);
+      },
+    },
+    subscribeEvents: {
+      kind: "core",
+      handle: (session, p, credential) => {
+        this.authorizeRunCredential(credential, p.runId as string, "run:events");
+        return this.subscribeEvents(session, p, credential);
+      },
+    },
+    retryRun: {
+      kind: "core",
+      handle: (_session, p, credential) => {
+        this.authorizeRunCredential(credential, p.runId as string, "run:retry");
+        this.opts.claimOrReject(p.runId as string);
+        return this.opts.api.retryRun(p.runId as string);
+      },
+    },
+    rewindRun: {
+      kind: "core",
+      handle: (_session, p, credential) => {
+        this.authorizeRunCredential(credential, p.runId as string, "run:rewind");
+        this.opts.claimOrReject(p.runId as string);
+        return this.opts.api.rewindRun(p.runId as string, p.toStableKey as string);
+      },
+    },
+    forkRun: {
+      kind: "core",
+      handle: (_session, p, credential) => {
+        this.authorizeRunCredential(credential, p.runId as string, "run:fork");
+        const fork = this.opts.api.forkRun(
+          p.runId as string,
+          (p.opts as Record<string, unknown>) ?? {},
+        );
+        const cap = issueRunCapability(this.opts.store, fork.runId, this.opts.clock());
+        return { ...fork, capability: cap.token, capabilityId: cap.capabilityId };
+      },
+    },
+    decideApproval: {
+      kind: "daemon",
+      handle: (_session, p, credential) => {
+        this.authorizeAdmin(credential);
+        const runId = p.runId as string;
+        this.opts.store.decideApproval(
+          runId,
+          p.key as string,
+          p.decision as { status: "approved" | "denied"; note?: string; grantedCaps?: unknown },
+          this.opts.clock(),
+        );
+        return this.wakeParked(runId);
+      },
+    },
+    sendSignal: {
+      kind: "daemon",
+      handle: (_session, p, credential) => {
+        const runId = p.runId as string;
+        this.authorizeRunCredential(credential, runId, "run:signal");
+        this.opts.store.putSignal(runId, p.name as string, p.payload, this.opts.clock());
+        return this.wakeParked(runId);
+      },
+    },
+    putSchedule: {
+      kind: "core",
+      handle: (_session, p, credential) => {
+        this.authorizeAdmin(credential);
+        const hasSource = p.source !== undefined;
+        const hasSavedRef = p.savedRef !== undefined;
+        if (hasSource === hasSavedRef) {
+          throw new Error("putSchedule requires exactly one of source or savedRef");
+        }
+        let workflowRef: string;
+        const scheduleName = (p.workflowName as string | null | undefined) ?? (p.name as string);
+        let defaultTarget: string | null = null;
+        if (hasSavedRef) {
+          if (p.workflowName !== undefined) {
+            throw new Error("putSchedule workflowName is only valid with source");
+          }
+          const saved = this.opts.store.resolveSavedWorkflowRef(p.savedRef as SavedWorkflowRef);
+          materializeWorkflowDefinition(
+            this.opts.store,
+            saved.definitionHash,
+            this.opts.definitionCacheRoot,
+          );
+          workflowRef = saved.definitionHash;
+          defaultTarget = saved.defaultTarget;
+        } else {
+          const snapshot = snapshotWorkflowSource(
+            this.opts.store,
+            p.source as WorkflowSourceInput,
+            {
+              name: scheduleName,
+              nowMs: this.opts.clock(),
+              cacheRoot: this.opts.definitionCacheRoot,
+            },
+          ).snapshot;
+          workflowRef = snapshot.hash;
+        }
+        const target = requireRunTarget(
+          (p.target as string | undefined) ??
+            defaultTarget ??
+            (p.clientDefaultTarget as string | undefined),
+          "putSchedule",
+        );
+        this.opts.store.putSchedule({
+          name: p.name as string,
+          workflowRef,
+          inputJson: p.input != null ? JSON.stringify(p.input) : null,
+          scheduleTarget: target,
+          intervalMs: p.intervalMs as number,
+          nextFireMs: (p.firstFireMs as number) ?? this.opts.clock(),
+        });
+        return { ok: true };
+      },
+    },
+    listRunWorkspaces: {
+      kind: "core",
+      handle: (_session, p, credential) => {
+        this.authorizeRunCredential(credential, p.runId as string, "run:read");
+        return this.opts.api.listRunWorkspaces(p.runId as string, {
+          ...(p.includeRemoved === true ? { includeRemoved: true } : {}),
+        });
+      },
+    },
+    getRunWorkspace: {
+      kind: "core",
+      handle: (_session, p, credential) => {
+        this.authorizeRunCredential(credential, p.runId as string, "run:read");
+        return this.opts.api.getRunWorkspace(p.runId as string, p.workspaceId as string);
+      },
+    },
+    getRunWorkspaceDiff: {
+      kind: "core",
+      handle: (_session, p, credential) => {
+        this.authorizeRunCredential(credential, p.runId as string, "run:read");
+        return this.opts.api.getRunWorkspaceDiff(p.runId as string, p.workspaceId as string);
+      },
+    },
+    mergeRunWorkspace: {
+      kind: "core",
+      handle: (_session, p, credential) => {
+        this.authorizeAdmin(credential);
+        return this.opts.api.mergeRunWorkspace(p.runId as string, p.workspaceId as string);
+      },
+    },
+    discardRunWorkspace: {
+      kind: "core",
+      handle: (_session, p, credential) => {
+        this.authorizeAdmin(credential);
+        return this.opts.api.discardRunWorkspace(p.runId as string, p.workspaceId as string);
+      },
+    },
+    gcWorkspaces: {
+      kind: "core",
+      handle: (_session, p, credential) => {
+        this.authorizeAdmin(credential);
+        return this.opts.api.gcWorkspaces({
+          ...(typeof p.olderThanMs === "number" ? { olderThanMs: p.olderThanMs } : {}),
+          ...(p.includePending === true ? { includePending: true } : {}),
+          ...(p.includeRemoved === true ? { includeRemoved: true } : {}),
+        });
+      },
+    },
+    listAgentProfiles: {
+      kind: "core",
+      handle: (_session, p, credential) => {
+        this.authorizeAdmin(credential);
+        return this.opts.api.listAgentProfiles(
+          p as { source?: "all" | "catalog" | "programmatic" },
+        );
+      },
+    },
+    getAgentProfile: {
+      kind: "core",
+      handle: (_session, p, credential) => {
+        this.authorizeAdmin(credential);
+        return this.opts.api.getAgentProfile(p.name as string);
+      },
+    },
+    putAgentProfile: {
+      kind: "core",
+      handle: (_session, p, credential) => {
+        this.authorizeAdmin(credential);
+        return this.opts.api.putAgentProfile(p as never);
+      },
+    },
+    deleteAgentProfile: {
+      kind: "core",
+      handle: (_session, p, credential) => {
+        this.authorizeAdmin(credential);
+        return this.opts.api.deleteAgentProfile(p as never);
+      },
+    },
+    checkAgentProfile: {
+      kind: "core",
+      handle: (_session, p, credential) => {
+        this.authorizeAdmin(credential);
+        return this.opts.api.checkAgentProfile(p as never);
+      },
+    },
+    listSettings: {
+      kind: "core",
+      handle: (_session, _p, credential) => {
+        this.authorizeAdmin(credential);
+        return this.opts.api.listSettings();
+      },
+    },
+    getSetting: {
+      kind: "core",
+      handle: (_session, p, credential) => {
+        this.authorizeAdmin(credential);
+        return this.opts.api.getSetting(p.key as string);
+      },
+    },
+    putSetting: {
+      kind: "core",
+      handle: (_session, p, credential) => {
+        this.authorizeAdmin(credential);
+        return this.opts.api.putSetting(p as never);
+      },
+    },
+    deleteSetting: {
+      kind: "core",
+      handle: (_session, p, credential) => {
+        this.authorizeAdmin(credential);
+        return this.opts.api.deleteSetting(p as never);
+      },
+    },
+    checkSetting: {
+      kind: "core",
+      handle: (_session, p, credential) => {
+        this.authorizeAdmin(credential);
+        return this.opts.api.checkSetting(p as never);
+      },
+    },
+    gcDefinitions: {
+      kind: "daemon",
+      handle: (_session, p, credential) => {
+        this.authorizeAdmin(credential);
+        const operational = effectiveOperationalSettings(this.opts.store.listDaemonSettingRows());
+        const ttlMs = typeof p.ttlMs === "number" ? p.ttlMs : operational.workflowDefinitionGcTtlMs;
+        const cacheMinAgeMs =
+          typeof p.cacheMinAgeMs === "number"
+            ? p.cacheMinAgeMs
+            : DEFAULT_DEFINITION_CACHE_MIN_AGE_MS;
+        const workflowDefinitionsRemoved = this.opts.store.pruneWorkflowDefinitions({
+          nowMs: this.opts.clock(),
+          ttlMs,
+        });
+        const definitionCacheEntriesRemoved = evictWorkflowDefinitionCache(this.opts.store, {
+          cacheRoot: this.opts.definitionCacheRoot,
+          nowMs: this.opts.clock(),
+          minAgeMs: cacheMinAgeMs,
+        });
+        return { workflowDefinitionsRemoved, definitionCacheEntriesRemoved };
+      },
+    },
+    ping: {
+      kind: "health",
+      handle: () => ({ ok: true, ownerId: this.opts.ownerId }),
+    },
+  };
+
+  constructor(private readonly opts: KeelOperationGatewayOptions) {}
+
+  async handle(session: GatewaySession, request: GatewayRequest): Promise<GatewayResponse> {
+    try {
+      const method = this.methods[request.method];
+      if (!method) throw new Error(`unknown method ${request.method}`);
+      const params = paramsObject(request.params);
+      const credential =
+        request.credential !== undefined ? request.credential : session.getCredential();
+      const result = await method.handle(session, params, credential);
+      return { id: request.id, result };
+    } catch (err) {
+      return { id: request.id, error: this.errorEnvelope(err) };
+    }
+  }
+
+  private errorEnvelope(err: unknown): GatewayErrorEnvelope {
+    if (err instanceof AuthorizationError) {
+      return {
+        code: err.code,
+        message: err.message,
+        action: err.request.action,
+        resource: err.request.resource,
+      };
+    }
+    return {
+      message: redactCapabilityTokensInValue(err instanceof Error ? err.message : String(err)),
+    };
+  }
+
+  private authorizeRunCredential(
+    credential: string | null,
+    runId: string,
+    action: CapabilityAction,
+  ): void {
+    authorize(
+      this.opts.store,
+      credential,
+      { action, resource: { kind: "run", runId } },
+      this.opts.clock(),
+    );
+  }
+
+  private authorizeAdmin(credential: string | null): void {
+    authorize(
+      this.opts.store,
+      credential,
+      { action: "admin", resource: { kind: "daemon" } },
+      this.opts.clock(),
+    );
+  }
+
+  private authorizeWorkflow(
+    credential: string | null,
+    name: string,
+    version: number | undefined,
+    action: CapabilityAction,
+  ): void {
+    authorize(
+      this.opts.store,
+      credential,
+      {
+        action,
+        resource:
+          version === undefined ? { kind: "workflow", name } : { kind: "workflow", name, version },
+      },
+      this.opts.clock(),
+    );
+  }
+
+  private waitForRunAuthorized(credential: string | null, runId: string): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (fn: () => void) => {
+        if (settled) return;
+        settled = true;
+        clearInterval(recheck);
+        fn();
+      };
+      const recheck = setInterval(() => {
+        try {
+          this.authorizeRunCredential(credential, runId, "run:watch");
+        } catch (err) {
+          finish(() => reject(err));
+        }
+      }, AUTH_RECHECK_MS);
+      this.opts.api.waitForRun(runId).then(
+        (out) => {
+          try {
+            this.authorizeRunCredential(credential, runId, "run:watch");
+            finish(() => resolve(out));
+          } catch (err) {
+            finish(() => reject(err));
+          }
+        },
+        (err) => finish(() => reject(err)),
+      );
+    });
+  }
+
+  private subscribeEvents(
+    session: GatewaySession,
+    p: Record<string, unknown>,
+    credential: string | null,
+  ): { subId: string } {
+    const runId = p.runId as string;
+    const subId = randomUUID();
+    let unsub = () => {};
+    let stopped = false;
+    let unsubAssigned = false;
+    let authFailureSent = false;
+    let recheck: ReturnType<typeof setInterval> | null = null;
+    const stop = () => {
+      if (stopped) return;
+      stopped = true;
+      if (recheck) clearInterval(recheck);
+      if (unsubAssigned) unsub();
+      session.removeCleanup(stop);
+    };
+    session.addCleanup(stop);
+    const sendAuthFailure = (err: unknown) => {
+      if (authFailureSent) return;
+      authFailureSent = true;
+      session.sendEvent({
+        subId,
+        kind: "ephemeral",
+        type: "authorization.failed",
+        payload: {
+          message: redactCapabilityTokensInValue(err instanceof Error ? err.message : String(err)),
+        },
+        atMs: this.opts.clock(),
+      });
+    };
+    recheck = setInterval(() => {
+      try {
+        this.authorizeRunCredential(credential, runId, "run:events");
+      } catch (err) {
+        sendAuthFailure(err);
+        stop();
+      }
+    }, AUTH_RECHECK_MS);
+    const subscribed = this.opts.api.subscribeEvents(
+      runId,
+      (p.afterSeq as number) ?? 0,
+      (event: EventEnvelope) => {
+        try {
+          if (stopped) return;
+          this.authorizeRunCredential(credential, runId, "run:events");
+          session.sendEvent({ subId, ...redactCapabilityTokensInValue(event) });
+        } catch (err) {
+          sendAuthFailure(err);
+          stop();
+        }
+      },
+    );
+    unsub = subscribed;
+    unsubAssigned = true;
+    if (stopped) {
+      unsub();
+      session.removeCleanup(stop);
+    }
+    return { subId };
+  }
+
+  /** Resume a run waiting on a just-delivered decision/signal. */
+  private async wakeParked(runId: string): Promise<{ status: string }> {
+    const run = this.opts.store.getRun(runId);
+    if (!run) throw new Error(`run ${runId} not found`);
+    if (run.status.startsWith("waiting-")) {
+      this.opts.claimOrReject(runId);
+      try {
+        await this.opts.api.resumeRun(runId);
+      } catch (err) {
+        if (isUnsupportedWorkflowSdkAbiError(err)) {
+          failRunWithError(this.opts.store, runId, err, this.opts.clock());
+        }
+        throw err;
+      }
+      const out = await this.opts.api.waitForRun(runId);
+      return { status: out.status };
+    }
+    return { status: run.status };
+  }
+}
+
+function paramsObject(params: unknown): Record<string, unknown> {
+  if (params === undefined || params === null) return {};
+  if (typeof params !== "object" || Array.isArray(params)) {
+    throw new Error("request params must be an object");
+  }
+  return params as Record<string, unknown>;
+}

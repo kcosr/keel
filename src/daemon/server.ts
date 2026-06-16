@@ -9,36 +9,24 @@ import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import type { Socket } from "bun";
 import type { AgentProviderRegistry } from "../agents/types.ts";
-import {
-  AuthorizationError,
-  type CapabilityAction,
-  authorize,
-  ensureAdminCapability,
-  issueRunCapability,
-} from "../auth/capabilities.ts";
-import { redactCapabilityTokensInValue } from "../auth/redaction.ts";
+import { ensureAdminCapability } from "../auth/capabilities.ts";
 import { JournalStore } from "../journal/store.ts";
 import { RealmKernel } from "../kernel/realm/realm-host.ts";
 import { failRunWithError } from "../kernel/run-errors.ts";
 import { Supervisor } from "../kernel/supervisor.ts";
-import type {
-  EventEnvelope,
-  SaveWorkflowRequest,
-  SavedWorkflowRef,
-  WorkflowProvenance,
-} from "../rpc/contract.ts";
 import { EventHub } from "../rpc/event-hub.ts";
 import { InProcessKeel } from "../rpc/in-process.ts";
-import { effectiveOperationalSettings } from "../settings/catalog.ts";
-import { requireRunTarget } from "../target.ts";
 import {
-  evictWorkflowDefinitionCache,
   isUnsupportedWorkflowSdkAbiError,
   keelPackageRoot,
-  materializeWorkflowDefinition,
-  snapshotWorkflowSource,
 } from "../workflow-definitions/snapshot.ts";
-import type { WorkflowSourceInput } from "../workflow-definitions/source.ts";
+import {
+  type GatewayEventFrame,
+  type GatewayRequest,
+  type GatewayResponse,
+  type GatewaySession,
+  KeelOperationGateway,
+} from "./gateway.ts";
 
 export interface DaemonOptions {
   socketPath: string;
@@ -59,18 +47,52 @@ export interface DaemonOptions {
   clock?: () => number;
 }
 
-interface Conn {
-  socket: Socket<undefined>;
+class SocketGatewaySession implements GatewaySession {
+  readonly id = randomUUID();
   buf: string;
-  subs: Map<string, () => void>; // subId → unsubscribe
-  credential: string | null;
+  private credential: string | null;
+  private readonly cleanups = new Set<() => void>();
+
+  constructor(private readonly socket: Socket<undefined>) {
+    this.buf = "";
+    this.credential = null;
+  }
+
+  getCredential(): string | null {
+    return this.credential;
+  }
+
+  setCredential(token: string | null): void {
+    this.credential = token;
+  }
+
+  sendEvent(event: GatewayEventFrame): void {
+    this.socket.write(`${JSON.stringify({ event })}\n`);
+  }
+
+  sendResponse(response: GatewayResponse): void {
+    this.socket.write(`${JSON.stringify(response)}\n`);
+  }
+
+  addCleanup(cleanup: () => void): void {
+    this.cleanups.add(cleanup);
+  }
+
+  removeCleanup(cleanup: () => void): void {
+    this.cleanups.delete(cleanup);
+  }
+
+  close(): void {
+    for (const cleanup of [...this.cleanups]) cleanup();
+    this.cleanups.clear();
+  }
 }
+
+type GatewaySocket = Socket<undefined> & { session?: SocketGatewaySession };
 
 const DEFAULT_HEARTBEAT_MS = 10_000;
 const DEFAULT_SUPERVISE_MS = 1000;
 const OWNER_STALE_HEARTBEATS = 3;
-const AUTH_RECHECK_MS = 100;
-const DEFAULT_DEFINITION_CACHE_MIN_AGE_MS = 60_000;
 
 export class KeelDaemon {
   readonly ownerId: string;
@@ -78,6 +100,7 @@ export class KeelDaemon {
   private readonly kernel: RealmKernel;
   private readonly api: InProcessKeel;
   private readonly clock: () => number;
+  private readonly definitionCacheRoot: string;
   private readonly heartbeatMs: number;
   private server: ReturnType<typeof Bun.listen> | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -86,12 +109,15 @@ export class KeelDaemon {
   private readonly supervisor: Supervisor;
   private readonly superviseMs: number;
   private readonly eventHub = new EventHub();
+  private readonly gateway: KeelOperationGateway;
 
   constructor(private readonly opts: DaemonOptions) {
     this.ownerId = opts.ownerId ?? `daemon_${randomUUID()}`;
     this.clock = opts.clock ?? (() => Date.now());
     this.heartbeatMs = opts.heartbeatMs ?? DEFAULT_HEARTBEAT_MS;
     this.superviseMs = opts.superviseMs ?? DEFAULT_SUPERVISE_MS;
+    this.definitionCacheRoot =
+      opts.definitionCacheRoot ?? join(dirname(opts.dbPath), "definitions");
     this.store = JournalStore.open(opts.dbPath);
     if (opts.adminToken) {
       ensureAdminCapability(this.store, opts.adminToken, this.clock());
@@ -100,7 +126,7 @@ export class KeelDaemon {
       ...(opts.agents ? { agents: opts.agents } : {}),
       workspaceStore: opts.workspaceStore ?? join(dirname(opts.dbPath), "workspaces"),
       ...(opts.agentProfiles ? { agentProfiles: opts.agentProfiles } : {}),
-      definitionCacheRoot: opts.definitionCacheRoot ?? join(dirname(opts.dbPath), "definitions"),
+      definitionCacheRoot: this.definitionCacheRoot,
       clock: this.clock,
     });
     this.assertNoDuplicateProfileSources();
@@ -122,6 +148,15 @@ export class KeelDaemon {
         if (ok) this.owned.add(runId);
         return ok;
       },
+    });
+    this.gateway = new KeelOperationGateway({
+      ownerId: this.ownerId,
+      api: this.api,
+      store: this.store,
+      clock: this.clock,
+      claimLaunchedRun: (runId) => this.claimLaunchedRun(runId),
+      claimOrReject: (runId) => this.claimOrReject(runId),
+      definitionCacheRoot: this.definitionCacheRoot,
     });
   }
 
@@ -160,17 +195,11 @@ export class KeelDaemon {
       unix: this.opts.socketPath,
       socket: {
         open: (socket) => {
-          (socket as Socket<undefined> & { conn?: Conn }).conn = {
-            socket,
-            buf: "",
-            subs: new Map(),
-            credential: null,
-          };
+          (socket as GatewaySocket).session = new SocketGatewaySession(socket);
         },
-        data: (socket, data) => this.onData(socket as Socket<undefined> & { conn?: Conn }, data),
+        data: (socket, data) => this.onData(socket as GatewaySocket, data),
         close: (socket) => {
-          const conn = (socket as Socket<undefined> & { conn?: Conn }).conn;
-          if (conn) for (const unsub of conn.subs.values()) unsub();
+          (socket as GatewaySocket).session?.close();
         },
       },
     });
@@ -185,24 +214,9 @@ export class KeelDaemon {
     this.store.close();
   }
 
-  /** Resume a run waiting on a just-delivered decision/signal. */
-  private async wakeParked(runId: string): Promise<{ status: string }> {
-    const run = this.store.getRun(runId);
-    if (!run) throw new Error(`run ${runId} not found`);
-    if (run.status.startsWith("waiting-")) {
-      this.claimOrReject(runId);
-      try {
-        await this.api.resumeRun(runId);
-      } catch (err) {
-        if (isUnsupportedWorkflowSdkAbiError(err)) {
-          failRunWithError(this.store, runId, err, this.clock());
-        }
-        throw err;
-      }
-      const out = await this.api.waitForRun(runId);
-      return { status: out.status };
-    }
-    return { status: run.status };
+  private claimLaunchedRun(runId: string): void {
+    this.store.claimRun(runId, this.ownerId, this.clock(), this.clock());
+    this.owned.add(runId);
   }
 
   /** CAS-claim a run before driving it; throw if another live daemon owns it. */
@@ -230,418 +244,36 @@ export class KeelDaemon {
     }
   }
 
-  private onData(socket: Socket<undefined> & { conn?: Conn }, data: Buffer): void {
-    const conn = socket.conn;
-    if (!conn) return;
-    conn.buf += data.toString("utf8");
-    let nl = conn.buf.indexOf("\n");
+  private onData(socket: GatewaySocket, data: Buffer): void {
+    const session = socket.session;
+    if (!session) return;
+    session.buf += data.toString("utf8");
+    let nl = session.buf.indexOf("\n");
     while (nl >= 0) {
-      const line = conn.buf.slice(0, nl);
-      conn.buf = conn.buf.slice(nl + 1);
-      if (line.trim()) void this.dispatch(conn, line);
-      nl = conn.buf.indexOf("\n");
+      const line = session.buf.slice(0, nl);
+      session.buf = session.buf.slice(nl + 1);
+      if (line.trim()) void this.dispatch(session, line);
+      nl = session.buf.indexOf("\n");
     }
   }
 
-  private send(conn: Conn, obj: unknown): void {
-    conn.socket.write(`${JSON.stringify(obj)}\n`);
-  }
-
-  private async dispatch(conn: Conn, line: string): Promise<void> {
-    let req: { id: number; method: string; params?: unknown };
+  private async dispatch(session: SocketGatewaySession, line: string): Promise<void> {
+    let req: GatewayRequest;
     try {
-      req = JSON.parse(line);
+      const raw = JSON.parse(line) as {
+        id?: unknown;
+        method?: unknown;
+        params?: unknown;
+      };
+      req = {
+        id: raw.id,
+        method: typeof raw.method === "string" ? raw.method : String(raw.method),
+        params: raw.params,
+      };
     } catch {
       return;
     }
-    try {
-      const result = await this.handle(conn, req.method, req.params);
-      this.send(conn, { id: req.id, result });
-    } catch (err) {
-      this.send(conn, {
-        id: req.id,
-        error:
-          err instanceof AuthorizationError
-            ? {
-                code: err.code,
-                message: err.message,
-                action: err.request.action,
-                resource: err.request.resource,
-              }
-            : {
-                message: redactCapabilityTokensInValue(
-                  err instanceof Error ? err.message : String(err),
-                ),
-              },
-      });
-    }
-  }
-
-  private async handle(conn: Conn, method: string, params: unknown): Promise<unknown> {
-    const p = (params ?? {}) as Record<string, unknown>;
-    if (method === "authenticate") {
-      conn.credential = p.token as string;
-      return { ok: true };
-    }
-    switch (method) {
-      case "launchRun": {
-        const target = requireRunTarget(p.target, "launchRun");
-        const res = await this.api.launchRun({
-          source: p.source as WorkflowSourceInput,
-          input: p.input,
-          target,
-          name: (p.name as string | null | undefined) ?? null,
-          provenance: p.provenance as WorkflowProvenance | undefined,
-        });
-        this.store.claimRun(res.runId, this.ownerId, this.clock(), this.clock());
-        this.owned.add(res.runId);
-        const cap = issueRunCapability(this.store, res.runId, this.clock());
-        return { ...res, capability: cap.token, capabilityId: cap.capabilityId };
-      }
-      case "saveWorkflow": {
-        const name = p.name as string;
-        this.authorizeWorkflow(conn, name, p.version as number | undefined, "workflow:save");
-        return this.api.saveWorkflow(p as unknown as SaveWorkflowRequest);
-      }
-      case "previewWorkflowDefinition":
-        this.authorizeAdmin(conn);
-        return this.api.previewWorkflowDefinition({ source: p.source as WorkflowSourceInput });
-      case "listSavedWorkflows":
-        this.authorizeAdmin(conn);
-        return this.api.listSavedWorkflows({
-          ...(p.includeDisabled === true ? { includeDisabled: true } : {}),
-          ...(p.includeDeprecated === true ? { includeDeprecated: true } : {}),
-          ...(p.includeDeleted === true ? { includeDeleted: true } : {}),
-        });
-      case "getSavedWorkflow": {
-        this.authorizeWorkflow(conn, p.name as string, undefined, "workflow:read");
-        return this.api.getSavedWorkflow(p.name as string);
-      }
-      case "getSavedWorkflowSource": {
-        this.authorizeWorkflow(
-          conn,
-          p.name as string,
-          typeof p.version === "number" ? (p.version as number) : undefined,
-          "workflow:read",
-        );
-        return this.api.getSavedWorkflowSource(p as never);
-      }
-      case "getWorkflowDefinitionSource": {
-        const lookup = (p.lookup ?? {}) as Record<string, unknown>;
-        if (lookup.kind === "run") {
-          this.authorizeRun(conn, lookup.runId as string, "run:source");
-        } else if (lookup.kind === "definition") {
-          this.authorizeAdmin(conn);
-        } else {
-          throw new Error("workflow definition source lookup must be run or definition");
-        }
-        return this.api.getWorkflowDefinitionSource(p as never);
-      }
-      case "launchSavedWorkflow": {
-        const ref = (p.ref ?? {}) as SavedWorkflowRef;
-        this.authorizeWorkflow(
-          conn,
-          ref.name,
-          typeof ref.version === "number" ? ref.version : undefined,
-          "workflow:run",
-        );
-        const saved = this.store.resolveSavedWorkflowRef(ref);
-        this.authorizeWorkflow(conn, ref.name, saved.version, "workflow:run");
-        const target =
-          (p.target as string | undefined) ??
-          saved.defaultTarget ??
-          (p.clientDefaultTarget as string | undefined);
-        const res = await this.api.launchSavedWorkflow({
-          ref,
-          input: p.input,
-          target,
-          name: (p.name as string | null | undefined) ?? null,
-        });
-        this.store.claimRun(res.runId, this.ownerId, this.clock(), this.clock());
-        this.owned.add(res.runId);
-        const cap = issueRunCapability(this.store, res.runId, this.clock());
-        return { ...res, capability: cap.token, capabilityId: cap.capabilityId };
-      }
-      case "setSavedWorkflowDisabled":
-        this.authorizeWorkflow(conn, p.name as string, undefined, "workflow:save");
-        return this.api.setSavedWorkflowDisabled(p.name as string, p.disabled === true);
-      case "setSavedWorkflowVersionEnabled":
-        this.authorizeWorkflow(conn, p.name as string, p.version as number, "workflow:save");
-        return this.api.setSavedWorkflowVersionEnabled(
-          p.name as string,
-          p.version as number,
-          p.enabled === true,
-        );
-      case "deprecateSavedWorkflowVersion":
-        this.authorizeWorkflow(conn, p.name as string, p.version as number, "workflow:save");
-        return this.api.deprecateSavedWorkflowVersion(p as never);
-      case "deleteSavedWorkflow":
-        this.authorizeAdmin(conn);
-        return this.api.deleteSavedWorkflow(p.name as string);
-      case "deleteSavedWorkflowVersion":
-        this.authorizeAdmin(conn);
-        return this.api.deleteSavedWorkflowVersion(p.name as string, p.version as number);
-      case "resumeRun": {
-        this.authorizeRun(conn, p.runId as string, "run:resume");
-        this.claimOrReject(p.runId as string);
-        return this.api.resumeRun(p.runId as string);
-      }
-      case "interruptRun": {
-        this.authorizeRun(conn, p.runId as string, "run:interrupt");
-        this.claimOrReject(p.runId as string);
-        return this.api.interruptRun(p.runId as string, p.reason as string | undefined);
-      }
-      case "rerunRun": {
-        this.authorizeRun(conn, p.runId as string, "run:retry");
-        this.claimOrReject(p.runId as string);
-        return this.api.rerunRun(
-          p.runId as string,
-          p.opts as {
-            source?: WorkflowSourceInput;
-            input?: unknown;
-            name?: string | null;
-            provenance?: WorkflowProvenance;
-          },
-        );
-      }
-      case "getRun":
-        this.authorizeRun(conn, p.runId as string, "run:read");
-        return this.api.getRun(p.runId as string);
-      case "getRunReport":
-        this.authorizeRun(conn, p.runId as string, "run:read");
-        return this.api.getRunReport(p.runId as string);
-      case "getBlockage":
-        this.authorizeRun(conn, p.runId as string, "run:read");
-        return this.api.getBlockage(p.runId as string);
-      case "listRuns":
-        this.authorizeAdmin(conn);
-        return this.api.listRuns();
-      case "waitForRun":
-        this.authorizeRun(conn, p.runId as string, "run:watch");
-        return this.waitForRunAuthorized(conn.credential, p.runId as string);
-      case "getRunOutput":
-        this.authorizeRun(conn, p.runId as string, "run:output");
-        return this.api.getRunOutput(p.runId as string);
-      case "subscribeEvents": {
-        this.authorizeRun(conn, p.runId as string, "run:events");
-        const credential = conn.credential;
-        const subId = randomUUID();
-        let unsub = () => {};
-        let stopped = false;
-        let unsubAssigned = false;
-        const stop = () => {
-          if (stopped) return;
-          stopped = true;
-          clearInterval(recheck);
-          if (unsubAssigned) unsub();
-          conn.subs.delete(subId);
-        };
-        conn.subs.set(subId, stop);
-        const sendAuthFailure = (err: unknown) => {
-          this.send(conn, {
-            event: {
-              subId,
-              kind: "ephemeral",
-              type: "authorization.failed",
-              payload: {
-                message: redactCapabilityTokensInValue(
-                  err instanceof Error ? err.message : String(err),
-                ),
-              },
-              atMs: this.clock(),
-            },
-          });
-        };
-        const recheck = setInterval(() => {
-          try {
-            this.authorizeRunCredential(credential, p.runId as string, "run:events");
-          } catch (err) {
-            sendAuthFailure(err);
-            stop();
-          }
-        }, AUTH_RECHECK_MS);
-        const subscribed = this.api.subscribeEvents(
-          p.runId as string,
-          (p.afterSeq as number) ?? 0,
-          (event: EventEnvelope) => {
-            try {
-              if (stopped) return;
-              this.authorizeRunCredential(credential, p.runId as string, "run:events");
-              this.send(conn, { event: { subId, ...redactCapabilityTokensInValue(event) } });
-            } catch (err) {
-              sendAuthFailure(err);
-              stop();
-            }
-          },
-        );
-        unsub = subscribed;
-        unsubAssigned = true;
-        if (stopped) {
-          unsub();
-          conn.subs.delete(subId);
-        }
-        return { subId };
-      }
-      case "retryRun": {
-        this.authorizeRun(conn, p.runId as string, "run:retry");
-        this.claimOrReject(p.runId as string);
-        return this.api.retryRun(p.runId as string);
-      }
-      case "rewindRun": {
-        this.authorizeRun(conn, p.runId as string, "run:rewind");
-        this.claimOrReject(p.runId as string);
-        return this.api.rewindRun(p.runId as string, p.toStableKey as string);
-      }
-      case "forkRun": {
-        this.authorizeRun(conn, p.runId as string, "run:fork");
-        const fork = this.api.forkRun(p.runId as string, (p.opts as Record<string, unknown>) ?? {});
-        const cap = issueRunCapability(this.store, fork.runId, this.clock());
-        return { ...fork, capability: cap.token, capabilityId: cap.capabilityId };
-      }
-      case "decideApproval": {
-        this.authorizeAdmin(conn);
-        const runId = p.runId as string;
-        this.store.decideApproval(
-          runId,
-          p.key as string,
-          p.decision as { status: "approved" | "denied"; note?: string; grantedCaps?: unknown },
-          this.clock(),
-        );
-        return this.wakeParked(runId);
-      }
-      case "sendSignal": {
-        const runId = p.runId as string;
-        this.authorizeRun(conn, runId, "run:signal");
-        this.store.putSignal(runId, p.name as string, p.payload, this.clock());
-        return this.wakeParked(runId);
-      }
-      case "putSchedule": {
-        this.authorizeAdmin(conn);
-        const hasSource = p.source !== undefined;
-        const hasSavedRef = p.savedRef !== undefined;
-        if (hasSource === hasSavedRef) {
-          throw new Error("putSchedule requires exactly one of source or savedRef");
-        }
-        let workflowRef: string;
-        const scheduleName = (p.workflowName as string | null | undefined) ?? (p.name as string);
-        let defaultTarget: string | null = null;
-        if (hasSavedRef) {
-          if (p.workflowName !== undefined) {
-            throw new Error("putSchedule workflowName is only valid with source");
-          }
-          const saved = this.store.resolveSavedWorkflowRef(p.savedRef as SavedWorkflowRef);
-          materializeWorkflowDefinition(
-            this.store,
-            saved.definitionHash,
-            this.opts.definitionCacheRoot ?? join(dirname(this.opts.dbPath), "definitions"),
-          );
-          workflowRef = saved.definitionHash;
-          // v1 schedules persist only the pinned definition hash, not a separate saved label.
-          defaultTarget = saved.defaultTarget;
-        } else {
-          const snapshot = snapshotWorkflowSource(this.store, p.source as WorkflowSourceInput, {
-            name: scheduleName,
-            nowMs: this.clock(),
-            cacheRoot:
-              this.opts.definitionCacheRoot ?? join(dirname(this.opts.dbPath), "definitions"),
-          }).snapshot;
-          workflowRef = snapshot.hash;
-        }
-        const target = requireRunTarget(
-          (p.target as string | undefined) ??
-            defaultTarget ??
-            (p.clientDefaultTarget as string | undefined),
-          "putSchedule",
-        );
-        this.store.putSchedule({
-          name: p.name as string,
-          workflowRef,
-          inputJson: p.input != null ? JSON.stringify(p.input) : null,
-          scheduleTarget: target,
-          intervalMs: p.intervalMs as number,
-          nextFireMs: (p.firstFireMs as number) ?? this.clock(),
-        });
-        return { ok: true };
-      }
-      case "listRunWorkspaces":
-        this.authorizeRun(conn, p.runId as string, "run:read");
-        return this.api.listRunWorkspaces(p.runId as string, {
-          ...(p.includeRemoved === true ? { includeRemoved: true } : {}),
-        });
-      case "getRunWorkspace":
-        this.authorizeRun(conn, p.runId as string, "run:read");
-        return this.api.getRunWorkspace(p.runId as string, p.workspaceId as string);
-      case "getRunWorkspaceDiff":
-        this.authorizeRun(conn, p.runId as string, "run:read");
-        return this.api.getRunWorkspaceDiff(p.runId as string, p.workspaceId as string);
-      case "mergeRunWorkspace":
-        this.authorizeAdmin(conn);
-        return this.api.mergeRunWorkspace(p.runId as string, p.workspaceId as string);
-      case "discardRunWorkspace":
-        this.authorizeAdmin(conn);
-        return this.api.discardRunWorkspace(p.runId as string, p.workspaceId as string);
-      case "gcWorkspaces":
-        this.authorizeAdmin(conn);
-        return this.api.gcWorkspaces({
-          ...(typeof p.olderThanMs === "number" ? { olderThanMs: p.olderThanMs } : {}),
-          ...(p.includePending === true ? { includePending: true } : {}),
-          ...(p.includeRemoved === true ? { includeRemoved: true } : {}),
-        });
-      case "listAgentProfiles":
-        this.authorizeAdmin(conn);
-        return this.api.listAgentProfiles(p as { source?: "all" | "catalog" | "programmatic" });
-      case "getAgentProfile":
-        this.authorizeAdmin(conn);
-        return this.api.getAgentProfile(p.name as string);
-      case "putAgentProfile":
-        this.authorizeAdmin(conn);
-        return this.api.putAgentProfile(p as never);
-      case "deleteAgentProfile":
-        this.authorizeAdmin(conn);
-        return this.api.deleteAgentProfile(p as never);
-      case "checkAgentProfile":
-        this.authorizeAdmin(conn);
-        return this.api.checkAgentProfile(p as never);
-      case "listSettings":
-        this.authorizeAdmin(conn);
-        return this.api.listSettings();
-      case "getSetting":
-        this.authorizeAdmin(conn);
-        return this.api.getSetting(p.key as string);
-      case "putSetting":
-        this.authorizeAdmin(conn);
-        return this.api.putSetting(p as never);
-      case "deleteSetting":
-        this.authorizeAdmin(conn);
-        return this.api.deleteSetting(p as never);
-      case "checkSetting":
-        this.authorizeAdmin(conn);
-        return this.api.checkSetting(p as never);
-      case "gcDefinitions": {
-        this.authorizeAdmin(conn);
-        const operational = effectiveOperationalSettings(this.store.listDaemonSettingRows());
-        const ttlMs = typeof p.ttlMs === "number" ? p.ttlMs : operational.workflowDefinitionGcTtlMs;
-        const cacheMinAgeMs =
-          typeof p.cacheMinAgeMs === "number"
-            ? p.cacheMinAgeMs
-            : DEFAULT_DEFINITION_CACHE_MIN_AGE_MS;
-        const workflowDefinitionsRemoved = this.store.pruneWorkflowDefinitions({
-          nowMs: this.clock(),
-          ttlMs,
-        });
-        const definitionCacheEntriesRemoved = evictWorkflowDefinitionCache(this.store, {
-          cacheRoot:
-            this.opts.definitionCacheRoot ?? join(dirname(this.opts.dbPath), "definitions"),
-          nowMs: this.clock(),
-          minAgeMs: cacheMinAgeMs,
-        });
-        return { workflowDefinitionsRemoved, definitionCacheEntriesRemoved };
-      }
-      case "ping":
-        return { ok: true, ownerId: this.ownerId };
-      default:
-        throw new Error(`unknown method ${method}`);
-    }
+    session.sendResponse(await this.gateway.handle(session, req));
   }
 
   private assertNoDuplicateProfileSources(): void {
@@ -653,74 +285,5 @@ export class KeelDaemon {
         );
       }
     }
-  }
-
-  private authorizeRun(conn: Conn, runId: string, action: CapabilityAction): void {
-    this.authorizeRunCredential(conn.credential, runId, action);
-  }
-
-  private authorizeRunCredential(
-    credential: string | null,
-    runId: string,
-    action: CapabilityAction,
-  ): void {
-    authorize(this.store, credential, { action, resource: { kind: "run", runId } }, this.clock());
-  }
-
-  private authorizeAdmin(conn: Conn): void {
-    authorize(
-      this.store,
-      conn.credential,
-      { action: "admin", resource: { kind: "daemon" } },
-      this.clock(),
-    );
-  }
-
-  private authorizeWorkflow(
-    conn: Conn,
-    name: string,
-    version: number | undefined,
-    action: CapabilityAction,
-  ): void {
-    authorize(
-      this.store,
-      conn.credential,
-      {
-        action,
-        resource:
-          version === undefined ? { kind: "workflow", name } : { kind: "workflow", name, version },
-      },
-      this.clock(),
-    );
-  }
-
-  private waitForRunAuthorized(credential: string | null, runId: string): Promise<unknown> {
-    return new Promise((resolve, reject) => {
-      let settled = false;
-      const finish = (fn: () => void) => {
-        if (settled) return;
-        settled = true;
-        clearInterval(recheck);
-        fn();
-      };
-      const recheck = setInterval(() => {
-        try {
-          this.authorizeRunCredential(credential, runId, "run:watch");
-        } catch (err) {
-          finish(() => reject(err));
-        }
-      }, AUTH_RECHECK_MS);
-      this.api.waitForRun(runId).then(
-        (out) => {
-          try {
-            this.authorizeRunCredential(credential, runId, "run:watch");
-            finish(() => resolve(out));
-          } catch (err) {
-            finish(() => reject(err));
-          }
-        },
-        (err) => finish(() => reject(err)),
-      );
-    });
   }
 }

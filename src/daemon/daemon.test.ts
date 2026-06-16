@@ -65,6 +65,23 @@ function rawRpc(
   });
 }
 
+function rawFrame(socketPath: string, frame: unknown): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    const socket = createConnection(socketPath);
+    let buf = "";
+    socket.on("connect", () => socket.write(`${JSON.stringify(frame)}\n`));
+    socket.on("data", (chunk) => {
+      buf += chunk.toString("utf8");
+      const nl = buf.indexOf("\n");
+      if (nl < 0) return;
+      const line = buf.slice(0, nl);
+      socket.end();
+      resolve(JSON.parse(line) as Record<string, unknown>);
+    });
+    socket.on("error", reject);
+  });
+}
+
 function rawAdminRpc(
   socketPath: string,
   method: string,
@@ -192,6 +209,34 @@ function makeV11OldAbiDueTimerDb(path: string): void {
 }
 
 describe("daemon multi-client over the socket", () => {
+  test("raw socket responses preserve request ids and unknown-method precedence", async () => {
+    const socketPath = join(dir, "raw-wire.sock");
+    const daemon = new KeelDaemon({
+      socketPath,
+      dbPath: join(dir, "raw-wire.db"),
+      adminToken: ADMIN_TOKEN,
+    });
+    await daemon.start();
+    try {
+      const weirdId = { nested: ["id"] };
+      const unknown = await rawFrame(socketPath, {
+        id: weirdId,
+        method: "doesNotExist",
+        params: "not-an-object",
+      });
+      expect(unknown.id).toEqual(weirdId);
+      expect((unknown.error as { message?: string } | undefined)?.message).toBe(
+        "unknown method doesNotExist",
+      );
+
+      const missingId = await rawFrame(socketPath, { method: "ping", params: {} });
+      expect("id" in missingId).toBe(false);
+      expect(missingId.result).toMatchObject({ ok: true, ownerId: daemon.ownerId });
+    } finally {
+      daemon.stop();
+    }
+  });
+
   test("raw launchRun rejects missing or blank targets", async () => {
     const socketPath = join(dir, "target.sock");
     const daemon = new KeelDaemon({

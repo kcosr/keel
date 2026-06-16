@@ -361,7 +361,7 @@ function assertProviderSupportsProfile(
     codexSandboxForCapabilities(tools.capabilities);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`${path} provider "codex" ${message}`);
+    throw new Error(`${path} provider "codex": ${message}`);
   }
 }
 

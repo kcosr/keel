@@ -113,6 +113,9 @@ describe("resolveProfile", () => {
     const none = check({ provider: "codex", toolPolicy: "none" });
     expect(none.ok).toBe(false);
     expect(none.diagnostics[0]?.message).toMatch(/no-tools capability shapes/);
+    expect(none.diagnostics[0]?.message).toBe(
+      'profile provider "codex": codex provider does not support no-tools capability shapes; Codex app-server has no verified no-tools mapping',
+    );
 
     const toolEdit = check({ provider: "codex", toolPolicy: "read-only", allowTools: ["bash"] });
     expect(toolEdit.ok).toBe(false);

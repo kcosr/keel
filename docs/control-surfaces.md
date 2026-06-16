@@ -101,9 +101,9 @@ workflow source capture semantics. If SDK exposure is `required`, also evaluate
 
 | Operation | RPC | CLI | Execute | Web | TUI | MCP | SDK | Authority |
 |---|---|---|---|---|---|---|---|---|
-| run list/get/report/output/watch | implemented | implemented | implemented | deferred | implemented | deferred | not-applicable | `admin`, `run:read`, `run:watch`, `run:events`, `run:output` |
+| run list/get/report/output/watch | implemented | implemented | partial | deferred | implemented | deferred | not-applicable | `admin`, `run:read`, `run:watch`, `run:events`, `run:output` |
 | launch run | implemented | implemented | implemented | deferred | not-applicable | deferred | not-applicable | open on local socket; follow-up uses minted run capability |
-| resume/retry/rewind/fork | implemented | implemented | partial | deferred | partial | deferred | not-applicable | `run:resume`, `run:retry`, `run:rewind`, `run:fork` |
+| resume/retry/rewind/fork | implemented | implemented | implemented | deferred | partial | deferred | not-applicable | `run:resume`, `run:retry`, `run:rewind`, `run:fork` |
 | interrupt run | implemented | implemented | implemented | deferred | not-applicable | deferred | not-applicable | `run:interrupt` |
 | signal delivery | implemented | implemented | implemented | deferred | implemented | deferred | `ctx.signal` implemented | `run:signal` |
 | approval decision | implemented | implemented | implemented | deferred | implemented | deferred | `ctx.human` implemented | `admin` |
@@ -123,7 +123,7 @@ acknowledgement behavior.
 | Command | Starts work | Blocks until | Streams | Detach flag | Default output | Exit basis |
 |---|---|---|---|---|---|---|
 | `launch` | yes | terminal/parked/interrupted by default; start acknowledgement with `--detach` | yes when attached | yes | attached NDJSON; detached JSON | attached run outcome, or launch success/failure when detached |
-| `run` | yes | terminal/parked/interrupted | yes | no | JSON envelope | run outcome |
+| `run` | yes | terminal/parked/interrupted | yes with `--output text` | no | JSON envelope | run outcome |
 | `resume` | yes | terminal/parked/interrupted by default; start acknowledgement with `--detach` | yes when attached | yes | text watch when attached; `<runId>\t<status>` when detached | attached run outcome, or resume success/failure when detached |
 | `retry` | yes | terminal/parked/interrupted by default; start acknowledgement with `--detach` | yes when attached | yes | text watch when attached; `<runId>\t<status>` when detached | attached run outcome, or retry success/failure when detached |
 | `rewind` | yes | terminal/parked/interrupted by default; start acknowledgement with `--detach` | yes when attached | yes | text watch when attached; `<runId>\t<status>` when detached | attached run outcome, or rewind success/failure when detached |

@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### Added
+- Admin-gated schedule read API across daemon/RPC/client, CLI, and `keel execute`:
+  `listSchedules`/`getSchedule`, `keel schedule list`, and `keel schedule show`
+  now expose stable schedule projections, opt-in source inclusion, missing
+  definition state for disabled/old rows, last-run status, and persisted schedule
+  error parse failures.
 - Codex provider tool-policy mapping now supports default/read-only and
   workspace-write capability shapes with Codex app-server sandboxes while
   preserving explicit unrestricted `danger-full-access`; unsupported no-tools,

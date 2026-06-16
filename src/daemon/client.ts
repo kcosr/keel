@@ -27,6 +27,8 @@ import type {
   SavedWorkflowSummary,
   SavedWorkflowVersionView,
   SavedWorkflowView,
+  ScheduleSummary,
+  ScheduleView,
   SettingView,
   SettingsDiagnostic,
   WorkflowDefinitionSourceView,
@@ -263,6 +265,12 @@ export class DaemonClient {
         ? { target: clientRunTargetOrCwd(req.target, "putSchedule") }
         : { clientDefaultTarget: clientRunTargetOrCwd(undefined, "putSchedule") }),
     });
+  }
+  listSchedules(req: { includeDisabled?: boolean } = {}): Promise<ScheduleSummary[]> {
+    return this.rpc("listSchedules", req);
+  }
+  getSchedule(req: { name: string; includeSource?: boolean }): Promise<ScheduleView | null> {
+    return this.rpc("getSchedule", req);
   }
   listRunWorkspaces(
     runId: string,

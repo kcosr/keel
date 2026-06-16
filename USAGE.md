@@ -142,6 +142,8 @@ bun src/cli/keel.ts <command> [args]
 | `list [--output text\|json]` | List runs as an aligned table or JSON envelope. Requires admin. |
 | `workflow save/install/list/show/source/run/disable/enable/...` | Manage saved workflow names and immutable versions, install curated review workflows, and display retained workflow definition source. |
 | `schedule put <name> [workflow.ts\|--workflow saved-name] --interval-ms ms [--target dir]` | Create or replace a pinned workflow schedule. Requires admin. |
+| `schedule list [--enabled-only] [--output text\|json]` | List pinned workflow schedules. Requires admin. |
+| `schedule show <name> [--output text\|json] [--source]` | Show one schedule projection, optionally including retained source. Requires admin. |
 | `profiles list/get/set/delete/check ...` | Manage daemon-wide persistent agent profiles. Requires admin. |
 | `settings list/get/set/unset/check ...` | Manage typed daemon settings. Requires admin. |
 | `workspace list/show/diff/merge/discard/gc ...` | Inspect and manage retained isolated agent/session workspaces by `workspaceId`. |
@@ -629,6 +631,10 @@ return {
 `keel.mergeRunWorkspace`, `keel.discardRunWorkspace`, and `keel.gcWorkspaces`.
 Per-run capabilities may list/get/diff workspaces for that run; merge, discard,
 and GC restore the execute control credential/admin capability.
+
+`execute` can inspect schedules with `keel.listSchedules({ includeDisabled })`
+and `keel.getSchedule(name, { includeSource })`. These are daemon-wide schedule
+reads, so they restore the execute control credential/admin capability.
 
 `execute` is not durable orchestration. It can be re-invoked with non-secret
 state handles, but durable pauses belong in workflow code via `ctx.human`,
@@ -1164,6 +1170,23 @@ The daemon resolves the saved ref at creation time, stores the resolved
 definition hash, and does not track later `latest` versions. Creating or
 replacing schedules is admin-only for both source and saved-ref forms.
 
+Schedules are inspectable without reading the journal directly:
+
+```bash
+keel schedule list
+keel schedule list --enabled-only --output json
+keel schedule show hourly-review
+keel schedule show hourly-review --source --output json
+```
+
+The read projection includes the pinned workflow definition hash, definition
+availability, workflow name/kind when the definition is still present, target,
+interval, next fire time, last run id/status, input, and persisted disable error.
+Disabled schedules remain listed even if definition GC has removed their pinned
+workflow definition; those rows report `definitionState: "missing"` and source is
+`null` when requested. Invalid persisted schedule error JSON is surfaced as a
+`parse-error` state rather than hiding the schedule row.
+
 ### Saved Workflows
 
 Saved workflows are a naming layer over immutable workflow definitions. Saving a
@@ -1373,6 +1396,8 @@ interface KeelApi {
     | { name: string; source: WorkflowSourceInput; workflowName?: string | null; input?: unknown; target?: string; intervalMs: number; firstFireMs?: number }
     | { name: string; savedRef: { name: string; version?: number | "latest"; allowDeprecated?: boolean }; input?: unknown; target?: string; intervalMs: number; firstFireMs?: number }
   ): { ok: boolean };
+  listSchedules(opts?: { includeDisabled?: boolean }): ScheduleSummary[];
+  getSchedule(req: { name: string; includeSource?: boolean }): ScheduleView | null;
   resumeRun(runId: string): Promise<RunStart>;
   interruptRun(runId: string, reason?: string): Promise<{ runId: string; status: "interrupted" }>;
   rerunRun(

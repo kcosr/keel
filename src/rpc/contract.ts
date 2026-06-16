@@ -18,7 +18,14 @@ import type {
 } from "../journal/store.ts";
 import type { SettingClass, SettingView, SettingsDiagnostic } from "../settings/catalog.ts";
 import type { WorkflowSourceInput } from "../workflow-definitions/source.ts";
-import type { Blockage, RunProjection, RunReport, RunSummary } from "./projection.ts";
+import type {
+  Blockage,
+  RunProjection,
+  RunReport,
+  RunSummary,
+  ScheduleSummary,
+  ScheduleView,
+} from "./projection.ts";
 
 export type WorkflowProvenance = { kind: "stdin" } | { kind: "clientPath"; path: string };
 
@@ -119,7 +126,17 @@ export type PutScheduleRequest =
       workflowName?: never;
     });
 
+export interface ListSchedulesRequest {
+  includeDisabled?: boolean;
+}
+
+export interface GetScheduleRequest {
+  name: string;
+  includeSource?: boolean;
+}
+
 export type { SavedWorkflowSummary, SavedWorkflowVersionView, SavedWorkflowView };
+export type { ScheduleSummary, ScheduleView };
 
 export interface RunOutcome {
   runId: string;
@@ -321,6 +338,8 @@ export interface KeelApi {
     version: number,
   ): Promise<SavedWorkflowVersionView> | SavedWorkflowVersionView;
   putSchedule(req: PutScheduleRequest): Promise<{ ok: boolean }> | { ok: boolean };
+  listSchedules(req?: ListSchedulesRequest): Promise<ScheduleSummary[]> | ScheduleSummary[];
+  getSchedule(req: GetScheduleRequest): Promise<ScheduleView | null> | ScheduleView | null;
   /** Resume a non-terminal run in the background. */
   resumeRun(runId: string): Promise<RunStart>;
   /** Park a non-terminal run until an explicit resume. */

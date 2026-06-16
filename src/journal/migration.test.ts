@@ -7,6 +7,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RealmKernel } from "../kernel/realm/realm-host.ts";
+import { buildScheduleView } from "../rpc/projection.ts";
 import {
   WORKFLOW_SDK_ABI_VERSION,
   materializeWorkflowDefinition,
@@ -612,11 +613,37 @@ describe("schema migrations", () => {
       expect(ver?.value).toBe("20");
 
       const schedule = store.db
-        .query<{ enabled: number; workflow_ref: string }, []>(
-          "SELECT enabled, workflow_ref FROM schedules WHERE name = 'hourly'",
+        .query<
+          {
+            enabled: number;
+            workflow_ref: string;
+            schedule_target: string | null;
+            last_error_json: string | null;
+          },
+          []
+        >(
+          "SELECT enabled, workflow_ref, schedule_target, last_error_json FROM schedules WHERE name = 'hourly'",
         )
         .get();
-      expect(schedule).toEqual({ enabled: 0, workflow_ref: "/daemon/path.workflow.ts" });
+      expect(schedule).toEqual({
+        enabled: 0,
+        workflow_ref: "/daemon/path.workflow.ts",
+        schedule_target: null,
+        last_error_json: null,
+      });
+      expect(buildScheduleView(store, "hourly", { includeSource: true })).toMatchObject({
+        name: "hourly",
+        enabled: false,
+        workflowRef: "/daemon/path.workflow.ts",
+        definitionState: "missing",
+        workflowName: null,
+        workflowKind: null,
+        target: null,
+        lastError: { kind: "none" },
+        input: null,
+        inputJson: "null",
+        source: null,
+      });
       expect(store.getRun("r_path")?.workflowName).toBe("path-run");
       expect(store.getWorkflowDefinition("wf_sha256_old")?.name).toBe("path-run");
 

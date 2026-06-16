@@ -7,6 +7,8 @@ import type {
   RunStart,
   RunWorkspaceDiff,
   RunWorkspaceView,
+  ScheduleSummary,
+  ScheduleView,
   WorkspaceGcResult,
 } from "../rpc/contract.ts";
 import type { Blockage, RunProjection, RunReport } from "../rpc/projection.ts";
@@ -36,6 +38,8 @@ export interface ExecuteKeel {
   getRunWorkspaceDiff(runId: string, workspaceId: string): Promise<RunWorkspaceDiff>;
   mergeRunWorkspace(runId: string, workspaceId: string): Promise<RunWorkspaceView>;
   discardRunWorkspace(runId: string, workspaceId: string): Promise<RunWorkspaceView>;
+  listSchedules(opts?: { includeDisabled?: boolean }): Promise<ScheduleSummary[]>;
+  getSchedule(name: string, opts?: { includeSource?: boolean }): Promise<ScheduleView | null>;
   gcWorkspaces(opts?: {
     olderThanMs?: number;
     includePending?: boolean;
@@ -216,6 +220,14 @@ export function createExecuteKeel(opts: ExecuteRuntimeOptions): ExecuteKeel {
     async discardRunWorkspace(runId, workspaceId) {
       await authenticateControlCredential();
       return opts.client.discardRunWorkspace(runId, workspaceId);
+    },
+    async listSchedules(scheduleOpts = {}) {
+      await authenticateControlCredential();
+      return opts.client.listSchedules(scheduleOpts);
+    },
+    async getSchedule(name, scheduleOpts = {}) {
+      await authenticateControlCredential();
+      return opts.client.getSchedule({ name, ...scheduleOpts });
     },
     async gcWorkspaces(gcOpts = {}) {
       await authenticateControlCredential();

@@ -758,6 +758,7 @@ describe("capability auth", () => {
       // unauthenticated → rejected
       const anon = await DaemonClient.connect(socketPath);
       await expect(anon.listRuns()).rejects.toThrow(/no capability presented/);
+      await expect(anon.listSchedules()).rejects.toThrow(/no capability presented/);
       anon.close();
 
       const launcher = await DaemonClient.connect(socketPath);
@@ -805,6 +806,8 @@ describe("capability auth", () => {
         /different resource/,
       );
       await expect(scoped.listRuns()).rejects.toThrow(/admin/);
+      await expect(scoped.listSchedules()).rejects.toThrow(/admin/);
+      await expect(scoped.getSchedule({ name: "hourly" })).rejects.toThrow(/admin/);
       await expect(scoped.listSettings()).rejects.toThrow(/admin/);
       await expect(scoped.getSetting("agent.defaultTimeoutMs")).rejects.toThrow(/admin/);
       await expect(
@@ -846,6 +849,19 @@ describe("capability auth", () => {
 
       const admin = await DaemonClient.connect(socketPath);
       await admin.authenticate(ADMIN_TOKEN);
+      await admin.putSchedule({
+        name: "hourly",
+        source: chainUrl.source,
+        workflowName: "hourly",
+        input: { n: 1 },
+        intervalMs: 60_000,
+      });
+      expect((await admin.listSchedules()).map((schedule) => schedule.name)).toEqual(["hourly"]);
+      expect(await admin.getSchedule({ name: "hourly" })).toMatchObject({
+        name: "hourly",
+        definitionState: "available",
+        workflowName: "chain",
+      });
       expect((await admin.listRuns()).map((r) => r.runId).sort()).toEqual(
         [first.runId, second.runId].sort(),
       );

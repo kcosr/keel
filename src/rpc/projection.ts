@@ -5,8 +5,10 @@
 // it here prevents per-surface drift.
 
 import type { JournalStore } from "../journal/store.ts";
-import type { EffectType, JournalStatus, RunStatus } from "../journal/types.ts";
+import type { EffectType, JournalStatus, RunStatus, ScheduleRow } from "../journal/types.ts";
 import { RUN_FINISHED_INLINE_OUTPUT_BYTES } from "../kernel/output.ts";
+import { workflowDefinitionSourceSelection } from "../workflow-definitions/source-view.ts";
+import type { WorkflowDefinitionSourceView } from "./contract.ts";
 
 export interface NodeView {
   stableKey: string;
@@ -60,6 +62,33 @@ export interface RunReport {
   blockage?: Blockage;
   nodes: ReportNodeView[];
   stats: RunStats;
+}
+
+export type ScheduleErrorProjection =
+  | { kind: "none" }
+  | { kind: "error"; error: { name?: string; message: string } }
+  | { kind: "parse-error"; raw: string; message: string };
+
+export interface ScheduleSummary {
+  name: string;
+  enabled: boolean;
+  workflowRef: string;
+  definitionState: "available" | "missing";
+  workflowName: string | null;
+  workflowKind: string | null;
+  target: string | null;
+  intervalMs: number;
+  nextFireMs: number;
+  lastRunId: string | null;
+  lastRunStatus: RunStatus | null;
+  lastFailedAtMs: number | null;
+  lastError: ScheduleErrorProjection;
+}
+
+export interface ScheduleView extends ScheduleSummary {
+  input: unknown;
+  inputJson: string | null;
+  source?: WorkflowDefinitionSourceView | null;
 }
 
 /** Build the canonical projection for a run from the journal + events. */
@@ -118,6 +147,88 @@ export function buildProjection(store: JournalStore, runId: string): RunProjecti
     error: run.errorJson ? (JSON.parse(run.errorJson) as { name: string; message: string }) : null,
     stats,
   };
+}
+
+export function listScheduleSummaries(
+  store: JournalStore,
+  opts: { includeDisabled?: boolean } = {},
+): ScheduleSummary[] {
+  return store.listSchedules(opts).map((row) => buildScheduleSummary(store, row));
+}
+
+export function buildScheduleView(
+  store: JournalStore,
+  name: string,
+  opts: { includeSource?: boolean } = {},
+): ScheduleView | null {
+  const row = store.getSchedule(name);
+  if (!row) return null;
+  const summary = buildScheduleSummary(store, row);
+  const view: ScheduleView = {
+    ...summary,
+    input: row.inputJson === null ? null : JSON.parse(row.inputJson),
+    inputJson: row.inputJson,
+  };
+  if (opts.includeSource) {
+    const definition = store.getWorkflowDefinition(row.workflowRef);
+    view.source = definition ? workflowDefinitionSourceView(row.workflowRef, definition) : null;
+  }
+  return view;
+}
+
+function buildScheduleSummary(store: JournalStore, row: ScheduleRow): ScheduleSummary {
+  const definition = store.getWorkflowDefinition(row.workflowRef);
+  return {
+    name: row.name,
+    enabled: row.enabled,
+    workflowRef: row.workflowRef,
+    definitionState: definition ? "available" : "missing",
+    workflowName: definition?.name ?? null,
+    workflowKind: definition?.kind ?? null,
+    target: row.scheduleTarget,
+    intervalMs: row.intervalMs,
+    nextFireMs: row.nextFireMs,
+    lastRunId: row.lastRunId,
+    lastRunStatus: row.lastRunId ? (store.getRun(row.lastRunId)?.status ?? null) : null,
+    lastFailedAtMs: row.lastFailedAtMs,
+    lastError: scheduleErrorProjection(row.lastErrorJson),
+  };
+}
+
+function workflowDefinitionSourceView(
+  definitionHash: string,
+  definition: NonNullable<ReturnType<JournalStore["getWorkflowDefinition"]>>,
+): WorkflowDefinitionSourceView {
+  const { entry, files } = workflowDefinitionSourceSelection(definition, {});
+  return {
+    kind: "workflow-definition-source",
+    lookup: { kind: "definition", definitionHash },
+    definitionHash,
+    definitionName: definition.name,
+    createdAtMs: definition.createdAtMs,
+    entry,
+    files,
+  };
+}
+
+function scheduleErrorProjection(errorJson: string | null): ScheduleErrorProjection {
+  if (errorJson === null) return { kind: "none" };
+  try {
+    const parsed = JSON.parse(errorJson) as { name?: unknown; message?: unknown };
+    return {
+      kind: "error",
+      error: {
+        ...(typeof parsed.name === "string" ? { name: parsed.name } : {}),
+        message: typeof parsed.message === "string" ? parsed.message : String(parsed.message),
+      },
+    };
+  } catch (err) {
+    return {
+      kind: "parse-error",
+      raw: errorJson,
+      message: err instanceof Error ? err.message : String(err),
+    };
+  }
 }
 
 /** Build a post-run digest from journaled node results, not raw event transcripts. */

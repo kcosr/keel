@@ -43,6 +43,8 @@ import type {
   AgentProfileCheckResult,
   AgentProfileView,
   RunOutcome,
+  ScheduleSummary,
+  ScheduleView,
   SettingView,
   SettingsDiagnostic,
   WorkflowProvenance,
@@ -128,11 +130,7 @@ const COMMANDS: [string, string, string][] = [
     "[runId] [--status status] [--limit n] [--output text]",
     "open the interactive run browser",
   ],
-  [
-    "schedule",
-    "put <name> [workflow.ts|--workflow saved-name] --interval-ms ms [--target dir]",
-    "create or replace a cron schedule",
-  ],
+  ["schedule", "put|list|show ...", "create and inspect cron schedules"],
   ["profiles", "list|get|set|delete|check ...", "manage persistent agent profile catalog"],
   ["settings", "list|get|set|unset|check ...", "manage daemon settings catalog"],
   [
@@ -440,39 +438,76 @@ async function dispatch(argv: string[]): Promise<number> {
     }
     case "schedule": {
       const [sub, ...scheduleArgs] = rest;
-      if (sub !== "put") return usage("schedule needs put <name> [workflow.ts]");
-      const parsed = parseSchedulePutArgs(scheduleArgs);
-      if (!parsed.name) return usage("schedule needs put <name> [workflow.ts]");
-      const client = await openClient();
-      if (parsed.workflow) {
-        await client.putSchedule({
-          name: parsed.name,
-          savedRef: {
-            name: parsed.workflow,
-            version: parsed.version,
-            allowDeprecated: parsed.allowDeprecated,
-          },
-          input: parsed.input,
-          target: parsed.target,
-          intervalMs: parsed.intervalMs,
-          ...(parsed.firstFireMs !== undefined ? { firstFireMs: parsed.firstFireMs } : {}),
-        });
-      } else {
-        const captured = await readWorkflowSource(parsed.file);
-        await client.putSchedule({
-          name: parsed.name,
-          source: captured.source,
-          workflowName: parsed.workflowName ?? captured.defaultName,
-          input: parsed.input,
-          target: parsed.target,
-          intervalMs: parsed.intervalMs,
-          ...(parsed.firstFireMs !== undefined ? { firstFireMs: parsed.firstFireMs } : {}),
-        });
+      switch (sub) {
+        case "put": {
+          const parsed = parseSchedulePutArgs(scheduleArgs);
+          if (!parsed.name) return usage("schedule needs put <name> [workflow.ts]");
+          const client = await openClient();
+          if (parsed.workflow) {
+            await client.putSchedule({
+              name: parsed.name,
+              savedRef: {
+                name: parsed.workflow,
+                version: parsed.version,
+                allowDeprecated: parsed.allowDeprecated,
+              },
+              input: parsed.input,
+              target: parsed.target,
+              intervalMs: parsed.intervalMs,
+              ...(parsed.firstFireMs !== undefined ? { firstFireMs: parsed.firstFireMs } : {}),
+            });
+          } else {
+            const captured = await readWorkflowSource(parsed.file);
+            await client.putSchedule({
+              name: parsed.name,
+              source: captured.source,
+              workflowName: parsed.workflowName ?? captured.defaultName,
+              input: parsed.input,
+              target: parsed.target,
+              intervalMs: parsed.intervalMs,
+              ...(parsed.firstFireMs !== undefined ? { firstFireMs: parsed.firstFireMs } : {}),
+            });
+          }
+          process.stdout.write(
+            `${JSON.stringify({ ok: true, name: parsed.name, target: parsed.target })}\n`,
+          );
+          return 0;
+        }
+        case "list": {
+          const parsed = parseScheduleListArgs(scheduleArgs);
+          const client = await openClient();
+          const schedules = await client.listSchedules({
+            includeDisabled: !parsed.enabledOnly,
+          });
+          process.stdout.write(
+            parsed.output === "json"
+              ? `${JSON.stringify({ schedules })}\n`
+              : formatScheduleList(schedules, Date.now()),
+          );
+          return 0;
+        }
+        case "show": {
+          const parsed = parseScheduleShowArgs(scheduleArgs);
+          if (!parsed.name) return usage("schedule needs show <name>");
+          const client = await openClient();
+          const schedule = await client.getSchedule({
+            name: parsed.name,
+            ...(parsed.source ? { includeSource: true } : {}),
+          });
+          if (!schedule) {
+            process.stderr.write(`schedule ${parsed.name} not found\n`);
+            return 1;
+          }
+          process.stdout.write(
+            parsed.output === "json"
+              ? `${JSON.stringify(schedule, null, 2)}\n`
+              : formatScheduleShow(schedule),
+          );
+          return 0;
+        }
+        default:
+          return usage("schedule needs put|list|show");
       }
-      process.stdout.write(
-        `${JSON.stringify({ ok: true, name: parsed.name, target: parsed.target })}\n`,
-      );
-      return 0;
     }
     case "workspace": {
       return await workspaceCommand(rest);
@@ -735,6 +770,17 @@ export interface SchedulePutArgs {
   firstFireMs?: number;
 }
 
+export interface ScheduleListArgs {
+  enabledOnly: boolean;
+  output: ListOutputFormat;
+}
+
+export interface ScheduleShowArgs {
+  name?: string;
+  output: ListOutputFormat;
+  source: boolean;
+}
+
 export function parseLaunchArgs(args: string[]): LaunchArgs {
   const out: LaunchArgs = {
     detach: false,
@@ -801,6 +847,58 @@ export function parseSchedulePutArgs(args: string[]): SchedulePutArgs {
     throw new Error("schedule put accepts workflow.ts or --workflow, not both");
   if (out.intervalMs <= 0) throw new Error("schedule put requires --interval-ms ms");
   return out;
+}
+
+export function parseScheduleListArgs(args: string[]): ScheduleListArgs {
+  let output: ListOutputFormat = "text";
+  let enabledOnly = false;
+  const positional: string[] = [];
+  let i = 0;
+  while (i < args.length) {
+    const arg = args[i] as string;
+    if (arg === "--enabled-only") {
+      enabledOnly = true;
+      i += 1;
+    } else if (arg === "--output") {
+      output = parseListOutputFormat(requireFlagValue(args, i, "--output"));
+      i += 2;
+    } else if (arg.startsWith("--")) {
+      throw new Error(`unknown schedule list flag ${arg}`);
+    } else {
+      positional.push(arg);
+      i += 1;
+    }
+  }
+  if (positional.length > 0) {
+    throw new Error(`unexpected argument ${positional[0]} for schedule list`);
+  }
+  return { enabledOnly, output };
+}
+
+export function parseScheduleShowArgs(args: string[]): ScheduleShowArgs {
+  let output: ListOutputFormat = "text";
+  let source = false;
+  const positional: string[] = [];
+  let i = 0;
+  while (i < args.length) {
+    const arg = args[i] as string;
+    if (arg === "--source") {
+      source = true;
+      i += 1;
+    } else if (arg === "--output") {
+      output = parseListOutputFormat(requireFlagValue(args, i, "--output"));
+      i += 2;
+    } else if (arg.startsWith("--")) {
+      throw new Error(`unknown schedule show flag ${arg}`);
+    } else {
+      positional.push(arg);
+      i += 1;
+    }
+  }
+  if (positional.length > 1) {
+    throw new Error(`unexpected argument ${positional[1]} for schedule show`);
+  }
+  return { name: positional[0], output, source };
 }
 
 export function parseExecuteArgs(args: string[]): ExecuteArgs {
@@ -1084,6 +1182,64 @@ export function formatRunReportText(report: RunReport): string {
     }
   }
   return `${lines.join("\n")}\n`;
+}
+
+export function formatScheduleList(schedules: readonly ScheduleSummary[], nowMs: number): string {
+  return formatTable(
+    ["NAME", "STATUS", "NEXT FIRE", "INTERVAL", "LAST RUN", "TARGET"],
+    schedules.map((schedule) => [
+      tableCell(schedule.name, { maxWidth: 28 }),
+      schedule.enabled ? "enabled" : "disabled",
+      schedule.enabled ? formatNextFire(schedule.nextFireMs, nowMs) : "-",
+      formatDuration(0, schedule.intervalMs),
+      schedule.lastRunStatus ?? schedule.lastRunId ?? "-",
+      tableCell(schedule.target ?? "-", { maxWidth: 48 }),
+    ]),
+  );
+}
+
+export function formatScheduleShow(schedule: ScheduleView): string {
+  const lines = [
+    `name ${compact(schedule.name)}`,
+    `status ${schedule.enabled ? "enabled" : "disabled"}`,
+    `definition ${schedule.definitionState === "missing" ? "missing" : "available"}`,
+    `workflowRef ${compact(schedule.workflowRef)}`,
+    `workflowName ${compact(schedule.workflowName ?? "-")}`,
+    `workflowKind ${compact(schedule.workflowKind ?? "-")}`,
+    `target ${compact(schedule.target ?? "-")}`,
+    `interval ${formatDuration(0, schedule.intervalMs)}`,
+    `nextFire ${schedule.enabled ? formatUtcTimestamp(schedule.nextFireMs) : "-"}`,
+    `lastRun ${compact(schedule.lastRunId ?? "-")}`,
+    `lastRunStatus ${compact(schedule.lastRunStatus ?? "-")}`,
+    `lastFailedAt ${schedule.lastFailedAtMs == null ? "-" : formatUtcTimestamp(schedule.lastFailedAtMs)}`,
+    `input ${compact(schedule.input)}`,
+  ];
+  if (schedule.lastError.kind === "error") {
+    const name = schedule.lastError.error.name ? `${schedule.lastError.error.name}: ` : "";
+    lines.push(`lastError ${compact(`${name}${schedule.lastError.error.message}`)}`);
+  } else if (schedule.lastError.kind === "parse-error") {
+    lines.push(`lastError parse-error: ${compact(schedule.lastError.message)}`);
+    lines.push(`lastErrorRaw ${compact(schedule.lastError.raw)}`);
+  } else {
+    lines.push("lastError none");
+  }
+  if ("source" in schedule) {
+    if (schedule.source === null) {
+      lines.push("source definition missing");
+    } else if (schedule.source) {
+      lines.push(`sourceEntry ${compact(schedule.source.entry)}`);
+      for (const file of schedule.source.files) {
+        lines.push(`sourceFile ${compact(file.path)}${file.entry ? " entry" : ""}`);
+        lines.push(file.code.endsWith("\n") ? file.code.slice(0, -1) : file.code);
+      }
+    }
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+function formatNextFire(nextFireMs: number, nowMs: number): string {
+  if (nextFireMs <= nowMs) return "due";
+  return `in ${formatDuration(0, nextFireMs - nowMs)}`;
 }
 
 export function formatRunHeader(runId: string): string {

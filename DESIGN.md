@@ -815,9 +815,14 @@ provider implementation and tests, not in vendored reference artifacts.
 adapter can own a local stdio `codex app-server` subprocess or connect to a
 remote WebSocket / WebSocket-over-UDS app-server selected by
 `providerConfig.codex.transport`. Codex thread ids are the session tokens. The
-first-cut capability mapping is intentionally fail-closed: only explicit
-unrestricted tool access maps to Codex `danger-full-access`; narrower sandbox,
-network-off, and provider-native allow/deny shapes are future work.
+capability mapping is intentionally fail-closed and dispatches on exact resolved
+capability shape, not only the `toolPolicy` label: `{ fs:'read', shell:false,
+network:'none' }` maps to Codex `read-only`; `{ fs:'workspace-write',
+shell:false, network:'none' }` maps to Codex `workspace-write` with the resolved
+cwd as the writable root; `{ fs:'workspace-write', shell:true, network:['*'] }`
+maps to Codex `danger-full-access`. Codex app-server has no verified no-tools
+mapping, so `toolPolicy:'none'`, host network allowlists, shell-without-network,
+and provider-native allow/deny tool edits reject instead of widening access.
 
 ### 10.3 Structured output
 

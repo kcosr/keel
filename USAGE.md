@@ -862,15 +862,24 @@ cwd/workspace behavior with `ctx.workspace`, `ctx.withWorkspace`, and
 ### Codex Provider
 
 `provider: "codex"` drives the Codex app-server JSON-RPC protocol. Codex is not
-the default provider, and the first cut deliberately supports only unrestricted
-Codex/yolo operation. A default/read-only Codex call fails with guidance to set
-`toolPolicy: "unrestricted"`:
+the default provider. Keel maps Codex tool access by exact resolved capability
+shape:
+
+- default / `toolPolicy: "read-only"`: Codex `read-only` sandbox with
+  `networkAccess: false`;
+- `toolPolicy: "workspace-write"`: Codex `workspace-write` sandbox with the
+  resolved cwd as the writable root and `networkAccess: false`;
+- `toolPolicy: "unrestricted"`: Codex `danger-full-access`.
+
+`toolPolicy: "none"` is not supported for Codex because app-server has no
+verified no-tools mapping. `allowTools` and `denyTools` are also rejected for
+Codex until provider-native tool selection has equivalent semantics.
 
 ```ts
 await ctx.agent({
   key: "edit",
   provider: "codex",
-  toolPolicy: "unrestricted",
+  toolPolicy: "workspace-write",
   providerConfig: {
     codex: { transport: { type: "uds", path: "/tmp/codex.sock" } },
   },
@@ -896,8 +905,11 @@ absolute socket path and uses WebSocket over the Unix stream with request URL
 `ws://localhost/rpc`.
 
 Remote `ws`/`uds` app-servers are assumed to share the daemon filesystem
-namespace. Keel sends the resolved workspace cwd to Codex but first-cut
-unrestricted Codex is not sandboxed to that cwd and can access anything its host
+namespace. Keel always sends the resolved workspace cwd to Codex and requires it
+to be an existing absolute directory. Codex read-only and workspace-write use
+Codex's own filesystem/network sandbox; these modes may still execute sandboxed
+commands, so do not treat them as a no-shell guarantee. Unrestricted
+`danger-full-access` is not sandboxed to the cwd and can access anything its host
 runtime can access. Secret env injection is supported only for stdio; remote
 transports reject non-empty `secrets` rather than silently dropping them.
 
@@ -917,15 +929,15 @@ and close events; the log can contain prompts, outputs, cwd paths, and secret
 values.
 
 Common Codex errors include malformed `providerConfig.codex.transport...`,
-missing `toolPolicy: "unrestricted"`, unsupported narrower capabilities or
-allow/deny tool edits, remote transport plus secrets, missing/unusable cwd,
-JSON-RPC method errors, resumed cwd/token mismatch, unreconcilable active remote
-turns, and turn failure/interruption.
+unsupported `none` or lossy capability shapes, allow/deny tool edits, remote
+transport plus secrets, missing/unusable cwd, JSON-RPC method errors, resumed
+cwd/token mismatch, unreconcilable active remote turns, and turn
+failure/interruption.
 
 A live smoke should be gated with `KEEL_LIVE=1`: point `providerConfig.codex` at
 a real app-server (or use stdio), request a tiny structured JSON response with
-`toolPolicy: "unrestricted"`, assert a session token, and verify a completed run
-replays without a second provider invocation.
+an explicit Codex-supported tool policy, assert a session token, and verify a
+completed run replays without a second provider invocation.
 
 ### Structured Output
 
@@ -1037,7 +1049,8 @@ denyTools: ["LS"];
 ```
 
 Capability enforcement is mapped to provider-specific tool flags in one place,
-including Pi, Claude, and first-cut unrestricted-only Codex mappings.
+including Pi, Claude, and Codex sandbox mappings for supported capability
+shapes.
 
 Filesystem capability levels:
 

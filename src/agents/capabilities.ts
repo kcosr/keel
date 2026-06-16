@@ -150,11 +150,14 @@ export function resolvedToolPolicyToClaudeArgs(resolved: ResolvedToolPolicy): st
 export interface CodexCapabilityParams {
   thread: {
     approvalPolicy: "never";
-    sandbox: "danger-full-access";
+    sandbox: "read-only" | "workspace-write" | "danger-full-access";
   };
   turn: {
     approvalPolicy: "never";
-    sandboxPolicy: { type: "dangerFullAccess" };
+    sandboxPolicy:
+      | { type: "readOnly"; networkAccess: false }
+      | { type: "workspaceWrite"; writableRoots: string[]; networkAccess: false }
+      | { type: "dangerFullAccess" };
   };
 }
 
@@ -162,35 +165,79 @@ export function resolvedToolPolicyToCodexParams(
   resolved: ResolvedToolPolicy,
   cwd: string | undefined,
 ): CodexCapabilityParams {
-  rejectUnrestrictedAdjustments(resolved);
+  const existingCwd = requireCodexCwd(cwd);
+
   if (resolved.allowTools.length > 0 || resolved.denyTools.length > 0) {
-    throw new Error(
-      'codex first-cut provider does not support allowTools or denyTools; use toolPolicy: "unrestricted" with no provider-native tool edits',
-    );
-  }
-  const caps = resolved.capabilities;
-  const reasons: string[] = [];
-  if (caps.fs !== "workspace-write") reasons.push(`fs=${caps.fs}`);
-  if (!caps.shell) reasons.push("shell=false");
-  if (caps.network === "none") {
-    reasons.push("network=none");
-  } else if (caps.network.length !== 1 || caps.network[0] !== "*") {
-    reasons.push(`network=${JSON.stringify(caps.network)}`);
-  }
-  if (!cwd) reasons.push("cwd is missing");
-  else if (!isAbsolute(cwd)) reasons.push(`cwd is not absolute: ${cwd}`);
-  else if (!existingDirectory(cwd)) reasons.push(`cwd is not an existing directory: ${cwd}`);
-
-  if (reasons.length > 0) {
-    throw new Error(
-      `codex first-cut provider supports only explicit unrestricted tool access; use toolPolicy: "unrestricted" with an existing absolute workspace cwd (${reasons.join(", ")})`,
-    );
+    throw new Error("codex provider does not support allowTools or denyTools");
   }
 
-  return {
-    thread: { approvalPolicy: "never", sandbox: "danger-full-access" },
-    turn: { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } },
-  };
+  const sandbox = codexSandboxForCapabilities(resolved.capabilities);
+  switch (sandbox) {
+    case "read-only":
+      return {
+        thread: { approvalPolicy: "never", sandbox: "read-only" },
+        turn: {
+          approvalPolicy: "never",
+          sandboxPolicy: { type: "readOnly", networkAccess: false },
+        },
+      };
+    case "workspace-write":
+      return {
+        thread: { approvalPolicy: "never", sandbox: "workspace-write" },
+        turn: {
+          approvalPolicy: "never",
+          sandboxPolicy: {
+            type: "workspaceWrite",
+            writableRoots: [existingCwd],
+            networkAccess: false,
+          },
+        },
+      };
+    case "danger-full-access":
+      return {
+        thread: { approvalPolicy: "never", sandbox: "danger-full-access" },
+        turn: { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } },
+      };
+  }
+}
+
+export function codexSandboxForCapabilities(
+  caps: Capabilities,
+): "read-only" | "workspace-write" | "danger-full-access" {
+  if (caps.fs === "none") {
+    throw new Error(
+      "codex provider does not support no-tools capability shapes; Codex app-server has no verified no-tools mapping",
+    );
+  }
+  if (caps.fs === "read" && !caps.shell && caps.network === "none") return "read-only";
+  if (caps.fs === "workspace-write" && !caps.shell && caps.network === "none") {
+    return "workspace-write";
+  }
+  if (
+    caps.fs === "workspace-write" &&
+    caps.shell &&
+    caps.network !== "none" &&
+    caps.network.length === 1 &&
+    caps.network[0] === "*"
+  ) {
+    return "danger-full-access";
+  }
+  throw new Error(
+    `codex provider does not support capability shape ${formatCapabilityShape(caps)}; supported shapes are fs=read,shell=false,network=none; fs=workspace-write,shell=false,network=none; fs=workspace-write,shell=true,network=["*"]`,
+  );
+}
+
+function requireCodexCwd(cwd: string | undefined): string {
+  if (!cwd) throw new Error("codex cwd is missing");
+  if (!isAbsolute(cwd)) throw new Error(`codex cwd is not absolute: ${cwd}`);
+  if (!existingDirectory(cwd)) throw new Error(`codex cwd is not an existing directory: ${cwd}`);
+  return cwd;
+}
+
+function formatCapabilityShape(caps: Capabilities): string {
+  return `fs=${caps.fs}, shell=${String(caps.shell)}, network=${
+    caps.network === "none" ? "none" : JSON.stringify(caps.network)
+  }`;
 }
 
 function existingDirectory(path: string): boolean {

@@ -9,29 +9,55 @@ import {
 } from "./capabilities.ts";
 
 describe("Codex capability mapping", () => {
-  test("default read-only rejects with unrestricted guidance", () => {
-    const resolved = resolveInvocationToolPolicy({});
-    expect(() => resolvedToolPolicyToCodexParams(resolved, process.cwd())).toThrow(
-      /toolPolicy: "unrestricted"/,
+  test("default and explicit read-only map to Codex read-only params", () => {
+    const expected = {
+      thread: { approvalPolicy: "never", sandbox: "read-only" },
+      turn: {
+        approvalPolicy: "never",
+        sandboxPolicy: { type: "readOnly", networkAccess: false },
+      },
+    } as const;
+    expect(resolvedToolPolicyToCodexParams(resolveInvocationToolPolicy({}), process.cwd())).toEqual(
+      expected,
     );
+    expect(
+      resolvedToolPolicyToCodexParams(
+        resolveInvocationToolPolicy({ toolPolicy: "read-only" }),
+        process.cwd(),
+      ),
+    ).toEqual(expected);
   });
 
-  test("none and read-only policies reject", () => {
+  test("workspace-write maps to Codex workspace-write params with cwd writable root", () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-codex-cap-"));
+    try {
+      expect(
+        resolvedToolPolicyToCodexParams(
+          resolveInvocationToolPolicy({ toolPolicy: "workspace-write" }),
+          dir,
+        ),
+      ).toEqual({
+        thread: { approvalPolicy: "never", sandbox: "workspace-write" },
+        turn: {
+          approvalPolicy: "never",
+          sandboxPolicy: { type: "workspaceWrite", writableRoots: [dir], networkAccess: false },
+        },
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("none policy rejects with no-tools guidance", () => {
     expect(() =>
       resolvedToolPolicyToCodexParams(
         resolveInvocationToolPolicy({ toolPolicy: "none" }),
         process.cwd(),
       ),
-    ).toThrow(/toolPolicy: "unrestricted"/);
-    expect(() =>
-      resolvedToolPolicyToCodexParams(
-        resolveInvocationToolPolicy({ toolPolicy: "read-only" }),
-        process.cwd(),
-      ),
-    ).toThrow(/toolPolicy: "unrestricted"/);
+    ).toThrow(/no-tools capability shapes/);
   });
 
-  test("workspace-write without all-host network rejects", () => {
+  test("unsupported network and capability mixes reject with shape details", () => {
     expect(() =>
       resolvedToolPolicyToCodexParams(
         resolveInvocationToolPolicy({
@@ -39,7 +65,7 @@ describe("Codex capability mapping", () => {
         }),
         process.cwd(),
       ),
-    ).toThrow(/network=none/);
+    ).toThrow(/shell=true, network=none/);
     expect(() =>
       resolvedToolPolicyToCodexParams(
         resolveInvocationToolPolicy({
@@ -53,6 +79,14 @@ describe("Codex capability mapping", () => {
         process.cwd(),
       ),
     ).toThrow(/example\.com/);
+    expect(() =>
+      resolvedToolPolicyToCodexParams(
+        resolveInvocationToolPolicy({
+          capabilities: { fs: "read", shell: false, network: ["*"], secrets: [] },
+        }),
+        process.cwd(),
+      ),
+    ).toThrow(/fs=read, shell=false, network=\["\*"\]/);
   });
 
   test("allowTools and denyTools reject", () => {
@@ -83,6 +117,16 @@ describe("Codex capability mapping", () => {
           dir,
         ),
       ).toEqual(expected);
+      expect(
+        resolveInvocationToolPolicy({
+          capabilities: {
+            fs: "workspace-write",
+            shell: true,
+            network: ["*"],
+            secrets: [],
+          },
+        }).toolPolicy,
+      ).toBe("workspace-write");
       expect(
         resolvedToolPolicyToCodexParams(
           resolveInvocationToolPolicy({

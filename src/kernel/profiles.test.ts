@@ -3,7 +3,11 @@
 // hash; changing the profile config re-runs the step, renaming it does not.
 
 import { describe, expect, test } from "bun:test";
-import { resolveProfile } from "../agents/profiles.ts";
+import {
+  checkAgentProfileConfig,
+  normalizeAgentProfileConfig,
+  resolveProfile,
+} from "../agents/profiles.ts";
 import { resolveSelectedProviderConfig } from "../agents/provider-config.ts";
 import type { AgentInvocation, AgentProvider, AgentResult } from "../agents/types.ts";
 import { AgentProviderRegistry } from "../agents/types.ts";
@@ -85,6 +89,49 @@ describe("resolveProfile", () => {
       profileProviderConfig,
     });
     expect(unselectedDoesNotBlock).toEqual(profileProviderConfig.codex);
+  });
+
+  test("codex profile support is validated by capability shape", () => {
+    const registry = new AgentProviderRegistry().register({
+      name: "codex",
+      async generate(): Promise<AgentResult> {
+        return { text: "ok", transcript: [] };
+      },
+    });
+    const check = (config: Record<string, unknown>) =>
+      checkAgentProfileConfig(config, { providerRegistry: registry });
+
+    expect(check({ provider: "codex", toolPolicy: "read-only" }).ok).toBe(true);
+    expect(check({ provider: "codex", toolPolicy: "workspace-write" }).ok).toBe(true);
+    expect(
+      check({
+        provider: "codex",
+        capabilities: { fs: "workspace-write", shell: true, network: ["*"], secrets: [] },
+      }).ok,
+    ).toBe(true);
+
+    const none = check({ provider: "codex", toolPolicy: "none" });
+    expect(none.ok).toBe(false);
+    expect(none.diagnostics[0]?.message).toMatch(/no-tools capability shapes/);
+
+    const toolEdit = check({ provider: "codex", toolPolicy: "read-only", allowTools: ["bash"] });
+    expect(toolEdit.ok).toBe(false);
+    expect(toolEdit.diagnostics[0]?.message).toMatch(/allowTools or denyTools/);
+
+    const unsupported = check({
+      provider: "codex",
+      capabilities: { fs: "workspace-write", shell: true, network: "none", secrets: [] },
+    });
+    expect(unsupported.ok).toBe(false);
+    expect(unsupported.diagnostics[0]?.message).toMatch(/fs=workspace-write/);
+  });
+
+  test("profile normalization stores structurally valid codex configs without support checks", () => {
+    const normalized = normalizeAgentProfileConfig({
+      provider: "codex",
+      toolPolicy: "none",
+    });
+    expect(normalized).toEqual({ provider: "codex", toolPolicy: "none" });
   });
 });
 

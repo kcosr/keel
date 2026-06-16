@@ -6,7 +6,6 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CodexProvider } from "../../agents/codex.ts";
 import { SecretStore } from "../../agents/secrets.ts";
 import type {
   AgentHooks,
@@ -277,8 +276,17 @@ describe("trusted-local agent isolation controls", () => {
     ]);
   });
 
-  test("codex default read-only policy fails before falling back to daemon cwd", async () => {
+  test("codex default read-only uses the intended workspace cwd", async () => {
     const store = JournalStore.memory();
+    const target = mkdtempSync(join(tmpdir(), "keel-codex-target-"));
+    let invocation: AgentInvocation | undefined;
+    const provider: AgentProvider = {
+      name: "codex",
+      async generate(inv: AgentInvocation): Promise<AgentResult> {
+        invocation = inv;
+        return { text: "ok", transcript: [] };
+      },
+    };
     const workflow = {
       source: `
         import { type Ctx } from "@kcosr/keel";
@@ -286,16 +294,27 @@ describe("trusted-local agent isolation controls", () => {
           return await ctx.agent({ key: "edit", provider: "codex", prompt: "x" });
         }
       `,
-      name: "codex-default-rejects",
+      name: "codex-default-read-only-cwd",
     };
-    const kernel = new RealmKernel(store, {
-      idgen: () => "r",
-      agents: new AgentProviderRegistry().register(new CodexProvider({ bin: "missing-codex" })),
-    });
-    await expect(kernel.run<string>(workflow, null, { target: process.cwd() })).rejects.toThrow(
-      /toolPolicy: "unrestricted"/,
-    );
-    expect(store.getRun("r")?.status).toBe("failed");
+    try {
+      const kernel = new RealmKernel(store, {
+        idgen: () => "r",
+        agents: new AgentProviderRegistry().register(provider),
+      });
+      const handle = await kernel.run<string>(workflow, null, { target });
+      expect(handle.status).toBe("finished");
+      expect(handle.output).toBe("ok");
+      expect(invocation?.cwd).toBe(target);
+      expect(invocation?.toolPolicy).toBe("read-only");
+      expect(invocation?.capabilities).toMatchObject({
+        fs: "read",
+        shell: false,
+        network: "none",
+      });
+      expect(process.cwd()).not.toBe(target);
+    } finally {
+      rmSync(target, { recursive: true, force: true });
+    }
   });
 
   test("secrets with provider-native tool additions run without workspace isolation and receive env", async () => {

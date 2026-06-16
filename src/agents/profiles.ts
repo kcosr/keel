@@ -1,6 +1,7 @@
 import { type Json, canonicalJson, sha256Hex } from "../hash.ts";
 import {
   type ToolPolicy,
+  codexSandboxForCapabilities,
   resolveToolPolicy,
   validateCapabilitiesDeclaration,
 } from "./capabilities.ts";
@@ -353,14 +354,14 @@ function assertProviderSupportsProfile(
     ...(config.allowTools ? { allowTools: config.allowTools } : {}),
     ...(config.denyTools ? { denyTools: config.denyTools } : {}),
   });
-  if (
-    tools.toolPolicy !== "unrestricted" ||
-    tools.allowTools.length > 0 ||
-    tools.denyTools.length > 0
-  ) {
-    throw new Error(
-      `${path} provider "codex" supports only explicit toolPolicy "unrestricted" with no allowTools or denyTools`,
-    );
+  if (tools.allowTools.length > 0 || tools.denyTools.length > 0) {
+    throw new Error(`${path} provider "codex" does not support allowTools or denyTools`);
+  }
+  try {
+    codexSandboxForCapabilities(tools.capabilities);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`${path} provider "codex" ${message}`);
   }
 }
 

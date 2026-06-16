@@ -287,6 +287,41 @@ describe("Codex JSON-RPC flow", () => {
     expect(events).toContainEqual({ type: "text", data: "hello" });
   });
 
+  test("read-only policy sends Codex read-only thread and turn sandbox params", async () => {
+    const transport = new ScriptedTransport(basicScript);
+
+    await runWithTransport(transport, { toolPolicy: "read-only" });
+
+    expect(transport.sent[2]?.params).toMatchObject({
+      cwd: process.cwd(),
+      approvalPolicy: "never",
+      sandbox: "read-only",
+    });
+    expect(transport.sent[3]?.params).toMatchObject({
+      threadId: "thread-1",
+      approvalPolicy: "never",
+      sandboxPolicy: { type: "readOnly", networkAccess: false },
+    });
+  });
+
+  test("workspace-write policy sends writable root in Codex turn sandbox params", async () => {
+    const cwd = tempDir("keel-codex-workspace-write-");
+    const transport = new ScriptedTransport(basicScript);
+
+    await runWithTransport(transport, { toolPolicy: "workspace-write", cwd });
+
+    expect(transport.sent[2]?.params).toMatchObject({
+      cwd,
+      approvalPolicy: "never",
+      sandbox: "workspace-write",
+    });
+    expect(transport.sent[3]?.params).toMatchObject({
+      threadId: "thread-1",
+      approvalPolicy: "never",
+      sandboxPolicy: { type: "workspaceWrite", writableRoots: [cwd], networkAccess: false },
+    });
+  });
+
   test("item/completed is authoritative and multiple items get paragraph boundaries", async () => {
     const transport = new ScriptedTransport((message, t) => {
       switch (message.method) {
@@ -410,7 +445,10 @@ describe("Codex JSON-RPC flow", () => {
       }
     });
 
-    const { result } = await runWithTransport(transport, { resumeToken: "thread-1" });
+    const { result } = await runWithTransport(transport, {
+      resumeToken: "thread-1",
+      toolPolicy: "read-only",
+    });
     expect(transport.sent.map((m) => m.method)).toEqual([
       "initialize",
       "initialized",
@@ -418,6 +456,12 @@ describe("Codex JSON-RPC flow", () => {
       "thread/resume",
       "turn/start",
     ]);
+    expect(transport.sent[3]?.params).toMatchObject({
+      threadId: "thread-1",
+      cwd: process.cwd(),
+      approvalPolicy: "never",
+      sandbox: "read-only",
+    });
     expect(result.sessionToken).toBe("thread-1");
     expect(result.text).toBe("again");
   });

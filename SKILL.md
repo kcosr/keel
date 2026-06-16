@@ -111,13 +111,14 @@ shell commands, use explicit capabilities:
 capabilities: { fs: "none", network: "none", shell: true, secrets: [] }
 ```
 
-Codex is available as `provider: "codex"` only in first-cut unrestricted mode:
-set `toolPolicy: "unrestricted"` and, when not using the stdio default, supply
-`providerConfig.codex.transport` (`stdio`, `ws`, or `uds`). Do not describe
-Codex workspaces as a sandbox: Keel sets the cwd and captures worktree diffs, but
-unrestricted Codex can access outside that cwd according to the host runtime.
-Keep raw secrets out of workflow source and `providerConfig`; remote Codex
-transports reject secret env injection in this first cut.
+Codex is available as `provider: "codex"` with default/read-only,
+workspace-write, or unrestricted tool policies in an explicit workspace cwd.
+When not using the stdio default, supply `providerConfig.codex.transport`
+(`stdio`, `ws`, or `uds`). Codex read-only/workspace-write use Codex's sandbox
+with network disabled, but may still run sandboxed commands; unrestricted Codex
+can access outside the cwd according to the host runtime. Keep raw secrets out
+of workflow source and `providerConfig`; remote Codex transports reject secret
+env injection.
 
 ## 4.1 Multi-Turn Agent Sessions (`ctx.agentSession`)
 

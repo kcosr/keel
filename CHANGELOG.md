@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### Added
+- Codex provider tool-policy mapping now supports default/read-only and
+  workspace-write capability shapes with Codex app-server sandboxes while
+  preserving explicit unrestricted `danger-full-access`; unsupported no-tools,
+  lossy network, and allow/deny tool shapes still fail closed.
 - Saved workflow registry schema v20 and RPC/CLI commands (`keel workflow ...`)
   for saving captured workflow bundles as `name@version`, listing/showing
   metadata, printing exact stored source, launching pinned saved versions, and
@@ -18,7 +22,7 @@
 - Journal schema v17 stores daemon setting overrides plus immutable run setting snapshot sets; migrating older journals backfills explicit workflow-visible default settings for every run and warning events for non-terminal pre-v17 runs.
 - Persistent daemon-owned agent profile catalog with admin RPC/CLI management (`keel profiles ...`), validation/check diagnostics, programmatic-profile coexistence, and frozen per-run profile snapshots for deterministic replay.
 - Journal schema v16 stores catalog profiles plus immutable run profile snapshot sets; migrating older journals backfills explicit empty snapshots and warning events for non-terminal pre-v16 runs.
-- First-cut `codex` app-server agent provider with stdio, WebSocket, and WebSocket-over-Unix-socket transports via `providerConfig.codex.transport`. Codex requires explicit unrestricted tools (`toolPolicy: "unrestricted"`), uses Keel's resolved workspace cwd, captures app-server thread ids as session tokens, and supports opt-in raw protocol logging with `KEEL_CODEX_RAW_LOG`.
+- First-cut `codex` app-server agent provider with stdio, WebSocket, and WebSocket-over-Unix-socket transports via `providerConfig.codex.transport`. Codex uses Keel's resolved workspace cwd, captures app-server thread ids as session tokens, and supports opt-in raw protocol logging with `KEEL_CODEX_RAW_LOG`.
 - Provider-keyed `providerConfig` for `ctx.agent`, `ctx.agentSession`, and agent profiles. Keel validates the full map as strict JSON, includes only the selected provider's config in replay identity, and passes only that immutable selected config to provider adapters.
 - Workflow-scoped `ctx.workspace`/`ctx.withWorkspace` with direct and git-worktree modes, `WorkspaceHandle` sharing across agents/sessions, and a lazy `__default` direct workspace at `ctx.run.target`.
 - Managed workspace `copy` and `clone` modes. `copy` snapshots dirty local directories without `.git` metadata and supports baseline diff/merge back to unchanged sources; `clone` creates explicit local or remote git clones, supports local non-bare clone merge, and reports remote/local-bare clone merge as unsupported. Workspace RPC/CLI views now expose source kind, source URI/ref/branch/base commit, copy baseline path, merge/diff support, and mode-aware diff metadata.

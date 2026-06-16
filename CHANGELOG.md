@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 ### Added
+- Tracked documentation ownership guide in `docs/documentation.md`, plus README
+  and agent-rule routing for future documentation updates.
 - Admin-gated schedule read API across daemon/RPC/client, CLI, and `keel execute`:
   `listSchedules`/`getSchedule`, `keel schedule list`, and `keel schedule show`
   now expose stable schedule projections, opt-in source inclusion, missing

@@ -29,7 +29,7 @@ Saved workflow packaging:
 ```bash
 keel workflow install task-review-guidance
 
-# Lower-level equivalent when installing manually:
+# Minimal manual saves when you do not want package metadata/input schemas:
 keel workflow save task-code-review workflows/task-review-guidance/code-review.workflow.ts --version 1
 keel workflow save task-plan-review workflows/task-review-guidance/plan-review.workflow.ts --version 1
 keel workflow save task-docs-review workflows/task-review-guidance/docs-review.workflow.ts --version 1

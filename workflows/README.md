@@ -7,9 +7,9 @@ documented follow-up behavior.
 
 Workflow files are normal Keel workflows and may import local deterministic
 helper modules through relative paths. The only external import is
-`@kcosr/keel`, and launch-time source, helper source, and external package
-integrity are snapshotted. If you edit a workflow, a helper, or the local SDK
-package after launch, start a fresh run unless you are intentionally doing
+`@kcosr/keel`; launch-time entry source, helper source, SDK ABI metadata, and
+import metadata are snapshotted. If you edit a workflow, a helper, or the local
+SDK package after launch, start a fresh run unless you are intentionally doing
 development-only database surgery.
 
 | Workflow | Use When |
@@ -25,6 +25,12 @@ development-only database surgery.
 
 All workflows are bounded by launch input such as `maxRounds` or `maxReviews`.
 Keep those limits small for write-capable workflows.
+
+Reusable workflows that use `ctx.agentSession` preserve backend session
+continuity across turns and resume/retry paths. They do not support rerun,
+rewind, or fork of runs that used durable agent sessions; changing participant
+identity or turn prompts fails closed. See `USAGE.md` Agent Sessions for the full
+operator caveats.
 
 Install the curated task-review-guidance package with:
 

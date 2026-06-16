@@ -415,6 +415,7 @@ writes ≈ 1 s — negligible against 106 minutes).
                           ┌────────── Keel daemon ──────────┐
                           │ scheduler · timers · supervisor │
                           │ realm host (Bun Workers)        │
+                          │ operation gateway · auth        │
                           │ canonical projection · events   │
                           │ capability resolver · diff gate │
                           └───┬─────────────┬────────────┬──┘
@@ -422,6 +423,16 @@ writes ≈ 1 s — negligible against 106 minutes).
                         journal store  artifact store  workspaces
                        (SQLite-WAL/PG) (content-addr)  (git worktrees)
 ```
+
+Transport adapters are intentionally thin. The local Unix socket owns socket
+binding, JSON-line framing, connection-scoped `authenticate`, and connection
+cleanup; HTTP/SSE, WebSocket, and MCP adapters should own only their transport
+framing. All daemon operations that read or mutate durable state route through
+`KeelOperationGateway`, which centralizes method dispatch, capability
+authorization, run ownership claims, launch/fork capability issuance,
+approval/signal wakeups, event redaction, long-lived authorization rechecks, and
+subscription cleanup. This keeps future transports from becoming independent
+authorization boundaries.
 
 **The daemon — never the CLI — spawns agent subprocesses.** The CLI sends one
 RPC and exits; the daemon hosts the realm, spawns the agent, holds its handle,

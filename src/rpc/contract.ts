@@ -50,6 +50,14 @@ export interface SaveWorkflowRequest {
   allowDuplicateDefinition?: boolean;
 }
 
+export interface PreviewWorkflowDefinitionRequest {
+  source: WorkflowSourceInput;
+}
+
+export interface PreviewWorkflowDefinitionResult {
+  definitionHash: string;
+}
+
 export interface SavedWorkflowRef {
   name: string;
   version?: number | "latest";
@@ -273,6 +281,9 @@ export interface KeelApi {
   saveWorkflow(
     req: SaveWorkflowRequest,
   ): Promise<SavedWorkflowVersionView> | SavedWorkflowVersionView;
+  previewWorkflowDefinition(
+    req: PreviewWorkflowDefinitionRequest,
+  ): Promise<PreviewWorkflowDefinitionResult> | PreviewWorkflowDefinitionResult;
   listSavedWorkflows(opts?: {
     includeDisabled?: boolean;
     includeDeprecated?: boolean;

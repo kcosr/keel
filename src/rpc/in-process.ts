@@ -51,6 +51,7 @@ import type {
   KeelApi,
   LaunchRequest,
   LaunchSavedWorkflowRequest,
+  PreviewWorkflowDefinitionRequest,
   PutScheduleRequest,
   RunOutcome,
   RunStart,
@@ -152,6 +153,23 @@ export class InProcessKeel implements KeelApi {
       createdAtMs: at,
       allowDuplicateDefinition: req.allowDuplicateDefinition ?? false,
     });
+  }
+
+  previewWorkflowDefinition(req: PreviewWorkflowDefinitionRequest) {
+    const at = this.opts.clock?.() ?? Date.now();
+    const snapshot = createWorkflowDefinitionSnapshot(req.source, {
+      nowMs: at,
+    });
+    this.store.putWorkflowDefinition({
+      hash: snapshot.hash,
+      name: snapshot.name,
+      kind: snapshot.kind,
+      code: snapshot.code,
+      sourceMap: null,
+      manifestJson: canonicalJson(snapshot.manifest),
+      createdAtMs: at,
+    });
+    return { definitionHash: snapshot.hash };
   }
 
   listSavedWorkflows(opts: Parameters<KeelApi["listSavedWorkflows"]>[0] = {}) {

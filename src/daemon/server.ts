@@ -303,6 +303,9 @@ export class KeelDaemon {
         this.authorizeWorkflow(conn, name, p.version as number | undefined, "workflow:save");
         return this.api.saveWorkflow(p as unknown as SaveWorkflowRequest);
       }
+      case "previewWorkflowDefinition":
+        this.authorizeAdmin(conn);
+        return this.api.previewWorkflowDefinition({ source: p.source as WorkflowSourceInput });
       case "listSavedWorkflows":
         this.authorizeAdmin(conn);
         return this.api.listSavedWorkflows({

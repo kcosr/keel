@@ -5,8 +5,9 @@ export const FINDING_JSON_SCHEMA_DESCRIPTION =
 
 const SEVERITIES: ReviewSeverity[] = ["critical", "high", "medium", "low"];
 
-export function renderFindingContract(kind: "code" | "plan"): string {
-  const subject = kind === "code" ? "code review" : "plan review";
+export function renderFindingContract(kind: "code" | "plan" | "docs"): string {
+  const subject =
+    kind === "code" ? "code review" : kind === "plan" ? "plan review" : "docs review";
   return [
     "Reviewer Output Contract",
     `Return one JSON object for this ${subject}.`,

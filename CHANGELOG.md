@@ -44,6 +44,10 @@
   checklist/rubric/prompt helpers, one-shot `task-code-review` and
   `task-plan-review` saved workflow packaging examples, strict in-workflow
   review-output validation, and captured helper source display coverage.
+- `keel workflow install task-review-guidance` installs the curated code, plan,
+  and docs review workflows as immutable saved workflow versions with per-entry
+  `created`/`unchanged`/`conflict`/`failed` reporting. The package now includes
+  a read-only docs review workflow and richer Keel-native review rubrics.
 - `ctx.agentSession({ key, ... }).turn({ key, prompt, ... })` for realm
   workflows that need one logical Pi/Codex or Claude backend conversation across
   multiple durable turns in the same run. Session runs fail closed for

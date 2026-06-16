@@ -168,6 +168,13 @@ describe("workflow definition snapshots", () => {
   });
 
   test("task review guidance workflows capture all helper modules", () => {
+    const expectedHelpers = [
+      "guidance/checklist.ts",
+      "guidance/finding.ts",
+      "guidance/prompt.ts",
+      "guidance/rubric.ts",
+      "guidance/types.ts",
+    ];
     const workflow = resolve(
       import.meta.dir,
       "..",
@@ -180,11 +187,7 @@ describe("workflow definition snapshots", () => {
     expect(captured.entry).toBe("code-review.workflow.ts");
     expect(captured.modules.map((module) => module.path)).toEqual([
       "code-review.workflow.ts",
-      "guidance/checklist.ts",
-      "guidance/finding.ts",
-      "guidance/prompt.ts",
-      "guidance/rubric.ts",
-      "guidance/types.ts",
+      ...expectedHelpers,
     ]);
 
     const planWorkflow = resolve(
@@ -207,14 +210,26 @@ describe("workflow definition snapshots", () => {
         workflowDefinitionSourceSelection(row as NonNullable<typeof row>, { all: true }).files.map(
           (file) => file.path,
         ),
-      ).toEqual([
-        "plan-review.workflow.ts",
-        "guidance/checklist.ts",
-        "guidance/finding.ts",
-        "guidance/prompt.ts",
-        "guidance/rubric.ts",
-        "guidance/types.ts",
+      ).toEqual(["plan-review.workflow.ts", ...expectedHelpers]);
+
+      const docsWorkflow = resolve(
+        import.meta.dir,
+        "..",
+        "..",
+        "workflows",
+        "task-review-guidance",
+        "docs-review.workflow.ts",
+      );
+      const docsCaptured = captureWorkflowBundleFromFile(docsWorkflow);
+      expect(docsCaptured.entry).toBe("docs-review.workflow.ts");
+      expect(docsCaptured.modules.map((module) => module.path)).toEqual([
+        "docs-review.workflow.ts",
+        ...expectedHelpers,
       ]);
+      expect(docsCaptured.modules.map((module) => module.path)).not.toContain("package.ts");
+      expect(docsCaptured.modules.map((module) => module.path)).not.toContain(
+        "guidance/input-schema.ts",
+      );
     } finally {
       store.close();
     }

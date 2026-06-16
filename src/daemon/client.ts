@@ -12,6 +12,8 @@ import type {
   GetWorkflowDefinitionSourceRequest,
   LaunchRequest,
   LaunchSavedWorkflowRequest,
+  PreviewWorkflowDefinitionRequest,
+  PreviewWorkflowDefinitionResult,
   PutAgentProfileRequest,
   PutSettingRequest,
   RunLaunchResult,
@@ -136,6 +138,11 @@ export class DaemonClient {
   }
   saveWorkflow(req: SaveWorkflowRequest): Promise<SavedWorkflowVersionView> {
     return this.rpc("saveWorkflow", req);
+  }
+  previewWorkflowDefinition(
+    req: PreviewWorkflowDefinitionRequest,
+  ): Promise<PreviewWorkflowDefinitionResult> {
+    return this.rpc("previewWorkflowDefinition", req);
   }
   listSavedWorkflows(
     req: {

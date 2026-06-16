@@ -79,6 +79,31 @@ async function runCli(
   }
 }
 
+function createSourceBearingPackageRoot(dir: string, opts: { mutateDocs?: boolean } = {}): string {
+  mkdirSync(join(dir, "src"), { recursive: true });
+  mkdirSync(join(dir, "workflows", "task-review-guidance", "guidance"), { recursive: true });
+  writeFileSync(join(dir, "package.json"), '{"name":"@kcosr/keel"}\n');
+  writeFileSync(join(dir, "src", "sdk.ts"), "export {};\n");
+  for (const file of ["code-review.workflow.ts", "plan-review.workflow.ts"]) {
+    writeFileSync(
+      join(dir, "workflows", "task-review-guidance", file),
+      readFileSync(new URL(file, TASK_REVIEW), "utf8"),
+    );
+  }
+  const docs = readFileSync(new URL("docs-review.workflow.ts", TASK_REVIEW), "utf8");
+  writeFileSync(
+    join(dir, "workflows", "task-review-guidance", "docs-review.workflow.ts"),
+    opts.mutateDocs ? `${docs}\n// test source change\n` : docs,
+  );
+  for (const file of ["checklist.ts", "finding.ts", "prompt.ts", "rubric.ts", "types.ts"]) {
+    writeFileSync(
+      join(dir, "workflows", "task-review-guidance", "guidance", file),
+      readFileSync(new URL(`guidance/${file}`, TASK_REVIEW), "utf8"),
+    );
+  }
+  return dir;
+}
+
 describe("keel CLI", () => {
   test("help is a daemon-free install smoke", async () => {
     const dir = mkdtempSync(join(tmpdir(), "keel-cli-help-"));
@@ -1597,6 +1622,137 @@ describe("keel CLI", () => {
     DAEMON_TEST_TIMEOUT_MS,
   );
 
+  test(
+    "workflow install task-review-guidance classifies created, unchanged, and conflicts",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "keel-cli-workflow-install-"));
+      const socketPath = join(dir, "keel.sock");
+      const dbPath = join(dir, "keel.db");
+      const daemon = new KeelDaemon({
+        socketPath,
+        dbPath,
+        adminToken: "kc_admin_workflow_install_test",
+      });
+      await daemon.start();
+      try {
+        const env = {
+          KEEL_SOCKET: socketPath,
+          KEEL_DB: dbPath,
+          KEEL_CAP_DIR: join(dir, "caps"),
+          KEEL_ADMIN_TOKEN: "kc_admin_workflow_install_test",
+        };
+        const first = await runCli(
+          ["workflow", "install", "task-review-guidance", "--output", "json"],
+          dir,
+          env,
+        );
+        expect(first.code).toBe(0);
+        const firstPayload = JSON.parse(first.stdout) as {
+          workflows: Array<{ name: string; version: number; status: string }>;
+        };
+        expect(firstPayload.workflows.map((workflow) => workflow.name)).toEqual([
+          "task-code-review",
+          "task-plan-review",
+          "task-docs-review",
+        ]);
+        expect(firstPayload.workflows.map((workflow) => workflow.status)).toEqual([
+          "created",
+          "created",
+          "created",
+        ]);
+        expect(firstPayload.workflows.map((workflow) => workflow.version)).toEqual([1, 1, 1]);
+
+        const rerun = await runCli(
+          ["workflow", "install", "task-review-guidance", "--output", "json"],
+          dir,
+          env,
+        );
+        expect(rerun.code).toBe(0);
+        expect(
+          (JSON.parse(rerun.stdout) as { workflows: Array<{ status: string }> }).workflows.map(
+            (workflow) => workflow.status,
+          ),
+        ).toEqual(["unchanged", "unchanged", "unchanged"]);
+
+        const docsSource = await runCli(
+          ["workflow", "source", "task-docs-review", "--version", "1", "--all"],
+          dir,
+          env,
+        );
+        expect(docsSource.code).toBe(0);
+        const docsFiles = [...docsSource.stdout.matchAll(/^--- (.+)$/gm)].map((match) => match[1]);
+        expect(docsFiles).toEqual([
+          "docs-review.workflow.ts",
+          "guidance/checklist.ts",
+          "guidance/finding.ts",
+          "guidance/prompt.ts",
+          "guidance/rubric.ts",
+          "guidance/types.ts",
+        ]);
+
+        const changedRoot = createSourceBearingPackageRoot(join(dir, "changed-root"), {
+          mutateDocs: true,
+        });
+        const changed = await runCli(
+          ["workflow", "install", "task-review-guidance", "--output", "json"],
+          dir,
+          { ...env, KEEL_PACKAGE_ROOT: changedRoot },
+        );
+        expect(changed.code).toBe(0);
+        const changedPayload = JSON.parse(changed.stdout) as {
+          workflows: Array<{ name: string; version: number; status: string }>;
+        };
+        expect(changedPayload.workflows).toMatchObject([
+          { name: "task-code-review", version: 1, status: "unchanged" },
+          { name: "task-plan-review", version: 1, status: "unchanged" },
+          { name: "task-docs-review", version: 2, status: "created" },
+        ]);
+
+        const conflict = await runCli(
+          ["workflow", "install", "task-review-guidance", "--version", "1", "--output", "json"],
+          dir,
+          { ...env, KEEL_PACKAGE_ROOT: changedRoot },
+        );
+        expect(conflict.code).toBe(1);
+        const conflictPayload = JSON.parse(conflict.stdout) as {
+          workflows: Array<{ name: string; status: string; message?: string }>;
+        };
+        expect(conflictPayload.workflows).toMatchObject([
+          { name: "task-code-review", status: "unchanged" },
+          { name: "task-plan-review", status: "unchanged" },
+          { name: "task-docs-review", status: "conflict" },
+        ]);
+        expect(conflictPayload.workflows[2]?.message).toContain(
+          "version 1 already exists with a different definition hash",
+        );
+
+        const missingRoot = createSourceBearingPackageRoot(join(dir, "missing-root"));
+        rmSync(join(missingRoot, "workflows"), { recursive: true, force: true });
+        const missing = await runCli(
+          ["workflow", "install", "task-review-guidance", "--output", "json"],
+          dir,
+          { ...env, KEEL_PACKAGE_ROOT: missingRoot },
+        );
+        expect(missing.code).toBe(1);
+        const missingPayload = JSON.parse(missing.stdout) as {
+          workflows: Array<{ status: string; message?: string }>;
+        };
+        expect(missingPayload.workflows.map((workflow) => workflow.status)).toEqual([
+          "failed",
+          "failed",
+          "failed",
+        ]);
+        expect(missingPayload.workflows[0]?.message).toContain(
+          "requires a source-bearing Keel checkout/package",
+        );
+      } finally {
+        daemon.stop();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    DAEMON_TEST_TIMEOUT_MS,
+  );
+
   test("execute writes structured errors for argument/setup failures", async () => {
     const dir = mkdtempSync(join(tmpdir(), "keel-execute-arg-error-"));
     try {
@@ -1679,6 +1835,14 @@ describe("keel CLI", () => {
       expect(workflowSourceEmptyRun.stderr).toContain(
         "workflow source --run needs a non-empty run id",
       );
+      const workflowInstallUnknown = await runCli(
+        ["workflow", "install", "unknown-package"],
+        dir,
+        env,
+      );
+      expect(workflowInstallUnknown.code).toBe(1);
+      expect(workflowInstallUnknown.stderr).toContain('unknown workflow package "unknown-package"');
+      expect(workflowInstallUnknown.stderr).not.toContain("Failed to connect");
 
       const attached = await runCli(["launch", "--output", "json", "wf.ts"], dir, env);
       expect(attached.code).toBe(1);

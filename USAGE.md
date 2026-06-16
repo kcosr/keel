@@ -140,7 +140,7 @@ bun src/cli/keel.ts <command> [args]
 | `output <runId> [--output json\|text]` | Print the terminal workflow output. |
 | `report <runId> [--output json\|text]` | Print a journaled per-node result digest. |
 | `list [--output text\|json]` | List runs as an aligned table or JSON envelope. Requires admin. |
-| `workflow save/list/show/source/run/disable/enable/...` | Manage saved workflow names and immutable versions, and display retained workflow definition source. |
+| `workflow save/install/list/show/source/run/disable/enable/...` | Manage saved workflow names and immutable versions, install curated review workflows, and display retained workflow definition source. |
 | `schedule put <name> [workflow.ts\|--workflow saved-name] --interval-ms ms [--target dir]` | Create or replace a pinned workflow schedule. Requires admin. |
 | `profiles list/get/set/delete/check ...` | Manage daemon-wide persistent agent profiles. Requires admin. |
 | `settings list/get/set/unset/check ...` | Manage typed daemon settings. Requires admin. |
@@ -1190,12 +1190,50 @@ Multi-file workflow packages are saved the same way. For the reusable task
 review guidance package:
 
 ```bash
+keel workflow install task-review-guidance
+keel workflow install task-review-guidance --output json
+keel workflow install task-review-guidance --version 2 --allow-duplicate-definition
+
+# Lower-level manual saves remain available:
 keel workflow save task-code-review workflows/task-review-guidance/code-review.workflow.ts --version 1
 keel workflow save task-plan-review workflows/task-review-guidance/plan-review.workflow.ts --version 1
+keel workflow save task-docs-review workflows/task-review-guidance/docs-review.workflow.ts --version 1
 keel workflow run task-code-review --version 1 \
   --input '{"repository":".","task":"review the current change"}'
+keel workflow run task-docs-review --version 1 \
+  --input '{"repository":".","task":"review docs for the current change"}'
 keel workflow source task-plan-review --version 1 --all
 ```
+
+`workflow install task-review-guidance` requires admin authority because it spans
+multiple saved workflow names and uses daemon-wide preview/list operations. It
+captures the built-in workflow files from `keelPackageRoot()` and fails clearly
+if the installed package or checkout does not include the `workflows/` source
+tree. Installation is best-effort across package entries. Text output is
+table-like; JSON output is stable:
+
+```json
+{
+  "package": "task-review-guidance",
+  "workflows": [
+    {
+      "name": "task-code-review",
+      "version": 1,
+      "status": "created",
+      "definitionHash": "wf_sha256_..."
+    }
+  ]
+}
+```
+
+Statuses are `created`, `unchanged`, `conflict`, or `failed`. Without
+`--version`, an unchanged latest saved version reports `unchanged`; changed
+source creates the next integer version. With `--version`, an existing matching
+version reports `unchanged`, while an existing different definition reports
+`conflict`. `--allow-duplicate-definition` preserves the registry behavior for
+operators who intentionally want another version pointing at the same captured
+definition. Installing a new version reasserts the built-in row title,
+description, and tags, while immutable saved version records remain unchanged.
 
 The `workflow source --all` text output lists captured files with one stable
 header per file. The entry file appears first, followed by helper paths in
@@ -1264,8 +1302,13 @@ for its scoped workflow. `workflow:run` can launch saved workflows. `workflow:re
 can show/source scoped saved workflows. Launch-minted run capabilities include
 `run:source` for `--run` source lookup; older run capabilities without
 `run:source` fail closed. Direct `--definition` lookup is admin-only because it
-is daemon-wide. `workflow list`, `delete`, `delete-version`, and all schedule
-creation remain admin-only in v1.
+is daemon-wide. `workflow list`, `workflow install`, `delete`, `delete-version`,
+and all schedule creation remain admin-only in v1.
+
+`previewWorkflowDefinition` is an admin-only support RPC used by
+`workflow install` to classify package entries against the exact daemon-computed
+definition hash. It accepts only `source`; workflow name and provenance are
+recorded by `saveWorkflow` metadata and do not affect the hash.
 
 ## API Reference
 
@@ -1297,6 +1340,9 @@ target strings instead of falling back to daemon cwd.
 interface KeelApi {
   launchRun(req: LaunchRequest): Promise<RunLaunchResult>;
   saveWorkflow(req: SaveWorkflowRequest): SavedWorkflowVersionView;
+  previewWorkflowDefinition(req: {
+    source: WorkflowSourceInput;
+  }): { definitionHash: string };
   listSavedWorkflows(opts?: {
     includeDisabled?: boolean;
     includeDeprecated?: boolean;

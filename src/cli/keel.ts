@@ -15,6 +15,7 @@
 
 import {
   chmodSync,
+  existsSync,
   lstatSync,
   mkdirSync,
   readFileSync,
@@ -25,6 +26,10 @@ import {
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  TASK_REVIEW_GUIDANCE_PACKAGE,
+  TASK_REVIEW_WORKFLOWS,
+} from "../../workflows/task-review-guidance/package.ts";
 import { ClaudeProvider } from "../agents/claude.ts";
 import { CodexProvider } from "../agents/codex.ts";
 import { PiProvider } from "../agents/pi.ts";
@@ -47,6 +52,7 @@ import { effectiveOperationalSettings } from "../settings/catalog.ts";
 import { cliTargetPath } from "../target.ts";
 import { runTui } from "../tui/index.ts";
 import { captureWorkflowFile } from "../workflow-definitions/capture.ts";
+import { keelPackageRoot } from "../workflow-definitions/snapshot.ts";
 import type { WorkflowSourceInput } from "../workflow-definitions/source.ts";
 import { displayName, formatDuration, formatListRuns, formatUtcTimestamp } from "./run-display.ts";
 import { formatTable, tableCell } from "./table.ts";
@@ -116,7 +122,7 @@ const COMMANDS: [string, string, string][] = [
   ["output", "<runId> [--output json|text]", "print a run's terminal output"],
   ["report", "<runId> [--output json|text]", "print a run's per-node result digest"],
   ["list", "[--output text|json]", "list runs"],
-  ["workflow", "save|list|show|source|run|disable|enable|...", "manage saved workflows"],
+  ["workflow", "save|install|list|show|source|run|disable|enable|...", "manage saved workflows"],
   [
     "tui",
     "[runId] [--status status] [--limit n] [--output text]",
@@ -1468,6 +1474,22 @@ async function handleWorkflow(args: string[]): Promise<number> {
       );
       return 0;
     }
+    case "install": {
+      const parsed = parseWorkflowInstallArgs(rest);
+      if (!parsed.packageName) return usage("workflow needs install <package>");
+      if (parsed.packageName !== TASK_REVIEW_GUIDANCE_PACKAGE) {
+        throw new Error(`unknown workflow package "${parsed.packageName}"`);
+      }
+      const client = await getClient();
+      const result = await installWorkflowPackage(client, parsed);
+      if (parsed.output === "json") process.stdout.write(`${JSON.stringify(result)}\n`);
+      else process.stdout.write(formatWorkflowInstallResult(result));
+      return result.workflows.some(
+        (workflow) => workflow.status === "failed" || workflow.status === "conflict",
+      )
+        ? 1
+        : 0;
+    }
     case "list": {
       const parsed = parseWorkflowListArgs(rest);
       const client = await getClient();
@@ -1580,7 +1602,9 @@ async function handleWorkflow(args: string[]): Promise<number> {
       return 0;
     }
     default:
-      return usage("workflow needs save|list|show|source|run|disable|enable|deprecate|delete");
+      return usage(
+        "workflow needs save|install|list|show|source|run|disable|enable|deprecate|delete",
+      );
   }
 }
 
@@ -1647,6 +1671,169 @@ function parseWorkflowSaveArgs(args: string[]): {
   out.name = positional[0];
   out.file = positional[1];
   return out;
+}
+
+type WorkflowInstallStatus = "created" | "unchanged" | "conflict" | "failed";
+
+interface WorkflowInstallEntryResult {
+  name: string;
+  status: WorkflowInstallStatus;
+  definitionHash?: string;
+  version?: number;
+  message?: string;
+}
+
+interface WorkflowInstallResult {
+  package: string;
+  workflows: WorkflowInstallEntryResult[];
+}
+
+function parseWorkflowInstallArgs(args: string[]): {
+  packageName?: string;
+  version?: number;
+  allowDuplicateDefinition: boolean;
+  output: "text" | "json";
+} {
+  const positional: string[] = [];
+  let version: number | undefined;
+  let allowDuplicateDefinition = false;
+  let output: "text" | "json" = "text";
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i] as string;
+    if (arg === "--version")
+      version = parsePositiveInteger(requireFlagValue(args, i++, "--version"), "--version");
+    else if (arg === "--allow-duplicate-definition") allowDuplicateDefinition = true;
+    else if (arg === "--output")
+      output = parseTextJsonOutput(requireFlagValue(args, i++, "--output"));
+    else if (arg.startsWith("--")) throw new Error(`unknown workflow install flag ${arg}`);
+    else positional.push(arg);
+  }
+  if (positional.length > 1)
+    throw new Error(`unexpected argument ${positional[1]} for workflow install`);
+  return {
+    packageName: positional[0],
+    ...(version !== undefined ? { version } : {}),
+    allowDuplicateDefinition,
+    output,
+  };
+}
+
+async function installWorkflowPackage(
+  client: DaemonClient,
+  opts: {
+    packageName?: string;
+    version?: number;
+    allowDuplicateDefinition: boolean;
+    output: "text" | "json";
+  },
+): Promise<WorkflowInstallResult> {
+  if (opts.packageName !== TASK_REVIEW_GUIDANCE_PACKAGE) {
+    throw new Error(`unknown workflow package "${opts.packageName}"`);
+  }
+  const root = keelPackageRoot();
+  const existing = new Map(
+    (
+      await client.listSavedWorkflows({
+        includeDisabled: true,
+        includeDeprecated: true,
+        includeDeleted: true,
+      })
+    ).map((workflow) => [workflow.name, workflow]),
+  );
+  const workflows: WorkflowInstallEntryResult[] = [];
+  for (const entry of TASK_REVIEW_WORKFLOWS) {
+    const result = await installWorkflowPackageEntry(client, root, existing.get(entry.name), {
+      entry,
+      version: opts.version,
+      allowDuplicateDefinition: opts.allowDuplicateDefinition,
+    });
+    workflows.push(result);
+  }
+  return { package: TASK_REVIEW_GUIDANCE_PACKAGE, workflows };
+}
+
+async function installWorkflowPackageEntry(
+  client: DaemonClient,
+  root: string,
+  existing: Awaited<ReturnType<DaemonClient["listSavedWorkflows"]>>[number] | undefined,
+  opts: {
+    entry: (typeof TASK_REVIEW_WORKFLOWS)[number];
+    version?: number;
+    allowDuplicateDefinition: boolean;
+  },
+): Promise<WorkflowInstallEntryResult> {
+  const file = join(root, opts.entry.file);
+  try {
+    if (!existsSync(file)) {
+      throw new Error(
+        `built-in workflow source ${opts.entry.file} is missing; workflow install requires a source-bearing Keel checkout/package. Set KEEL_PACKAGE_ROOT to the repository root if needed.`,
+      );
+    }
+    const captured = captureWorkflowFile(file);
+    const preview = await client.previewWorkflowDefinition({ source: captured.source });
+    const definitionHash = preview.definitionHash;
+    const requested = opts.version;
+    if (requested !== undefined) {
+      const existingVersion = existing?.versions.find((version) => version.version === requested);
+      if (existingVersion?.deletedAtMs === null) {
+        if (existingVersion.definitionHash === definitionHash) {
+          return {
+            name: opts.entry.name,
+            version: requested,
+            status: "unchanged",
+            definitionHash,
+          };
+        }
+        return {
+          name: opts.entry.name,
+          version: requested,
+          status: "conflict",
+          definitionHash,
+          message: `version ${requested} already exists with a different definition hash`,
+        };
+      }
+    } else {
+      const latest = latestSavedWorkflowVersion(existing);
+      if (latest && latest.definitionHash === definitionHash && !opts.allowDuplicateDefinition) {
+        return {
+          name: opts.entry.name,
+          version: latest.version,
+          status: "unchanged",
+          definitionHash,
+        };
+      }
+    }
+    const saved = await client.saveWorkflow({
+      name: opts.entry.name,
+      source: captured.source,
+      workflowName: opts.entry.workflowName,
+      provenance: captured.provenance,
+      title: opts.entry.title,
+      description: opts.entry.description,
+      tags: [...opts.entry.tags],
+      inputSchema: opts.entry.inputSchema,
+      ...(requested !== undefined ? { version: requested } : {}),
+      allowDuplicateDefinition: opts.allowDuplicateDefinition,
+    });
+    return {
+      name: saved.name,
+      version: saved.version,
+      status: "created",
+      definitionHash: saved.definitionHash,
+    };
+  } catch (err) {
+    return {
+      name: opts.entry.name,
+      status: "failed",
+      message: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+function latestSavedWorkflowVersion(
+  workflow: Awaited<ReturnType<DaemonClient["listSavedWorkflows"]>>[number] | undefined,
+): Awaited<ReturnType<DaemonClient["listSavedWorkflows"]>>[number]["versions"][number] | null {
+  return workflow?.versions.find((version) => version.deletedAtMs === null) ?? null;
 }
 
 function parseWorkflowListArgs(args: string[]): {
@@ -1838,6 +2025,20 @@ function formatWorkflowList(
       workflow.deletedAtMs ? "deleted" : workflow.disabledAtMs ? "disabled" : "enabled",
       workflow.title ?? "-",
       workflow.latestDefinitionHash ?? "-",
+    ]),
+  );
+}
+
+function formatWorkflowInstallResult(result: WorkflowInstallResult): string {
+  return formatTable(
+    ["PACKAGE", "NAME", "VERSION", "STATUS", "DEFINITION", "MESSAGE"],
+    result.workflows.map((workflow) => [
+      result.package,
+      workflow.name,
+      workflow.version === undefined ? "-" : String(workflow.version),
+      workflow.status,
+      workflow.definitionHash ?? "-",
+      workflow.message ?? "-",
     ]),
   );
 }

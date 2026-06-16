@@ -5,16 +5,29 @@ import {
   renderSeverityRules,
 } from "./guidance/checklist";
 import { renderFindingContract, validateReviewOutput } from "./guidance/finding";
-import { buildCodeReviewPrompt, buildPlanReviewPrompt } from "./guidance/prompt";
-import { CODE_REVIEW_RUBRIC, PLAN_REVIEW_RUBRIC } from "./guidance/rubric";
+import {
+  buildCodeReviewPrompt,
+  buildDocsReviewPrompt,
+  buildPlanReviewPrompt,
+} from "./guidance/prompt";
+import { CODE_REVIEW_RUBRIC, DOCS_REVIEW_RUBRIC, PLAN_REVIEW_RUBRIC } from "./guidance/rubric";
 
 describe("task review guidance", () => {
   test("renders stable code and plan rubrics", () => {
     expect(renderChecklist(CODE_REVIEW_RUBRIC)).toContain(
       "code.persistence (required) Persistence and migrations",
     );
+    expect(renderChecklist(CODE_REVIEW_RUBRIC)).toContain(
+      "code.async (required) Async and concurrency safety",
+    );
     expect(renderChecklist(PLAN_REVIEW_RUBRIC)).toContain(
       "plan.keel-native (required) Keel-native scope",
+    );
+    expect(renderChecklist(PLAN_REVIEW_RUBRIC)).toContain(
+      "plan.surface (required) Surface inventory",
+    );
+    expect(renderChecklist(DOCS_REVIEW_RUBRIC)).toContain(
+      "docs.quickstart (required) Quickstart runnability",
     );
     expect(renderSeverityRules(CODE_REVIEW_RUBRIC)).toBe(
       [
@@ -54,6 +67,18 @@ describe("task review guidance", () => {
     expect(plan).toContain("Correspondence header to add exactly: ### 2026-06-15 - Reviewer");
     expect(plan).toContain("plan.migrations");
     expect(plan).toContain(renderFindingContract("plan"));
+
+    const docs = buildDocsReviewPrompt({
+      repository: "/repo",
+      task: "review docs",
+      focus: ["quickstart"],
+      maxFindings: 2,
+    });
+    expect(docs).toContain("Repository: /repo");
+    expect(docs).toContain("Task: review docs");
+    expect(docs).toContain("docs.accuracy");
+    expect(docs).toContain("Advisory finding cap: 2");
+    expect(docs).toContain(renderFindingContract("docs"));
   });
 
   test("validates and normalizes structured review output", () => {

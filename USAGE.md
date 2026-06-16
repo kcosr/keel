@@ -12,7 +12,8 @@ agent-facing authoring guide, read [`SKILL.md`](./SKILL.md). For repository
 working conventions, read [`AGENTS.md`](./AGENTS.md). `DESIGN.md` is architecture
 and design-history material, not the command/API reference. For the cross-surface
 exposure and CLI interaction convention, read
-[`docs/control-surfaces.md`](./docs/control-surfaces.md).
+[`docs/control-surfaces.md`](./docs/control-surfaces.md). For source-backed API
+orientation, read [`docs/api.md`](./docs/api.md).
 
 ## Contents
 
@@ -1380,179 +1381,22 @@ recorded by `saveWorkflow` metadata and do not affect the hash.
 
 ## API Reference
 
-All clients speak the same `KeelApi` contract. The daemon exposes it over the
-Unix socket; tests and embedded callers may use it in-process.
+All clients speak the same daemon operation contract. The exact TypeScript source
+of truth is `src/rpc/contract.ts` for `KeelApi` and request/response types,
+and `src/rpc/projection.ts` for projections. See
+[`docs/api.md`](./docs/api.md) for the source-backed API orientation and
+operation-family map.
 
-### LaunchRequest
-
-```ts
-interface LaunchRequest {
-  source: string;
-  input: unknown;
-  target?: string; // non-empty; raw API callers must supply it; CLI/client wrappers use cwd
-  name?: string | null;
-  provenance?: { kind: "stdin" } | { kind: "clientPath"; path: string };
-}
-```
-
-`source` is workflow TypeScript captured by the client, either a string for an
-inline/stdin single module or a `{ kind: "bundle", entry, modules }` source
-bundle for file launches. `target` is the daemon-resolvable run target used by
-the default direct workspace; daemon/server boundaries reject missing or blank
-target strings instead of falling back to daemon cwd.
-`provenance` is display-only; the daemon never opens or parses it for execution.
-
-### KeelApi
-
-```ts
-interface KeelApi {
-  launchRun(req: LaunchRequest): Promise<RunLaunchResult>;
-  saveWorkflow(req: SaveWorkflowRequest): SavedWorkflowVersionView;
-  previewWorkflowDefinition(req: {
-    source: WorkflowSourceInput;
-  }): { definitionHash: string };
-  listSavedWorkflows(opts?: {
-    includeDisabled?: boolean;
-    includeDeprecated?: boolean;
-    includeDeleted?: boolean;
-  }): SavedWorkflowSummary[];
-  getSavedWorkflow(name: string): SavedWorkflowView | null;
-  getSavedWorkflowSource(req: {
-    name: string;
-    version?: number | "latest";
-    file?: string;
-    all?: boolean;
-    allowDeprecated?: boolean;
-  }): SavedWorkflowSourceView;
-  getWorkflowDefinitionSource(req: {
-    lookup:
-      | { kind: "run"; runId: string }
-      | { kind: "definition"; definitionHash: string };
-    file?: string;
-    all?: boolean;
-  }): WorkflowDefinitionSourceView;
-  launchSavedWorkflow(req: {
-    ref: { name: string; version?: number | "latest"; allowDeprecated?: boolean };
-    input?: unknown;
-    target?: string;
-    name?: string | null;
-  }): Promise<RunLaunchResult>;
-  putSchedule(req:
-    | { name: string; source: WorkflowSourceInput; workflowName?: string | null; input?: unknown; target?: string; intervalMs: number; firstFireMs?: number }
-    | { name: string; savedRef: { name: string; version?: number | "latest"; allowDeprecated?: boolean }; input?: unknown; target?: string; intervalMs: number; firstFireMs?: number }
-  ): { ok: boolean };
-  listSchedules(opts?: { includeDisabled?: boolean }): ScheduleSummary[];
-  getSchedule(req: { name: string; includeSource?: boolean }): ScheduleView | null;
-  resumeRun(runId: string): Promise<RunStart>;
-  interruptRun(runId: string, reason?: string): Promise<{ runId: string; status: "interrupted" }>;
-  rerunRun(
-    runId: string,
-    opts?: { source?: WorkflowSourceInput; input?: unknown; name?: string | null; provenance?: LaunchRequest["provenance"] },
-  ): Promise<RunStart>;
-  retryRun(runId: string): Promise<RunStart>;
-  rewindRun(runId: string, toStableKey: string): Promise<RunStart>;
-  forkRun(runId: string, opts?: { atStableKey?: string; newRunId?: string }): RunLaunchResult;
-  getRun(runId: string): RunProjection | null;
-  getRunReport(runId: string): RunReport | null;
-  getBlockage(runId: string): Blockage;
-  listRuns(): RunSummary[];
-  listRunWorkspaces(runId: string, opts?: { includeRemoved?: boolean }): RunWorkspaceView[];
-  getRunWorkspace(runId: string, workspaceId: string): RunWorkspaceView | null;
-  getRunWorkspaceDiff(runId: string, workspaceId: string): RunWorkspaceDiff;
-  mergeRunWorkspace(runId: string, workspaceId: string): RunWorkspaceView;
-  discardRunWorkspace(runId: string, workspaceId: string): RunWorkspaceView;
-  gcWorkspaces(opts?: {
-    olderThanMs?: number;
-    includePending?: boolean;
-    includeRemoved?: boolean;
-  }): WorkspaceGcResult;
-  listSettings(): SettingView[];
-  getSetting(key: string): SettingView | null;
-  putSetting(req: { key: string; value: unknown; ifGeneration?: number }): SettingView;
-  deleteSetting(req: { key: string; ifGeneration?: number }): { key: string; deleted: boolean };
-  checkSetting(req: {
-    key: string;
-    value: unknown;
-  }): { ok: boolean; diagnostics: SettingsDiagnostic[] };
-  waitForRun(runId: string): Promise<RunOutcome>;
-  getRunOutput(runId: string): Promise<RunOutcome>;
-  gcDefinitions(opts?: { ttlMs?: number; cacheMinAgeMs?: number }): Promise<{
-    workflowDefinitionsRemoved: number;
-    definitionCacheEntriesRemoved: number;
-  }>;
-  subscribeEvents(
-    runId: string,
-    afterSeq: number,
-    onEvent: (event: EventEnvelope) => void,
-  ): () => void;
-}
-
-interface RunLaunchResult {
-  runId: string;
-  capability?: string;
-  capabilityId?: string;
-}
-
-interface RunSummary {
-  runId: string;
-  workflowName: string | null;
-  status: RunProjection["status"];
-  createdAtMs: number;
-  finishedAtMs: number | null;
-  parentRunId: string | null;
-}
-
-interface RunProjection {
-  runId: string;
-  workflowName: string | null;
-  status: "running" | "waiting-human" | "waiting-signal" | "waiting-timer" | "waiting-approval" | "interrupted" | "finished" | "failed" | "cancelled" | "continued";
-  definitionVersion: string;
-  parentRunId: string | null;
-  createdAtMs: number;
-  finishedAtMs: number | null;
-  nodes: NodeView[];
-  phase: string | null;
-  error: { name: string; message: string } | null;
-  stats: { steps: number; agents: number; artifacts: number };
-}
-```
-
-Lifecycle methods start work in the background and return a `RunStart` or run id.
-`interruptRun` persists `status: "interrupted"`, appends `run.interrupted`, and
-aborts active in-process work best-effort; only `resumeRun` leaves that status.
-Signal delivery and approval decisions acknowledge durable delivery and
-wake-start handling; they do not imply the resumed workflow reached a parked or
-terminal status. Use `waitForRun` to wait for terminal or parked status, or
-`subscribeEvents` to stream events. The daemon returns a raw run capability on
-launch/fork so clients can establish authority for follow-up operations. The CLI
-writes that capability to a local cap file by default and only prints raw tokens
-with `--emit-capability`. `gcDefinitions` is an admin operation.
-
-### EventEnvelope
-
-```ts
-type EventEnvelope = DurableEventEnvelope | EphemeralEventEnvelope;
-
-interface DurableEventEnvelope {
-  kind: "durable";
-  seq: number;
-  type: string;
-  payload: unknown;
-  atMs: number;
-}
-
-interface EphemeralEventEnvelope {
-  kind: "ephemeral";
-  type: string;
-  payload: unknown;
-  atMs: number;
-}
-```
-
-Durable `seq` is monotonically increasing per run. `subscribeEvents(runId,
-afterSeq, ...)` first backfills durable rows with `seq > afterSeq`, then tails
-new durable rows and live ephemeral agent frames pushed by the daemon. Ephemeral
-frames are never replayed for late subscribers.
+Lifecycle methods start work in the background and return a `RunStart` or run
+id. `interruptRun` persists `status: "interrupted"`, appends
+`run.interrupted`, and aborts active in-process work best-effort; only
+`resumeRun` leaves that status. Signal delivery and approval decisions
+acknowledge durable delivery and wake-start handling; they do not imply the
+resumed workflow reached a parked or terminal status. Use `waitForRun`,
+`subscribeEvents`, `keel watch`, or the TUI to observe progress. The daemon
+returns a raw run capability on launch/fork so clients can establish authority
+for follow-up operations. The CLI writes that capability to a local cap file by
+default and only prints raw tokens with `--emit-capability`.
 
 ## Development And Operations
 

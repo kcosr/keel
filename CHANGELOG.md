@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### Added
+- Source-backed daemon API orientation in `docs/api.md` and a more granular
+  control-surface matrix for run, workflow, schedule, workspace, profile, and
+  settings operation families.
 - Tracked documentation ownership guide in `docs/documentation.md`, plus README
   and agent-rule routing for future documentation updates.
 - Admin-gated schedule read API across daemon/RPC/client, CLI, and `keel execute`:

@@ -19,6 +19,7 @@ travel, and daemon behavior.
 | Launch reusable operational workflows | [`workflows/README.md`](./workflows/README.md) |
 | Work in this repo safely: migrations, changelog, compatibility, capability rules | [`AGENTS.md`](./AGENTS.md) |
 | Decide which docs to update when behavior changes | [`docs/documentation.md`](./docs/documentation.md) |
+| Understand daemon API operation families | [`docs/api.md`](./docs/api.md) |
 | Track operation exposure across CLI, execute, TUI, API, and planned surfaces | [`docs/control-surfaces.md`](./docs/control-surfaces.md) |
 | Understand architecture, tradeoffs, historical design decisions, and acceptance workload | [`DESIGN.md`](./DESIGN.md) |
 | See user-visible changes over time | [`CHANGELOG.md`](./CHANGELOG.md) |

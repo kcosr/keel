@@ -18,6 +18,7 @@ import {
   formatListRuns,
   formatRunHeader,
   formatRunReportText,
+  formatScheduleList,
   parseExecuteArgs,
   parseLaunchArgs,
   parseLaunchInput,
@@ -25,6 +26,8 @@ import {
   parseListArgs,
   parseOutputFormat,
   parseRunArgs,
+  parseScheduleListArgs,
+  parseScheduleShowArgs,
   parseTuiArgs,
   parseWatchArgs,
   resolveWorkflowPath,
@@ -198,6 +201,70 @@ describe("keel CLI", () => {
         "RUN ID      STATUS          WORKFLOW                                  CREATED                   DURATION",
         "run_older   finished        chain                                     2026-06-14T01:02:03.004Z  12m",
         "run_active  waiting-signal  very long workflow name that is truncat…  2026-06-14T02:00:00.000Z  5s",
+        "",
+      ].join("\n"),
+    );
+  });
+
+  test("schedule list/show parsers and formatter are deterministic", () => {
+    expect(parseScheduleListArgs([])).toEqual({ enabledOnly: false, output: "text" });
+    expect(parseScheduleListArgs(["--enabled-only", "--output", "json"])).toEqual({
+      enabledOnly: true,
+      output: "json",
+    });
+    expect(() => parseScheduleListArgs(["hourly"])).toThrow(
+      "unexpected argument hourly for schedule list",
+    );
+    expect(parseScheduleShowArgs(["hourly", "--source", "--output", "json"])).toEqual({
+      name: "hourly",
+      output: "json",
+      source: true,
+    });
+    expect(() => parseScheduleShowArgs(["hourly", "extra"])).toThrow(
+      "unexpected argument extra for schedule show",
+    );
+
+    expect(
+      formatScheduleList(
+        [
+          {
+            name: "hourly-review",
+            enabled: true,
+            workflowRef: "wf_sha256_hourly",
+            definitionState: "available",
+            workflowName: "review",
+            workflowKind: "source",
+            target: "/repo",
+            intervalMs: 3_600_000,
+            nextFireMs: 4_200_000,
+            lastRunId: "run_1",
+            lastRunStatus: "finished",
+            lastFailedAtMs: null,
+            lastError: { kind: "none" },
+          },
+          {
+            name: "nightly-docs",
+            enabled: false,
+            workflowRef: "wf_sha256_missing",
+            definitionState: "missing",
+            workflowName: null,
+            workflowKind: null,
+            target: "/repo",
+            intervalMs: 86_400_000,
+            nextFireMs: 0,
+            lastRunId: null,
+            lastRunStatus: null,
+            lastFailedAtMs: 1,
+            lastError: { kind: "error", error: { message: "disabled" } },
+          },
+        ],
+        1_680_000,
+      ),
+    ).toBe(
+      [
+        "NAME           STATUS    NEXT FIRE  INTERVAL  LAST RUN  TARGET",
+        "hourly-review  enabled   in 42m     1h        finished  /repo",
+        "nightly-docs   disabled  -          1d        -         /repo",
         "",
       ].join("\n"),
     );
@@ -737,6 +804,74 @@ describe("keel CLI", () => {
         });
         expect(invalid.code).toBe(1);
         expect(invalid.stderr).toContain("--output ndjson is not available for report");
+      } finally {
+        daemon.stop();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    DAEMON_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "schedule list and show print text, JSON, and opt-in source",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "keel-schedule-read-"));
+      const socketPath = join(dir, "keel.sock");
+      const dbPath = join(dir, "keel.db");
+      const daemon = new KeelDaemon({
+        socketPath,
+        dbPath,
+        adminToken: "kc_admin_schedule_read_test",
+      });
+      await daemon.start();
+      try {
+        const env = {
+          KEEL_SOCKET: socketPath,
+          KEEL_DB: dbPath,
+          KEEL_DIR: dir,
+          KEEL_ADMIN_TOKEN: "kc_admin_schedule_read_test",
+        };
+        const put = await runCli(
+          ["schedule", "put", "hourly-review", chainUrl, "--interval-ms", "3600000"],
+          dir,
+          env,
+        );
+        expect(put.code).toBe(0);
+
+        const list = await runCli(["schedule", "list"], dir, env);
+        expect(list.code).toBe(0);
+        expect(list.stdout).toContain("NAME");
+        expect(list.stdout).toContain("hourly-review");
+        expect(list.stdout).toContain("enabled");
+        expect(list.stdout).toContain("1h");
+
+        const listJson = await runCli(["schedule", "list", "--output", "json"], dir, env);
+        expect(listJson.code).toBe(0);
+        const listed = JSON.parse(listJson.stdout) as { schedules: Array<{ name: string }> };
+        expect(listed.schedules.map((schedule) => schedule.name)).toEqual(["hourly-review"]);
+
+        const show = await runCli(["schedule", "show", "hourly-review"], dir, env);
+        expect(show.code).toBe(0);
+        expect(show.stdout).toContain("definition available");
+        expect(show.stdout).not.toContain("sourceEntry");
+
+        const source = await runCli(["schedule", "show", "hourly-review", "--source"], dir, env);
+        expect(source.code).toBe(0);
+        expect(source.stdout).toContain("sourceEntry");
+        expect(source.stdout).toContain("export default async function chain");
+
+        const showJson = await runCli(
+          ["schedule", "show", "hourly-review", "--source", "--output", "json"],
+          dir,
+          env,
+        );
+        expect(showJson.code).toBe(0);
+        const shown = JSON.parse(showJson.stdout) as {
+          name: string;
+          source?: { files: Array<{ code: string }> };
+        };
+        expect(shown.name).toBe("hourly-review");
+        expect(shown.source?.files[0]?.code).toContain("export default async function chain");
       } finally {
         daemon.stop();
         rmSync(dir, { recursive: true, force: true });

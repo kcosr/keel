@@ -242,6 +242,19 @@ export interface WorkflowDefinitionRow {
 
 export type NewWorkflowDefinitionRow = WorkflowDefinitionRow;
 
+export interface ScheduleRow {
+  name: string;
+  workflowRef: string;
+  inputJson: string | null;
+  scheduleTarget: string | null;
+  intervalMs: number;
+  nextFireMs: number;
+  enabled: boolean;
+  lastRunId: string | null;
+  lastErrorJson: string | null;
+  lastFailedAtMs: number | null;
+}
+
 export interface SavedWorkflowRow {
   name: string;
   title: string | null;

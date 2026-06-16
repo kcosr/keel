@@ -299,6 +299,41 @@ describe("JournalStore (in-memory)", () => {
     expect(store.getWorkflowDefinition("wf_sha256_fresh")).not.toBeNull();
   });
 
+  test("schedule read helpers include disabled rows by default and sort by name", () => {
+    store.putSchedule({
+      name: "beta",
+      workflowRef: "wf_sha256_beta",
+      inputJson: '{"n":2}',
+      scheduleTarget: "/repo/beta",
+      intervalMs: 2000,
+      nextFireMs: 20,
+    });
+    store.putSchedule({
+      name: "alpha",
+      workflowRef: "wf_sha256_alpha",
+      inputJson: null,
+      scheduleTarget: "/repo/alpha",
+      intervalMs: 1000,
+      nextFireMs: 10,
+    });
+    store.disableScheduleWithError("alpha", '{"name":"Error","message":"disabled"}', 30);
+
+    expect(store.listSchedules().map((schedule) => schedule.name)).toEqual(["alpha", "beta"]);
+    expect(
+      store.listSchedules({ includeDisabled: false }).map((schedule) => schedule.name),
+    ).toEqual(["beta"]);
+    expect(store.getSchedule("alpha")).toMatchObject({
+      name: "alpha",
+      enabled: false,
+      workflowRef: "wf_sha256_alpha",
+      inputJson: null,
+      scheduleTarget: "/repo/alpha",
+      lastErrorJson: '{"name":"Error","message":"disabled"}',
+      lastFailedAtMs: 30,
+    });
+    expect(store.getSchedule("missing")).toBeNull();
+  });
+
   test("agent session workspaces insert, update, and list deterministically", () => {
     const r1b = workspaceRow("r1", "b", { workspacePath: "/work/r1/b", status: "creating" });
     const r1a = workspaceRow("r1", "a", { workspacePath: "/work/r1/a", status: "idle" });

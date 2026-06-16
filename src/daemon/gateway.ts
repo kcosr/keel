@@ -422,6 +422,25 @@ export class KeelOperationGateway {
         return { ok: true };
       },
     },
+    listSchedules: {
+      kind: "core",
+      handle: (_session, p, credential) => {
+        this.authorizeAdmin(credential);
+        return this.opts.api.listSchedules({
+          ...(p.includeDisabled === false ? { includeDisabled: false } : {}),
+        });
+      },
+    },
+    getSchedule: {
+      kind: "core",
+      handle: (_session, p, credential) => {
+        this.authorizeAdmin(credential);
+        return this.opts.api.getSchedule({
+          name: p.name as string,
+          ...(p.includeSource === true ? { includeSource: true } : {}),
+        });
+      },
+    },
     listRunWorkspaces: {
       kind: "core",
       handle: (_session, p, credential) => {

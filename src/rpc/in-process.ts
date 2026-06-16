@@ -47,10 +47,12 @@ import {
 } from "../workspace/worktree.ts";
 import type {
   EventEnvelope,
+  GetScheduleRequest,
   GetWorkflowDefinitionSourceRequest,
   KeelApi,
   LaunchRequest,
   LaunchSavedWorkflowRequest,
+  ListSchedulesRequest,
   PreviewWorkflowDefinitionRequest,
   PutScheduleRequest,
   RunOutcome,
@@ -69,10 +71,14 @@ import {
   type RunProjection,
   type RunReport,
   type RunSummary,
+  type ScheduleSummary,
+  type ScheduleView,
   buildProjection,
   buildRunReport,
+  buildScheduleView,
   getBlockage,
   listRunSummaries,
+  listScheduleSummaries,
 } from "./projection.ts";
 
 const WORKSPACE_RECONCILE_STALE_MS = 30_000;
@@ -320,6 +326,16 @@ export class InProcessKeel implements KeelApi {
       nextFireMs: req.firstFireMs ?? this.opts.clock?.() ?? Date.now(),
     });
     return { ok: true };
+  }
+
+  listSchedules(req: ListSchedulesRequest = {}): ScheduleSummary[] {
+    return listScheduleSummaries(this.store, req);
+  }
+
+  getSchedule(req: GetScheduleRequest): ScheduleView | null {
+    return buildScheduleView(this.store, req.name, {
+      ...(req.includeSource === true ? { includeSource: true } : {}),
+    });
   }
 
   async resumeRun(runId: string): Promise<RunStart> {

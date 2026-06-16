@@ -34,6 +34,7 @@ import type {
   RunSettingSnapshotSetRow,
   SavedWorkflowRow,
   SavedWorkflowVersionRow,
+  ScheduleRow,
   WorkflowDefinitionRow,
 } from "./types.ts";
 
@@ -1558,6 +1559,21 @@ export class JournalStore {
       .run(errorJson, atMs, name);
   }
 
+  listSchedules(opts: { includeDisabled?: boolean } = {}): ScheduleRow[] {
+    const sql =
+      opts.includeDisabled === false
+        ? "SELECT * FROM schedules WHERE enabled = 1 ORDER BY name ASC"
+        : "SELECT * FROM schedules ORDER BY name ASC";
+    return this.db.query<RawScheduleRow, []>(sql).all().map(mapSchedule);
+  }
+
+  getSchedule(name: string): ScheduleRow | null {
+    const row = this.db
+      .query<RawScheduleRow, [string]>("SELECT * FROM schedules WHERE name = ?")
+      .get(name);
+    return row ? mapSchedule(row) : null;
+  }
+
   // ---- agent profile catalog and run snapshots --------------------------
 
   listAgentProfileCatalogRows(): AgentProfileCatalogRow[] {
@@ -2362,6 +2378,19 @@ interface RawWorkflowDefinitionRow {
   created_at_ms: number;
 }
 
+interface RawScheduleRow {
+  name: string;
+  workflow_ref: string;
+  input_json: string | null;
+  schedule_target: string | null;
+  interval_ms: number;
+  next_fire_ms: number;
+  enabled: number;
+  last_run_id: string | null;
+  last_error_json: string | null;
+  last_failed_at_ms: number | null;
+}
+
 interface RawSavedWorkflowRow {
   name: string;
   title: string | null;
@@ -2608,6 +2637,21 @@ function mapRun(r: RawRunRow): RunRow {
     runtimeOwnerId: r.runtime_owner_id,
     createdAtMs: r.created_at_ms,
     finishedAtMs: r.finished_at_ms,
+  };
+}
+
+function mapSchedule(r: RawScheduleRow): ScheduleRow {
+  return {
+    name: r.name,
+    workflowRef: r.workflow_ref,
+    inputJson: r.input_json,
+    scheduleTarget: r.schedule_target,
+    intervalMs: r.interval_ms,
+    nextFireMs: r.next_fire_ms,
+    enabled: r.enabled === 1,
+    lastRunId: r.last_run_id,
+    lastErrorJson: r.last_error_json,
+    lastFailedAtMs: r.last_failed_at_ms,
   };
 }
 

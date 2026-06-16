@@ -445,6 +445,93 @@ describe("saved workflow RPC", () => {
     ).toThrow(/workflow definition wf_sha256_missing not found/);
   });
 
+  test("schedule read projection joins definitions, run status, parse errors, and opt-in source", () => {
+    const store = JournalStore.memory();
+    const api = keel(store);
+    putDisplayableWorkflowDefinition(
+      store,
+      "wf_sha256_schedule_available",
+      "export default async () => 1;\n",
+      100,
+    );
+    putDisplayableWorkflowDefinition(
+      store,
+      "wf_sha256_schedule_missing",
+      "export default async () => 2;\n",
+      100,
+    );
+    store.insertRun({
+      runId: "run_last",
+      workflowName: "displayable",
+      definitionVersion: "wf_sha256_schedule_available",
+      workflowRef: null,
+      runTarget: process.cwd(),
+      status: "failed",
+      parentRunId: null,
+      tenantId: null,
+      inputRef: "null",
+      outputRef: null,
+      errorJson: null,
+      heartbeatAtMs: null,
+      runtimeOwnerId: null,
+      createdAtMs: 1,
+      finishedAtMs: 2,
+    });
+    store.putSchedule({
+      name: "available",
+      workflowRef: "wf_sha256_schedule_available",
+      inputJson: '{"n":1}',
+      scheduleTarget: process.cwd(),
+      intervalMs: 60_000,
+      nextFireMs: 200,
+    });
+    store.advanceSchedule("available", 300, "run_last");
+    store.putSchedule({
+      name: "missing",
+      workflowRef: "wf_sha256_schedule_missing",
+      inputJson: null,
+      scheduleTarget: null,
+      intervalMs: 120_000,
+      nextFireMs: 400,
+    });
+    store.disableScheduleWithError("missing", "{not-json", 500);
+    store.db
+      .query("DELETE FROM workflow_definitions WHERE hash = ?")
+      .run("wf_sha256_schedule_missing");
+
+    expect(api.listSchedules().map((schedule) => schedule.name)).toEqual(["available", "missing"]);
+    expect(api.listSchedules({ includeDisabled: false }).map((schedule) => schedule.name)).toEqual([
+      "available",
+    ]);
+    expect(api.listSchedules()[0]).toMatchObject({
+      name: "available",
+      definitionState: "available",
+      workflowName: "displayable",
+      workflowKind: "source",
+      lastRunId: "run_last",
+      lastRunStatus: "failed",
+      lastError: { kind: "none" },
+    });
+    expect(api.listSchedules()[1]).toMatchObject({
+      name: "missing",
+      definitionState: "missing",
+      workflowName: null,
+      workflowKind: null,
+      lastError: { kind: "parse-error", raw: "{not-json" },
+    });
+
+    const withoutSource = api.getSchedule({ name: "available" });
+    expect(withoutSource).toMatchObject({ input: { n: 1 }, inputJson: '{"n":1}' });
+    expect(withoutSource && "source" in withoutSource).toBe(false);
+    expect(api.getSchedule({ name: "available", includeSource: true })?.source).toMatchObject({
+      kind: "workflow-definition-source",
+      definitionHash: "wf_sha256_schedule_available",
+      files: [{ path: "entry.ts", code: "export default async () => 1;\n", entry: true }],
+    });
+    expect(api.getSchedule({ name: "missing", includeSource: true })?.source).toBeNull();
+    expect(api.getSchedule({ name: "absent" })).toBeNull();
+  });
+
   test("definition source display remains journal-backed across cache deletion and GC", async () => {
     const store = JournalStore.memory();
     const api = keel(store);

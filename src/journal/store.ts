@@ -7,14 +7,12 @@
 
 import { Database } from "bun:sqlite";
 import { canonicalJson } from "../hash.ts";
-import { workspaceIdentity } from "../workspace/identity.ts";
 import { applyMigration } from "./migrations.ts";
 import { DDL, SCHEMA_VERSION } from "./schema.ts";
 import type {
   AgentProfileCatalogRow,
   AgentSessionRow,
   AgentSessionTurnRow,
-  AgentSessionWorkspaceRow,
   AgentWorkspaceRow,
   AgentWorkspaceStatus,
   ArtifactRow,
@@ -38,7 +36,6 @@ import type {
   WorkflowDefinitionRow,
 } from "./types.ts";
 
-const LEGACY_SESSION_WORKSPACE_IDENTITY_SDK_ABI_VERSION = 6;
 const SAVED_WORKFLOW_NAME_RE = /^[a-z][a-z0-9]*(?:[-_.][a-z0-9]+)*$/;
 
 export interface SavedWorkflowVersionView {
@@ -872,41 +869,6 @@ export class JournalStore {
       ...statuses,
       olderThanMs,
     ).map(mapAgentWorkspace);
-  }
-
-  getAgentSessionWorkspace(runId: string, agentKey: string): AgentSessionWorkspaceRow | null {
-    const row = this.getAgentWorkspaceByKey(runId, "agent_session", agentKey);
-    return row ? sessionWorkspaceView(row) : null;
-  }
-
-  listAgentSessionWorkspaces(runId: string): AgentSessionWorkspaceRow[] {
-    return this.listAgentWorkspaces(runId)
-      .filter((row) => row.ownerKind === "agent_session")
-      .map(sessionWorkspaceView);
-  }
-
-  listAllAgentSessionWorkspaces(): AgentSessionWorkspaceRow[] {
-    return this.listAllAgentWorkspaces()
-      .filter((row) => row.ownerKind === "agent_session")
-      .map(sessionWorkspaceView);
-  }
-
-  insertAgentSessionWorkspace(row: AgentSessionWorkspaceRow): void {
-    this.insertAgentWorkspace(agentWorkspaceFromSession(row));
-  }
-
-  deleteAgentSessionWorkspace(runId: string, agentKey: string): void {
-    const row = this.getAgentWorkspaceByKey(runId, "agent_session", agentKey);
-    if (row) this.deleteAgentWorkspace(runId, row.workspaceId);
-  }
-
-  updateAgentSessionWorkspace(
-    runId: string,
-    agentKey: string,
-    patch: Parameters<JournalStore["updateAgentWorkspace"]>[2],
-  ): void {
-    const row = this.getAgentWorkspaceByKey(runId, "agent_session", agentKey);
-    if (row) this.updateAgentWorkspace(runId, row.workspaceId, patch);
   }
 
   /** Append an event; returns the assigned per-run sequence number. */
@@ -2771,80 +2733,6 @@ function mapAgentWorkspace(r: RawAgentWorkspaceRow): AgentWorkspaceRow {
     mergedAtMs: r.merged_at_ms,
     discardedAtMs: r.discarded_at_ms,
     removedAtMs: r.removed_at_ms,
-  };
-}
-
-function sessionWorkspaceView(row: AgentWorkspaceRow): AgentSessionWorkspaceRow {
-  return {
-    runId: row.runId,
-    agentKey: row.key,
-    workspacePath: row.workspacePath,
-    sourcePath: row.sourcePath ?? row.workspacePath,
-    baseCommit: row.baseCommit,
-    status: row.status,
-    lastTurnKey: row.lastTurnKey,
-    lastTurnAttempt: row.lastTurnAttempt,
-    lastDiffEventSeq: row.lastDiffEventSeq,
-    lastErrorEventSeq: row.lastErrorEventSeq,
-    createdAtMs: row.createdAtMs,
-    updatedAtMs: row.updatedAtMs,
-    mergedAtMs: row.mergedAtMs,
-    discardedAtMs: row.discardedAtMs,
-  };
-}
-
-function agentWorkspaceFromSession(row: AgentSessionWorkspaceRow): AgentWorkspaceRow {
-  const identity = workspaceIdentity({
-    key: row.agentKey,
-    mode: "worktree",
-    sourcePath: row.sourcePath,
-    sourceRef: "HEAD",
-    retentionPolicy: "retain",
-    branchPolicy: "detached",
-    sdkAbiVersion: LEGACY_SESSION_WORKSPACE_IDENTITY_SDK_ABI_VERSION,
-  });
-  return {
-    runId: row.runId,
-    workspaceId: `ws_${row.agentKey}`,
-    mode: "worktree",
-    ownerKind: "agent_session",
-    key: row.agentKey,
-    lastAttempt: null,
-    retentionPolicy: "retain",
-    workspacePath: row.workspacePath,
-    sourceKind: "worktree-git",
-    sourcePath: row.sourcePath,
-    sourceUri: null,
-    sourceBare: null,
-    sourceMergeEligible: true,
-    suppliedPath: null,
-    sourceRef: "HEAD",
-    resolvedRef: null,
-    checkoutBranch: null,
-    worktreeCheckoutKind: "detached",
-    worktreeBranchOwned: false,
-    baseCommit: row.baseCommit,
-    copyBaselinePath: null,
-    creationErrorJson: null,
-    workspaceIdentityJson: identity.json,
-    workspaceIdentityHash: identity.hash,
-    owned: true,
-    status: row.status,
-    failureSeen: false,
-    lastTurnKey: row.lastTurnKey,
-    lastTurnAttempt: row.lastTurnAttempt,
-    activeHolderKind: null,
-    activeHolderKey: null,
-    activeHolderAttempt: null,
-    activeStartedAtMs: null,
-    lastDiffEventSeq: row.lastDiffEventSeq,
-    lastErrorEventSeq: row.lastErrorEventSeq,
-    cleanupErrorJson: null,
-    createdAtMs: row.createdAtMs,
-    updatedAtMs: row.updatedAtMs,
-    mergedAtMs: row.mergedAtMs,
-    discardedAtMs: row.discardedAtMs,
-    removedAtMs: null,
   };
 }
 

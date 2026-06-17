@@ -109,6 +109,8 @@
   `target`/`--target`, or configure a saved workflow default target.
 - RealmKernel launch boundaries now reject missing or blank run targets before
   persisting a run; CLI/client layers remain responsible for cwd defaults.
+- Obsolete `AgentSessionWorkspace` store APIs/types have been removed; runtime
+  code and tests use unified `AgentWorkspaceRow` records outside migrations.
 - The current capability auth contract no longer exposes deferred
   approval-scoped resources or saved-task actions; approval decisions remain
   admin-only until scoped approvals or saved tasks ship.

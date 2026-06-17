@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { JournalStore } from "./store.ts";
-import type { AgentSessionWorkspaceRow, NewRunRow } from "./types.ts";
+import type { AgentWorkspaceRow, NewRunRow } from "./types.ts";
 
 function newRun(runId: string): NewRunRow {
   return {
@@ -33,23 +33,50 @@ function unnamedRun(runId: string): NewRunRow {
 function workspaceRow(
   runId: string,
   agentKey: string,
-  overrides: Partial<AgentSessionWorkspaceRow> = {},
-): AgentSessionWorkspaceRow {
+  overrides: Partial<AgentWorkspaceRow> = {},
+): AgentWorkspaceRow {
   return {
     runId,
-    agentKey,
+    workspaceId: `ws_${agentKey}`,
+    mode: "worktree",
+    ownerKind: "agent_session",
+    key: agentKey,
+    lastAttempt: null,
+    retentionPolicy: "retain",
     workspacePath: `/tmp/${runId}/${agentKey}`,
+    sourceKind: "worktree-git",
     sourcePath: `/repo/${runId}`,
+    sourceUri: null,
+    sourceBare: null,
+    sourceMergeEligible: true,
+    suppliedPath: null,
+    sourceRef: "HEAD",
+    resolvedRef: null,
+    checkoutBranch: null,
+    worktreeCheckoutKind: "detached",
+    worktreeBranchOwned: false,
     baseCommit: `base-${runId}`,
+    copyBaselinePath: null,
+    creationErrorJson: null,
+    workspaceIdentityJson: "{}",
+    workspaceIdentityHash: `${runId}-${agentKey}`,
+    owned: true,
     status: "idle",
+    failureSeen: false,
     lastTurnKey: null,
     lastTurnAttempt: null,
+    activeHolderKind: null,
+    activeHolderKey: null,
+    activeHolderAttempt: null,
+    activeStartedAtMs: null,
     lastDiffEventSeq: null,
     lastErrorEventSeq: null,
+    cleanupErrorJson: null,
     createdAtMs: 100,
     updatedAtMs: 100,
     mergedAtMs: null,
     discardedAtMs: null,
+    removedAtMs: null,
     ...overrides,
   };
 }
@@ -334,23 +361,23 @@ describe("JournalStore (in-memory)", () => {
     expect(store.getSchedule("missing")).toBeNull();
   });
 
-  test("agent session workspaces insert, update, and list deterministically", () => {
+  test("agent workspaces insert, update, and list deterministically", () => {
     const r1b = workspaceRow("r1", "b", { workspacePath: "/work/r1/b", status: "creating" });
     const r1a = workspaceRow("r1", "a", { workspacePath: "/work/r1/a", status: "idle" });
     const r2a = workspaceRow("r2", "a", { workspacePath: "/work/r2/a", status: "pending_review" });
-    store.insertAgentSessionWorkspace(r1b);
-    store.insertAgentSessionWorkspace(r1a);
-    store.insertAgentSessionWorkspace(r2a);
+    store.insertAgentWorkspace(r1b);
+    store.insertAgentWorkspace(r1a);
+    store.insertAgentWorkspace(r2a);
 
-    expect(store.getAgentSessionWorkspace("r1", "a")).toEqual(r1a);
-    expect(store.listAgentSessionWorkspaces("r1").map((w) => w.agentKey)).toEqual(["a", "b"]);
-    expect(store.listAllAgentSessionWorkspaces().map((w) => `${w.runId}/${w.agentKey}`)).toEqual([
+    expect(store.getAgentWorkspaceByKey("r1", "agent_session", "a")).toEqual(r1a);
+    expect(store.listAgentWorkspaces("r1").map((w) => w.key)).toEqual(["a", "b"]);
+    expect(store.listAllAgentWorkspaces().map((w) => `${w.runId}/${w.key}`)).toEqual([
       "r1/a",
       "r1/b",
       "r2/a",
     ]);
 
-    store.updateAgentSessionWorkspace("r1", "a", {
+    store.updateAgentWorkspace("r1", "ws_a", {
       status: "diff_error",
       lastTurnKey: "turn-2",
       lastTurnAttempt: 2,
@@ -358,7 +385,7 @@ describe("JournalStore (in-memory)", () => {
       lastErrorEventSeq: 12,
       updatedAtMs: 250,
     });
-    expect(store.getAgentSessionWorkspace("r1", "a")).toEqual({
+    expect(store.getAgentWorkspaceByKey("r1", "agent_session", "a")).toEqual({
       ...r1a,
       status: "diff_error",
       lastTurnKey: "turn-2",
@@ -368,14 +395,14 @@ describe("JournalStore (in-memory)", () => {
       updatedAtMs: 250,
     });
 
-    store.updateAgentSessionWorkspace("r1", "a", { status: "merged", mergedAtMs: 300 });
-    expect(store.getAgentSessionWorkspace("r1", "a")?.mergedAtMs).toBe(300);
+    store.updateAgentWorkspace("r1", "ws_a", { status: "merged", mergedAtMs: 300 });
+    expect(store.getAgentWorkspaceByKey("r1", "agent_session", "a")?.mergedAtMs).toBe(300);
 
-    store.deleteAgentSessionWorkspace("r1", "b");
-    expect(store.getAgentSessionWorkspace("r1", "b")).toBeNull();
+    store.deleteAgentWorkspace("r1", "ws_b");
+    expect(store.getAgentWorkspaceByKey("r1", "agent_session", "b")).toBeNull();
   });
 
-  test("agent session workspace status helpers transition only intended lifecycle states", () => {
+  test("agent workspace status helpers transition only intended lifecycle states", () => {
     for (const status of [
       "creating",
       "active",
@@ -386,19 +413,29 @@ describe("JournalStore (in-memory)", () => {
       "diff_error",
       "abandoned",
     ] as const) {
-      store.insertAgentSessionWorkspace(workspaceRow("r", status, { status, updatedAtMs: 100 }));
+      store.insertAgentWorkspace(workspaceRow("r", status, { status, updatedAtMs: 100 }));
     }
 
     store.reopenPendingReviewWorkspaces("r", 300);
-    expect(store.getAgentSessionWorkspace("r", "creating")?.status).toBe("creating");
-    expect(store.getAgentSessionWorkspace("r", "active")?.status).toBe("active");
-    expect(store.getAgentSessionWorkspace("r", "idle")?.status).toBe("idle");
-    expect(store.getAgentSessionWorkspace("r", "pending_review")?.status).toBe("idle");
-    expect(store.getAgentSessionWorkspace("r", "pending_review")?.updatedAtMs).toBe(300);
-    expect(store.getAgentSessionWorkspace("r", "diff_error")?.status).toBe("diff_error");
-    expect(store.getAgentSessionWorkspace("r", "merged")?.status).toBe("merged");
-    expect(store.getAgentSessionWorkspace("r", "discarded")?.status).toBe("discarded");
-    expect(store.getAgentSessionWorkspace("r", "abandoned")?.status).toBe("abandoned");
+    expect(store.getAgentWorkspaceByKey("r", "agent_session", "creating")?.status).toBe("creating");
+    expect(store.getAgentWorkspaceByKey("r", "agent_session", "active")?.status).toBe("active");
+    expect(store.getAgentWorkspaceByKey("r", "agent_session", "idle")?.status).toBe("idle");
+    expect(store.getAgentWorkspaceByKey("r", "agent_session", "pending_review")?.status).toBe(
+      "idle",
+    );
+    expect(store.getAgentWorkspaceByKey("r", "agent_session", "pending_review")?.updatedAtMs).toBe(
+      300,
+    );
+    expect(store.getAgentWorkspaceByKey("r", "agent_session", "diff_error")?.status).toBe(
+      "diff_error",
+    );
+    expect(store.getAgentWorkspaceByKey("r", "agent_session", "merged")?.status).toBe("merged");
+    expect(store.getAgentWorkspaceByKey("r", "agent_session", "discarded")?.status).toBe(
+      "discarded",
+    );
+    expect(store.getAgentWorkspaceByKey("r", "agent_session", "abandoned")?.status).toBe(
+      "abandoned",
+    );
 
     expect(
       store

@@ -168,25 +168,6 @@ export interface AgentWorkspaceRow {
   removedAtMs: number | null;
 }
 
-export type AgentSessionWorkspaceStatus = AgentWorkspaceStatus;
-
-export interface AgentSessionWorkspaceRow {
-  runId: string;
-  agentKey: string;
-  workspacePath: string;
-  sourcePath: string;
-  baseCommit: string | null;
-  status: AgentSessionWorkspaceStatus;
-  lastTurnKey: string | null;
-  lastTurnAttempt: number | null;
-  lastDiffEventSeq: number | null;
-  lastErrorEventSeq: number | null;
-  createdAtMs: number;
-  updatedAtMs: number;
-  mergedAtMs: number | null;
-  discardedAtMs: number | null;
-}
-
 export type NewJournalRow = Omit<
   JournalRow,
   | "attempt"

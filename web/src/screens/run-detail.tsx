@@ -33,7 +33,7 @@ import { Inspector } from "../components/inspector";
 import { type RawEventFrame, RawEventList, Transcript } from "../components/transcript";
 import { WorkflowFlow } from "../components/workflow-flow";
 import { useAsync } from "../hooks/use-async";
-import { flowRuntimeFromEvents } from "../lib/workflow-flow-live";
+import { flowPhaseFromEvents, flowRuntimeFromEvents } from "../lib/workflow-flow-live";
 
 type RunTab =
   | "overview"
@@ -295,7 +295,7 @@ function renderTab(
         <WorkflowFlow
           flow={detail.flow}
           nodes={detail.run.nodes}
-          phase={detail.run.phase}
+          phase={flowPhaseFromEvents(events) ?? detail.run.phase}
           runStatus={detail.run.status}
           runtime={flowRuntimeFromEvents(events)}
         />
@@ -627,6 +627,18 @@ function applyLiveProjection(
 
   for (const event of liveEvents) {
     if (event.kind !== "durable") continue;
+    if (event.type === "phase") {
+      const title = eventPayloadString(event.payload, "title");
+      if (!title) continue;
+      const projected = mutable();
+      if (projected.run) {
+        projected.run = {
+          ...projected.run,
+          phase: title,
+        };
+      }
+      continue;
+    }
     if (event.type === "run.parked") {
       const parked = parkedPayload(event.payload);
       if (!parked) continue;
@@ -678,6 +690,12 @@ function applyLiveProjection(
     }
   }
   return next ?? detail;
+}
+
+function eventPayloadString(payload: unknown, property: string): string | null {
+  if (!payload || typeof payload !== "object" || !(property in payload)) return null;
+  const value = (payload as Record<string, unknown>)[property];
+  return typeof value === "string" && value.length > 0 ? value : null;
 }
 
 function parkedPayload(

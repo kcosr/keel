@@ -191,18 +191,19 @@ export function layoutFlow(flow: WorkflowFlowView, runtime: Runtime): FlowLayout
     }
     if (op.kind === "phase") {
       const id = op.id;
-      const tone = phaseTone(phaseTitle(op), phaseOrder, currentPhaseIdx, runtime.finished);
+      const state = phaseState(phaseTitle(op), phaseOrder, currentPhaseIdx, runtime.finished);
       nodes.push({
         id,
         kind: "phase",
         op,
         label: phaseTitle(op),
-        tone,
+        tone: toneForRuntimeState(state),
         x: PAD,
         y,
         w: width - PAD * 2,
         h: PHASE_H,
-        matched: currentPhaseIdx >= 0,
+        matched: state !== "not-started",
+        state,
       });
       settlePrev(id);
       prevId = id;
@@ -276,10 +277,12 @@ function matchOp(
 ): OpMatch {
   if (op.kind === "phase") {
     return {
-      tone: phaseTone(phaseTitle(op), phaseOrder, currentPhaseIdx, runtime.finished),
+      tone: toneForRuntimeState(
+        phaseState(phaseTitle(op), phaseOrder, currentPhaseIdx, runtime.finished),
+      ),
       count: 0,
       matched: true,
-      state: runtime.finished ? "completed" : "not-started",
+      state: phaseState(phaseTitle(op), phaseOrder, currentPhaseIdx, runtime.finished),
     };
   }
   if (op.kind === "return") {
@@ -392,13 +395,18 @@ function toneForRuntimeState(state: FlowRuntimeState): Tone {
   }
 }
 
-function phaseTone(title: string, order: string[], currentIdx: number, finished: boolean): Tone {
-  if (finished) return "success";
-  if (currentIdx < 0) return "neutral";
+function phaseState(
+  title: string,
+  order: string[],
+  currentIdx: number,
+  finished: boolean,
+): FlowRuntimeState {
+  if (finished) return "completed";
+  if (currentIdx < 0) return "not-started";
   const idx = order.indexOf(title);
-  if (idx < currentIdx) return "success";
+  if (idx < currentIdx) return "completed";
   if (idx === currentIdx) return "running";
-  return "neutral";
+  return "not-started";
 }
 
 function opLabel(op: WorkflowFlowOperation): string {

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import type { WorkflowFlowOperation, WorkflowFlowView } from "../api/types";
+import type { NodeView, WorkflowFlowOperation, WorkflowFlowView } from "../api/types";
 import { layoutFlow } from "./workflow-flow";
 import type { FlowRuntimeOverrides } from "./workflow-flow-live";
 
@@ -75,4 +75,70 @@ describe("layoutFlow", () => {
       state: "blocked",
     });
   });
+
+  test("marks current phase running and prior phases completed from live phase", () => {
+    const flow: WorkflowFlowView = {
+      entry: { name: null, async: true, params: [] },
+      diagnostics: [],
+      operations: [
+        phase("parallel inputs"),
+        op("proposal"),
+        phase("synthesis"),
+        op("merge"),
+        phase("approval"),
+      ],
+    };
+
+    const layout = layoutFlow(flow, { nodes: [], phase: "synthesis", finished: false });
+    const byId = new Map(layout.nodes.map((node) => [node.id, node]));
+
+    expect(byId.get("phase-parallel-inputs")).toMatchObject({
+      tone: "success",
+      state: "completed",
+    });
+    expect(byId.get("phase-synthesis")).toMatchObject({
+      tone: "running",
+      state: "running",
+    });
+    expect(byId.get("phase-approval")).toMatchObject({
+      tone: "neutral",
+      state: "not-started",
+    });
+  });
+
+  test("treats pending projection nodes as running when keyed to an operation", () => {
+    const flow: WorkflowFlowView = {
+      entry: { name: null, async: true, params: [] },
+      diagnostics: [],
+      operations: [op("proposal")],
+    };
+    const nodes: NodeView[] = [
+      {
+        stableKey: "proposal",
+        effectType: "effectful",
+        status: "pending",
+        attempt: 1,
+        startedAtMs: 10,
+        dependsOn: [],
+        artifactBacked: false,
+      },
+    ];
+
+    const layout = layoutFlow(flow, { nodes, phase: null, finished: false });
+
+    expect(layout.nodes.find((node) => node.id === "proposal")).toMatchObject({
+      tone: "running",
+      matched: true,
+      state: "running",
+    });
+  });
 });
+
+function phase(title: string): WorkflowFlowOperation {
+  return {
+    id: `phase-${title.replaceAll(" ", "-")}`,
+    kind: "phase",
+    title: { kind: "literal", text: `"${title}"`, static: true, value: title },
+    containers: [],
+  };
+}

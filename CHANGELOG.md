@@ -171,6 +171,8 @@
 - The web run-detail Flow tab now applies keyed live event state while watching
   a run, so matching operations can update to running, blocked, completed, or
   failed without waiting for a full run projection refresh.
+- The web run-detail Flow tab now applies live phase events to the wide phase
+  rows and subtly pulses running or blocked operations/phases while watching.
 - The web run-detail Graph tab now renders projection nodes as an interactive
   flowchart — node boxes laid out in dependency columns, connected by SVG edges,
   with status colouring, dashed pending nodes, click-to-select node detail, and

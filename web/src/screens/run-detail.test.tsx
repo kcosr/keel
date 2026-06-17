@@ -155,6 +155,34 @@ describe("RunDetailScreen", () => {
     expect((await screen.findAllByText("approve-review")).length).toBeGreaterThan(0);
     expect(screen.getByText("keel approve run_1 approve-review")).toBeInTheDocument();
   });
+
+  test("projects live phase events without refetching detail", async () => {
+    const watched: WatchRunEventsOptions[] = [];
+    const client = {
+      getRun: vi.fn(async () => detail()),
+      watchRunEvents: vi.fn((_runId: string, opts: WatchRunEventsOptions) => {
+        watched.push(opts);
+        return vi.fn();
+      }),
+    } as unknown as KeelWebClient;
+
+    render(<RunDetailScreen client={client} runId="run_1" refreshKey={0} />);
+
+    await screen.findByText("cursor 5");
+    fireEvent.click(screen.getByRole("button", { name: "Watch live" }));
+    await waitFor(() => expect(client.watchRunEvents).toHaveBeenCalledTimes(1));
+
+    act(() => {
+      watched[0]?.onFrame({
+        event: "event",
+        data: durable(6, "phase", { title: "synthesis" }),
+        raw: "event: event",
+      });
+    });
+
+    await waitFor(() => expect(client.getRun).toHaveBeenCalledTimes(1));
+    expect(screen.getAllByText("synthesis").length).toBeGreaterThan(0);
+  });
 });
 
 function detail(seq = 5): RunDetailResponse {

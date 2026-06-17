@@ -1,8 +1,18 @@
 import { describe, expect, test } from "vitest";
 import type { EventStreamFrame } from "../api/types";
-import { flowRuntimeFromEvents } from "./workflow-flow-live";
+import { flowPhaseFromEvents, flowRuntimeFromEvents } from "./workflow-flow-live";
 
 describe("flowRuntimeFromEvents", () => {
+  test("returns the latest streamed phase title", () => {
+    const phase = flowPhaseFromEvents([
+      durable(1, "phase", { title: "parallel inputs" }),
+      ephemeral("agent.event", { key: "proposal", event: { type: "text", data: "draft" } }),
+      durable(2, "phase", { title: "synthesis" }),
+    ]);
+
+    expect(phase).toBe("synthesis");
+  });
+
   test("derives running, blocked, resumed, and completed states from keyed events", () => {
     const states = flowRuntimeFromEvents([
       ephemeral("agent.event", { key: "proposal", event: { type: "text", data: "draft" } }),

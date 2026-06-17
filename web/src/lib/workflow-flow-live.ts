@@ -9,6 +9,15 @@ export interface FlowRuntimeOverride {
 
 export type FlowRuntimeOverrides = Map<string, FlowRuntimeOverride>;
 
+export function flowPhaseFromEvents(events: EventStreamFrame[]): string | null {
+  let phase: string | null = null;
+  for (const event of events) {
+    if (event.kind === "control" || event.type !== "phase") continue;
+    phase = payloadString(event.payload, "title") ?? phase;
+  }
+  return phase;
+}
+
 export function flowRuntimeFromEvents(events: EventStreamFrame[]): FlowRuntimeOverrides {
   const states: FlowRuntimeOverrides = new Map();
   const blockedKeys = new Set<string>();

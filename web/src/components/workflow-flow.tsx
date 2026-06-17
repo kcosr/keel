@@ -196,7 +196,9 @@ function FlowNodeBox({
     return (
       <button
         type="button"
-        className={`gphase gphase-${node.tone}${selected ? " is-selected" : ""}`}
+        className={`gphase gphase-${node.tone}${activeClass(node)}${
+          selected ? " is-selected" : ""
+        }`}
         style={style}
         onClick={onSelect}
       >
@@ -227,9 +229,9 @@ function FlowNodeBox({
   return (
     <button
       type="button"
-      className={`gnode gnode-${node.tone}${node.matched ? "" : " is-unmatched"}${
-        selected ? " is-selected" : ""
-      }`}
+      className={`gnode gnode-${node.tone}${activeClass(node)}${
+        node.matched ? "" : " is-unmatched"
+      }${selected ? " is-selected" : ""}`}
       style={style}
       onClick={onSelect}
       title={node.label}
@@ -246,6 +248,10 @@ function FlowNodeBox({
       </span>
     </button>
   );
+}
+
+function activeClass(node: FlowNode): string {
+  return node.state === "running" || node.state === "blocked" ? " is-live-active" : "";
 }
 
 function FlowDetail({ node }: { node: FlowNode }) {

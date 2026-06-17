@@ -25,6 +25,10 @@ export interface ResolvedToolPolicy {
   capabilities: Capabilities;
 }
 
+export interface ToolPolicyResolutionOptions {
+  path?: string;
+}
+
 export const CAPABILITY_KEYS = [
   "fs",
   "network",
@@ -61,12 +65,15 @@ export function resolveCapabilities(spec: {
   return resolveToolPolicy(spec).capabilities;
 }
 
-export function resolveToolPolicy(spec: {
-  capabilities?: Partial<Capabilities>;
-  toolPolicy?: ToolPolicy;
-  allowTools?: string[];
-  denyTools?: string[];
-}): ResolvedToolPolicy {
+export function resolveToolPolicy(
+  spec: {
+    capabilities?: Partial<Capabilities>;
+    toolPolicy?: ToolPolicy;
+    allowTools?: string[];
+    denyTools?: string[];
+  },
+  opts: ToolPolicyResolutionOptions = {},
+): ResolvedToolPolicy {
   const toolPolicy = spec.toolPolicy;
   const baseCaps =
     toolPolicy !== undefined
@@ -74,8 +81,11 @@ export function resolveToolPolicy(spec: {
       : spec.capabilities
         ? capabilitiesFromPartial(spec.capabilities)
         : capabilitiesForToolPolicy(DEFAULT_TOOL_POLICY);
-  const allowTools = normalizeToolList(spec.allowTools);
-  const denyTools = normalizeToolList(spec.denyTools);
+  const allowTools = normalizeRuntimeToolList(
+    spec.allowTools,
+    toolListPath(opts.path, "allowTools"),
+  );
+  const denyTools = normalizeRuntimeToolList(spec.denyTools, toolListPath(opts.path, "denyTools"));
   const resolvedPolicy =
     toolPolicy ?? (spec.capabilities ? toolPolicyForCapabilities(baseCaps) : DEFAULT_TOOL_POLICY);
   rejectUnrestrictedAdjustments({ toolPolicy: resolvedPolicy, allowTools, denyTools });
@@ -87,16 +97,22 @@ export function resolveToolPolicy(spec: {
   };
 }
 
-export function resolveInvocationToolPolicy(spec: {
-  capabilities?: Capabilities;
-  toolPolicy?: ToolPolicy;
-  allowTools?: string[];
-  denyTools?: string[];
-}): ResolvedToolPolicy {
-  if (!spec.capabilities) return resolveToolPolicy(spec);
+export function resolveInvocationToolPolicy(
+  spec: {
+    capabilities?: Capabilities;
+    toolPolicy?: ToolPolicy;
+    allowTools?: string[];
+    denyTools?: string[];
+  },
+  opts: ToolPolicyResolutionOptions = {},
+): ResolvedToolPolicy {
+  if (!spec.capabilities) return resolveToolPolicy(spec, opts);
   const capabilities = cloneCapabilities(spec.capabilities);
-  const allowTools = normalizeToolList(spec.allowTools);
-  const denyTools = normalizeToolList(spec.denyTools);
+  const allowTools = normalizeRuntimeToolList(
+    spec.allowTools,
+    toolListPath(opts.path, "allowTools"),
+  );
+  const denyTools = normalizeRuntimeToolList(spec.denyTools, toolListPath(opts.path, "denyTools"));
   rejectUnrestrictedAdjustments({
     toolPolicy: spec.toolPolicy ?? toolPolicyForCapabilities(capabilities),
     allowTools,
@@ -368,18 +384,53 @@ function capabilitiesToClaudeTools(caps: Capabilities): string[] {
   return tools;
 }
 
-function normalizeToolList(tools: string[] | undefined): string[] {
-  if (!tools) return [];
+function normalizeRuntimeToolList(tools: string[] | undefined, path: string): string[] {
+  if (tools === undefined) return [];
+  return normalizeProviderToolList(tools, path);
+}
+
+function toolListPath(base: string | undefined, field: "allowTools" | "denyTools"): string {
+  return base ? `${base}.${field}` : field;
+}
+
+export function normalizeProviderToolList(value: unknown, path: string): string[] {
+  if (!Array.isArray(value)) throw new Error(`${path} must be an array`);
+  rejectArrayNonJsonKeys(value, path);
   const out: string[] = [];
   const seen = new Set<string>();
-  for (const raw of tools) {
+  for (let i = 0; i < value.length; i += 1) {
+    if (!(i in value)) throw new Error(`${path}[${i}] must not be a sparse array hole`);
+    const raw = value[i];
+    if (typeof raw !== "string" || raw.trim().length === 0) {
+      throw new Error(`${path}[${i}] must be a non-empty string`);
+    }
     const tool = raw.trim();
     const key = tool.toLowerCase();
-    if (!tool || seen.has(key)) continue;
+    if (seen.has(key)) throw new Error(`${path} contains duplicate tool "${tool}"`);
     seen.add(key);
     out.push(tool);
   }
   return out;
+}
+
+export function rejectArrayNonJsonKeys(value: unknown[], path: string): void {
+  for (const key of Reflect.ownKeys(value)) {
+    if (key === "length") continue;
+    if (typeof key === "symbol") throw new Error(`${path} must be JSON-serializable (symbol key)`);
+    if (!isArrayIndexKey(key, value.length)) {
+      throw new Error(`${path}.${key} must be JSON-serializable (array extra property)`);
+    }
+    const desc = Object.getOwnPropertyDescriptor(value, key);
+    if (!desc?.enumerable) {
+      throw new Error(`${path}[${key}] must be JSON-serializable (non-enumerable property)`);
+    }
+  }
+}
+
+function isArrayIndexKey(key: string, length: number): boolean {
+  if (!/^(0|[1-9][0-9]*)$/.test(key)) return false;
+  const n = Number(key);
+  return Number.isSafeInteger(n) && n >= 0 && n < length;
 }
 
 function normalizePiToolName(tool: string): string {

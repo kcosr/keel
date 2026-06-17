@@ -419,12 +419,15 @@ export class WorkflowCtx implements Ctx {
     });
     // Resolve capabilities identically to the realm path so the two front-ends
     // produce the same version hash for the same spec (identity parity, §11).
-    const tools = resolveToolPolicy({
-      ...(spec.capabilities ? { capabilities: spec.capabilities } : {}),
-      ...(spec.toolPolicy ? { toolPolicy: spec.toolPolicy } : {}),
-      ...(spec.allowTools ? { allowTools: spec.allowTools } : {}),
-      ...(spec.denyTools ? { denyTools: spec.denyTools } : {}),
-    });
+    const tools = resolveToolPolicy(
+      {
+        ...(spec.capabilities ? { capabilities: spec.capabilities } : {}),
+        ...(spec.toolPolicy ? { toolPolicy: spec.toolPolicy } : {}),
+        ...(spec.allowTools ? { allowTools: spec.allowTools } : {}),
+        ...(spec.denyTools ? { denyTools: spec.denyTools } : {}),
+      },
+      { path: `ctx.agent("${spec.key}")` },
+    );
     const caps = tools.capabilities;
     const workspaceHandle = this.resolveAgentWorkspaceHandle(spec.workspace);
     const workspaceId = workspaceHandle.id;

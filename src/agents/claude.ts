@@ -67,12 +67,15 @@ export class ClaudeProvider implements AgentProvider {
     if (invocation.reasoning) args.push("--effort", invocation.reasoning);
     args.push(
       ...resolvedToolPolicyToClaudeArgs(
-        resolveInvocationToolPolicy({
-          ...(invocation.capabilities ? { capabilities: invocation.capabilities } : {}),
-          ...(invocation.toolPolicy ? { toolPolicy: invocation.toolPolicy } : {}),
-          ...(invocation.allowTools ? { allowTools: invocation.allowTools } : {}),
-          ...(invocation.denyTools ? { denyTools: invocation.denyTools } : {}),
-        }),
+        resolveInvocationToolPolicy(
+          {
+            ...(invocation.capabilities ? { capabilities: invocation.capabilities } : {}),
+            ...(invocation.toolPolicy ? { toolPolicy: invocation.toolPolicy } : {}),
+            ...(invocation.allowTools ? { allowTools: invocation.allowTools } : {}),
+            ...(invocation.denyTools ? { denyTools: invocation.denyTools } : {}),
+          },
+          { path: `${this.name} agent "${invocation.key}"` },
+        ),
       ),
     );
     args.push("--", invocation.prompt);

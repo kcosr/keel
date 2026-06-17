@@ -62,12 +62,15 @@ export class PiProvider implements AgentProvider {
     const args = ["--mode", "rpc"];
     args.push(
       ...resolvedToolPolicyToPiArgs(
-        resolveInvocationToolPolicy({
-          ...(invocation.capabilities ? { capabilities: invocation.capabilities } : {}),
-          ...(invocation.toolPolicy ? { toolPolicy: invocation.toolPolicy } : {}),
-          ...(invocation.allowTools ? { allowTools: invocation.allowTools } : {}),
-          ...(invocation.denyTools ? { denyTools: invocation.denyTools } : {}),
-        }),
+        resolveInvocationToolPolicy(
+          {
+            ...(invocation.capabilities ? { capabilities: invocation.capabilities } : {}),
+            ...(invocation.toolPolicy ? { toolPolicy: invocation.toolPolicy } : {}),
+            ...(invocation.allowTools ? { allowTools: invocation.allowTools } : {}),
+            ...(invocation.denyTools ? { denyTools: invocation.denyTools } : {}),
+          },
+          { path: `${this.name} agent "${invocation.key}"` },
+        ),
       ),
     );
     if (invocation.model) args.push("--model", invocation.model);

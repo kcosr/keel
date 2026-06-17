@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   resolveInvocationToolPolicy,
+  resolveToolPolicy,
   resolvedToolPolicyToCodexParams,
   validateCapabilitiesDeclaration,
 } from "./capabilities.ts";
@@ -102,6 +103,39 @@ describe("Codex capability mapping", () => {
         process.cwd(),
       ),
     ).toThrow(/allowTools|denyTools/);
+  });
+
+  test("runtime tool lists reject invalid entries instead of normalizing them away", () => {
+    expect(() =>
+      resolveToolPolicy({ toolPolicy: "read-only", allowTools: ["bash", "BASH"] }),
+    ).toThrow(/allowTools contains duplicate tool "BASH"/);
+    expect(() => resolveToolPolicy({ toolPolicy: "read-only", denyTools: ["   "] })).toThrow(
+      /denyTools\[0\] must be a non-empty string/,
+    );
+    expect(() =>
+      resolveToolPolicy(
+        { toolPolicy: "read-only", allowTools: ["bash", "BASH"] },
+        { path: 'ctx.agent("review")' },
+      ),
+    ).toThrow(/ctx\.agent\("review"\)\.allowTools contains duplicate tool "BASH"/);
+    expect(() =>
+      resolveInvocationToolPolicy({
+        toolPolicy: "workspace-write",
+        capabilities: {
+          fs: "workspace-write",
+          network: "none",
+          shell: false,
+          secrets: [],
+        },
+        allowTools: new Array(1) as string[],
+      }),
+    ).toThrow(/allowTools\[0\] must not be a sparse array hole/);
+    expect(() =>
+      resolveInvocationToolPolicy({
+        toolPolicy: "read-only",
+        allowTools: "bash" as never,
+      }),
+    ).toThrow(/allowTools must be an array/);
   });
 
   test("unrestricted maps to Codex yolo params", () => {

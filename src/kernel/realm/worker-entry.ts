@@ -573,12 +573,15 @@ const ctx = Object.freeze({
       profileProviderConfig,
     });
     const schema = spec.schema as Schema<unknown> | undefined;
-    const tools = resolveToolPolicy({
-      ...(spec.capabilities ? { capabilities: spec.capabilities } : {}),
-      ...(spec.toolPolicy ? { toolPolicy: spec.toolPolicy } : {}),
-      ...(spec.allowTools ? { allowTools: spec.allowTools } : {}),
-      ...(spec.denyTools ? { denyTools: spec.denyTools } : {}),
-    });
+    const tools = resolveToolPolicy(
+      {
+        ...(spec.capabilities ? { capabilities: spec.capabilities } : {}),
+        ...(spec.toolPolicy ? { toolPolicy: spec.toolPolicy } : {}),
+        ...(spec.allowTools ? { allowTools: spec.allowTools } : {}),
+        ...(spec.denyTools ? { denyTools: spec.denyTools } : {}),
+      },
+      { path: `ctx.agent("${spec.key}")` },
+    );
     const caps = tools.capabilities;
     rejectRemovedWorkspaceFields(rawSpec, `ctx.agent("${spec.key}")`);
     const workspaceId = resolveWorkspaceId(spec.workspace);
@@ -691,12 +694,15 @@ const ctx = Object.freeze({
       profileName: rawSessionSpec.profile,
       profileProviderConfig,
     });
-    const tools = resolveToolPolicy({
-      ...(sessionSpec.capabilities ? { capabilities: sessionSpec.capabilities } : {}),
-      ...(sessionSpec.toolPolicy ? { toolPolicy: sessionSpec.toolPolicy } : {}),
-      ...(sessionSpec.allowTools ? { allowTools: sessionSpec.allowTools } : {}),
-      ...(sessionSpec.denyTools ? { denyTools: sessionSpec.denyTools } : {}),
-    });
+    const tools = resolveToolPolicy(
+      {
+        ...(sessionSpec.capabilities ? { capabilities: sessionSpec.capabilities } : {}),
+        ...(sessionSpec.toolPolicy ? { toolPolicy: sessionSpec.toolPolicy } : {}),
+        ...(sessionSpec.allowTools ? { allowTools: sessionSpec.allowTools } : {}),
+        ...(sessionSpec.denyTools ? { denyTools: sessionSpec.denyTools } : {}),
+      },
+      { path: `ctx.agentSession("${sessionSpec.key}")` },
+    );
     const caps = tools.capabilities;
     rejectRemovedWorkspaceFields(rawSessionSpec, `ctx.agentSession("${sessionSpec.key}")`);
     const workspaceId = resolveWorkspaceId(sessionSpec.workspace);

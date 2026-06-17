@@ -90,12 +90,15 @@ export class CodexProvider implements AgentProvider {
   async generate(invocation: AgentInvocation, hooks: AgentHooks): Promise<AgentResult> {
     const config = normalizeCodexProviderConfig(invocation.providerConfig);
     const cwd = requireInvocationCwd(invocation, this.name);
-    const resolved = resolveInvocationToolPolicy({
-      ...(invocation.capabilities ? { capabilities: invocation.capabilities } : {}),
-      ...(invocation.toolPolicy ? { toolPolicy: invocation.toolPolicy } : {}),
-      ...(invocation.allowTools ? { allowTools: invocation.allowTools } : {}),
-      ...(invocation.denyTools ? { denyTools: invocation.denyTools } : {}),
-    });
+    const resolved = resolveInvocationToolPolicy(
+      {
+        ...(invocation.capabilities ? { capabilities: invocation.capabilities } : {}),
+        ...(invocation.toolPolicy ? { toolPolicy: invocation.toolPolicy } : {}),
+        ...(invocation.allowTools ? { allowTools: invocation.allowTools } : {}),
+        ...(invocation.denyTools ? { denyTools: invocation.denyTools } : {}),
+      },
+      { path: `${this.name} agent "${invocation.key}"` },
+    );
     const codexCaps = resolvedToolPolicyToCodexParams(resolved, cwd);
     if (config.type !== "stdio" && Object.keys(invocation.env ?? {}).length > 0) {
       throw new Error(

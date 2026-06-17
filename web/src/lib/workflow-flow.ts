@@ -4,7 +4,12 @@
 // the journal projection. Parser-independent: it only consumes the IR shape.
 
 import type { NodeView, WorkflowFlowOperation, WorkflowFlowView } from "../api/types";
-import { type Tone, toneForStatus } from "../components/controls";
+import type { Tone } from "../components/controls";
+import type {
+  FlowRuntimeOverride,
+  FlowRuntimeOverrides,
+  FlowRuntimeState,
+} from "./workflow-flow-live";
 
 export const NODE_W = 216;
 export const NODE_H = 54;
@@ -30,6 +35,7 @@ export interface FlowNode {
   h: number;
   count?: number;
   matched: boolean;
+  state?: FlowRuntimeState;
 }
 
 export interface FlowEdge {
@@ -50,6 +56,7 @@ interface Runtime {
   nodes: NodeView[];
   phase: string | null;
   finished: boolean;
+  overrides?: FlowRuntimeOverrides;
 }
 
 interface Segment {
@@ -245,6 +252,7 @@ function opNode(
     h: NODE_H,
     count: match.count,
     matched: match.matched,
+    state: match.state,
   };
 }
 
@@ -257,6 +265,7 @@ interface OpMatch {
   tone: Tone;
   count: number;
   matched: boolean;
+  state: FlowRuntimeState;
 }
 
 function matchOp(
@@ -270,14 +279,55 @@ function matchOp(
       tone: phaseTone(phaseTitle(op), phaseOrder, currentPhaseIdx, runtime.finished),
       count: 0,
       matched: true,
+      state: runtime.finished ? "completed" : "not-started",
     };
   }
   if (op.kind === "return") {
-    return { tone: runtime.finished ? "success" : "neutral", count: 0, matched: runtime.finished };
+    return {
+      tone: runtime.finished ? "success" : "neutral",
+      count: 0,
+      matched: runtime.finished,
+      state: runtime.finished ? "completed" : "not-started",
+    };
+  }
+  const live = matchingOverride(op, runtime.overrides);
+  if (live) {
+    return {
+      tone: toneForRuntimeState(live.state),
+      count: live.count,
+      matched: true,
+      state: live.state,
+    };
   }
   const matches = matchingNodes(op, runtime.nodes);
-  if (matches.length === 0) return { tone: "neutral", count: 0, matched: false };
-  return { tone: aggregateTone(matches), count: matches.length, matched: true };
+  if (matches.length === 0) {
+    return { tone: "neutral", count: 0, matched: false, state: "not-started" };
+  }
+  const state = aggregateState(matches);
+  return { tone: toneForRuntimeState(state), count: matches.length, matched: true, state };
+}
+
+function matchingOverride(
+  op: WorkflowFlowOperation,
+  overrides: FlowRuntimeOverrides | undefined,
+): (FlowRuntimeOverride & { count: number }) | null {
+  if (!overrides || overrides.size === 0) return null;
+  const literal = staticKey(op);
+  if (literal) {
+    const exact = overrides.get(literal);
+    if (exact) return { ...exact, count: 1 };
+  }
+  const prefix = keyPrefix(op);
+  if (!prefix) return null;
+  const matches = [...overrides.entries()].filter(
+    ([key]) =>
+      key === prefix ||
+      key.startsWith(`${prefix}:`) ||
+      key.startsWith(`${prefix}-`) ||
+      key.startsWith(`${prefix}.`),
+  );
+  if (matches.length === 0) return null;
+  return { ...aggregateOverrides(matches.map(([, override]) => override)), count: matches.length };
 }
 
 function matchingNodes(op: WorkflowFlowOperation, nodes: NodeView[]): NodeView[] {
@@ -311,10 +361,35 @@ function keyPrefix(op: WorkflowFlowOperation): string | null {
   return literal?.[1] ?? null;
 }
 
-function aggregateTone(nodes: NodeView[]): Tone {
+function aggregateState(nodes: NodeView[]): FlowRuntimeState {
   if (nodes.some((node) => node.status === "failed")) return "failed";
-  if (nodes.every((node) => node.status === "completed")) return "success";
+  if (nodes.every((node) => node.status === "completed")) return "completed";
+  if (nodes.some((node) => String(node.status).startsWith("waiting"))) return "blocked";
   return "running";
+}
+
+function aggregateOverrides(overrides: FlowRuntimeOverride[]): FlowRuntimeOverride {
+  if (overrides.some((override) => override.state === "failed")) return { state: "failed" };
+  const blocked = overrides.find((override) => override.state === "blocked");
+  if (blocked) return blocked;
+  if (overrides.some((override) => override.state === "running")) return { state: "running" };
+  if (overrides.every((override) => override.state === "completed")) return { state: "completed" };
+  return { state: "not-started" };
+}
+
+function toneForRuntimeState(state: FlowRuntimeState): Tone {
+  switch (state) {
+    case "completed":
+      return "success";
+    case "running":
+      return "running";
+    case "blocked":
+      return "waiting";
+    case "failed":
+      return "failed";
+    default:
+      return "neutral";
+  }
 }
 
 function phaseTone(title: string, order: string[], currentIdx: number, finished: boolean): Tone {

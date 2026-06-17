@@ -1,11 +1,16 @@
 import { describe, expect, test } from "vitest";
 import type { WorkflowFlowOperation, WorkflowFlowView } from "../api/types";
 import { layoutFlow } from "./workflow-flow";
+import type { FlowRuntimeOverrides } from "./workflow-flow-live";
 
-function op(id: string, parallelLane: number): WorkflowFlowOperation {
+function op(
+  id: string,
+  parallelLane = 0,
+  kind: WorkflowFlowOperation["kind"] = "step",
+): WorkflowFlowOperation {
   return {
     id,
-    kind: "step",
+    kind,
     key: { kind: "literal", text: `"${id}"`, static: true, value: id },
     containers: ["parallel"],
     parallelLane,
@@ -43,5 +48,31 @@ describe("layoutFlow", () => {
     expect(layout.edges).toContainEqual(
       expect.objectContaining({ from: "review", to: "approve-review", kind: "seq" }),
     );
+  });
+
+  test("uses live runtime overrides before projection nodes are refreshed", () => {
+    const flow: WorkflowFlowView = {
+      entry: { name: null, async: true, params: [] },
+      diagnostics: [],
+      operations: [op("proposal", 0, "agent"), op("approve-proposal", 0, "human")],
+    };
+    const overrides: FlowRuntimeOverrides = new Map([
+      ["proposal", { state: "running" }],
+      ["approve-proposal", { state: "blocked", reason: "human" }],
+    ]);
+
+    const layout = layoutFlow(flow, { nodes: [], phase: null, finished: false, overrides });
+    const byId = new Map(layout.nodes.map((node) => [node.id, node]));
+
+    expect(byId.get("proposal")).toMatchObject({
+      tone: "running",
+      matched: true,
+      state: "running",
+    });
+    expect(byId.get("approve-proposal")).toMatchObject({
+      tone: "waiting",
+      matched: true,
+      state: "blocked",
+    });
   });
 });

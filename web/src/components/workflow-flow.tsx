@@ -15,6 +15,7 @@ import {
 import { useMemo, useState } from "react";
 import type { NodeView, RunStatus, WorkflowFlowOperation, WorkflowFlowView } from "../api/types";
 import { type FlowNode, layoutFlow } from "../lib/workflow-flow";
+import type { FlowRuntimeOverrides } from "../lib/workflow-flow-live";
 import { StatusPill } from "./controls";
 
 const OP_ICON: Record<string, LucideIcon> = {
@@ -40,16 +41,18 @@ export function WorkflowFlow({
   nodes,
   phase,
   runStatus,
+  runtime,
 }: {
   flow: WorkflowFlowView;
   nodes: NodeView[];
   phase: string | null;
   runStatus: RunStatus;
+  runtime?: FlowRuntimeOverrides;
 }) {
   const finished = TERMINAL.has(runStatus);
   const layout = useMemo(
-    () => layoutFlow(flow, { nodes, phase, finished }),
-    [flow, nodes, phase, finished],
+    () => layoutFlow(flow, { nodes, phase, finished, overrides: runtime }),
+    [flow, nodes, phase, finished, runtime],
   );
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [zoom, setZoom] = useState(1);
@@ -268,7 +271,7 @@ function FlowDetail({ node }: { node: FlowNode }) {
       <div className="graph-node-detail-head">
         <strong>{node.label}</strong>
         <StatusPill tone={node.tone} dot>
-          {node.matched ? statusLabel(node) : op.kind}
+          {statusLabel(node)}
         </StatusPill>
       </div>
       <div className="graph-node-detail-meta">
@@ -293,6 +296,18 @@ function FlowDetail({ node }: { node: FlowNode }) {
 }
 
 function statusLabel(node: FlowNode): string {
+  switch (node.state) {
+    case "completed":
+      return "completed";
+    case "failed":
+      return "failed";
+    case "running":
+      return "running";
+    case "blocked":
+      return "blocked";
+    case "not-started":
+      return "not started";
+  }
   switch (node.tone) {
     case "success":
       return "completed";

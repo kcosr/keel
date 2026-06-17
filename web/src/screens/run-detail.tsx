@@ -33,6 +33,7 @@ import { Inspector } from "../components/inspector";
 import { type RawEventFrame, RawEventList, Transcript } from "../components/transcript";
 import { WorkflowFlow } from "../components/workflow-flow";
 import { useAsync } from "../hooks/use-async";
+import { flowRuntimeFromEvents } from "../lib/workflow-flow-live";
 
 type RunTab =
   | "overview"
@@ -296,6 +297,7 @@ function renderTab(
           nodes={detail.run.nodes}
           phase={detail.run.phase}
           runStatus={detail.run.status}
+          runtime={flowRuntimeFromEvents(events)}
         />
       ) : (
         <EmptyState

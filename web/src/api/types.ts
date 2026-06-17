@@ -197,10 +197,54 @@ export interface RunDetailResponse {
   blockage: Blockage | null;
   workspaces: RunWorkspaceView[];
   source: WorkflowDefinitionSourceView | null;
+  flow: WorkflowFlowView | null;
   events: EventStreamFrame[];
   eventCursor: EventCursor | null;
   rawEvents: { href: string };
   availableCommands: Array<{ name: string; requiredAuthority: string }>;
+}
+
+export type WorkflowOperationKind =
+  | "phase"
+  | "step"
+  | "agent"
+  | "agentSession"
+  | "agentTurn"
+  | "sleep"
+  | "human"
+  | "signal"
+  | "return";
+
+export interface WorkflowExprSummary {
+  kind: string;
+  text: string;
+  static: boolean;
+  value?: unknown;
+}
+
+export interface WorkflowFlowOperation {
+  id: string;
+  kind: WorkflowOperationKind;
+  key?: WorkflowExprSummary;
+  title?: WorkflowExprSummary;
+  prompt?: WorkflowExprSummary;
+  provider?: WorkflowExprSummary;
+  model?: WorkflowExprSummary;
+  profile?: WorkflowExprSummary;
+  toolPolicy?: WorkflowExprSummary;
+  reasoning?: WorkflowExprSummary;
+  target?: WorkflowExprSummary;
+  status?: WorkflowExprSummary;
+  result?: WorkflowExprSummary;
+  condition?: WorkflowExprSummary;
+  sessionRef?: string;
+  containers: string[];
+}
+
+export interface WorkflowFlowView {
+  entry: { name: string | null; async: boolean; params: string[] };
+  operations: WorkflowFlowOperation[];
+  diagnostics: Array<{ severity: "info" | "warning"; message: string }>;
 }
 
 export interface RunLaunchResult {

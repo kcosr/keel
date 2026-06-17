@@ -16,6 +16,7 @@ import type {
 } from "../rpc/contract.ts";
 import { normalizeEventCursorInput } from "../rpc/event-cursor.ts";
 import { type Blockage, MAX_RUN_SUMMARY_PAGE_LIMIT, isVisibleBlockage } from "../rpc/projection.ts";
+import { buildWorkflowFlow } from "./workflow-flow.ts";
 
 export const DEFAULT_WEB_HOST = "127.0.0.1";
 export const DEFAULT_WEB_PORT = 7879;
@@ -345,6 +346,7 @@ async function projectionRoute(
         blockage: isVisibleBlockage(blockage as Blockage) ? blockage : null,
         workspaces,
         source,
+        flow: buildWorkflowFlow(source as Parameters<typeof buildWorkflowFlow>[0]),
         events: eventTail.events,
         eventCursor: eventTail.cursor,
         rawEvents: { href: `/runs/${encodeURIComponent(runId)}/events` },

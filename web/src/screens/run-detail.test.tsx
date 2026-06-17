@@ -164,6 +164,7 @@ function detail(seq = 5): RunDetailResponse {
     blockage: null,
     workspaces: [],
     source: null,
+    flow: null,
     events: [],
     eventCursor: { kind: "after-seq", runId: "run_1", seq },
     rawEvents: { href: "/runs/run_1/events" },

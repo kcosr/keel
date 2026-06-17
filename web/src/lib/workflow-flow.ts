@@ -1,0 +1,376 @@
+// Top-down flow layout for the workflow "Flow" view. Turns the static
+// operation/container IR (parsed server-side from the workflow source) into
+// placed nodes + edges our SVG renderer draws, and overlays runtime status from
+// the journal projection. Parser-independent: it only consumes the IR shape.
+
+import type { NodeView, WorkflowFlowOperation, WorkflowFlowView } from "../api/types";
+import { type Tone, toneForStatus } from "../components/controls";
+
+export const NODE_W = 216;
+export const NODE_H = 54;
+export const PHASE_H = 34;
+export const GATE_H = 46;
+export const FAN_H = 24;
+const V_GAP = 30;
+const H_GAP = 26;
+const PAD = 26;
+
+export type FlowNodeKind = "op" | "phase" | "branch" | "fanout" | "join";
+
+export interface FlowNode {
+  id: string;
+  kind: FlowNodeKind;
+  op?: WorkflowFlowOperation;
+  label: string;
+  meta?: string;
+  tone: Tone;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  count?: number;
+  matched: boolean;
+}
+
+export interface FlowEdge {
+  id: string;
+  from: string;
+  to: string;
+  kind: "seq" | "skip" | "repeat" | "fan";
+}
+
+export interface FlowLayout {
+  nodes: FlowNode[];
+  edges: FlowEdge[];
+  width: number;
+  height: number;
+}
+
+interface Runtime {
+  nodes: NodeView[];
+  phase: string | null;
+  finished: boolean;
+}
+
+interface Segment {
+  start: number;
+  end: number;
+}
+
+export function layoutFlow(flow: WorkflowFlowView, runtime: Runtime): FlowLayout {
+  const ops = flow.operations;
+  const parallel = segments(ops, (op) => op.containers.includes("parallel"));
+  const branch = segments(ops, (op) => op.containers.includes("branch"));
+  const loops = segments(ops, isLoopOp).filter((seg) => !inAnySegment(parallel, seg.start));
+
+  const phaseOrder = ops.filter((op) => op.kind === "phase").map((op) => phaseTitle(op));
+  const currentPhaseIdx = runtime.phase ? phaseOrder.indexOf(runtime.phase) : -1;
+
+  const maxSiblings = Math.max(1, ...parallel.map((seg) => seg.end - seg.start + 1));
+  const width = PAD * 2 + maxSiblings * NODE_W + (maxSiblings - 1) * H_GAP;
+  const centerX = width / 2;
+
+  const nodes: FlowNode[] = [];
+  const edges: FlowEdge[] = [];
+  let y = PAD;
+  let prevId: string | null = null;
+  let pendingSkipFrom: string | null = null;
+  let edgeSeq = 0;
+  const link = (from: string | null, to: string, kind: FlowEdge["kind"]) => {
+    if (from) edges.push({ id: `e${edgeSeq++}`, from, to, kind });
+  };
+  const settlePrev = (id: string) => {
+    link(prevId, id, "seq");
+    if (pendingSkipFrom) {
+      edges.push({ id: `e${edgeSeq++}`, from: pendingSkipFrom, to: id, kind: "skip" });
+      pendingSkipFrom = null;
+    }
+  };
+
+  let i = 0;
+  while (i < ops.length) {
+    const pseg = parallel.find((seg) => seg.start === i);
+    const bseg = branch.find((seg) => seg.start === i);
+
+    if (pseg) {
+      const fanId = `fanout_${i}`;
+      const cx = centerX;
+      nodes.push(fanNode(fanId, "fanout", "parallel fan-out", cx, y));
+      settlePrev(fanId);
+      y += FAN_H + V_GAP;
+      const segOps = ops.slice(pseg.start, pseg.end + 1);
+      const totalW = segOps.length * NODE_W + (segOps.length - 1) * H_GAP;
+      let x = centerX - totalW / 2;
+      const segIds: string[] = [];
+      for (const op of segOps) {
+        const node = opNode(op, x, y, runtime, phaseOrder, currentPhaseIdx);
+        nodes.push(node);
+        segIds.push(node.id);
+        link(fanId, node.id, "fan");
+        x += NODE_W + H_GAP;
+      }
+      y += NODE_H + V_GAP;
+      const joinId = `join_${i}`;
+      nodes.push(fanNode(joinId, "join", "join", cx, y));
+      for (const id of segIds) link(id, joinId, "fan");
+      y += FAN_H + V_GAP;
+      prevId = joinId;
+      i = pseg.end + 1;
+      continue;
+    }
+
+    if (bseg) {
+      const gateId = `branch_${i}`;
+      nodes.push({
+        id: gateId,
+        kind: "branch",
+        label: conditionLabel(ops, bseg),
+        tone: "info",
+        x: centerX - NODE_W / 2,
+        y,
+        w: NODE_W,
+        h: GATE_H,
+        matched: false,
+      });
+      settlePrev(gateId);
+      y += GATE_H + V_GAP;
+      const segOps = ops.slice(bseg.start, bseg.end + 1);
+      let first: string | null = null;
+      let last: string | null = null;
+      for (const segOp of segOps) {
+        const node = opNode(segOp, centerX - NODE_W / 2, y, runtime, phaseOrder, currentPhaseIdx);
+        nodes.push(node);
+        if (!first) first = node.id;
+        if (last) link(last, node.id, "seq");
+        last = node.id;
+        y += NODE_H + V_GAP;
+      }
+      if (first) link(gateId, first, "seq");
+      pendingSkipFrom = gateId; // skip edge resolves to the next placed node
+      prevId = last;
+      i = bseg.end + 1;
+      continue;
+    }
+
+    const op = ops[i];
+    if (!op) {
+      i += 1;
+      continue;
+    }
+    if (op.kind === "phase") {
+      const id = op.id;
+      const tone = phaseTone(phaseTitle(op), phaseOrder, currentPhaseIdx, runtime.finished);
+      nodes.push({
+        id,
+        kind: "phase",
+        op,
+        label: phaseTitle(op),
+        tone,
+        x: PAD,
+        y,
+        w: width - PAD * 2,
+        h: PHASE_H,
+        matched: currentPhaseIdx >= 0,
+      });
+      settlePrev(id);
+      prevId = id;
+      y += PHASE_H + V_GAP;
+      i += 1;
+      continue;
+    }
+
+    const node = opNode(op, centerX - NODE_W / 2, y, runtime, phaseOrder, currentPhaseIdx);
+    nodes.push(node);
+    settlePrev(node.id);
+    prevId = node.id;
+    y += NODE_H + V_GAP;
+    i += 1;
+  }
+
+  for (const seg of loops) {
+    const firstOp = ops[seg.start];
+    const lastOp = lastNonReturn(ops, seg);
+    if (firstOp && lastOp) {
+      edges.push({ id: `e${edgeSeq++}`, from: lastOp.id, to: firstOp.id, kind: "repeat" });
+    }
+  }
+
+  return { nodes, edges, width, height: y - V_GAP + PAD };
+}
+
+function opNode(
+  op: WorkflowFlowOperation,
+  x: number,
+  y: number,
+  runtime: Runtime,
+  phaseOrder: string[],
+  currentPhaseIdx: number,
+): FlowNode {
+  const match = matchOp(op, runtime, phaseOrder, currentPhaseIdx);
+  return {
+    id: op.id,
+    kind: "op",
+    op,
+    label: opLabel(op),
+    meta: opMeta(op, match.count),
+    tone: match.tone,
+    x,
+    y,
+    w: NODE_W,
+    h: NODE_H,
+    count: match.count,
+    matched: match.matched,
+  };
+}
+
+function fanNode(id: string, kind: FlowNodeKind, label: string, cx: number, y: number): FlowNode {
+  const w = 132;
+  return { id, kind, label, tone: "neutral", x: cx - w / 2, y, w, h: FAN_H, matched: false };
+}
+
+interface OpMatch {
+  tone: Tone;
+  count: number;
+  matched: boolean;
+}
+
+function matchOp(
+  op: WorkflowFlowOperation,
+  runtime: Runtime,
+  phaseOrder: string[],
+  currentPhaseIdx: number,
+): OpMatch {
+  if (op.kind === "phase") {
+    return {
+      tone: phaseTone(phaseTitle(op), phaseOrder, currentPhaseIdx, runtime.finished),
+      count: 0,
+      matched: true,
+    };
+  }
+  if (op.kind === "return") {
+    return { tone: runtime.finished ? "success" : "neutral", count: 0, matched: runtime.finished };
+  }
+  const matches = matchingNodes(op, runtime.nodes);
+  if (matches.length === 0) return { tone: "neutral", count: 0, matched: false };
+  return { tone: aggregateTone(matches), count: matches.length, matched: true };
+}
+
+function matchingNodes(op: WorkflowFlowOperation, nodes: NodeView[]): NodeView[] {
+  const literal = staticKey(op);
+  if (literal) {
+    const exact = nodes.filter((node) => node.stableKey === literal);
+    if (exact.length > 0) return exact;
+  }
+  const prefix = keyPrefix(op);
+  if (prefix) {
+    return nodes.filter(
+      (node) =>
+        node.stableKey === prefix ||
+        node.stableKey.startsWith(`${prefix}:`) ||
+        node.stableKey.startsWith(`${prefix}-`) ||
+        node.stableKey.startsWith(`${prefix}.`),
+    );
+  }
+  return [];
+}
+
+function staticKey(op: WorkflowFlowOperation): string | null {
+  if (op.key?.static && typeof op.key.value === "string") return op.key.value;
+  return null;
+}
+
+function keyPrefix(op: WorkflowFlowOperation): string | null {
+  const text = op.key?.text;
+  if (!text) return null;
+  const literal = text.match(/["'`]([^"'`]+)["'`]/);
+  return literal?.[1] ?? null;
+}
+
+function aggregateTone(nodes: NodeView[]): Tone {
+  if (nodes.some((node) => node.status === "failed")) return "failed";
+  if (nodes.every((node) => node.status === "completed")) return "success";
+  return "running";
+}
+
+function phaseTone(title: string, order: string[], currentIdx: number, finished: boolean): Tone {
+  if (finished) return "success";
+  if (currentIdx < 0) return "neutral";
+  const idx = order.indexOf(title);
+  if (idx < currentIdx) return "success";
+  if (idx === currentIdx) return "running";
+  return "neutral";
+}
+
+function opLabel(op: WorkflowFlowOperation): string {
+  if (op.kind === "return") return "return";
+  const expr = op.title ?? op.key;
+  const text = (typeof expr?.value === "string" ? expr.value : undefined) ?? expr?.text ?? op.kind;
+  return text;
+}
+
+function opMeta(op: WorkflowFlowOperation, count: number): string {
+  const bits: string[] = [op.kind];
+  if (op.containers.some((c) => c.includes("loop"))) bits.push("loop");
+  else if (op.containers.includes("parallel")) bits.push("parallel");
+  if (count > 1) bits.push(`×${count}`);
+  if (op.provider?.value && typeof op.provider.value === "string")
+    bits.push(String(op.provider.value));
+  return bits.join(" · ");
+}
+
+function conditionLabel(ops: WorkflowFlowOperation[], seg: Segment): string {
+  for (let i = seg.start; i <= seg.end; i++) {
+    const condition = ops[i]?.condition;
+    if (condition?.text) {
+      const text = condition.text.length > 40 ? `${condition.text.slice(0, 37)}…` : condition.text;
+      return `${text}?`;
+    }
+  }
+  return "branch?";
+}
+
+function phaseTitle(op: WorkflowFlowOperation): string {
+  return (
+    (typeof op.title?.value === "string" ? op.title.value : undefined) ?? op.title?.text ?? "phase"
+  );
+}
+
+function isLoopOp(op: WorkflowFlowOperation): boolean {
+  return op.containers.some(
+    (c) => c === "loop" || c.includes("map loop") || c.includes("forEach loop"),
+  );
+}
+
+function segments(
+  ops: WorkflowFlowOperation[],
+  predicate: (op: WorkflowFlowOperation) => boolean,
+): Segment[] {
+  const out: Segment[] = [];
+  let start: number | null = null;
+  for (let i = 0; i < ops.length; i++) {
+    const op = ops[i];
+    if (op && predicate(op)) {
+      if (start === null) start = i;
+    } else if (start !== null) {
+      out.push({ start, end: i - 1 });
+      start = null;
+    }
+  }
+  if (start !== null) out.push({ start, end: ops.length - 1 });
+  return out;
+}
+
+function inAnySegment(segs: Segment[], index: number): boolean {
+  return segs.some((seg) => index >= seg.start && index <= seg.end);
+}
+
+function lastNonReturn(ops: WorkflowFlowOperation[], seg: Segment): WorkflowFlowOperation | null {
+  for (let i = seg.end; i >= seg.start; i--) {
+    const op = ops[i];
+    if (op && op.kind !== "return") return op;
+  }
+  return null;
+}
+
+// re-export for the renderer
+export type { WorkflowFlowOperation };

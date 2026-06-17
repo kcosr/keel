@@ -44,6 +44,7 @@ export function AppShell({
   health,
   credential,
   search,
+  searchEnabled = true,
   onCredentialChange,
   onSearchChange,
   onRefresh,
@@ -55,6 +56,7 @@ export function AppShell({
   health: HealthResponse | null;
   credential: string;
   search: string;
+  searchEnabled?: boolean;
   onCredentialChange(value: string): void;
   onSearchChange(value: string): void;
   onRefresh(): void;
@@ -100,15 +102,17 @@ export function AppShell({
             <h1>{title}</h1>
             {subtitle ? <div className="topbar-subtitle">{subtitle}</div> : null}
           </div>
-          <label className="search-box">
-            <Search size={15} />
-            <input
-              value={search}
-              onChange={(event) => onSearchChange(event.target.value)}
-              placeholder="Search"
-              aria-label="Search"
-            />
-          </label>
+          {searchEnabled ? (
+            <label className="search-box">
+              <Search size={15} />
+              <input
+                value={search}
+                onChange={(event) => onSearchChange(event.target.value)}
+                placeholder="Search"
+                aria-label="Search"
+              />
+            </label>
+          ) : null}
           <label className="credential-box">
             <KeyRound size={15} />
             <input

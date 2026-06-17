@@ -25,10 +25,12 @@ import { type Column, DenseTable } from "../components/dense-table";
 import { NodeTimeline, RunGraph } from "../components/graph";
 import { Inspector } from "../components/inspector";
 import { type RawEventFrame, RawEventList, Transcript } from "../components/transcript";
+import { WorkflowFlow } from "../components/workflow-flow";
 import { useAsync } from "../hooks/use-async";
 
 type RunTab =
   | "overview"
+  | "flow"
   | "timeline"
   | "transcript"
   | "report"
@@ -47,6 +49,7 @@ interface StreamState {
 
 const TABS: Array<{ id: RunTab; label: string }> = [
   { id: "overview", label: "Overview" },
+  { id: "flow", label: "Flow" },
   { id: "timeline", label: "Timeline" },
   { id: "transcript", label: "Transcript" },
   { id: "report", label: "Report" },
@@ -260,9 +263,23 @@ function renderTab(
                 Open transcript
               </button>
             </div>
-            <Transcript events={events.slice(-8)} />
+            <Transcript events={events.slice(-8)} compact />
           </section>
         </div>
+      );
+    case "flow":
+      return detail.flow ? (
+        <WorkflowFlow
+          flow={detail.flow}
+          nodes={detail.run.nodes}
+          phase={detail.run.phase}
+          runStatus={detail.run.status}
+        />
+      ) : (
+        <EmptyState
+          title="No workflow flow"
+          detail="The run did not capture parseable workflow source for a structural view."
+        />
       );
     case "timeline":
       return (
@@ -549,7 +566,7 @@ function RunDetailInspector({
           </section>
           <section className="inspector-section">
             <h3>Latest Transcript</h3>
-            <Transcript events={latestEvents} />
+            <Transcript events={latestEvents} compact />
           </section>
         </>
       ) : (
@@ -564,6 +581,7 @@ function tabCount(
   detail: RunDetailResponse,
   events: EventStreamFrame[],
 ): number | undefined {
+  if (tab === "flow") return detail.flow?.operations.length ?? 0;
   if (tab === "timeline") return detail.run?.nodes.length ?? 0;
   if (tab === "workspaces") return detail.workspaces.length;
   if (tab === "events" || tab === "transcript") return events.length;

@@ -153,7 +153,22 @@
   public status `interrupted` until an explicit `resume`, with durable
   `run.interrupted` audit events and best-effort active worker/provider abort.
 
+### Added
+- The web run-detail view has a new "Flow" tab that renders the workflow's
+  authored structure as an interactive flowchart in the console's own styling
+  (phases as bands, parallel fan-out/join markers, branch gates, loop repeat
+  edges) and overlays runtime status from the journal projection (per-operation
+  done/running/failed colouring, current phase, and map-loop cardinality). The
+  `keel web` transport parses the run's captured workflow source into the
+  operation/container IR the browser renders; the TypeScript parser stays on the
+  server so the browser bundle is unaffected.
+
 ### Changed
+- The web run-detail Graph tab now renders projection nodes as an interactive
+  flowchart — node boxes laid out in dependency columns, connected by SVG edges,
+  with status colouring, dashed pending nodes, click-to-select node detail, and
+  zoom controls — replacing the earlier lane/stage layout. It still shows the
+  empty state for runs that record no journal nodes.
 - Workflow-facing top-level agent `secrets` was replaced by
   `environment.secrets`; the bundled daemon now constructs the in-memory
   `SecretStore` by default, and missing run secret values fail the agent step
@@ -305,6 +320,21 @@
   `KEEL_CAP_DIR`.
 
 ### Fixed
+- Web UI layout and usability pass: transcript/event status pills no longer
+  stretch into oversized circles when a row grows tall (pills are pinned to
+  their intrinsic size), the run-detail tab bar scrolls horizontally instead of
+  clipping on narrow viewports, the detail inspector rail is now collapsible
+  (persisted) and the side-by-side layout gives the master pane more room in the
+  981-1320px band, empty-state cards no longer nest a card inside a card, code
+  and JSON panels use the light theme palette with shrink-to-fit JSON blocks,
+  the top-bar search box is hidden on screens that do not consume it, transcript
+  previews render a compact time/event/message view, muted text meets WCAG AA
+  contrast, and keyboard focus rings are visible on all custom controls.
+- Transcript `log` events now render their structured `data` payload as JSON
+  instead of `[object Object]`; long transcript messages truncate to a readable
+  length with the full text available on hover, and long identifiers in table
+  name cells (e.g. profile config hashes) truncate with an ellipsis instead of
+  overflowing into adjacent columns.
 - Codex remote app-server transports now accept Desktop app-server response and
   notification frames that omit the optional `jsonrpc: "2.0"` marker while still
   rejecting malformed frames.

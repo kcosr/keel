@@ -613,6 +613,10 @@ h3 {
   padding-top: 14px;
 }
 
+.run-detail-screen .tab-panel {
+  min-height: 0;
+}
+
 .table-wrap {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -1046,6 +1050,14 @@ h3 {
   gap: 11px;
 }
 
+.run-detail-screen .tab-panel > .workflow-flow-graph {
+  min-height: calc(100vh - 230px);
+}
+
+.run-detail-screen .tab-panel > .workflow-flow-graph .graph-canvas {
+  height: clamp(520px, calc(100vh - 290px), 760px);
+}
+
 .graph-empty {
   background: var(--surface-2);
   border: 1px dashed var(--border-strong);
@@ -1383,6 +1395,17 @@ h3 {
 .graph-hint {
   font-size: 12px;
   padding: 2px;
+}
+
+.graph-hint-overlay {
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  bottom: 12px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+  padding: 6px 8px;
+  position: absolute;
+  right: 12px;
 }
 
 .graph-deps {

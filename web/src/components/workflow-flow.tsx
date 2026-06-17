@@ -64,7 +64,7 @@ export function WorkflowFlow({
     setZoom(Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(next * 100) / 100)));
 
   return (
-    <div className="run-graph">
+    <div className="run-graph workflow-flow-graph">
       <div className="graph-summary">
         <StatusPill tone="info">{flow.operations.length} operations</StatusPill>
         {flow.entry.name ? <StatusPill tone="neutral">{flow.entry.name}</StatusPill> : null}
@@ -167,14 +167,13 @@ export function WorkflowFlow({
             <ZoomIn size={15} />
           </button>
         </div>
+        {selected?.op ? null : (
+          <div className="graph-hint graph-hint-overlay muted">
+            Select an operation to inspect its spec and runtime status.
+          </div>
+        )}
       </div>
-      {selected?.op ? (
-        <FlowDetail node={selected} />
-      ) : (
-        <div className="graph-hint muted">
-          Select an operation to inspect its spec and runtime status.
-        </div>
-      )}
+      {selected?.op ? <FlowDetail node={selected} /> : null}
     </div>
   );
 }

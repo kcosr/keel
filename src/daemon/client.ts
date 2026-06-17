@@ -186,7 +186,9 @@ export class DaemonClient {
   launchSavedWorkflow(req: LaunchSavedWorkflowRequest): Promise<RunLaunchResult> {
     return this.rpc("launchSavedWorkflow", {
       ...req,
-      clientDefaultTarget: clientRunTargetOrCwd(undefined, "launchSavedWorkflow"),
+      ...(req.target !== undefined
+        ? { target: clientRunTargetOrCwd(req.target, "launchSavedWorkflow") }
+        : {}),
     });
   }
   setSavedWorkflowDisabled(name: string, disabled: boolean): Promise<SavedWorkflowView> {
@@ -270,11 +272,15 @@ export class DaemonClient {
     intervalMs: number;
     firstFireMs?: number;
   }): Promise<{ ok: boolean }> {
+    const target =
+      req.target !== undefined
+        ? clientRunTargetOrCwd(req.target, "putSchedule")
+        : req.savedRef === undefined
+          ? clientRunTargetOrCwd(undefined, "putSchedule")
+          : undefined;
     return this.rpc("putSchedule", {
       ...req,
-      ...(req.target !== undefined
-        ? { target: clientRunTargetOrCwd(req.target, "putSchedule") }
-        : { clientDefaultTarget: clientRunTargetOrCwd(undefined, "putSchedule") }),
+      ...(target !== undefined ? { target } : {}),
     });
   }
   listSchedules(req: { includeDisabled?: boolean } = {}): Promise<ScheduleSummary[]> {

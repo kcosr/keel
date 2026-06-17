@@ -58,9 +58,9 @@ captures workflow source before sending it to the daemon:
 `target` is the daemon-resolvable run target used by the default direct
 workspace. Path-based CLI launches default it from the invoking cwd unless
 `--target` is provided. Saved workflow launches and saved-ref schedules resolve
-target in this order: explicit request target, saved workflow default target,
-then client cwd fallback. Raw RPC callers must provide a non-empty target where
-required by the gateway/daemon boundary.
+target in this order: explicit request target, then saved workflow default
+target. Raw RPC callers must provide a non-empty target where required by the
+gateway/daemon boundary.
 
 ## Authority Notes
 

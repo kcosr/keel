@@ -104,6 +104,9 @@
   `run.interrupted` audit events and best-effort active worker/provider abort.
 
 ### Changed
+- Saved workflow launches and saved-ref schedules no longer accept the
+  undocumented daemon RPC `clientDefaultTarget` wrapper field. Use explicit
+  `target`/`--target`, or configure a saved workflow default target.
 - The current capability auth contract no longer exposes deferred
   approval-scoped resources or saved-task actions; approval decisions remain
   admin-only until scoped approvals or saved tasks ship.

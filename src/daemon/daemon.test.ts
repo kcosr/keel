@@ -296,6 +296,15 @@ describe("daemon multi-client over the socket", () => {
         intervalMs: 60_000,
       });
       expect(blank.error?.message).toMatch(/non-empty target/);
+
+      const legacy = await rawAdminRpc(socketPath, "putSchedule", {
+        name: "legacy-target",
+        source: chainUrl.source,
+        input: null,
+        clientDefaultTarget: dir,
+        intervalMs: 60_000,
+      });
+      expect(legacy.error?.message).toMatch(/putSchedule requires target/);
     } finally {
       daemon.stop();
     }
@@ -741,6 +750,18 @@ describe("daemon multi-client over the socket", () => {
       await admin.setSavedWorkflowDisabled("disabled-name", true);
       await expect(admin.launchSavedWorkflow({ ref: { name: "disabled-name" } })).rejects.toThrow(
         /disabled/,
+      );
+      await admin.saveWorkflow({
+        name: "no-target",
+        source: chainUrl.source,
+      });
+      const legacyTarget = await rawAdminRpc(socketPath, "launchSavedWorkflow", {
+        ref: { name: "no-target" },
+        clientDefaultTarget: dir,
+      });
+      expect(legacyTarget.error?.message).toMatch(/launchSavedWorkflow requires target/);
+      await expect(admin.launchSavedWorkflow({ ref: { name: "no-target" } })).rejects.toThrow(
+        /launchSavedWorkflow requires target/,
       );
       admin.close();
     } finally {

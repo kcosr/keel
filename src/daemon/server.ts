@@ -62,7 +62,9 @@ class SocketGatewaySession implements GatewaySession {
   buf: string;
   private credential: string | null;
   private readonly cleanups = new Set<() => void>();
-  private writeChain: Promise<void> = Promise.resolve();
+  private readonly decoder = new TextDecoder();
+  private readonly writeQueue: string[] = [];
+  private drainingWrites = false;
 
   constructor(private readonly socket: Socket<undefined>) {
     this.buf = "";
@@ -98,14 +100,29 @@ class SocketGatewaySession implements GatewaySession {
     this.cleanups.clear();
   }
 
+  appendData(data: Buffer): void {
+    this.buf += this.decoder.decode(data, { stream: true });
+  }
+
   private writeFrame(frame: unknown): void {
-    const line = `${JSON.stringify(frame)}\n`;
-    this.writeChain = this.writeChain
-      .catch(() => {})
-      .then(() => {
-        this.socket.write(line);
-      });
-    void this.writeChain;
+    this.writeQueue.push(`${JSON.stringify(frame)}\n`);
+    this.drainWrites();
+  }
+
+  private drainWrites(): void {
+    if (this.drainingWrites) return;
+    this.drainingWrites = true;
+    queueMicrotask(() => {
+      try {
+        while (this.writeQueue.length > 0) {
+          const batch = this.writeQueue.splice(0).join("");
+          this.socket.write(batch);
+        }
+      } finally {
+        this.drainingWrites = false;
+        if (this.writeQueue.length > 0) this.drainWrites();
+      }
+    });
   }
 }
 
@@ -282,7 +299,7 @@ export class KeelDaemon {
   private onData(socket: GatewaySocket, data: Buffer): void {
     const session = socket.session;
     if (!session) return;
-    session.buf += data.toString("utf8");
+    session.appendData(data);
     let nl = session.buf.indexOf("\n");
     while (nl >= 0) {
       const line = session.buf.slice(0, nl);

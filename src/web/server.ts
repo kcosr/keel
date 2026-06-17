@@ -64,6 +64,9 @@ class GatewaySocket {
   private buf = "";
   private nextId = 1;
   private readonly pending = new Map<string, PendingRequest>();
+  private readonly decoder = new TextDecoder();
+  private readonly writeQueue: string[] = [];
+  private drainingWrites = false;
   private disconnected = false;
   onEvent: ((event: GatewayEventFrame) => void) | null = null;
   onClose: ((err: unknown) => void) | null = null;
@@ -97,6 +100,10 @@ class GatewaySocket {
     debugContext?: string,
   ): Promise<GatewayResponse> {
     return new Promise((resolve, reject) => {
+      if (this.disconnected || this.socket.destroyed) {
+        reject(new Error("daemon connection closed"));
+        return;
+      }
       const id = requestId ?? this.nextId++;
       const key = requestKey(id);
       const request: GatewayRequest = {
@@ -131,19 +138,20 @@ class GatewaySocket {
         }, 2_000);
       }
       this.pending.set(key, pending);
-      this.socket.write(`${JSON.stringify(request)}\n`);
+      this.enqueueWrite(`${JSON.stringify(request)}\n`);
     });
   }
 
   close(): void {
     this.onClose = null;
+    this.disconnected = true;
     this.socket.end();
     this.socket.destroy();
     this.failAll(new Error("daemon connection closed"));
   }
 
   private onData(chunk: Buffer | string): void {
-    this.buf += chunk.toString();
+    this.buf += typeof chunk === "string" ? chunk : this.decoder.decode(chunk, { stream: true });
     let nl = this.buf.indexOf("\n");
     while (nl >= 0) {
       const line = this.buf.slice(0, nl);
@@ -160,6 +168,36 @@ class GatewaySocket {
         }
       }
       nl = this.buf.indexOf("\n");
+    }
+  }
+
+  private enqueueWrite(line: string): void {
+    this.writeQueue.push(line);
+    this.drainWrites();
+  }
+
+  private drainWrites(): void {
+    if (this.drainingWrites) return;
+    this.drainingWrites = true;
+    void this.drainWritesAsync();
+  }
+
+  private async drainWritesAsync(): Promise<void> {
+    try {
+      while (!this.disconnected && this.writeQueue.length > 0) {
+        const batch = this.writeQueue.splice(0).join("");
+        await new Promise<void>((resolve, reject) => {
+          this.socket.write(batch, (err?: Error | null) => {
+            if (err) reject(err);
+            else resolve();
+          });
+        });
+      }
+    } catch (err) {
+      this.failAll(err, true);
+    } finally {
+      this.drainingWrites = false;
+      if (!this.disconnected && this.writeQueue.length > 0) this.drainWrites();
     }
   }
 

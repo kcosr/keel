@@ -833,7 +833,10 @@ provider implementation and tests, not in vendored reference artifacts.
 **Codex targets app-server JSON-RPC**, not a one-shot CLI JSONL mode. The Codex
 adapter can own a local stdio `codex app-server` subprocess or connect to a
 remote WebSocket / WebSocket-over-UDS app-server selected by
-`providerConfig.codex.transport`. Codex thread ids are the session tokens. The
+`providerConfig.codex.transport`. Optional `providerConfig.codex.serviceTier`
+is part of the selected provider config and therefore replay identity: omitted
+leaves Codex defaults in control, `"fast"` requests priority service, and
+`"normal"` forces standard routing. Codex thread ids are the session tokens. The
 capability mapping is intentionally fail-closed and dispatches on exact resolved
 capability shape, not only the `toolPolicy` label: `{ fs:'read', shell:false,
 network:'none' }` maps to Codex `read-only`; `{ fs:'workspace-write',

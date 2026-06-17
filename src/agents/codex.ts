@@ -24,6 +24,8 @@ export const CODEX_TURN_COMPLETION_TIMEOUT_MS = DEFAULT_AGENT_TIMEOUT_MS;
 export const CODEX_CLOSE_GRACE_MS = 1_000;
 export const CODEX_INTERRUPT_CONFIRM_MS = 2_000;
 export const CODEX_DEFAULT_TRANSPORT = Object.freeze({ type: "stdio" as const });
+export const CODEX_FAST_SERVICE_TIER_WIRE_VALUE = "priority";
+export const CODEX_NORMAL_SERVICE_TIER_WIRE_VALUE: null = null;
 
 const CODEX_CLIENT_INFO = Object.freeze({ name: "keel", title: "Keel", version: "0.0.0" });
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -33,6 +35,17 @@ export type CodexTransportConfig =
   | { type: "stdio" }
   | { type: "ws"; url: string }
   | { type: "uds"; path: string };
+
+export type CodexServiceTier = "fast" | "normal";
+type CodexServiceTierWireValue =
+  | typeof CODEX_FAST_SERVICE_TIER_WIRE_VALUE
+  | typeof CODEX_NORMAL_SERVICE_TIER_WIRE_VALUE;
+
+export interface NormalizedCodexProviderConfig {
+  transport: CodexTransportConfig;
+  serviceTier?: CodexServiceTier;
+  codexServiceTierParam?: CodexServiceTierWireValue;
+}
 
 export interface CodexProviderOptions {
   bin?: string;
@@ -89,6 +102,7 @@ export class CodexProvider implements AgentProvider {
 
   async generate(invocation: AgentInvocation, hooks: AgentHooks): Promise<AgentResult> {
     const config = normalizeCodexProviderConfig(invocation.providerConfig);
+    const transportConfig = config.transport;
     const cwd = requireInvocationCwd(invocation, this.name);
     const resolved = resolveInvocationToolPolicy(
       {
@@ -100,9 +114,9 @@ export class CodexProvider implements AgentProvider {
       { path: `${this.name} agent "${invocation.key}"` },
     );
     const codexCaps = resolvedToolPolicyToCodexParams(resolved, cwd);
-    if (config.type !== "stdio" && Object.keys(invocation.env ?? {}).length > 0) {
+    if (transportConfig.type !== "stdio" && Object.keys(invocation.env ?? {}).length > 0) {
       throw new Error(
-        `codex ${transportDescriptor(config)} transport cannot receive secret env values; first-cut Codex env injection is supported only for stdio`,
+        `codex ${transportDescriptor(transportConfig)} transport cannot receive secret env values; first-cut Codex env injection is supported only for stdio`,
       );
     }
 
@@ -113,7 +127,10 @@ export class CodexProvider implements AgentProvider {
     const rawLog = (stream: CodexRawLogStream, data: unknown): void => {
       this.rawLog(invocation.key, stream, data);
     };
-    rawLog("transport", { descriptor: transportDescriptor(config), config });
+    rawLog("transport", {
+      descriptor: transportDescriptor(transportConfig),
+      config: transportConfig,
+    });
     const transportContext = {
       bin: this.bin,
       cwd,
@@ -133,7 +150,7 @@ export class CodexProvider implements AgentProvider {
           removeOpenAbort = () => invocation.abortSignal?.removeEventListener("abort", onOpenAbort);
         })
       : null;
-    const openTransport = this.transportFactory.open(config, transportContext);
+    const openTransport = this.transportFactory.open(transportConfig, transportContext);
     void openTransport.then(
       (opened) => {
         if (abortedDuringOpen) void opened.close();
@@ -228,7 +245,7 @@ export class CodexProvider implements AgentProvider {
         transport,
         emit,
         invocation,
-        transportType: config.type,
+        transportType: transportConfig.type,
       }).then(
         () => rejectForAbort(new Error(`codex agent "${invocation.key}" aborted`)),
         (err) => rejectForAbort(err instanceof Error ? err : new Error(String(err))),
@@ -278,6 +295,9 @@ export class CodexProvider implements AgentProvider {
         client.request("turn/start", {
           threadId: state.threadId,
           input: [{ type: "text", text: invocation.prompt }],
+          ...(config.codexServiceTierParam !== undefined
+            ? { serviceTier: config.codexServiceTierParam }
+            : {}),
           ...codexCaps.turn,
         }),
       );
@@ -316,7 +336,7 @@ export class CodexProvider implements AgentProvider {
           client,
           transport,
           emit,
-          transportType: config.type,
+          transportType: transportConfig.type,
         });
       }
       throw err;
@@ -343,15 +363,28 @@ export class CodexProvider implements AgentProvider {
 
 export function normalizeCodexProviderConfig(
   value: ProviderConfigValue | undefined,
-): CodexTransportConfig {
-  if (value === undefined) return { ...CODEX_DEFAULT_TRANSPORT };
+): NormalizedCodexProviderConfig {
+  if (value === undefined) return { transport: { ...CODEX_DEFAULT_TRANSPORT } };
   if (!isPlainObject(value)) {
     throw invalidConfig("providerConfig.codex must be a plain JSON object");
   }
-  rejectUnknownKeys(value, ["transport"], "providerConfig.codex");
+  rejectUnknownKeys(value, ["transport", "serviceTier"], "providerConfig.codex");
   if (!hasOwn(value, "transport")) {
     throw invalidConfig("providerConfig.codex.transport is required");
   }
+  const serviceTier = hasOwn(value, "serviceTier")
+    ? normalizeCodexServiceTier(value.serviceTier)
+    : undefined;
+  const serviceTierConfig =
+    serviceTier === undefined
+      ? {}
+      : ({
+          serviceTier,
+          codexServiceTierParam:
+            serviceTier === "fast"
+              ? CODEX_FAST_SERVICE_TIER_WIRE_VALUE
+              : CODEX_NORMAL_SERVICE_TIER_WIRE_VALUE,
+        } satisfies Pick<NormalizedCodexProviderConfig, "serviceTier" | "codexServiceTierParam">);
   const transport = value.transport;
   if (!isPlainObject(transport)) {
     throw invalidConfig("providerConfig.codex.transport must be a plain JSON object");
@@ -364,7 +397,7 @@ export function normalizeCodexProviderConfig(
   }
   if (type === "stdio") {
     rejectUnknownKeys(transport, ["type"], "providerConfig.codex.transport");
-    return { type: "stdio" };
+    return { transport: { type: "stdio" }, ...serviceTierConfig };
   }
   if (type === "ws") {
     rejectUnknownKeys(transport, ["type", "url"], "providerConfig.codex.transport");
@@ -387,7 +420,7 @@ export function normalizeCodexProviderConfig(
     if (url.username || url.password) {
       throw invalidConfig("providerConfig.codex.transport.url must not include credentials");
     }
-    return { type: "ws", url: url.toString() };
+    return { transport: { type: "ws", url: url.toString() }, ...serviceTierConfig };
   }
 
   rejectUnknownKeys(transport, ["type", "path"], "providerConfig.codex.transport");
@@ -397,7 +430,12 @@ export function normalizeCodexProviderConfig(
   if (!isAbsolute(transport.path)) {
     throw invalidConfig("providerConfig.codex.transport.path must be an absolute filesystem path");
   }
-  return { type: "uds", path: transport.path };
+  return { transport: { type: "uds", path: transport.path }, ...serviceTierConfig };
+}
+
+function normalizeCodexServiceTier(value: unknown): CodexServiceTier {
+  if (value === "fast" || value === "normal") return value;
+  throw invalidConfig('providerConfig.codex.serviceTier must be exactly "fast" or "normal"');
 }
 
 class DefaultCodexTransportFactory implements CodexTransportFactory {

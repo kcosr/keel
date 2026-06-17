@@ -1022,25 +1022,34 @@ await ctx.agent({
   provider: "codex",
   toolPolicy: "workspace-write",
   providerConfig: {
-    codex: { transport: { type: "uds", path: "/tmp/codex.sock" } },
+    codex: {
+      transport: { type: "uds", path: "/tmp/codex.sock" },
+      serviceTier: "fast",
+    },
   },
   prompt: "Make the requested change.",
 });
 ```
 
-Transport config is selected only through `providerConfig.codex.transport` (or a
-profile that supplies it):
+Codex request config is selected through `providerConfig.codex` (or a profile
+that supplies it):
 
 ```ts
 { codex: { transport: { type: "stdio" } } }
-{ codex: { transport: { type: "ws", url: "ws://127.0.0.1:1455/rpc" } } }
-{ codex: { transport: { type: "uds", path: "/tmp/codex.sock" } } }
+{ codex: { transport: { type: "stdio" }, serviceTier: "normal" } }
+{ codex: { transport: { type: "ws", url: "ws://127.0.0.1:1455/rpc" }, serviceTier: "fast" } }
+{ codex: { transport: { type: "uds", path: "/tmp/codex.sock" }, serviceTier: "fast" } }
 ```
 
 If `providerConfig.codex` is omitted, the runtime default is stdio and Keel
 spawns `${KEEL_CODEX_BIN:-codex} app-server` in the resolved workspace cwd.
 Omitted config and explicit `{ codex: { transport: { type: "stdio" } } }` are
 intentional distinct replay identities; choose one style and keep it stable.
+`serviceTier` is optional and accepts only `"fast"` or `"normal"`. Omitted
+`serviceTier` leaves Codex/user defaults in control, `"fast"` requests Codex
+priority service, and `"normal"` explicitly requests standard routing even when
+a Codex model catalog or app-server default would otherwise choose fast service.
+Omitted, `"normal"`, and `"fast"` are distinct replay identities.
 `ws.url` must be an absolute `ws://` or `wss://` URL. `uds.path` must be an
 absolute socket path and uses WebSocket over the Unix stream with request URL
 `ws://localhost/rpc`.
@@ -1070,6 +1079,7 @@ and close events; the log can contain prompts, outputs, cwd paths, and secret
 values.
 
 Common Codex errors include malformed `providerConfig.codex.transport...`,
+invalid `providerConfig.codex.serviceTier`,
 unsupported `none` or lossy capability shapes, allow/deny tool edits, remote
 transport plus secrets, missing/unusable cwd, JSON-RPC method errors, resumed
 cwd/token mismatch, unreconcilable active remote turns, and turn

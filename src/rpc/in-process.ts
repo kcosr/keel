@@ -386,7 +386,7 @@ export class InProcessKeel implements KeelApi {
     const newId = this.kernel.fork(runId, opts);
     return {
       runId: newId,
-      attachCursor: cursorAfterSeq(newId, Math.max(0, this.store.eventHighWater(newId) - 1)),
+      attachCursor: cursorAfterSeq(newId, 0),
     };
   }
 

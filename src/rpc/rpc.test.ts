@@ -847,6 +847,32 @@ describe("event subscription", () => {
   );
 
   test(
+    "forkRun attachCursor starts before forked run history",
+    async () => {
+      const store = JournalStore.memory();
+      const api = keel(store);
+      const { runId } = await api.launchRun({ ...chainUrl, input: { n: 1 }, name: "source" });
+      await api.waitForRun(runId);
+
+      const originalEventHighWater = store.eventHighWater.bind(store);
+      store.eventHighWater = ((id: string) =>
+        id === "run_forked" ? 12 : originalEventHighWater(id)) as JournalStore["eventHighWater"];
+      const forked = api.forkRun(runId, { newRunId: "run_forked" });
+      store.eventHighWater = originalEventHighWater as JournalStore["eventHighWater"];
+      expect(forked.attachCursor).toEqual({ kind: "after-seq", runId: "run_forked", seq: 0 });
+
+      const seen: string[] = [];
+      const unsub = api.subscribeEvents({ runId: forked.runId, cursor: forked.attachCursor }, (e) =>
+        seen.push(e.type),
+      );
+      unsub();
+
+      expect(seen).toEqual(["run.forked"]);
+    },
+    WORKFLOW_TEST_TIMEOUT_MS,
+  );
+
+  test(
     "agent deltas are live frames and finalized messages are durable rows",
     async () => {
       const store = JournalStore.memory();

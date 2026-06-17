@@ -382,9 +382,11 @@ owned or otherwise executing normally and is not rendered as a visible blockage.
 heartbeat is stale or missing; it is based on `runtime_owner_id` and
 `heartbeat_at_ms`, not on how long a workflow step has been pending. Slow
 provider work remains inspectable through per-node `startedAtMs`, from which
-surfaces may derive pending age. Other current blockage reasons map to explicit
-waits or interruption: `waiting_human`, `waiting_signal`, `waiting_timer`, and
-`interrupted`; terminal runs report no blockage.
+surfaces may derive pending age. `agent_concurrency` means the daemon is healthy
+but the next agent call is waiting for an operational concurrency permit; it
+clears automatically when capacity is released. Other current blockage reasons
+map to explicit waits or interruption: `waiting_human`, `waiting_signal`,
+`waiting_timer`, and `interrupted`; terminal runs report no blockage.
 
 ### List Output
 
@@ -994,6 +996,15 @@ Initial daemon-operational settings:
 | `codex.rpcTimeoutMs` | integer `> 0` | `60000` | next Codex provider construction, normally daemon restart |
 | `codex.connectTimeoutMs` | integer `> 0` | `15000` | next Codex provider construction, normally daemon restart |
 | `workflowDefinition.gcTtlMs` | integer `>= 0` | `2592000000` | next `gcDefinitions`/`keel gc` call unless explicitly overridden |
+| `agent.maxConcurrentTotal` | positive integer or `"unlimited"` | `"unlimited"` | daemon restart |
+| `agent.maxConcurrentByProvider` | object of provider names to positive integers or `"unlimited"` | `{}` | daemon restart |
+
+Agent concurrency settings apply to daemon-owned `ctx.agent` calls and
+`ctx.agentSession().turn` calls. Each logical call/turn holds one permit through
+its internal schema and stall retries, then releases it on success, failure,
+interrupt, or teardown. Capacity waits are in-memory scheduling state, not
+durable parked waits; after daemon restart, replay reaches the pending agent
+effect and re-enters the queue if limits still require it.
 
 Named profiles remain the preferred way to configure reusable agent roles.
 Settings are global fallbacks used only after the workflow spec and selected

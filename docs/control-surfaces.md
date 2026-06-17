@@ -113,7 +113,8 @@ daemon gateway, not a second operation dispatcher:
   `authorization.failed`, and heartbeat frames.
 - Projection routes currently cover runs, run detail, approvals, workspaces, and
   system status. Run projections hide diagnostic `running` blockage and only
-  surface actionable waits, interruptions, or stale owner-heartbeat stalls.
+  surface actionable waits, agent concurrency queues, interruptions, or stale
+  owner-heartbeat stalls.
 - Captured-source `launchRun` is admin-only through the web surface even though
   it remains open on the trusted local Unix socket.
 
@@ -143,7 +144,7 @@ unless a row explicitly says UI.
 | workflow definition preview/source | implemented | implemented | deferred | deferred | not-applicable | deferred | not-applicable | `admin`, `run:source` depending selector |
 | workflow definition GC | implemented | implemented | deferred | deferred | not-applicable | deferred | not-applicable | `admin` |
 | profile catalog | implemented | implemented | deferred | deferred | not-applicable | deferred | `profile` field consumes snapshots | `admin` for catalog management |
-| settings catalog | implemented | implemented | deferred | deferred | not-applicable | deferred | workflow-visible settings snapshot | `admin` |
+| settings catalog | implemented | implemented | deferred | deferred | not-applicable | deferred | workflow-visible settings snapshot; daemon-operational agent concurrency limits are not SDK-visible | `admin` |
 | workspace list/show/diff | implemented | implemented | implemented | implemented | deferred | deferred | not-applicable | `run:read` |
 | workspace merge/discard/gc | implemented | implemented | implemented | implemented | deferred | deferred | not-applicable | `admin` |
 

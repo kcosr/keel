@@ -8,6 +8,7 @@
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import type { Socket } from "bun";
+import { AgentConcurrencyLimiter } from "../agents/concurrency.ts";
 import { SecretStore } from "../agents/secrets.ts";
 import type { AgentProviderRegistry } from "../agents/types.ts";
 import { ensureAdminCapability } from "../auth/capabilities.ts";
@@ -22,6 +23,7 @@ import { failRunWithError } from "../kernel/run-errors.ts";
 import { Supervisor } from "../kernel/supervisor.ts";
 import { EventHub } from "../rpc/event-hub.ts";
 import { InProcessKeel } from "../rpc/in-process.ts";
+import { effectiveOperationalSettings } from "../settings/catalog.ts";
 import {
   isUnsupportedWorkflowSdkAbiError,
   keelPackageRoot,
@@ -128,6 +130,14 @@ export class KeelDaemon {
     if (opts.adminToken) {
       ensureAdminCapability(this.store, opts.adminToken, this.clock());
     }
+    const operational = effectiveOperationalSettings(this.store.listDaemonSettingRows());
+    const agentConcurrency = new AgentConcurrencyLimiter(
+      {
+        total: operational.agentMaxConcurrentTotal,
+        byProvider: operational.agentMaxConcurrentByProvider,
+      },
+      { clock: this.clock },
+    );
     this.kernel = new RealmKernel(this.store, {
       ...(opts.agents ? { agents: opts.agents } : {}),
       workspaceStore: opts.workspaceStore ?? join(dirname(opts.dbPath), "workspaces"),
@@ -135,12 +145,14 @@ export class KeelDaemon {
       secrets: opts.secrets ?? new SecretStore(),
       definitionCacheRoot: this.definitionCacheRoot,
       clock: this.clock,
+      agentConcurrency,
     });
     this.assertNoDuplicateProfileSources();
     this.api = new InProcessKeel(this.kernel, this.store, this.eventHub, {
       ...(opts.agents ? { agents: opts.agents } : {}),
       clock: this.clock,
       ownerStaleWindowMs: ownerStaleWindowMs(this.heartbeatMs),
+      agentConcurrency,
     });
     this.supervisor = new Supervisor({
       store: this.store,

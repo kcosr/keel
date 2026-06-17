@@ -19,6 +19,10 @@
   daemon-owner heartbeats instead of long pending step age. Reports and web/TUI
   projections hide diagnostic `running` as a visible blockage, while node views
   expose durable `startedAtMs` for surfaces that want to derive pending age.
+- Daemon-owned agent calls now support restart-applied operational concurrency
+  limits through `agent.maxConcurrentTotal` and
+  `agent.maxConcurrentByProvider`. Queued calls stay in `running` state and
+  surface as `agent_concurrency` blockage in `getBlockage`/reports.
 - Local web API transport via `keel web`, with localhost-only default binding,
   `/health`, `/rpc`, projection routes, static asset serving, and SSE run event
   streams using the shared cursor/control-frame contract.

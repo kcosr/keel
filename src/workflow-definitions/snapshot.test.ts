@@ -235,6 +235,23 @@ describe("workflow definition snapshots", () => {
     }
   });
 
+  test("model routing example workflow captures the helper module", () => {
+    const workflow = resolve(
+      import.meta.dir,
+      "..",
+      "..",
+      "workflows",
+      "model-routing",
+      "example-smart-implement-review.workflow.ts",
+    );
+    const captured = captureWorkflowBundleFromFile(workflow);
+    expect(captured.entry).toBe("example-smart-implement-review.workflow.ts");
+    expect(captured.modules.map((module) => module.path)).toEqual([
+      "example-smart-implement-review.workflow.ts",
+      "model-routing.ts",
+    ]);
+  });
+
   test("file capture includes static value and side-effect imports but excludes type-only edges", () => {
     const dir = mkdtempSync(join(tmpdir(), "keel-snapshot-import-kinds-"));
     try {

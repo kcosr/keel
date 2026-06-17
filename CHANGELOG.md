@@ -89,6 +89,10 @@
   and docs review workflows as immutable saved workflow versions with per-entry
   `created`/`unchanged`/`conflict`/`failed` reporting. The package now includes
   a read-only docs review workflow and richer Keel-native review rubrics.
+- Reusable `workflows/model-routing/` helper package for captured static or
+  read-only-agent routing of profile/reasoning choices, with guardrails for
+  allowlisted profiles, allowlisted reasoning levels, critical surface/risk
+  floors, and workflow-owned timeout/verification hints.
 - `ctx.agentSession({ key, ... }).turn({ key, prompt, ... })` for realm
   workflows that need one logical Pi/Codex or Claude backend conversation across
   multiple durable turns in the same run. Session runs fail closed for

@@ -105,7 +105,8 @@ Use `profile: "name"` when an operator has configured reusable defaults in the d
 Keel validates the full provider-keyed map, but only the selected provider's
 entry affects replay identity or reaches the adapter. It replaces, not deep
 merges, profile config for that provider. Do not put raw secrets or workspace
-choices in `providerConfig`; use `secrets` and workspace handles instead.
+choices in `providerConfig`; request secret names with `environment.secrets`,
+supply values at launch/restart time, and use workspace handles for cwd.
 
 Agents run in a resolved workspace: explicit handle, scoped `ctx.withWorkspace`,
 or the run default direct workspace at `ctx.run.target`. To let an agent run
@@ -113,6 +114,15 @@ shell commands, use explicit capabilities:
 
 ```ts
 capabilities: { fs: "none", network: "none", shell: true, secrets: [] }
+```
+
+To inject a secret value, grant and request the same secret name. The raw value
+must be supplied by the run launcher with `--secret`, `--secret-env`, or API
+`runSecrets`:
+
+```ts
+capabilities: { secrets: ["TOKEN"] },
+environment: { secrets: ["TOKEN"] },
 ```
 
 Codex is available as `provider: "codex"` with default/read-only,
@@ -124,7 +134,7 @@ leaves Codex defaults in control. Codex read-only/workspace-write use Codex's
 sandbox with network disabled, but may still run sandboxed commands;
 unrestricted Codex can access outside the cwd according to the host runtime.
 Keep raw secrets out of workflow source and `providerConfig`; remote Codex
-transports reject secret env injection.
+transports reject any injected environment.
 
 ## 4.1 Multi-Turn Agent Sessions (`ctx.agentSession`)
 

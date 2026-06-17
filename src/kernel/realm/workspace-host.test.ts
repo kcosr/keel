@@ -16,6 +16,7 @@ import type {
 import { AgentProviderRegistry } from "../../agents/types.ts";
 import { JournalStore } from "../../journal/store.ts";
 import { captureWorkflowFile } from "../../workflow-definitions/capture.ts";
+import { WORKFLOW_SDK_ABI_VERSION } from "../../workflow-definitions/snapshot.ts";
 import { workspaceIdentity } from "../../workspace/identity.ts";
 import {
   GIT_DIFF_MAX_BUFFER_BYTES,
@@ -464,7 +465,7 @@ describe("durable diff + worktree cleanup", () => {
       sourceRef: "HEAD",
       retentionPolicy,
       branchPolicy: "generated",
-      sdkAbiVersion: 7,
+      sdkAbiVersion: WORKFLOW_SDK_ABI_VERSION,
     });
     input.store.insertAgentWorkspace({
       runId: input.runId,
@@ -1472,7 +1473,7 @@ describe("secret lifecycle", () => {
     expect(JSON.stringify(liveFrames)).not.toContain("«redacted»");
     expect(store.listEvents("r").some((e) => e.type === "agent.redacted")).toBe(false);
     // secrets wiped on run completion (per-run lifetime)
-    expect(secrets.resolve("r", ["TOKEN"])).toEqual([]);
+    expect(() => secrets.resolveOrThrow("r", ["TOKEN"])).toThrow(/missing secret value/);
   });
 
   test("secret values in finalized agent event rows are persisted without redaction", async () => {

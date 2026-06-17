@@ -1657,21 +1657,28 @@ describe("Codex transports", () => {
     }
   });
 
-  test("remote transports reject secret env rather than dropping it", async () => {
-    const transport = new ScriptedTransport(basicScript);
-    await expect(
-      new CodexProvider({
-        transportFactory: new ScriptedFactory(transport),
-        rpcTimeoutMs: 1_000,
-        turnTimeoutMs: 1_000,
-      }).generate(
-        codexInvocation({
-          providerConfig: { transport: { type: "ws", url: "ws://127.0.0.1:1" } },
-          env: { TOKEN: "secret" },
-        }),
-        {},
-      ),
-    ).rejects.toThrow(/cannot receive secret env/);
+  test("remote transports reject injected environment rather than dropping it", async () => {
+    const remoteTransportConfigs: CodexTransportConfig[] = [
+      { type: "ws" as const, url: "ws://127.0.0.1:1" },
+      { type: "uds" as const, path: "/tmp/codex.sock" },
+    ];
+
+    for (const transportConfig of remoteTransportConfigs) {
+      const transport = new ScriptedTransport(basicScript);
+      await expect(
+        new CodexProvider({
+          transportFactory: new ScriptedFactory(transport),
+          rpcTimeoutMs: 1_000,
+          turnTimeoutMs: 1_000,
+        }).generate(
+          codexInvocation({
+            providerConfig: { transport: transportConfig },
+            env: { TOKEN: "secret" },
+          }),
+          {},
+        ),
+      ).rejects.toThrow(/cannot receive environment variables/);
+    }
   });
 });
 

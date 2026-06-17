@@ -29,6 +29,7 @@ import type {
 } from "./projection.ts";
 
 export type WorkflowProvenance = { kind: "stdin" } | { kind: "clientPath"; path: string };
+export type RunSecrets = Record<string, string>;
 
 export interface LaunchRequest {
   /** Workflow TypeScript captured by the client. The daemon never reads client paths. */
@@ -40,6 +41,8 @@ export interface LaunchRequest {
   name?: string | null;
   /** Display-only provenance. It is never opened or parsed for execution. */
   provenance?: WorkflowProvenance;
+  /** Trusted-local secret values for this run. Keel never persists these values. */
+  runSecrets?: RunSecrets;
 }
 
 export interface SaveWorkflowRequest {
@@ -77,6 +80,7 @@ export interface LaunchSavedWorkflowRequest {
   input?: unknown;
   target?: string;
   name?: string | null;
+  runSecrets?: RunSecrets;
 }
 
 export interface SavedWorkflowSourceView {
@@ -393,12 +397,17 @@ export interface KeelApi {
       input?: unknown;
       name?: string | null;
       provenance?: WorkflowProvenance;
+      runSecrets?: RunSecrets;
     },
   ): Promise<RunStart>;
   /** Re-run a failed run from its failed step in the background. */
-  retryRun(runId: string): Promise<RunStart>;
+  retryRun(runId: string, opts?: { runSecrets?: RunSecrets }): Promise<RunStart>;
   /** Discard everything after a step and re-run in the background. */
-  rewindRun(runId: string, toStableKey: string): Promise<RunStart>;
+  rewindRun(
+    runId: string,
+    toStableKey: string,
+    opts?: { runSecrets?: RunSecrets },
+  ): Promise<RunStart>;
   /** Copy a terminal run into a new independent run. */
   forkRun(runId: string, opts?: { atStableKey?: string; newRunId?: string }): RunLaunchResult;
   /** The canonical projection for one run. */

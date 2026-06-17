@@ -8,7 +8,7 @@ export default async function writeSecret(ctx: Ctx, _input: null): Promise<strin
     prompt: "write the config",
     provider: "writer",
     workspace,
-    capabilities: { fs: "workspace-write" },
-    secrets: ["TOKEN"],
+    capabilities: { fs: "workspace-write", secrets: ["TOKEN"] },
+    environment: { secrets: ["TOKEN"] },
   });
 }

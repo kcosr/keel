@@ -34,10 +34,10 @@ observe progress.
 
 | Family | RPC methods | CLI surface | Execute surface | Notes |
 |---|---|---|---|---|
-| Run launch | `launchRun`, `launchSavedWorkflow` | `launch`, `run`, `workflow run` | `keel.launch` | Launch mints a run capability for follow-up run-scoped operations. |
+| Run launch | `launchRun`, `launchSavedWorkflow` | `launch`, `run`, `workflow run` | `keel.launch` | Launch mints a run capability for follow-up run-scoped operations. Request `runSecrets`/`--secret*` here when agents use `environment.secrets`. |
 | Run reads | `listRuns`, `getRun`, `getRunReport`, `getRunOutput`, `getBlockage` | `list`, `get`, `report`, `output` | `keel.get`, `keel.report`, `keel.output`, `keel.blockage` | RPC `getRunOutput` returns the current run outcome; CLI `output` and execute `keel.output` require finished output. `getBlockage` may return diagnostic `running`; report/projection surfaces render only actionable blockage. |
 | Run events/wait | `waitForRun`, `subscribeEvents` | `watch`; attached lifecycle commands reuse watch formatting | `keel.wait`, `keel.events` | Durable events backfill by sequence; ephemeral live frames are not replayed. |
-| Run lifecycle | `resumeRun`, `retryRun`, `rewindRun`, `forkRun`, `interruptRun`, `rerunRun` | `resume`, `retry`, `rewind`, `fork`, `interrupt`; no CLI rerun command | `keel.resume`, `keel.retry`, `keel.rewind`, `keel.fork`, `keel.interrupt`; no execute rerun helper | `rerunRun` is RPC-only at this baseline. |
+| Run lifecycle | `resumeRun`, `retryRun`, `rewindRun`, `forkRun`, `interruptRun`, `rerunRun` | `resume`, `retry`, `rewind`, `fork`, `interrupt`; no CLI rerun command | `keel.resume`, `keel.retry`, `keel.rewind`, `keel.fork`, `keel.interrupt`; no execute rerun helper | `retryRun`, `rewindRun`, and RPC-only `rerunRun` accept fresh `runSecrets` for re-executed agents. |
 | Signals and approvals | gateway `sendSignal`, gateway `decideApproval` | `signal`, `approve`, `deny` | `keel.signal`, `keel.approve`, `keel.deny` | Signal uses run authority; approval decisions are admin-only. Delivery acknowledges durable input plus wake start; it does not wait for resumed work to finish. |
 | Schedules | `putSchedule`, `listSchedules`, `getSchedule` | `schedule put`, `schedule list`, `schedule show` | `keel.listSchedules`, `keel.getSchedule` | Execute exposes read operations only. |
 | Saved workflows | `saveWorkflow`, `listSavedWorkflows`, `getSavedWorkflow`, `getSavedWorkflowSource`, `launchSavedWorkflow`, lifecycle setters/deleters | `workflow save`, `install`, `list`, `show`, `source`, `run`, `enable`, `disable`, `enable-version`, `disable-version`, `deprecate`, `delete`, `delete-version` | deferred | Saved workflow versions pin immutable workflow definition hashes. |
@@ -61,6 +61,13 @@ workspace. Path-based CLI launches default it from the invoking cwd unless
 target in this order: explicit request target, then saved workflow default
 target. Raw RPC callers must provide a non-empty target where required by the
 gateway/daemon boundary.
+
+`LaunchRequest.runSecrets` and `LaunchSavedWorkflowRequest.runSecrets` are
+trusted-local raw secret values keyed by environment variable name. They are not
+persisted in the journal; the daemon stores them in its in-memory side channel
+for the run and wipes them when the run reaches a terminal cleanup path. The same
+shape is accepted on `retryRun`, `rewindRun`, and `rerunRun` options for agents
+that re-execute after the original values have expired or rotated.
 
 ## Authority Notes
 

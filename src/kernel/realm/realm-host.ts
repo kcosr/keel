@@ -9,6 +9,11 @@ import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import {
+  type NormalizedAgentEnvironment,
+  hasAgentEnvironment,
+  normalizeRunSecrets,
+} from "../../agents/environment.ts";
 import { AgentFailure, executeAgent, runAgentWithStall } from "../../agents/execute.ts";
 import {
   type AgentProfileSnapshotEntry,
@@ -407,15 +412,51 @@ export class RealmKernel {
     return workflowVisibleSettingsFromSnapshot(runId, this.store.listRunSettingSnapshots(runId));
   }
 
+  private assertRunSecretStoreAvailable(runSecrets: Record<string, string>, path: string): void {
+    if (Object.keys(runSecrets).length > 0 && !this.secrets) {
+      throw new Error(`${path} requires a RealmKernel SecretStore`);
+    }
+  }
+
+  private putRunSecrets(runId: string, runSecrets: Record<string, string>): void {
+    if (Object.keys(runSecrets).length === 0) return;
+    this.secrets?.putMany(runId, runSecrets);
+  }
+
+  private resolveAgentEnvironmentEnv(
+    runId: string,
+    environment: NormalizedAgentEnvironment,
+  ): Record<string, string> | undefined {
+    if (!hasAgentEnvironment(environment)) return undefined;
+    const env: Record<string, string> = { ...environment.vars };
+    if (environment.secrets.length > 0) {
+      if (!this.secrets) {
+        throw new Error("agent environment.secrets requires a RealmKernel SecretStore");
+      }
+      for (const ref of this.secrets.resolveOrThrow(runId, environment.secrets)) {
+        env[ref.name] = ref.value;
+      }
+    }
+    return env;
+  }
+
   /** Start a run and return its id immediately, with a promise for completion.
    * The RPC layer/daemon uses this so launchRun returns before the run finishes. */
   launch<O>(
     workflow: ClientCapturedWorkflow,
     input: unknown,
-    meta: { name?: string | null; target?: string | null } = {},
+    meta: {
+      name?: string | null;
+      target?: string | null;
+      runSecrets?: Record<string, string>;
+    } = {},
   ): { runId: string; done: Promise<RunHandle<O>> } {
     const at = this.host.clock();
     const target = requireRunTarget(meta.target, "RealmKernel.launch");
+    const runSecrets = normalizeRunSecrets(meta.runSecrets, {
+      path: "RealmKernel.launch.runSecrets",
+    });
+    this.assertRunSecretStoreAvailable(runSecrets, "RealmKernel.launch.runSecrets");
     const name = meta.name !== undefined ? meta.name : (workflow.name ?? null);
     const { snapshot, entryPath } = snapshotWorkflowSource(this.store, workflow.source, {
       name,
@@ -452,13 +493,18 @@ export class RealmKernel {
         this.host.clock(),
       );
     });
+    this.putRunSecrets(runId, runSecrets);
     return { runId, done: this.execute<O>(runId, entryPath, input) };
   }
 
   async run<O>(
     workflow: ClientCapturedWorkflow,
     input: unknown,
-    meta: { name?: string | null; target?: string | null } = {},
+    meta: {
+      name?: string | null;
+      target?: string | null;
+      runSecrets?: Record<string, string>;
+    } = {},
   ): Promise<RunHandle<O>> {
     return this.launch<O>(workflow, input, meta).done;
   }
@@ -466,9 +512,18 @@ export class RealmKernel {
   launchDefinition<O>(
     definitionHash: string,
     input: unknown,
-    meta: { name?: string | null; workflowRef?: string | null; target?: string | null } = {},
+    meta: {
+      name?: string | null;
+      workflowRef?: string | null;
+      target?: string | null;
+      runSecrets?: Record<string, string>;
+    } = {},
   ): { runId: string; done: Promise<RunHandle<O>> } {
     const target = requireRunTarget(meta.target, "RealmKernel.launchDefinition");
+    const runSecrets = normalizeRunSecrets(meta.runSecrets, {
+      path: "RealmKernel.launchDefinition.runSecrets",
+    });
+    this.assertRunSecretStoreAvailable(runSecrets, "RealmKernel.launchDefinition.runSecrets");
     assertWorkflowDefinitionHash(definitionHash);
     const entryPath = materializeWorkflowDefinition(
       this.store,
@@ -505,6 +560,7 @@ export class RealmKernel {
         this.host.clock(),
       );
     });
+    this.putRunSecrets(runId, runSecrets);
     return { runId, done: this.execute<O>(runId, entryPath, input) };
   }
 
@@ -584,6 +640,7 @@ export class RealmKernel {
       input?: unknown;
       name?: string | null;
       provenance?: WorkflowProvenance;
+      runSecrets?: Record<string, string>;
     } = {},
   ): Promise<RunHandle<O>> {
     return this.startRerun<O>(runId, opts).done;
@@ -596,6 +653,7 @@ export class RealmKernel {
       input?: unknown;
       name?: string | null;
       provenance?: WorkflowProvenance;
+      runSecrets?: Record<string, string>;
     } = {},
   ): { runId: string; done: Promise<RunHandle<O>> } {
     const run = this.store.getRun(runId);
@@ -608,6 +666,10 @@ export class RealmKernel {
         `run ${runId} uses durable agent sessions and cannot be rerun; start a fresh run instead`,
       );
     }
+    const runSecrets = normalizeRunSecrets(opts.runSecrets, {
+      path: "RealmKernel.startRerun.runSecrets",
+    });
+    this.assertRunSecretStoreAvailable(runSecrets, "RealmKernel.startRerun.runSecrets");
     const sourceOverride = opts.source !== undefined;
     const name = opts.name !== undefined ? opts.name : run.workflowName;
     const { definitionHash, workflowRef, entryPath } = sourceOverride
@@ -642,19 +704,30 @@ export class RealmKernel {
       this.store.replaceRunSettingSnapshot(runId, settingSnapshot, settingSnapshot.rows);
       this.store.appendEvent(runId, "run.rerun", { definitionHash }, this.host.clock());
     });
+    this.putRunSecrets(runId, runSecrets);
     return { runId, done: this.execute<O>(runId, entryPath, effectiveInput) };
   }
 
   /** Retry a FAILED run from its failed step (§18) — the failed rows are dropped
    * so they re-execute; completed upstream replays. For transient agent failures. */
-  async retry<O>(runId: string): Promise<RunHandle<O>> {
-    return this.startRetry<O>(runId).done;
+  async retry<O>(
+    runId: string,
+    opts: { runSecrets?: Record<string, string> } = {},
+  ): Promise<RunHandle<O>> {
+    return this.startRetry<O>(runId, opts).done;
   }
 
-  startRetry<O>(runId: string): { runId: string; done: Promise<RunHandle<O>> } {
+  startRetry<O>(
+    runId: string,
+    opts: { runSecrets?: Record<string, string> } = {},
+  ): { runId: string; done: Promise<RunHandle<O>> } {
     const run = this.store.getRun(runId);
     if (!run) throw new Error(`run ${runId} not found`);
     if (run.status !== "failed") throw new Error(`retry needs a failed run (is ${run.status})`);
+    const runSecrets = normalizeRunSecrets(opts.runSecrets, {
+      path: "RealmKernel.startRetry.runSecrets",
+    });
+    this.assertRunSecretStoreAvailable(runSecrets, "RealmKernel.startRetry.runSecrets");
     const executionPath = this.executionPathForRun(run);
     this.store.deleteFailedRows(runId);
     const at = this.host.clock();
@@ -663,19 +736,25 @@ export class RealmKernel {
       this.store.reopenPendingReviewWorkspaces(runId, at);
       this.store.appendEvent(runId, "run.retry", {}, at);
     });
+    this.putRunSecrets(runId, runSecrets);
     const input = run.inputRef ? JSON.parse(run.inputRef) : undefined;
     return { runId, done: this.execute<O>(runId, executionPath, input) };
   }
 
   /** Rewind a run to a chosen step (§18): discard everything journaled after it,
    * then re-execute. The kept prefix replays; the rest re-runs (may diverge). */
-  async rewind<O>(runId: string, toStableKey: string): Promise<RunHandle<O>> {
-    return this.startRewind<O>(runId, toStableKey).done;
+  async rewind<O>(
+    runId: string,
+    toStableKey: string,
+    opts: { runSecrets?: Record<string, string> } = {},
+  ): Promise<RunHandle<O>> {
+    return this.startRewind<O>(runId, toStableKey, opts).done;
   }
 
   startRewind<O>(
     runId: string,
     toStableKey: string,
+    opts: { runSecrets?: Record<string, string> } = {},
   ): { runId: string; done: Promise<RunHandle<O>> } {
     const run = this.store.getRun(runId);
     if (!run) throw new Error(`run ${runId} not found`);
@@ -690,6 +769,10 @@ export class RealmKernel {
     if (!this.store.getLatestAttempt(runId, toStableKey)) {
       throw new Error(`cannot rewind to unknown step "${toStableKey}"`);
     }
+    const runSecrets = normalizeRunSecrets(opts.runSecrets, {
+      path: "RealmKernel.startRewind.runSecrets",
+    });
+    this.assertRunSecretStoreAvailable(runSecrets, "RealmKernel.startRewind.runSecrets");
     const executionPath = this.executionPathForRun(run);
     // Trim journal + decrement refcounts + clear unresolved waits as one snapshot.
     this.store.deleteRunStateAfter(runId, toStableKey);
@@ -700,6 +783,7 @@ export class RealmKernel {
       finishedAtMs: null,
     });
     this.store.appendEvent(runId, "run.rewind", { to: toStableKey }, this.host.clock());
+    this.putRunSecrets(runId, runSecrets);
     const input = run.inputRef ? JSON.parse(run.inputRef) : undefined;
     return { runId, done: this.execute<O>(runId, executionPath, input) };
   }
@@ -2267,6 +2351,22 @@ export class RealmKernel {
               // §11: an explicitly isolated agent edits in a git worktree;
               // secrets are injected as invocation env from the side channel.
               const caps = m.capabilities ?? undefined;
+              let invocationEnv: Record<string, string> | undefined;
+              try {
+                invocationEnv = this.resolveAgentEnvironmentEnv(runId, m.environment);
+              } catch (err) {
+                engine.failStep(
+                  m.key,
+                  begun.attempt,
+                  m.version,
+                  begun.inputHash,
+                  begun.startedAtMs,
+                  err,
+                  "effectful",
+                );
+                reply(m.id, { ok: false, error: serializeError(err) });
+                break;
+              }
               const workspaceHolder: WorkspaceHolder = {
                 kind: "agent",
                 key: m.key,
@@ -2288,9 +2388,6 @@ export class RealmKernel {
                 reply(m.id, { ok: false, error: serializeError(err) });
                 break;
               }
-              const secretRefs = this.secrets?.resolve(runId, m.secrets) ?? [];
-              const secretEnv: Record<string, string> = {};
-              for (const r of secretRefs) secretEnv[r.name] = r.value;
               const settings = requireWorkflowSettings();
 
               void (async () => {
@@ -2311,7 +2408,7 @@ export class RealmKernel {
                           ...(m.reasoning ? { reasoning: m.reasoning } : {}),
                           ...(caps ? { capabilities: caps } : {}),
                           cwd: workspace.cwd,
-                          ...(secretRefs.length > 0 ? { env: secretEnv } : {}),
+                          ...(invocationEnv !== undefined ? { env: invocationEnv } : {}),
                           ...(begun.resumeToken ? { resumeToken: begun.resumeToken } : {}),
                           abortSignal: signal,
                           timeoutMs: m.timeoutMs ?? settings.agentDefaultTimeoutMs,
@@ -2500,15 +2597,20 @@ export class RealmKernel {
                 reply(m.id, { ok: true, output: begun.value, contentHash: hashJson(begun.value) });
                 break;
               }
+              let invocationEnv: Record<string, string> | undefined;
+              try {
+                invocationEnv = this.resolveAgentEnvironmentEnv(runId, m.environment);
+              } catch (err) {
+                this.failAgentSessionTurn(runId, m, begun, err);
+                reply(m.id, { ok: false, error: serializeError(err) });
+                break;
+              }
               if (!sessionRunGuarded) {
                 this.activeSessionRuns.add(runId);
                 sessionRunGuarded = true;
               }
               this.onStepExecute?.(m.stableKey);
               const caps = m.capabilities ?? undefined;
-              const secretRefs = this.secrets?.resolve(runId, m.secrets) ?? [];
-              const secretEnv: Record<string, string> = {};
-              for (const r of secretRefs) secretEnv[r.name] = r.value;
               const settings = requireWorkflowSettings();
 
               void (async () => {
@@ -2529,7 +2631,7 @@ export class RealmKernel {
                           ...(m.reasoning ? { reasoning: m.reasoning } : {}),
                           ...(caps ? { capabilities: caps } : {}),
                           cwd: begun.cwd,
-                          ...(secretRefs.length > 0 ? { env: secretEnv } : {}),
+                          ...(invocationEnv !== undefined ? { env: invocationEnv } : {}),
                           ...(begun.resumeToken ? { resumeToken: begun.resumeToken } : {}),
                           abortSignal: signal,
                           timeoutMs: m.timeoutMs ?? settings.agentDefaultTimeoutMs,

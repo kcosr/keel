@@ -7,6 +7,7 @@
 // for the host's reply. log/phase are fire-and-forget.
 
 import type { Capabilities, ToolPolicy } from "../../agents/capabilities.ts";
+import type { NormalizedAgentEnvironment } from "../../agents/environment.ts";
 import type { ProviderConfigValue } from "../../agents/types.ts";
 import type { InputDep, WorkspaceRetention } from "../../journal/types.ts";
 import type { WorkflowVisibleSettings } from "../../settings/catalog.ts";
@@ -55,7 +56,7 @@ export type WorkerRequest =
       denyTools: string[];
       workspaceId: string;
       capabilities: Capabilities | null;
-      secrets: string[];
+      environment: NormalizedAgentEnvironment;
       version: string;
       inputs: unknown;
       jsonSchema: unknown;
@@ -84,7 +85,7 @@ export type WorkerRequest =
       denyTools: string[];
       workspaceId: string;
       capabilities: Capabilities | null;
-      secrets: string[];
+      environment: NormalizedAgentEnvironment;
       version: string;
       inputs: unknown;
       jsonSchema: unknown;

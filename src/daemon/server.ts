@@ -8,6 +8,7 @@
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import type { Socket } from "bun";
+import { SecretStore } from "../agents/secrets.ts";
 import type { AgentProviderRegistry } from "../agents/types.ts";
 import { ensureAdminCapability } from "../auth/capabilities.ts";
 import { JournalStore } from "../journal/store.ts";
@@ -48,6 +49,8 @@ export interface DaemonOptions {
   workspaceStore?: string;
   /** Named agent profiles, resolved into each ctx.agent before versioning. */
   agentProfiles?: Record<string, unknown>;
+  /** In-memory trusted-local secret side channel. Defaults to a fresh store. */
+  secrets?: SecretStore;
   definitionCacheRoot?: string;
   clock?: () => number;
 }
@@ -129,6 +132,7 @@ export class KeelDaemon {
       ...(opts.agents ? { agents: opts.agents } : {}),
       workspaceStore: opts.workspaceStore ?? join(dirname(opts.dbPath), "workspaces"),
       ...(opts.agentProfiles ? { agentProfiles: opts.agentProfiles } : {}),
+      secrets: opts.secrets ?? new SecretStore(),
       definitionCacheRoot: this.definitionCacheRoot,
       clock: this.clock,
     });

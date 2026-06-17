@@ -127,7 +127,7 @@ export class InProcessKeel implements KeelApi {
         provenance: req.provenance,
       },
       req.input,
-      { target },
+      { target, ...(req.runSecrets !== undefined ? { runSecrets: req.runSecrets } : {}) },
     );
     this.running.set(
       runId,
@@ -267,6 +267,7 @@ export class InProcessKeel implements KeelApi {
       name,
       workflowRef: `saved:${saved.name}@${saved.version} ${saved.definitionHash}`,
       target,
+      ...(req.runSecrets !== undefined ? { runSecrets: req.runSecrets } : {}),
     });
     this.running.set(
       runId,
@@ -367,6 +368,7 @@ export class InProcessKeel implements KeelApi {
       input?: unknown;
       name?: string | null;
       provenance?: WorkflowProvenance;
+      runSecrets?: Record<string, string>;
     },
   ): Promise<RunStart> {
     const attachAfterSeq = this.store.eventHighWater(runId);
@@ -374,15 +376,22 @@ export class InProcessKeel implements KeelApi {
     return this.started(runId, attachAfterSeq);
   }
 
-  async retryRun(runId: string): Promise<RunStart> {
+  async retryRun(
+    runId: string,
+    opts: { runSecrets?: Record<string, string> } = {},
+  ): Promise<RunStart> {
     const attachAfterSeq = this.store.eventHighWater(runId);
-    this.start(this.kernel.startRetry<unknown>(runId));
+    this.start(this.kernel.startRetry<unknown>(runId, opts));
     return this.started(runId, attachAfterSeq);
   }
 
-  async rewindRun(runId: string, toStableKey: string): Promise<RunStart> {
+  async rewindRun(
+    runId: string,
+    toStableKey: string,
+    opts: { runSecrets?: Record<string, string> } = {},
+  ): Promise<RunStart> {
     const attachAfterSeq = this.store.eventHighWater(runId);
-    this.start(this.kernel.startRewind<unknown>(runId, toStableKey));
+    this.start(this.kernel.startRewind<unknown>(runId, toStableKey, opts));
     return this.started(runId, attachAfterSeq);
   }
 

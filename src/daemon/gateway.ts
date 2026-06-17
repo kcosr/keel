@@ -126,6 +126,7 @@ export class KeelOperationGateway {
           target,
           name: (p.name as string | null | undefined) ?? null,
           provenance: p.provenance as WorkflowProvenance | undefined,
+          runSecrets: p.runSecrets as Record<string, string> | undefined,
         });
         this.opts.claimLaunchedRun(res.runId);
         const cap = issueRunCapability(this.opts.store, res.runId, this.opts.clock());
@@ -209,6 +210,7 @@ export class KeelOperationGateway {
           input: p.input,
           target,
           name: (p.name as string | null | undefined) ?? null,
+          runSecrets: p.runSecrets as Record<string, string> | undefined,
         });
         this.opts.claimLaunchedRun(res.runId);
         const cap = issueRunCapability(this.opts.store, res.runId, this.opts.clock());
@@ -282,6 +284,7 @@ export class KeelOperationGateway {
             input?: unknown;
             name?: string | null;
             provenance?: WorkflowProvenance;
+            runSecrets?: Record<string, string>;
           },
         );
       },
@@ -340,7 +343,9 @@ export class KeelOperationGateway {
       handle: (_session, p, credential) => {
         this.authorizeRunCredential(credential, p.runId as string, "run:retry");
         this.opts.claimOrReject(p.runId as string);
-        return this.opts.api.retryRun(p.runId as string);
+        return this.opts.api.retryRun(p.runId as string, {
+          runSecrets: p.runSecrets as Record<string, string> | undefined,
+        });
       },
     },
     rewindRun: {
@@ -348,7 +353,9 @@ export class KeelOperationGateway {
       handle: (_session, p, credential) => {
         this.authorizeRunCredential(credential, p.runId as string, "run:rewind");
         this.opts.claimOrReject(p.runId as string);
-        return this.opts.api.rewindRun(p.runId as string, p.toStableKey as string);
+        return this.opts.api.rewindRun(p.runId as string, p.toStableKey as string, {
+          runSecrets: p.runSecrets as Record<string, string> | undefined,
+        });
       },
     },
     forkRun: {

@@ -33,6 +33,7 @@ import {
 } from "../../workflows/task-review-guidance/package.ts";
 import { ClaudeProvider } from "../agents/claude.ts";
 import { CodexProvider } from "../agents/codex.ts";
+import { validateEnvironmentName } from "../agents/environment.ts";
 import { PiProvider } from "../agents/pi.ts";
 import { AgentProviderRegistry } from "../agents/types.ts";
 import { redactCapabilityTokens } from "../auth/redaction.ts";
@@ -45,6 +46,7 @@ import type {
   AgentProfileView,
   EventCursorInput,
   RunOutcome,
+  RunSecrets,
   ScheduleSummary,
   ScheduleView,
   SettingView,
@@ -119,12 +121,12 @@ const COMMANDS: [string, string, string][] = [
   ["link", "[dir]", "make <dir> (default: cwd) able to import the @kcosr/keel SDK"],
   [
     "launch",
-    "[workflow.ts] [--name n] [--input json] [--target dir] [--output json|text|ndjson] [--tools] [--detach] [--emit-capability]",
+    "[workflow.ts] [--name n] [--input json] [--target dir] [--secret NAME=VALUE] [--secret-env NAME[=ENV]] [--output json|text|ndjson] [--tools] [--detach] [--emit-capability]",
     "start a run from client-captured workflow source",
   ],
   [
     "run",
-    "[workflow.ts] [--name n] [--input json] [--target dir] [--output json|text|ndjson] [--tools]",
+    "[workflow.ts] [--name n] [--input json] [--target dir] [--secret NAME=VALUE] [--secret-env NAME[=ENV]] [--output json|text|ndjson] [--tools]",
     "launch and print the result",
   ],
   [
@@ -158,10 +160,14 @@ const COMMANDS: [string, string, string][] = [
   ["gc", "", "prune unreferenced workflow definitions and cache entries"],
   ["resume", "[--detach] [--tools] <runId>", "resume a parked or incomplete run"],
   ["interrupt", "<runId> [reason]", "interrupt a non-terminal run until explicit resume"],
-  ["retry", "[--detach] [--tools] <runId>", "re-run a failed run from its failed step"],
+  [
+    "retry",
+    "[--detach] [--tools] [--secret NAME=VALUE] [--secret-env NAME[=ENV]] <runId>",
+    "re-run a failed run from its failed step",
+  ],
   [
     "rewind",
-    "[--detach] [--tools] <runId> <stepKey>",
+    "[--detach] [--tools] [--secret NAME=VALUE] [--secret-env NAME[=ENV]] <runId> <stepKey>",
     "discard everything after a step and re-run",
   ],
   ["fork", "<runId> [atStepKey]", "copy a run into a new independent run"],
@@ -317,6 +323,9 @@ async function dispatch(argv: string[]): Promise<number> {
         target: launchOpts.target,
         name: launchOpts.name ?? captured.defaultName,
         provenance: captured.provenance,
+        ...(nonEmptyRunSecrets(launchOpts.runSecrets) !== undefined
+          ? { runSecrets: launchOpts.runSecrets }
+          : {}),
       });
       const { runId } = launched;
       const capabilityRef =
@@ -370,6 +379,9 @@ async function dispatch(argv: string[]): Promise<number> {
         target: runOpts.target,
         name: runOpts.name ?? captured.defaultName,
         provenance: captured.provenance,
+        ...(nonEmptyRunSecrets(runOpts.runSecrets) !== undefined
+          ? { runSecrets: runOpts.runSecrets }
+          : {}),
       });
       const capabilityRef = launched.capability
         ? writeCapabilityFile(launched.runId, launched.capability)
@@ -611,7 +623,11 @@ async function dispatch(argv: string[]): Promise<number> {
       const [runId] = parsed.args;
       if (!runId) return usage("retry needs a runId");
       const client = await openClient();
-      const out = await client.retryRun(runId);
+      const out = await client.retryRun(runId, {
+        ...(nonEmptyRunSecrets(parsed.runSecrets) !== undefined
+          ? { runSecrets: parsed.runSecrets }
+          : {}),
+      });
       if (!parsed.detach) process.stdout.write(formatRunHeader(out.runId));
       const terminal = parsed.detach
         ? null
@@ -628,7 +644,11 @@ async function dispatch(argv: string[]): Promise<number> {
       const [runId, step] = parsed.args;
       if (!runId || !step) return usage("rewind needs <runId> <stepKey>");
       const client = await openClient();
-      const out = await client.rewindRun(runId, step);
+      const out = await client.rewindRun(runId, step, {
+        ...(nonEmptyRunSecrets(parsed.runSecrets) !== undefined
+          ? { runSecrets: parsed.runSecrets }
+          : {}),
+      });
       if (!parsed.detach) process.stdout.write(formatRunHeader(out.runId));
       const terminal = parsed.detach
         ? null
@@ -690,21 +710,27 @@ async function dispatch(argv: string[]): Promise<number> {
 export function parseLifecycleArgs(args: string[]): {
   detach: boolean;
   tools: boolean;
+  runSecrets: RunSecrets;
   args: string[];
 } {
   let detach = false;
   let tools = false;
+  const runSecrets: RunSecrets = {};
   const positional: string[] = [];
-  for (const arg of args) {
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i] as string;
     if (arg === "--detach") detach = true;
     else if (arg === "--tools") tools = true;
+    else if (arg === "--secret") addCliRunSecret(runSecrets, requireFlagValue(args, i++, arg), arg);
+    else if (arg === "--secret-env")
+      addCliRunSecretFromEnv(runSecrets, requireFlagValue(args, i++, arg), arg);
     else if (arg.startsWith("--")) throw new Error(`unknown lifecycle flag ${arg}`);
     else positional.push(arg);
   }
   if (detach && tools) {
     throw new Error("--tools is only available for attached lifecycle --output text");
   }
-  return { detach, tools, args: positional };
+  return { detach, tools, runSecrets, args: positional };
 }
 
 export function parseOutputFormat(value: string): OutputFormat {
@@ -849,6 +875,7 @@ export interface LaunchArgs {
   name?: string | null;
   input: unknown;
   target?: string;
+  runSecrets: RunSecrets;
 }
 
 export interface RunArgs {
@@ -858,6 +885,7 @@ export interface RunArgs {
   name?: string | null;
   input: unknown;
   target?: string;
+  runSecrets: RunSecrets;
 }
 
 export interface ExecuteArgs {
@@ -900,13 +928,14 @@ export function parseLaunchArgs(args: string[]): LaunchArgs {
     emitCapability: false,
     tools: false,
     input: {},
+    runSecrets: {},
   };
   parseSourceArgs(args, out, { detach: true, emitCapability: true, output: true, tools: true });
   return out;
 }
 
 export function parseRunArgs(args: string[]): RunArgs {
-  const out: RunArgs = { tools: false, input: {} };
+  const out: RunArgs = { tools: false, input: {}, runSecrets: {} };
   parseSourceArgs(args, out, { detach: false, emitCapability: false, output: true, tools: true });
   return out;
 }
@@ -1064,6 +1093,7 @@ function parseSourceArgs(
     emitCapability?: boolean;
     tools?: boolean;
     output?: OutputFormat;
+    runSecrets: RunSecrets;
   },
   flags: { detach: boolean; emitCapability: boolean; output: boolean; tools: boolean },
 ): void {
@@ -1091,6 +1121,16 @@ function parseSourceArgs(
       i += 2;
     } else if (arg === "--target") {
       out.target = resolve(cliTargetPath(requireFlagValue(args, i, "--target")));
+      i += 2;
+    } else if (arg === "--secret") {
+      addCliRunSecret(out.runSecrets, requireFlagValue(args, i, "--secret"), "--secret");
+      i += 2;
+    } else if (arg === "--secret-env") {
+      addCliRunSecretFromEnv(
+        out.runSecrets,
+        requireFlagValue(args, i, "--secret-env"),
+        "--secret-env",
+      );
       i += 2;
     } else if (arg.startsWith("--")) {
       throw new Error(`unknown flag ${arg}`);
@@ -1128,6 +1168,38 @@ export function parseLaunchInput(inputJson: string | undefined): unknown {
     throw new Error("launch input must be valid JSON; omit it for {}");
   }
   return JSON.parse(inputJson);
+}
+
+function addCliRunSecret(out: RunSecrets, assignment: string, flag: string): void {
+  const equals = assignment.indexOf("=");
+  if (equals <= 0) throw new Error(`${flag} must use NAME=VALUE`);
+  const name = assignment.slice(0, equals);
+  const value = assignment.slice(equals + 1);
+  setCliRunSecret(out, name, value, flag);
+}
+
+function addCliRunSecretFromEnv(out: RunSecrets, assignment: string, flag: string): void {
+  const equals = assignment.indexOf("=");
+  const name = equals === -1 ? assignment : assignment.slice(0, equals);
+  const source = equals === -1 ? assignment : assignment.slice(equals + 1);
+  if (name.length === 0) throw new Error(`${flag} must specify a secret name`);
+  if (source.length === 0) throw new Error(`${flag} must specify an environment variable name`);
+  const value = process.env[source];
+  if (value === undefined)
+    throw new Error(`${flag} source environment variable ${source} is not set`);
+  setCliRunSecret(out, name, value, flag);
+}
+
+function setCliRunSecret(out: RunSecrets, name: string, value: string, flag: string): void {
+  validateEnvironmentName(name, `${flag} name`);
+  if (Object.prototype.hasOwnProperty.call(out, name)) {
+    throw new Error(`${flag} specifies duplicate secret ${name}`);
+  }
+  out[name] = value;
+}
+
+function nonEmptyRunSecrets(runSecrets: RunSecrets): RunSecrets | undefined {
+  return Object.keys(runSecrets).length > 0 ? runSecrets : undefined;
 }
 
 export function parseRunIdOutputArgs(
@@ -1830,6 +1902,9 @@ async function handleWorkflow(args: string[]): Promise<number> {
         ...(parsed.input !== undefined ? { input: parsed.input } : {}),
         ...(parsed.target !== undefined ? { target: parsed.target } : {}),
         name: parsed.runName ?? null,
+        ...(nonEmptyRunSecrets(parsed.runSecrets) !== undefined
+          ? { runSecrets: parsed.runSecrets }
+          : {}),
       });
       const capabilityRef = launched.capability
         ? writeCapabilityFile(launched.runId, launched.capability)
@@ -2248,6 +2323,7 @@ function parseWorkflowRunArgs(args: string[]): {
   allowDeprecated?: boolean;
   output?: OutputFormat;
   tools: boolean;
+  runSecrets: RunSecrets;
 } {
   const out: {
     name?: string;
@@ -2258,7 +2334,8 @@ function parseWorkflowRunArgs(args: string[]): {
     allowDeprecated?: boolean;
     output?: OutputFormat;
     tools: boolean;
-  } = { tools: false };
+    runSecrets: RunSecrets;
+  } = { tools: false, runSecrets: {} };
   const positional: string[] = [];
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i] as string;
@@ -2273,6 +2350,10 @@ function parseWorkflowRunArgs(args: string[]): {
     else if (arg === "--output")
       out.output = parseOutputFormat(requireFlagValue(args, i++, "--output"));
     else if (arg === "--tools") out.tools = true;
+    else if (arg === "--secret")
+      addCliRunSecret(out.runSecrets, requireFlagValue(args, i++, arg), arg);
+    else if (arg === "--secret-env")
+      addCliRunSecretFromEnv(out.runSecrets, requireFlagValue(args, i++, arg), arg);
     else if (arg.startsWith("--")) throw new Error(`unknown workflow run flag ${arg}`);
     else positional.push(arg);
   }

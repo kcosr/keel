@@ -227,6 +227,7 @@ export class DaemonClient {
       input?: unknown;
       name?: string | null;
       provenance?: LaunchRequest["provenance"];
+      runSecrets?: LaunchRequest["runSecrets"];
     },
   ): Promise<RunStart> {
     return this.rpc("rerunRun", { runId, opts });
@@ -237,11 +238,18 @@ export class DaemonClient {
   getRunReport(runId: string): Promise<RunReport | null> {
     return this.rpc("getRunReport", { runId });
   }
-  retryRun(runId: string): Promise<RunStart> {
-    return this.rpc("retryRun", { runId });
+  retryRun(
+    runId: string,
+    opts: { runSecrets?: LaunchRequest["runSecrets"] } = {},
+  ): Promise<RunStart> {
+    return this.rpc("retryRun", { runId, ...opts });
   }
-  rewindRun(runId: string, toStableKey: string): Promise<RunStart> {
-    return this.rpc("rewindRun", { runId, toStableKey });
+  rewindRun(
+    runId: string,
+    toStableKey: string,
+    opts: { runSecrets?: LaunchRequest["runSecrets"] } = {},
+  ): Promise<RunStart> {
+    return this.rpc("rewindRun", { runId, toStableKey, ...opts });
   }
   forkRun(
     runId: string,

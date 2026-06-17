@@ -158,8 +158,8 @@ bun src/cli/keel.ts <command> [args]
 |---|---|
 | `daemon` | Start the daemon in the foreground. |
 | `link [dir]` | Symlink this repo's SDK into `<dir>/node_modules`; defaults to the current directory. |
-| `launch [workflow.ts] [--name n] [--input json] [--target dir] [--output json\|text\|ndjson] [--tools] [--detach] [--emit-capability]` | Start a run from client-captured workflow source. Attached launch streams NDJSON by default; detached launch prints JSON. |
-| `run [workflow.ts] [--name n] [--input json] [--target dir] [--output json\|text\|ndjson] [--tools]` | Launch a run and print a JSON envelope, text transcript, or NDJSON events. |
+| `launch [workflow.ts] [--name n] [--input json] [--target dir] [--secret NAME=VALUE] [--secret-env NAME[=ENV]] [--output json\|text\|ndjson] [--tools] [--detach] [--emit-capability]` | Start a run from client-captured workflow source. Attached launch streams NDJSON by default; detached launch prints JSON. |
+| `run [workflow.ts] [--name n] [--input json] [--target dir] [--secret NAME=VALUE] [--secret-env NAME[=ENV]] [--output json\|text\|ndjson] [--tools]` | Launch a run and print a JSON envelope, text transcript, or NDJSON events. |
 | `watch <runId> [--output ndjson\|text] [--from beginning\|now \| --after-seq n \| --tail n] [--tools]` | Stream run events until terminal or parked. |
 | `get <runId>` | Print the canonical run projection as JSON. |
 | `output <runId> [--output json\|text]` | Print the terminal workflow output. |
@@ -177,8 +177,8 @@ bun src/cli/keel.ts <command> [args]
 | `gc` | Prune unreferenced workflow definition rows and cache entries. Requires admin. |
 | `resume [--detach] [--tools] <runId>` | Resume a parked, interrupted, or incomplete run. Watches by default. |
 | `interrupt <runId> [reason]` | Stop active work and park a non-terminal run until explicit `resume`. |
-| `retry [--detach] [--tools] <runId>` | Re-run a failed run from its failed step. Watches by default. |
-| `rewind [--detach] [--tools] <runId> <stepKey>` | Discard everything after a step and re-run. Watches by default. |
+| `retry [--detach] [--tools] [--secret NAME=VALUE] [--secret-env NAME[=ENV]] <runId>` | Re-run a failed run from its failed step. Watches by default. |
+| `rewind [--detach] [--tools] [--secret NAME=VALUE] [--secret-env NAME[=ENV]] <runId> <stepKey>` | Discard everything after a step and re-run. Watches by default. |
 | `fork <runId> [atStepKey]` | Copy a terminal run into a new independent run. |
 | `execute [file] [--entry name] [--state file] [--cap-file file] [--output json] [--emit-capability] [-- args...]` | Run a stateless TypeScript control script over the daemon API. Omit `file` to read stdin. |
 | `approve <runId> <key> [note]` | Approve a `ctx.human` gate and acknowledge delivery/wake start. |
@@ -519,6 +519,29 @@ path. `rerun` with a source override snapshots the supplied source as a new
 definition. Workflow source and helper modules are persisted verbatim in the
 journal database; do not embed secrets in workflow TypeScript.
 
+### Run Secrets
+
+Secret values are supplied at run launch or restart time, not in workflow
+source. `keel launch`, `keel run`, `keel workflow run`, `keel retry`, and
+`keel rewind` accept repeatable secret flags:
+
+```bash
+keel run workflow.ts --secret TOKEN=inline-value
+keel run workflow.ts --secret-env TOKEN
+keel run workflow.ts --secret-env TOKEN=DEPLOY_TOKEN
+keel retry run_123 --secret-env TOKEN=DEPLOY_TOKEN
+keel rewind run_123 step_key --secret TOKEN=rotated-value
+```
+
+`--secret NAME=VALUE` injects the literal value for secret name `NAME`.
+`--secret-env NAME` reads the value from process environment variable `NAME`.
+`--secret-env NAME=ENV_NAME` maps environment variable `ENV_NAME` into secret
+name `NAME`. Secret names must be valid provider environment variable names and
+must not start with `KEEL_`; duplicate names fail. These values are stored only
+in the daemon's in-memory run secret side channel and are wiped when the run
+reaches a terminal cleanup path. Saved workflows and schedules do not persist
+raw secret values.
+
 Stdin launches are still a single module named `entry.ts`; local relative
 imports from stdin are rejected with guidance to launch from a file. The only
 external import a workflow source may use is the exact SDK import
@@ -528,9 +551,10 @@ through `node_modules` are rejected. `@kcosr/keel` resolves through the current
 daemon's workflow SDK bridge, guarded by the workflow SDK ABI stored in the
 definition manifest. Compatible Keel upgrades can resume existing definitions; a
 daemon that does not support the stored ABI fails the run with a
-required-versus-supported ABI error. The provider-config SDK addition is an ABI 5
-boundary: re-register workflow definitions after upgrade, and drain suspended or
-non-terminal older-ABI runs first unless Keel gains a real multi-ABI bridge.
+required-versus-supported ABI error. The agent `environment` SDK addition is an
+ABI 8 boundary: re-register workflow definitions after upgrade, and drain
+suspended or non-terminal older-ABI runs first unless Keel gains a real
+multi-ABI bridge.
 
 ### Targets And Run Workspaces
 
@@ -890,7 +914,7 @@ const finding = await ctx.agent({
 | `denyTools?` | Provider-native tool removals after policy resolution. |
 | `workspace?` | `WorkspaceHandle` from `ctx.workspace`; defaults to the scoped or run default direct workspace. |
 | `capabilities?` | Explicit normalized capability declaration used when `toolPolicy` is omitted. |
-| `secrets?` | Secret names to inject from the side channel. |
+| `environment?` | Literal env vars and secret names to inject at invocation: `{ vars?: Record<string,string>; secrets?: string[] }`. |
 | `onFailure?` | `"throw"` by default, or `"null"` to tolerate terminal failure. |
 | `maxRetries?` | In-session structured-output validation retries. Default: `agent.defaultMaxRetries`. |
 | `lenient?` | Opt into tolerant structured-output coercion. Default: `agent.defaultLenient`. |
@@ -911,7 +935,7 @@ keel profiles check <name> [--connect] [--output text|json]
 keel profiles check --file <path|-> [--connect] [--output text|json]
 ```
 
-All profile commands use the daemon connection (`KEEL_SOCKET`/`KEEL_DIR`) and require an admin credential (`KEEL_ADMIN_TOKEN` or an admin capability file). Profile JSON may include provider/model/reasoning, tool policy, allow/deny tools, capabilities, retry/timeout options, and provider-keyed `providerConfig`. It must not include prompt/key/schema/workspace/secret fields or legacy `workspaceIsolation`, `workspaceRetention`, or `target` fields.
+All profile commands use the daemon connection (`KEEL_SOCKET`/`KEEL_DIR`) and require an admin credential (`KEEL_ADMIN_TOKEN` or an admin capability file). Profile JSON may include provider/model/reasoning, tool policy, allow/deny tools, capabilities, retry/timeout options, `environment`, and provider-keyed `providerConfig`. It must not include prompt/key/schema/workspace fields, top-level `secrets`, or legacy `workspaceIsolation`, `workspaceRetention`, or `target` fields.
 
 The daemon snapshots the complete effective catalog (programmatic plus persisted catalog profiles) when a run is launched or rerun. Resume, retry, rewind, daemon restart, provider retries, and default forks keep the existing snapshot; editing or deleting a profile only affects future launches and reruns.
 
@@ -996,9 +1020,9 @@ not deep merge. Use `{}` for the selected provider to clear a profile config.
 Adapters receive a deep-cloned, deeply frozen selected config object.
 
 `providerConfig` is replay-visible execution configuration, not a secret store
-and not a workspace selector. Keep raw secrets in named `secrets`, and choose
-cwd/workspace behavior with `ctx.workspace`, `ctx.withWorkspace`, and
-`workspace` handles.
+and not a workspace selector. Request secret names through `environment.secrets`,
+supply raw values with launch/restart run secrets, and choose cwd/workspace
+behavior with `ctx.workspace`, `ctx.withWorkspace`, and `workspace` handles.
 
 ### Codex Provider
 
@@ -1060,8 +1084,9 @@ to be an existing absolute directory. Codex read-only and workspace-write use
 Codex's own filesystem/network sandbox; these modes may still execute sandboxed
 commands, so do not treat them as a no-shell guarantee. Unrestricted
 `danger-full-access` is not sandboxed to the cwd and can access anything its host
-runtime can access. Secret env injection is supported only for stdio; remote
-transports reject non-empty `secrets` rather than silently dropping them.
+runtime can access. Environment injection is supported only for stdio; remote
+transports reject non-empty `environment.vars` or `environment.secrets` rather
+than silently dropping them.
 
 Codex app-server thread ids are captured write-ahead as session tokens and are
 returned from provider calls so schema retries and `ctx.agentSession` turns reuse
@@ -1081,7 +1106,7 @@ values.
 Common Codex errors include malformed `providerConfig.codex.transport...`,
 invalid `providerConfig.codex.serviceTier`,
 unsupported `none` or lossy capability shapes, allow/deny tool edits, remote
-transport plus secrets, missing/unusable cwd, JSON-RPC method errors, resumed
+transport plus environment injection, missing/unusable cwd, JSON-RPC method errors, resumed
 cwd/token mismatch, unreconcilable active remote turns, and turn
 failure/interruption.
 
@@ -1153,7 +1178,7 @@ may not start with `__session.`.
 
 Participant identity is fixed for the run after profiles, selected provider
 config, tool policy, allowed tools, denied tools, capabilities, resolved
-workspace id, and secret names are resolved. Changing the participant identity or
+workspace id, and normalized environment are resolved. Changing the participant identity or
 reusing a turn key with a changed prompt/schema/options fails the run instead of
 starting a fresh backend session.
 
@@ -1214,17 +1239,17 @@ Filesystem capability levels:
 | `"read"` | Read, grep, and list. |
 | `"workspace-write"` | Edit/write through provider tools. Use `worktree`, `copy`, or supported local `clone` workspaces when edits should be staged in a Keel-owned workspace and reviewed as a diff before merge. |
 
-Secrets named in `secrets` are resolved from a side channel keyed by run and
-injected into the provider invocation environment. Secret names, not raw values,
-belong in workflow source and agent options. If an agent prints, streams,
-returns, writes, diffs, or errors with a secret value, Keel journals that content
-as-is; there is no exact-value agent-secret redaction pass. Secrets do not
-require worktree mode; workspace choice is only cwd/lifecycle selection, not a
-secret boundary.
-
-The bundled `keel daemon` does not yet construct a `SecretStore`; secret
-injection requires constructing `RealmKernel` or `KeelDaemon` programmatically
-with one.
+Secrets named in `environment.secrets` are resolved from a side channel keyed by
+run and injected into the provider invocation environment. Secret names, not raw
+values, belong in workflow source and agent options. Every requested secret must
+also be granted in `capabilities.secrets`; otherwise the workflow fails before
+provider invocation. Missing run secret values fail the agent step instead of
+silently injecting an empty environment. Literal non-secret environment variables
+may be supplied with `environment.vars` and participate in agent identity by
+value. If an agent prints, streams, returns, writes, diffs, or errors with a
+secret value, Keel journals that content as-is; there is no exact-value
+agent-secret redaction pass. Secrets do not require worktree mode; workspace
+choice is only cwd/lifecycle selection, not a secret boundary.
 
 ## Durability Features
 
@@ -1366,6 +1391,9 @@ keel workflow enable review-loop
 keel workflow deprecate review-loop 2 "use v3"
 keel workflow delete-version review-loop 1 --yes
 ```
+
+`keel workflow run` accepts the same `--secret` and `--secret-env` flags as
+`keel run`; the raw values apply only to the launched run.
 
 Multi-file workflow packages are saved the same way. For the reusable task
 review guidance package:
@@ -1581,8 +1609,7 @@ daemons from driving the same run; after restart, the daemon reclaims orphaned
 - SQLite is the only implemented store. Postgres compatibility is a discipline
   enforced by tests, not a working backend.
 - Secrets are trusted-local environment injection through the side channel.
-  Persistent agent profiles and daemon settings are available through the CLI and
-  daemon APIs.
+  Agent-visible secret values can still be journaled if the agent emits them.
 - The full 111-agent workload remains budget/target-repo dependent; shape,
   durability, and crash-resume are covered by mock scale tests and reduced live
   runs.

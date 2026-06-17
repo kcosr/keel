@@ -400,21 +400,47 @@ describe("keel CLI", () => {
     expect(parseLifecycleArgs(["wf.ts", '{"n":1}'])).toEqual({
       detach: false,
       tools: false,
+      runSecrets: {},
       args: ["wf.ts", '{"n":1}'],
     });
     expect(parseLifecycleArgs(["--detach", "run_123"])).toEqual({
       detach: true,
       tools: false,
+      runSecrets: {},
       args: ["run_123"],
     });
     expect(parseLifecycleArgs(["--tools", "run_123"])).toEqual({
       detach: false,
       tools: true,
+      runSecrets: {},
       args: ["run_123"],
     });
+    const previousSecretSource = process.env.KEEL_TEST_SECRET_SOURCE;
+    try {
+      process.env.KEEL_TEST_SECRET_SOURCE = "from-env";
+      expect(
+        parseLifecycleArgs([
+          "--secret",
+          "TOKEN=inline",
+          "--secret-env",
+          "FROM_ENV=KEEL_TEST_SECRET_SOURCE",
+          "run_123",
+        ]),
+      ).toEqual({
+        detach: false,
+        tools: false,
+        runSecrets: { FROM_ENV: "from-env", TOKEN: "inline" },
+        args: ["run_123"],
+      });
+    } finally {
+      if (previousSecretSource === undefined)
+        Reflect.deleteProperty(process.env, "KEEL_TEST_SECRET_SOURCE");
+      else process.env.KEEL_TEST_SECRET_SOURCE = previousSecretSource;
+    }
     expect(() => parseLifecycleArgs(["--detach", "--tools", "run_123"])).toThrow(
       "attached lifecycle --output text",
     );
+    expect(() => parseLifecycleArgs(["--secret", "BAD"])).toThrow("--secret must use NAME=VALUE");
   });
 
   test("launch args parse source path, input, name, detach, and capability emission", () => {
@@ -435,6 +461,7 @@ describe("keel CLI", () => {
       file: "wf.ts",
       name: "review",
       input: { n: 1 },
+      runSecrets: {},
     });
     expect(parseLaunchArgs(["--detach", "--output", "text", "wf.ts"])).toEqual({
       detach: true,
@@ -443,6 +470,7 @@ describe("keel CLI", () => {
       output: "text",
       file: "wf.ts",
       input: {},
+      runSecrets: {},
     });
     expect(parseLaunchArgs(["--output", "text", "--tools", "wf.ts"])).toEqual({
       detach: false,
@@ -451,6 +479,7 @@ describe("keel CLI", () => {
       output: "text",
       file: "wf.ts",
       input: {},
+      runSecrets: {},
     });
     expect(parseLaunchArgs(["--detach", "wf.ts"])).toEqual({
       detach: true,
@@ -458,9 +487,19 @@ describe("keel CLI", () => {
       tools: false,
       file: "wf.ts",
       input: {},
+      runSecrets: {},
+    });
+    expect(parseLaunchArgs(["--secret", "TOKEN=inline", "wf.ts"])).toEqual({
+      detach: false,
+      emitCapability: false,
+      tools: false,
+      file: "wf.ts",
+      input: {},
+      runSecrets: { TOKEN: "inline" },
     });
     expect(() => parseLaunchArgs(["wf.ts", '{"n":1}'])).toThrow("workflow input must use --input");
     expect(() => parseLaunchArgs(['{"n":1}'])).toThrow("workflow input must use --input");
+    expect(() => parseLaunchArgs(["--secret", "__proto__=x", "wf.ts"])).toThrow("reserved");
   });
 
   test("run args parse output mode with optional source path", () => {
@@ -468,11 +507,13 @@ describe("keel CLI", () => {
       tools: false,
       output: "ndjson",
       input: null,
+      runSecrets: {},
     });
     expect(parseRunArgs(["--output", "text", "--tools"])).toEqual({
       tools: true,
       output: "text",
       input: {},
+      runSecrets: {},
     });
     expect(() => parseRunArgs(["--json"])).toThrow("unknown flag --json");
     expect(() => parseRunArgs(['{"n":1}'])).toThrow("workflow input must use --input");

@@ -28,6 +28,7 @@ describe("resolveProfile", () => {
         model: "opus",
         reasoning: "high",
         toolPolicy: "read-only" as const,
+        environment: { vars: { MODE: "review" }, secrets: ["TOKEN"] },
       },
     };
     const resolved = resolveProfile(
@@ -41,12 +42,19 @@ describe("resolveProfile", () => {
       model: "opus",
       reasoning: "high",
       toolPolicy: "read-only",
+      environment: { vars: { MODE: "review" }, secrets: ["TOKEN"] },
     });
     // explicit field wins over the profile
     expect(
       resolveProfile({ key: "k", prompt: "p", profile: "reviewer", model: "haiku" }, profiles)
         .model,
     ).toBe("haiku");
+    expect(
+      resolveProfile(
+        { key: "k", prompt: "p", profile: "reviewer", environment: { vars: { MODE: "local" } } },
+        profiles,
+      ).environment,
+    ).toEqual({ vars: { MODE: "local" } });
     // unknown profile fails loud
     expect(() => resolveProfile({ key: "k", prompt: "p", profile: "nope" }, profiles)).toThrow(
       /unknown agent profile/,
@@ -170,6 +178,23 @@ describe("resolveProfile", () => {
       toolPolicy: "none",
     });
     expect(normalized).toEqual({ provider: "codex", toolPolicy: "none" });
+  });
+
+  test("profile normalization accepts environment and still rejects top-level secrets", () => {
+    expect(
+      normalizeAgentProfileConfig({
+        provider: "pi",
+        capabilities: { secrets: ["TOKEN"] },
+        environment: { vars: { MODE: "review" }, secrets: ["TOKEN"] },
+      }),
+    ).toEqual({
+      provider: "pi",
+      capabilities: { secrets: ["TOKEN"] },
+      environment: { vars: { MODE: "review" }, secrets: ["TOKEN"] },
+    });
+    expect(() => normalizeAgentProfileConfig({ provider: "pi", secrets: ["TOKEN"] })).toThrow(
+      /profile\.secrets is not allowed/,
+    );
   });
 });
 

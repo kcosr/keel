@@ -12,6 +12,12 @@ import {
   validateProviderToolPolicy,
 } from "../agents/capabilities.ts";
 import { DEFAULT_AGENT_PROVIDER, DEFAULT_SCHEMA_MAX_RETRIES } from "../agents/defaults.ts";
+import {
+  type AgentEnvironmentSpec,
+  assertEnvironmentSecretsGranted,
+  hasAgentEnvironment,
+  normalizeAgentEnvironment,
+} from "../agents/environment.ts";
 import { AgentFailure, executeAgent, runAgentWithStall } from "../agents/execute.ts";
 import { type AgentProfiles, resolveProfile } from "../agents/profiles.ts";
 import { resolveSelectedProviderConfig } from "../agents/provider-config.ts";
@@ -68,8 +74,8 @@ export interface AgentSpec<T> {
   workspace?: WorkspaceHandle;
   /** Explicit capabilities; overrides the default read-only policy (§11). */
   capabilities?: Partial<Capabilities>;
-  /** Named secret refs to inject as env at invocation (§11.2). */
-  secrets?: string[];
+  /** Literal env vars and named secret refs to inject at invocation (§11.2). */
+  environment?: AgentEnvironmentSpec;
   /** Terminal-failure policy after retries (D7): default 'throw'. */
   onFailure?: "throw" | "null";
   /** In-session validation retries (default 2). */
@@ -403,11 +409,6 @@ export class WorkflowCtx implements Ctx {
       this.agentProfiles as AgentProfiles | undefined,
     ) as AgentSpec<T>;
     assertNotReservedAuthorKey(spec.key, "ctx.agent");
-    // Secret injection is realm-only (the side channel lives on the daemon host);
-    // fail loudly rather than silently ignoring a secrets request in-process.
-    if (spec.secrets?.length) {
-      throw new Error("ctx.agent({ secrets }) requires the realm kernel (secret side-channel)");
-    }
     rejectRemovedWorkspaceFields(rawSpec, `ctx.agent("${spec.key}")`);
     const provider = spec.provider ?? DEFAULT_AGENT_PROVIDER;
     const profileProviderConfig = rawSpec.profile
@@ -433,6 +434,16 @@ export class WorkflowCtx implements Ctx {
     );
     validateProviderToolPolicy(provider, tools, `ctx.agent("${spec.key}")`);
     const caps = tools.capabilities;
+    const environment = normalizeAgentEnvironment(spec.environment, {
+      path: `ctx.agent("${spec.key}").environment`,
+    });
+    assertEnvironmentSecretsGranted(environment, caps, `ctx.agent("${spec.key}")`);
+    // Secret value resolution is realm-only (the side channel lives on the daemon host).
+    if (environment.secrets.length > 0) {
+      throw new Error(
+        "ctx.agent({ environment: { secrets } }) requires the realm kernel (secret side-channel)",
+      );
+    }
     const workspaceHandle = this.resolveAgentWorkspaceHandle(spec.workspace);
     const workspaceId = workspaceHandle.id;
     const workspaceIdentityHash = workspaceHandle.identityHash ?? null;
@@ -449,7 +460,7 @@ export class WorkflowCtx implements Ctx {
       workspaceId,
       ...(workspaceIdentityHash !== null ? { workspaceIdentityHash } : {}),
       capabilities: caps,
-      secrets: spec.secrets ?? [],
+      environment,
     };
     const version =
       spec.version ??
@@ -489,6 +500,7 @@ export class WorkflowCtx implements Ctx {
               denyTools: tools.denyTools,
               capabilities: caps,
               cwd,
+              ...(hasAgentEnvironment(environment) ? { env: environment.vars } : {}),
               ...(begun.resumeToken ? { resumeToken: begun.resumeToken } : {}),
               abortSignal: signal,
             },

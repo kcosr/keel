@@ -269,7 +269,10 @@ async function rpcRoute(request: Request, socketPath: string): Promise<Response>
     throw new HttpError(400, { message: "rpc method must be a non-empty string" });
   }
   const response = await unary(socketPath, rpc.method, rpc.params ?? {}, credential, rpc.id);
-  return json(response, response.error ? statusForGatewayError(response.error) : 200);
+  if (response.error) {
+    return json(redactCapabilityTokensInValue(response), statusForGatewayError(response.error));
+  }
+  return json(response);
 }
 
 async function projectionRoute(
@@ -391,7 +394,9 @@ async function eventsRoute(
   const credential = bearerCredential(request);
   const cursor = parseEventCursor(new URL(request.url));
   const preflight = await unary(socketPath, "getRun", { runId }, credential);
-  if (preflight.error) return json(preflight, statusForGatewayError(preflight.error));
+  if (preflight.error) {
+    return json(redactCapabilityTokensInValue(preflight), statusForGatewayError(preflight.error));
+  }
   const encoder = new TextEncoder();
   let gateway: GatewaySocket | null = null;
   let heartbeat: ReturnType<typeof setInterval> | null = null;
@@ -480,7 +485,7 @@ async function eventsRoute(
           if (!snapshot) return;
           if (snapshot.error) {
             sendSnapshot(null);
-            write(sseFrame("error", snapshot.error));
+            write(sseFrame("error", redactCapabilityTokensInValue(snapshot.error)));
             scheduleClose();
             return;
           }
@@ -488,7 +493,7 @@ async function eventsRoute(
           const response = await subscribed;
           if (!response) return;
           if (response.error) {
-            write(sseFrame("error", response.error));
+            write(sseFrame("error", redactCapabilityTokensInValue(response.error)));
             scheduleClose();
           }
         },
@@ -510,20 +515,6 @@ async function eventsRoute(
       connection: "keep-alive",
     },
   });
-}
-
-async function collectEvents(
-  socketPath: string,
-  runId: string,
-  cursor: EventCursorInput,
-  credential: string | null,
-): Promise<{ events: EventStreamFrame[]; cursor: EventCursor | null }> {
-  const conn = await GatewaySocket.connect(socketPath);
-  try {
-    return await collectEventsOn(conn, runId, cursor, credential);
-  } finally {
-    conn.close();
-  }
 }
 
 async function collectEventsOn(
@@ -564,16 +555,6 @@ async function collectEventsOn(
   };
 }
 
-async function gatewayResult<T>(
-  socketPath: string,
-  method: string,
-  params: unknown,
-  credential: string | null,
-): Promise<T> {
-  const response = await unary(socketPath, method, params, credential);
-  return resultOrHttpError<T>(response);
-}
-
 async function gatewayResultOn<T>(
   conn: GatewaySocket,
   method: string,
@@ -602,11 +583,6 @@ async function unary(
   } finally {
     conn.close();
   }
-}
-
-async function hasAdminAuthority(socketPath: string, credential: string | null): Promise<boolean> {
-  const response = await unary(socketPath, "listRuns", {}, credential);
-  return !response.error;
 }
 
 async function hasAdminAuthorityOn(

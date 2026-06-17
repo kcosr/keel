@@ -273,6 +273,14 @@ describe("web transport", () => {
       });
       expect(missingRun.status).toBe(404);
 
+      const redactedRpcError = await jsonFetch(`${web.url}/rpc`, {
+        method: "POST",
+        body: JSON.stringify({ method: "getRun", params: { runId: "kc_run_rpc_secret" } }),
+      });
+      expect(redactedRpcError.status).toBe(401);
+      expect(JSON.stringify(redactedRpcError.body)).toContain("«redacted-capability»");
+      expect(JSON.stringify(redactedRpcError.body)).not.toContain("kc_run_rpc_secret");
+
       const runs = await jsonFetch(`${web.url}/api/runs`, { headers: auth(ADMIN_TOKEN) });
       expect(runs.status).toBe(200);
       expect(runs.body.runs[0]).toMatchObject({
@@ -368,6 +376,13 @@ describe("web transport", () => {
         headers: auth(launched.capability as string),
       });
       expect(badCursor.status).toBe(400);
+
+      const redactedPreflight = await jsonFetch(
+        `${web.url}/runs/kc_run_event_preflight_secret/events?from=beginning`,
+      );
+      expect(redactedPreflight.status).toBe(401);
+      expect(JSON.stringify(redactedPreflight.body)).toContain("«redacted-capability»");
+      expect(JSON.stringify(redactedPreflight.body)).not.toContain("kc_run_event_preflight_secret");
     } finally {
       client.close();
       web.stop(true);

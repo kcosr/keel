@@ -114,10 +114,10 @@ daemon gateway, not a second operation dispatcher:
 - Projection routes currently cover runs, run detail, approvals, workspaces, and
   system status. The runs list projection is intentionally bounded before
   per-run enrichment through the daemon `listRunsPage` RPC, defaults to the
-  latest 100 runs, rejects limits above 500, and returns page metadata for
-  honest truncation copy. Run projections hide diagnostic `running` blockage and
-  only surface actionable waits, agent concurrency queues, interruptions, or
-  stale owner-heartbeat stalls.
+  latest 100 runs, rejects limits above the shared 500-run RPC maximum, and
+  returns page metadata for honest truncation copy. Run projections hide
+  diagnostic `running` blockage and only surface actionable waits, agent
+  concurrency queues, interruptions, or stale owner-heartbeat stalls.
 - Captured-source `launchRun` is admin-only through the web surface even though
   it remains open on the trusted local Unix socket.
 

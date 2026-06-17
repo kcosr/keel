@@ -18,6 +18,8 @@ import { RUN_FINISHED_INLINE_OUTPUT_BYTES } from "../kernel/output.ts";
 import { workflowDefinitionSourceSelection } from "../workflow-definitions/source-view.ts";
 import type { WorkflowDefinitionSourceView } from "./contract.ts";
 
+export const MAX_RUN_SUMMARY_PAGE_LIMIT = 500;
+
 export interface NodeView {
   stableKey: string;
   effectType: EffectType;

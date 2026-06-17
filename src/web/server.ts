@@ -15,14 +15,14 @@ import type {
   StreamControlFrame,
 } from "../rpc/contract.ts";
 import { normalizeEventCursorInput } from "../rpc/event-cursor.ts";
-import { type Blockage, isVisibleBlockage } from "../rpc/projection.ts";
+import { type Blockage, MAX_RUN_SUMMARY_PAGE_LIMIT, isVisibleBlockage } from "../rpc/projection.ts";
 
 export const DEFAULT_WEB_HOST = "127.0.0.1";
 export const DEFAULT_WEB_PORT = 7879;
 export const DEFAULT_WEB_HEARTBEAT_MS = 15_000;
 export const DEFAULT_WEB_ASSETS_DIR = resolve(import.meta.dir, "..", "..", "web", "dist");
 export const DEFAULT_WEB_RUNS_LIMIT = 100;
-export const MAX_WEB_RUNS_LIMIT = 500;
+export const MAX_WEB_RUNS_LIMIT = MAX_RUN_SUMMARY_PAGE_LIMIT;
 
 export interface KeelWebServerOptions {
   socketPath: string;

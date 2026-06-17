@@ -462,7 +462,8 @@ current time minus `createdAtMs`. Empty lists still print the header row.
 Use `keel list --output json` for scripts. It returns a CLI envelope while the
 unbounded `listRuns` RPC method remains a bare `RunSummary[]`. Browser run
 lists use the bounded `listRunsPage({ limit })` RPC, which returns
-`{ runs, total }` in the same newest-first order. CLI JSON:
+`{ runs, total }` in the same newest-first order and rejects limits above `500`.
+CLI JSON:
 
 ```json
 {"runs":[{"runId":"run_...","status":"finished","workflowName":"review","createdAtMs":1781414349314,"finishedAtMs":1781415069314,"parentRunId":null}]}

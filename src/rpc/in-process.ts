@@ -76,6 +76,7 @@ import { cursorAfterSeq } from "./event-cursor.ts";
 import { EventHub } from "./event-hub.ts";
 import {
   type Blockage,
+  MAX_RUN_SUMMARY_PAGE_LIMIT,
   type RunProjection,
   type RunReport,
   type RunSummary,
@@ -117,6 +118,9 @@ function agentConcurrencyBlockage(queued: AgentConcurrencyWaitSnapshot): Blockag
 function requireRunPageLimit(limit: unknown): number {
   if (typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1) {
     throw new Error("listRunsPage limit must be a positive integer");
+  }
+  if (limit > MAX_RUN_SUMMARY_PAGE_LIMIT) {
+    throw new Error(`listRunsPage limit must be <= ${MAX_RUN_SUMMARY_PAGE_LIMIT}`);
   }
   return limit;
 }

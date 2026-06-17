@@ -23,9 +23,9 @@
   disabled-state explanations.
 - The web runs projection now defaults to a bounded latest-run page, accepts an
   explicit `limit` up to the documented maximum, uses a bounded daemon
-  `listRunsPage` RPC before per-run enrichment, and returns page metadata so the
-  UI can disclose truncated browser history without materializing every
-  historical run.
+  `listRunsPage` RPC before per-run enrichment, enforces the same maximum on
+  direct RPC calls, and returns page metadata so the UI can disclose truncated
+  browser history without materializing every historical run.
 - Agent specs and persistent profiles now support `environment: { vars, secrets }`.
   Literal `vars` are passed as provider environment variables and hashed by
   value; `environment.secrets` requests named run-secret values supplied through

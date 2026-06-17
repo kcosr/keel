@@ -917,7 +917,11 @@ export class JournalStore {
       )
       .all(runId, count);
     if (rows.length === 0) return 0;
-    return Math.max(0, Math.min(...rows.map((row) => row.seq)) - 1);
+    let floorSeq = rows[0]?.seq ?? 0;
+    for (const row of rows.slice(1)) {
+      if (row.seq < floorSeq) floorSeq = row.seq;
+    }
+    return floorSeq > 0 ? floorSeq - 1 : 0;
   }
 
   private notifyEventAppended(event: EventRow): void {

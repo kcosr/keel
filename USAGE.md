@@ -291,6 +291,11 @@ already-terminal, parked, or interrupted event, watch still exits from the
 daemon's closed stream status after catch-up. See `docs/events.md` for the
 shared cursor contract.
 
+Attached lifecycle commands (`resume`, `retry`, `rewind`, attached `launch`, and
+saved-workflow `run`) use the operation's returned `attachCursor`, so they show
+the accepted operation and subsequent progress without replaying stale earlier
+history. Plain `keel watch <runId>` still starts from the beginning by default.
+
 ### Run, Output, And Report Formats
 
 `keel run` defaults to `--output json`, a single envelope containing `runId`,

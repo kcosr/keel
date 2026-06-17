@@ -95,6 +95,10 @@ should prefer JSON/NDJSON or direct API calls.
 
 See `docs/events.md` for the shared cursor and stream-boundary contract.
 
+Start and wake operations that can be followed by a stream return an
+`attachCursor`; callers can subscribe from that cursor to observe the accepted
+operation without replaying stale pre-operation history.
+
 ## Execute Wrapper
 
 `keel execute` injects a smaller `keel` object for stateless control scripts.

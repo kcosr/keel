@@ -55,6 +55,7 @@ import type {
   ListSchedulesRequest,
   PreviewWorkflowDefinitionRequest,
   PutScheduleRequest,
+  RunLaunchResult,
   RunOutcome,
   RunStart,
   RunWorkspaceDiff,
@@ -66,6 +67,7 @@ import type {
   WorkflowProvenance,
   WorkspaceGcResult,
 } from "./contract.ts";
+import { cursorAfterSeq } from "./event-cursor.ts";
 import { EventHub } from "./event-hub.ts";
 import {
   type Blockage,
@@ -112,7 +114,7 @@ export class InProcessKeel implements KeelApi {
     );
   }
 
-  async launchRun(req: LaunchRequest): Promise<{ runId: string }> {
+  async launchRun(req: LaunchRequest): Promise<RunLaunchResult> {
     const target = requireRunTarget(req.target, "launchRun");
     const { runId, done } = this.kernel.launch(
       {
@@ -127,7 +129,7 @@ export class InProcessKeel implements KeelApi {
       runId,
       done.catch((err) => ({ runId, status: "failed", output: undefined }) as RunHandle<unknown>),
     );
-    return { runId };
+    return { runId, attachCursor: cursorAfterSeq(runId, 0) };
   }
 
   saveWorkflow(req: SaveWorkflowRequest) {
@@ -251,7 +253,7 @@ export class InProcessKeel implements KeelApi {
     return run.definitionVersion;
   }
 
-  async launchSavedWorkflow(req: LaunchSavedWorkflowRequest): Promise<{ runId: string }> {
+  async launchSavedWorkflow(req: LaunchSavedWorkflowRequest): Promise<RunLaunchResult> {
     const saved = this.store.resolveSavedWorkflowRef(req.ref);
     const target = requireRunTarget(req.target ?? saved.defaultTarget, "launchSavedWorkflow");
     const input =
@@ -266,7 +268,7 @@ export class InProcessKeel implements KeelApi {
       runId,
       done.catch((err) => ({ runId, status: "failed", output: undefined }) as RunHandle<unknown>),
     );
-    return { runId };
+    return { runId, attachCursor: cursorAfterSeq(runId, 0) };
   }
 
   setSavedWorkflowDisabled(name: string, disabled: boolean) {
@@ -340,8 +342,9 @@ export class InProcessKeel implements KeelApi {
   }
 
   async resumeRun(runId: string): Promise<RunStart> {
+    const attachAfterSeq = this.store.eventHighWater(runId);
     this.start(this.kernel.startResume<unknown>(runId));
-    return this.started(runId);
+    return this.started(runId, attachAfterSeq);
   }
 
   async interruptRun(
@@ -362,23 +365,29 @@ export class InProcessKeel implements KeelApi {
       provenance?: WorkflowProvenance;
     },
   ): Promise<RunStart> {
+    const attachAfterSeq = this.store.eventHighWater(runId);
     this.start(this.kernel.startRerun<unknown>(runId, opts));
-    return this.started(runId);
+    return this.started(runId, attachAfterSeq);
   }
 
   async retryRun(runId: string): Promise<RunStart> {
+    const attachAfterSeq = this.store.eventHighWater(runId);
     this.start(this.kernel.startRetry<unknown>(runId));
-    return this.started(runId);
+    return this.started(runId, attachAfterSeq);
   }
 
   async rewindRun(runId: string, toStableKey: string): Promise<RunStart> {
+    const attachAfterSeq = this.store.eventHighWater(runId);
     this.start(this.kernel.startRewind<unknown>(runId, toStableKey));
-    return this.started(runId);
+    return this.started(runId, attachAfterSeq);
   }
 
-  forkRun(runId: string, opts: { atStableKey?: string; newRunId?: string }): { runId: string } {
+  forkRun(runId: string, opts: { atStableKey?: string; newRunId?: string }): RunLaunchResult {
     const newId = this.kernel.fork(runId, opts);
-    return { runId: newId };
+    return {
+      runId: newId,
+      attachCursor: cursorAfterSeq(newId, Math.max(0, this.store.eventHighWater(newId) - 1)),
+    };
   }
 
   getRun(runId: string): RunProjection | null {
@@ -852,9 +861,9 @@ export class InProcessKeel implements KeelApi {
     );
   }
 
-  private started(runId: string): RunStart {
+  private started(runId: string, attachAfterSeq: number): RunStart {
     const status = this.store.getRun(runId)?.status ?? "running";
-    return { runId, status };
+    return { runId, status, attachCursor: cursorAfterSeq(runId, attachAfterSeq) };
   }
 
   private outcome(runId: string, handle: RunHandle<unknown>): RunOutcome {

@@ -79,7 +79,7 @@ class FakeProcess {
 
 interface FakeSubscription {
   runId: string;
-  cursor: SubscribeEventsRequest["cursor"];
+  cursor: unknown;
   onEvent: (event: EventEnvelope) => void;
   onError?: (err: unknown) => void;
   onCaughtUp?: (result: SubscribeEventsResult) => void;
@@ -116,25 +116,25 @@ class FakeTuiClient implements TuiClient {
 
   async resumeRun(runId: string): Promise<RunStart> {
     this.resumeCalls.push(runId);
-    return { runId, status: "running" };
+    return runStart(runId);
   }
 
   async retryRun(runId: string): Promise<RunStart> {
     this.retryCalls.push(runId);
     if (this.retryError) throw this.retryError;
-    return { runId, status: "running" };
+    return runStart(runId);
   }
 
   async rewindRun(runId: string): Promise<RunStart> {
-    return { runId, status: "running" };
+    return runStart(runId);
   }
 
-  async decideApproval(_runId: string): Promise<{ status: string }> {
-    return { status: "running" };
+  async decideApproval(runId: string): Promise<RunStart> {
+    return runStart(runId);
   }
 
-  async sendSignal(_runId: string): Promise<{ status: string }> {
-    return { status: "running" };
+  async sendSignal(runId: string): Promise<RunStart> {
+    return runStart(runId);
   }
 
   async getRunOutput(runId: string): Promise<RunOutcome> {
@@ -162,6 +162,10 @@ class FakeTuiClient implements TuiClient {
       subscription.unsubscribeCalls += 1;
     };
   }
+}
+
+function runStart(runId: string): RunStart {
+  return { runId, status: "running", attachCursor: { kind: "after-seq", runId, seq: 9 } };
 }
 
 describe("runTui orchestration", () => {
@@ -277,7 +281,7 @@ describe("runTui orchestration", () => {
       const second = client.subscriptions[1] as FakeSubscription;
       expect(first.unsubscribed).toBe(true);
       expect(second.runId).toBe("run_a");
-      expect(second.cursor).toEqual({ kind: "after-seq", seq: 5 });
+      expect(second.cursor).toEqual({ kind: "after-seq", runId: "run_a", seq: 9 });
       expect(client.getRunCalls.length).toBeGreaterThanOrEqual(2);
 
       client.retryError = new Error("owned elsewhere");

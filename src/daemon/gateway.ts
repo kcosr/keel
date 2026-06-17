@@ -12,6 +12,7 @@ import type {
   EventCursor,
   EventEnvelope,
   EventStreamFrame,
+  RunStart,
   SaveWorkflowRequest,
   SavedWorkflowRef,
   StreamControlFrame,
@@ -19,7 +20,11 @@ import type {
   SubscribeEventsResult,
   WorkflowProvenance,
 } from "../rpc/contract.ts";
-import { normalizeEventCursorInput } from "../rpc/event-cursor.ts";
+import {
+  cursorAfterSeq,
+  normalizeEventCursorInput,
+  resolveEventCursor,
+} from "../rpc/event-cursor.ts";
 import type { InProcessKeel } from "../rpc/in-process.ts";
 import { effectiveOperationalSettings } from "../settings/catalog.ts";
 import { requireRunTarget } from "../target.ts";
@@ -363,13 +368,14 @@ export class KeelOperationGateway {
       handle: (_session, p, credential) => {
         this.authorizeAdmin(credential);
         const runId = p.runId as string;
+        const attachAfterSeq = this.opts.store.eventHighWater(runId);
         this.opts.store.decideApproval(
           runId,
           p.key as string,
           p.decision as { status: "approved" | "denied"; note?: string; grantedCaps?: unknown },
           this.opts.clock(),
         );
-        return this.startWakeAfterDelivery(runId);
+        return this.startWakeAfterDelivery(runId, attachAfterSeq);
       },
     },
     sendSignal: {
@@ -377,8 +383,9 @@ export class KeelOperationGateway {
       handle: (_session, p, credential) => {
         const runId = p.runId as string;
         this.authorizeRunCredential(credential, runId, "run:signal");
+        const attachAfterSeq = this.opts.store.eventHighWater(runId);
         this.opts.store.putSignal(runId, p.name as string, p.payload, this.opts.clock());
-        return this.startWakeAfterDelivery(runId);
+        return this.startWakeAfterDelivery(runId, attachAfterSeq);
       },
     },
     putSchedule: {
@@ -717,13 +724,14 @@ export class KeelOperationGateway {
     };
     normalizeEventCursorInput(req.cursor);
     const includeControlFrames = req.includeControlFrames === true;
+    const initialCursor = resolveEventCursor(this.opts.store, runId, req.cursor).initialCursor;
     const subId = randomUUID();
     let unsub = () => {};
     let stopped = false;
     let unsubAssigned = false;
     let authFailureSent = false;
     let recheck: ReturnType<typeof setInterval> | null = null;
-    let lastCursor: EventCursor = { kind: "after-seq", runId, seq: 0 };
+    let lastCursor: EventCursor = initialCursor;
     const stop = () => {
       if (stopped) return;
       stopped = true;
@@ -807,22 +815,25 @@ export class KeelOperationGateway {
   }
 
   /** Start, but do not await, a wake made eligible by a delivered decision/signal. */
-  private async startWakeAfterDelivery(runId: string): Promise<{ status: string }> {
+  private async startWakeAfterDelivery(runId: string, attachAfterSeq: number): Promise<RunStart> {
     const run = this.opts.store.getRun(runId);
     if (!run) throw new Error(`run ${runId} not found`);
+    const attachCursor = cursorAfterSeq(runId, attachAfterSeq);
     if (run.status.startsWith("waiting-")) {
       const active = this.activeDeliveryWakes.get(runId);
-      if (active) return active.ack;
+      if (active)
+        return { runId, status: (await active.ack).status as RunStart["status"], attachCursor };
       const wake: ActiveDeliveryWake = { ack: this.startDeliveryWake(runId) };
       this.activeDeliveryWakes.set(runId, wake);
       try {
-        return await wake.ack;
+        const started = await wake.ack;
+        return { runId, status: started.status as RunStart["status"], attachCursor };
       } catch (err) {
         if (this.activeDeliveryWakes.get(runId) === wake) this.activeDeliveryWakes.delete(runId);
         throw err;
       }
     }
-    return { status: run.status };
+    return { runId, status: run.status, attachCursor };
   }
 
   private async startDeliveryWake(runId: string): Promise<{ status: string }> {

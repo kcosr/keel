@@ -824,6 +824,13 @@ describe("event subscription", () => {
         input: { n: 2 },
         name: "chain",
       });
+      const attachLaunch = await api.launchRun({ ...onceUrl, input: null, name: "attach-cursor" });
+      expect(attachLaunch.attachCursor).toEqual({
+        kind: "after-seq",
+        runId: attachLaunch.runId,
+        seq: 0,
+      });
+      await api.waitForRun(attachLaunch.runId);
       const unsub = api.subscribeEvents({ runId: runId, cursor: { kind: "beginning" } }, (e) =>
         seen.push({ type: e.type, payload: e.payload }),
       );
@@ -1081,6 +1088,58 @@ describe("event subscription", () => {
       seen: [],
       cursor: { kind: "after-seq", runId: "r", seq: 3 },
     });
+  });
+
+  test("now subscriptions cover setup-window durable events exactly once", () => {
+    const store = JournalStore.memory();
+    const hub = new EventHub();
+    store.onEventAppended((event) => hub.publishDurable(event));
+    store.appendEvent("r", "before", {}, 1);
+
+    const originalListEvents = store.listEvents.bind(store);
+    let injected = false;
+    store.listEvents = ((runId: string, afterSeq?: number) => {
+      if (!injected) {
+        injected = true;
+        store.appendEvent("r", "during-setup", {}, 2);
+      }
+      return originalListEvents(runId, afterSeq);
+    }) as JournalStore["listEvents"];
+
+    const seen: string[] = [];
+    const sub = hub.subscribe(store, { runId: "r", cursor: { kind: "now" } }, (event) =>
+      seen.push(event.type),
+    );
+    sub.unsubscribe();
+
+    expect(seen).toEqual(["during-setup"]);
+    expect(sub.cursor).toEqual({ kind: "after-seq", runId: "r", seq: 2 });
+  });
+
+  test("reconnecting from an empty-backfill cursor does not rewind skipped history", () => {
+    const store = JournalStore.memory();
+    const hub = new EventHub();
+    store.onEventAppended((event) => hub.publishDurable(event));
+    store.appendEvent("r", "one", {}, 1);
+    store.appendEvent("r", "two", {}, 2);
+
+    const firstSeen: string[] = [];
+    const first = hub.subscribe(store, { runId: "r", cursor: { kind: "now" } }, (event) =>
+      firstSeen.push(event.type),
+    );
+    first.unsubscribe();
+
+    const secondSeen: string[] = [];
+    const second = hub.subscribe(
+      store,
+      { runId: "r", cursor: { kind: "after-seq", seq: first.cursor.seq } },
+      (event) => secondSeen.push(event.type),
+    );
+    store.appendEvent("r", "three", {}, 3);
+    second.unsubscribe();
+
+    expect(firstSeen).toEqual([]);
+    expect(secondSeen).toEqual(["three"]);
   });
 
   test("caught-up and closed control frames carry resolved durable cursors", () => {
@@ -2050,12 +2109,24 @@ describe("lifecycle start methods", () => {
       expect((await api.waitForRun(runId)).status).toBe("failed");
 
       const started = await api.retryRun(runId);
-      expect(started).toEqual({ runId, status: "running" });
+      expect(started).toMatchObject({
+        runId,
+        status: "running",
+        attachCursor: { kind: "after-seq", runId, seq: 3 },
+      });
       expect(await api.waitForRun(runId)).toMatchObject({
         runId,
         status: "finished",
         output: "done:true",
       });
+      const attachedEvents: string[] = [];
+      const unsub = api.subscribeEvents({ runId, cursor: started.attachCursor }, (event) =>
+        attachedEvents.push(event.type),
+      );
+      unsub();
+      expect(attachedEvents).toContain("run.retry");
+      expect(attachedEvents).toContain("run.finished");
+      expect(attachedEvents).not.toContain("run.failed");
     },
     WORKFLOW_TEST_TIMEOUT_MS,
   );

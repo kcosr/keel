@@ -315,7 +315,11 @@ async function dispatch(argv: string[]): Promise<number> {
           })}\n`,
         );
       }
-      const terminal = await watchRun(client, runId, { output, tools: launchOpts.tools });
+      const terminal = await watchRun(client, runId, {
+        output,
+        tools: launchOpts.tools,
+        cursor: launched.attachCursor,
+      });
       return statusExitCode(terminal);
     }
     case "run": {
@@ -344,7 +348,11 @@ async function dispatch(argv: string[]): Promise<number> {
       if (output === "text") {
         process.stdout.write(`run ${launched.runId}\n`);
       }
-      const terminal = await watchRun(client, launched.runId, { output, tools: runOpts.tools });
+      const terminal = await watchRun(client, launched.runId, {
+        output,
+        tools: runOpts.tools,
+        cursor: launched.attachCursor,
+      });
       return statusExitCode(terminal);
     }
     case "watch": {
@@ -407,7 +415,11 @@ async function dispatch(argv: string[]): Promise<number> {
       if (!parsed.detach) process.stdout.write(formatRunHeader(out.runId));
       const terminal = parsed.detach
         ? null
-        : await watchRun(client, out.runId, { output: "text", tools: parsed.tools });
+        : await watchRun(client, out.runId, {
+            output: "text",
+            tools: parsed.tools,
+            cursor: out.attachCursor,
+          });
       if (parsed.detach) process.stdout.write(`${out.runId}\t${out.status}\n`);
       return parsed.detach ? 0 : statusExitCode(terminal ?? out.status);
     }
@@ -567,7 +579,11 @@ async function dispatch(argv: string[]): Promise<number> {
       if (!parsed.detach) process.stdout.write(formatRunHeader(out.runId));
       const terminal = parsed.detach
         ? null
-        : await watchRun(client, out.runId, { output: "text", tools: parsed.tools });
+        : await watchRun(client, out.runId, {
+            output: "text",
+            tools: parsed.tools,
+            cursor: out.attachCursor,
+          });
       if (parsed.detach) process.stdout.write(`${out.runId}\t${out.status}\n`);
       return parsed.detach ? 0 : statusExitCode(terminal ?? out.status);
     }
@@ -580,7 +596,11 @@ async function dispatch(argv: string[]): Promise<number> {
       if (!parsed.detach) process.stdout.write(formatRunHeader(out.runId));
       const terminal = parsed.detach
         ? null
-        : await watchRun(client, out.runId, { output: "text", tools: parsed.tools });
+        : await watchRun(client, out.runId, {
+            output: "text",
+            tools: parsed.tools,
+            cursor: out.attachCursor,
+          });
       if (parsed.detach) process.stdout.write(`${out.runId}\t${out.status}\n`);
       return parsed.detach ? 0 : statusExitCode(terminal ?? out.status);
     }
@@ -1735,7 +1755,11 @@ async function handleWorkflow(args: string[]): Promise<number> {
         return statusExitCode(outcome.status);
       }
       if (output === "text") process.stdout.write(`run ${launched.runId}\n`);
-      const terminal = await watchRun(client, launched.runId, { output, tools: parsed.tools });
+      const terminal = await watchRun(client, launched.runId, {
+        output,
+        tools: parsed.tools,
+        cursor: launched.attachCursor,
+      });
       return statusExitCode(terminal);
     }
     case "disable":

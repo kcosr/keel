@@ -53,12 +53,32 @@ Closed status lets `keel watch --from now`, `--tail 0`, and execute event
 iteration terminate deterministically when the requested cursor skips an existing
 terminal, parked, or interrupted event.
 
+## Accepted Work
+
+Operations that accept work return an `attachCursor` when the caller can attach
+to the accepted operation's stream:
+
+- launches return `{ kind: "after-seq", runId, seq: 0 }`, so attaching from the
+  cursor observes the run from its first durable event;
+- resume, retry, rewind, and rerun capture the run's durable high-water mark
+  before appending their restart event, so attaching from the cursor includes
+  `run.resumed`, `run.retry`, `run.rewind`, or `run.rerun`;
+- signal and approval delivery capture the durable high-water mark before wake
+  handling starts, so an eligible wake includes the subsequent resume/progress
+  events.
+
+Attached lifecycle commands use `attachCursor`. Plain `keel watch <runId>` still
+defaults to `{ kind: "beginning" }`.
+
 ## Authorization
 
 Event subscriptions require `run:events`. Long-lived daemon subscriptions keep
 the credential snapshot used at subscription time and continue to fail closed on
 revocation. Existing socket clients receive authorization revocation as an
 ephemeral `authorization.failed` event with a redacted `{ message }` payload.
+Subscriptions that request control frames receive revocation as a cursor-bearing
+`authorization.failed` control frame instead, so reconnecting clients can retain
+the last durable cursor represented by the stream.
 
 All streamed event and control payloads that cross daemon, CLI, execute, or
 future web boundaries must pass through capability-token redaction.

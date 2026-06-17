@@ -1247,7 +1247,9 @@ describe("daemon interruptRun over the socket", () => {
       expect((await c.getBlockage(runId)).reason).toBe("interrupted");
 
       await expect(c.sendSignal(runId, "proceed", { go: true })).resolves.toEqual({
+        runId,
         status: "interrupted",
+        attachCursor: { kind: "after-seq", runId, seq: 3 },
       });
       expect((await c.getRun(runId))?.status).toBe("interrupted");
       const report = await c.getRunReport(runId);
@@ -1498,7 +1500,11 @@ describe("HITL over the socket", () => {
       expect((await c.getRun(runId))?.status).toBe("waiting-signal");
 
       const ack = await c.sendSignal(runId, "proceed", { go: true });
-      expect(ack).toEqual({ status: "running" });
+      expect(ack).toMatchObject({
+        runId,
+        status: "running",
+        attachCursor: { kind: "after-seq", runId, seq: 2 },
+      });
       expect((await c.getRun(runId))?.status).not.toBe("finished");
       await expect(c.waitForRun(runId)).resolves.toMatchObject({ status: "finished", output: 7 });
       c.close();
@@ -1532,7 +1538,11 @@ describe("HITL over the socket", () => {
 
       await c.authenticate(ADMIN_TOKEN);
       const ack = await c.decideApproval(runId, "approve-deploy", { status: "approved" });
-      expect(ack).toEqual({ status: "running" });
+      expect(ack).toMatchObject({
+        runId,
+        status: "running",
+        attachCursor: { kind: "after-seq", runId, seq: 2 },
+      });
       expect((await c.getRun(runId))?.status).not.toBe("finished");
       await c.authenticate(capability as string);
       await expect(c.waitForRun(runId)).resolves.toMatchObject({ status: "finished", output: 11 });

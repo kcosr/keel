@@ -385,20 +385,22 @@ describe("KeelOperationGateway", () => {
       await expect(
         ok(harness, session, "waitForRun", { runId: gate.runId }, gate.capability),
       ).resolves.toMatchObject({ status: "waiting-human" });
-      await expect(
-        ok(
-          harness,
-          session,
-          "decideApproval",
-          {
-            runId: gate.runId,
-            key: "approve-deploy",
-            decision: { status: "approved" },
-          },
-          ADMIN_TOKEN,
-        ),
-      ).resolves.toMatchObject({ status: "running" });
-      expect(harness.fencedClaims).toContain(gate.runId);
+      const approvalWake = await ok(
+        harness,
+        session,
+        "decideApproval",
+        {
+          runId: gate.runId,
+          key: "approve-deploy",
+          decision: { status: "approved" },
+        },
+        ADMIN_TOKEN,
+      );
+      expect(approvalWake).toMatchObject({
+        runId: gate.runId,
+        status: "running",
+        attachCursor: { kind: "after-seq", runId: gate.runId, seq: 3 },
+      });
       await expect(
         ok(harness, session, "waitForRun", { runId: gate.runId }, gate.capability),
       ).resolves.toMatchObject({ status: "finished" });
@@ -413,23 +415,42 @@ describe("KeelOperationGateway", () => {
       await expect(
         ok(harness, session, "waitForRun", { runId: signal.runId }, signal.capability),
       ).resolves.toMatchObject({ status: "waiting-signal" });
-      await expect(
-        ok(
-          harness,
-          session,
-          "sendSignal",
-          {
-            runId: signal.runId,
-            name: "proceed",
-            payload: { go: true, by: "gateway" },
-          },
-          signal.capability,
-        ),
-      ).resolves.toMatchObject({ status: "running" });
+      const signalWake = await ok<{
+        runId: string;
+        status: string;
+        attachCursor: { kind: "after-seq"; runId: string; seq: number };
+      }>(
+        harness,
+        session,
+        "sendSignal",
+        {
+          runId: signal.runId,
+          name: "proceed",
+          payload: { go: true, by: "gateway" },
+        },
+        signal.capability,
+      );
+      expect(signalWake).toMatchObject({
+        runId: signal.runId,
+        status: "running",
+        attachCursor: { kind: "after-seq", runId: signal.runId, seq: 2 },
+      });
+      expect(harness.fencedClaims).toContain(gate.runId);
       expect(harness.fencedClaims).toContain(signal.runId);
       await expect(
         ok(harness, session, "waitForRun", { runId: signal.runId }, signal.capability),
       ).resolves.toMatchObject({ status: "finished" });
+      const signalAttach = await ok<{ subId: string }>(
+        harness,
+        session,
+        "subscribeEvents",
+        { runId: signal.runId, cursor: signalWake.attachCursor },
+        signal.capability,
+      );
+      const attachedSignalEvents = session.events
+        .filter((event) => event.subId === signalAttach.subId)
+        .map((event) => event.type);
+      expect(attachedSignalEvents).toContain("run.resumed");
     } finally {
       harness.close();
     }
@@ -447,7 +468,11 @@ describe("KeelOperationGateway", () => {
       harness.api.resumeRun = async (id: string) => {
         resumeCalls += 1;
         await Bun.sleep(50);
-        return { runId: id, status: "waiting-signal" };
+        return {
+          runId: id,
+          status: "waiting-signal",
+          attachCursor: { kind: "after-seq", runId: id, seq: 0 },
+        };
       };
       harness.api.waitForRun = async (id: string) => {
         await Bun.sleep(50);
@@ -459,8 +484,16 @@ describe("KeelOperationGateway", () => {
         ok(harness, session, "sendSignal", { runId, name: "proceed", payload: 2 }, token),
       ]);
 
-      expect(first).toEqual({ status: "running" });
-      expect(second).toEqual({ status: "running" });
+      expect(first).toMatchObject({
+        runId,
+        status: "running",
+        attachCursor: { kind: "after-seq", runId, seq: 0 },
+      });
+      expect(second).toMatchObject({
+        runId,
+        status: "running",
+        attachCursor: { kind: "after-seq", runId, seq: 0 },
+      });
       expect(resumeCalls).toBe(1);
       expect(harness.fencedClaims).toEqual([runId]);
     } finally {

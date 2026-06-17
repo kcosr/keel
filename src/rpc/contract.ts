@@ -149,6 +149,7 @@ export interface RunOutcome {
 export interface RunStart {
   runId: string;
   status: RunProjection["status"];
+  attachCursor: EventCursor;
 }
 
 export interface InterruptRunResult {
@@ -158,6 +159,7 @@ export interface InterruptRunResult {
 
 export interface RunLaunchResult {
   runId: string;
+  attachCursor: EventCursor;
   capability?: string;
   capabilityId?: string;
 }

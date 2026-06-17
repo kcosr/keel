@@ -350,6 +350,12 @@ describe("keel CLI", () => {
     expect(() => parseWatchArgs(["run_123", "--from", "now", "--tail", "5"])).toThrow(
       "--tail cannot be combined with --from",
     );
+    expect(() => parseWatchArgs(["run_123", "--after-seq", "1", "--tail", "5"])).toThrow(
+      "--tail cannot be combined with --after-seq",
+    );
+    expect(() => parseWatchArgs(["run_123", "--from", "now", "--after-seq", "1"])).toThrow(
+      "--after-seq cannot be combined with --from",
+    );
     expect(() => parseWatchArgs(["run_123", "--tools"])).toThrow("attached watch --output text");
     expect(parseOutputFormat("json")).toBe("json");
     expect(() => parseOutputFormat("events")).toThrow("expected json, text, or ndjson");
@@ -961,7 +967,8 @@ describe("keel CLI", () => {
         const resumed = await runCli(["resume", payload.runId], dir, env);
         expect(resumed.code).toBe(3);
         expect(resumed.stdout).toContain(`run ${payload.runId}`);
-        expect(resumed.stdout).toContain("run.parked human approve-deploy");
+        expect(resumed.stdout).toContain("run.resumed");
+        expect(resumed.stdout).not.toContain("run.parked human approve-deploy");
 
         const approved = await runCli(["approve", payload.runId, "approve-deploy"], dir, env);
         expect(approved.code).toBe(0);
@@ -1129,12 +1136,9 @@ describe("keel CLI", () => {
         const retried = await runCli(["retry", payload.runId], dir, env);
         expect(retried.code).toBe(0);
         expect(retried.stdout).toContain(`run ${payload.runId}`);
-        expect(retried.stdout).toContain("run.failed");
         expect(retried.stdout).toContain("run.retry");
         expect(retried.stdout).toContain("run.finished");
-        expect(retried.stdout.indexOf("run.failed")).toBeLessThan(
-          retried.stdout.indexOf("run.retry"),
-        );
+        expect(retried.stdout).not.toContain("run.failed");
         expect(retried.stdout.indexOf("run.retry")).toBeLessThan(
           retried.stdout.indexOf("run.finished"),
         );

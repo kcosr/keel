@@ -129,6 +129,7 @@ export class DaemonClient {
   private failAll(err: unknown): void {
     for (const p of this.pending.values()) p.reject(err);
     this.pending.clear();
+    this.subs.clear();
     this.controlSubs.clear();
     this.pendingSubEvents.clear();
     this.closedSubIds.clear();
@@ -253,10 +254,10 @@ export class DaemonClient {
     runId: string,
     key: string,
     decision: { status: "approved" | "denied"; note?: string; grantedCaps?: unknown },
-  ): Promise<{ status: string }> {
+  ): Promise<RunStart> {
     return this.rpc("decideApproval", { runId, key, decision });
   }
-  sendSignal(runId: string, name: string, payload: unknown): Promise<{ status: string }> {
+  sendSignal(runId: string, name: string, payload: unknown): Promise<RunStart> {
     return this.rpc("sendSignal", { runId, name, payload });
   }
   putSchedule(req: {

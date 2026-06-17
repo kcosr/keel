@@ -1,6 +1,7 @@
 import { resolve } from "node:path";
 import type { DaemonClient } from "../daemon/client.ts";
 import type {
+  EventCursor,
   EventCursorInput,
   EventEnvelope,
   LaunchRequest,
@@ -46,13 +47,13 @@ export interface ExecuteKeel {
     includePending?: boolean;
     includeRemoved?: boolean;
   }): Promise<WorkspaceGcResult>;
-  signal(runId: string, name: string, payload?: unknown): Promise<{ status: string }>;
+  signal(runId: string, name: string, payload?: unknown): Promise<RunStart>;
   approve(
     runId: string,
     key: string,
     opts?: { note?: string; grantedCaps?: unknown },
-  ): Promise<{ status: string }>;
-  deny(runId: string, key: string, opts?: { note?: string }): Promise<{ status: string }>;
+  ): Promise<RunStart>;
+  deny(runId: string, key: string, opts?: { note?: string }): Promise<RunStart>;
 }
 
 export type ExecuteLaunchRequest =
@@ -67,6 +68,7 @@ export interface ExecuteRunHandle {
   runId: string;
   capabilityRef?: string;
   capability?: string;
+  attachCursor?: EventCursor;
 }
 
 export interface ExecuteEventsRequest {
@@ -149,7 +151,10 @@ export function createExecuteKeel(opts: ExecuteRuntimeOptions): ExecuteKeel {
     async launch(req) {
       const normalized = normalizeLaunch(req, opts.cwd);
       const launched = await opts.client.launchRun(normalized);
-      return handle(launched.runId, launched.capability);
+      return {
+        ...(await handle(launched.runId, launched.capability)),
+        attachCursor: launched.attachCursor,
+      };
     },
     async resume(runId) {
       await authenticateKnownRun(runId);
@@ -170,7 +175,10 @@ export function createExecuteKeel(opts: ExecuteRuntimeOptions): ExecuteKeel {
     async fork(runId, forkOpts = {}) {
       await authenticateKnownRun(runId);
       const forked = await opts.client.forkRun(runId, forkOpts);
-      return handle(forked.runId, forked.capability);
+      return {
+        ...(await handle(forked.runId, forked.capability)),
+        attachCursor: forked.attachCursor,
+      };
     },
     async get(runId) {
       await authenticateKnownRun(runId);

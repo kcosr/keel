@@ -317,6 +317,13 @@ export class KeelOperationGateway {
         return this.opts.api.listRuns();
       },
     },
+    listRunsPage: {
+      kind: "core",
+      handle: (_session, p, credential) => {
+        this.authorizeAdmin(credential);
+        return this.opts.api.listRunsPage({ limit: p.limit as number });
+      },
+    },
     waitForRun: {
       kind: "core",
       handle: (_session, p, credential) => {

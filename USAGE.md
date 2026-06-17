@@ -207,6 +207,49 @@ Defaults:
   `--assets` points at an alternate bundle and `--api-only` disables bundle
   serving.
 
+Frontend development and verification scripts:
+
+```bash
+bun run web:dev       # Vite dev server, proxying to keel web on 127.0.0.1:7879
+bun run web:build     # emits the production bundle to web/dist
+bun run web:test      # frontend unit tests
+bun run web:preview   # preview the built Vite bundle
+```
+
+The production React UI is a browser client over the same web transport routes
+listed below. It stores a manually entered bearer token in `sessionStorage` for
+the current browser session only, not `localStorage`, and sends it as
+`Authorization: Bearer <capability>`. Event watching uses `fetch()` plus a
+readable stream parser so credentials stay in headers.
+
+The UI opens on the runs inbox, grouped by decision, active, and recently
+finished runs from `GET /api/runs?limit=100`. The runs projection uses the
+bounded daemon `listRunsPage` RPC before per-run enrichment and returns `page`
+metadata with the requested limit, default limit, maximum limit, total known
+runs, returned rows, and a `truncated` flag. When the browser list is truncated,
+the UI says so and points
+operators to `keel list` or a bounded `GET /api/runs?limit=n` request up to the
+documented maximum. Run detail views use `GET /api/runs/:runId` for overview,
+timeline, transcript, report, source, workspaces, approvals, and events; live
+watch reconnects from the latest event cursor and keeps raw live SSE frames
+available alongside the coalesced transcript. The initial event tail comes from
+the JSON detail projection and is shown as reconstructed event frames. The
+approvals view lists current workflow-authored `ctx.human` gates and uses
+admin-authorized `decideApproval` calls for approve/deny decisions. The
+workspaces view lists retained run workspaces, loads detail/diff through daemon
+RPC, and requires admin authority plus browser confirmation for merge, discard,
+and workspace GC. Mutating browser controls expose the required authority and
+copyable CLI equivalents; disabled controls explain the missing authority or
+unsupported workspace state. Tables support row selection with Enter/Space and
+Arrow/Home/End navigation where a row action exists. The workflows view uses
+saved-workflow RPCs for list, detail, exact stored source, and launch without
+browser-supplied raw secrets. Schedules are read-only and use
+`listSchedules`/`getSchedule` including source when available. Profiles and
+settings expose current catalog list/get/check state; set/delete/unset controls
+are not part of the browser UI at this baseline. The system view uses only
+`/health` and `/api/system`; it does not infer journal paths, schema versions,
+systemd state, daemon logs, or restart controls.
+
 Do not expose this server remotely by default. Binding a non-local host is an
 explicit local operator choice; TLS, CORS, browser sessions, and remote exposure
 policy are not part of this transport.
@@ -224,8 +267,18 @@ Routes:
   frame after backfill, optional `closed` or `authorization.failed` control
   frames, and heartbeat comments. Cursor query parameters are `from=beginning`,
   `from=now`, `afterSeq=<n>`, `tail=<n>`, or `cursor=<json>`.
-- `GET /api/runs`, `/api/runs/:runId`, `/api/approvals`, `/api/workspaces`, and
-  `/api/system` return server-side projections layered on daemon RPC calls.
+- `GET /api/runs?limit=n`, `/api/runs/:runId`, `/api/approvals`,
+  `/api/workspaces`, and `/api/system` return server-side projections layered on
+  daemon RPC calls. The runs list defaults to `limit=100`, rejects limits above
+  `500`, calls bounded `listRunsPage` instead of unbounded `listRuns`, enriches
+  only the returned page, and includes `page` metadata so clients can disclose
+  truncation.
+- The workspace browser projection currently aggregates per-run workspace RPCs
+  across known runs. Very large journals may prefer `keel workspace ...`
+  commands until a first-class aggregate workspace projection is added.
+- Saved workflow, schedule, profile, and setting browser views call current
+  daemon RPC methods through `POST /rpc`; there are no fixture-backed web data
+  paths.
 - `GET /assets/*` serves files from `--assets`; other non-API paths fall back to
   `index.html` when a bundle is present.
 
@@ -407,10 +460,19 @@ use `finishedAtMs - createdAtMs`; active or waiting runs use the command's
 current time minus `createdAtMs`. Empty lists still print the header row.
 
 Use `keel list --output json` for scripts. It returns a CLI envelope while the
-RPC method remains a bare `RunSummary[]`:
+unbounded `listRuns` RPC method remains a bare `RunSummary[]`. Browser run
+lists use the bounded `listRunsPage({ limit })` RPC, which returns
+`{ runs, total }` in the same newest-first order and rejects limits above `500`.
+CLI JSON:
 
 ```json
 {"runs":[{"runId":"run_...","status":"finished","workflowName":"review","createdAtMs":1781414349314,"finishedAtMs":1781415069314,"parentRunId":null}]}
+```
+
+Bounded RPC page:
+
+```json
+{"runs":[{"runId":"run_...","status":"finished","workflowName":"review","createdAtMs":1781414349314,"finishedAtMs":1781415069314,"parentRunId":null}],"total":1}
 ```
 
 `--output ndjson` is invalid for `list`.
@@ -671,7 +733,7 @@ keel workspace gc [--older-than-ms ms] [--include-pending] [--include-removed]
 `RunWorkspaceView.workspaceId` is the canonical selector for show/diff/merge/
 discard. Views include `mode`, `sourceKind`, display `key`, provider
 `workspacePath`, source path/URI/ref/branch/base commit metadata, copy baseline
-path, ownership, retention, merge/diff support, latest attempt/turn and active
+path, ownership, retention, merge/discard/diff support, latest attempt/turn and active
 holder metadata, `failureSeen`, timestamps, and cleanup errors. Default list
 output hides idle direct workspaces such as `__default`; `--all` includes removed
 audit rows and direct workspace rows.
@@ -1559,11 +1621,12 @@ returns a raw run capability on launch/fork so clients can establish authority
 for follow-up operations. The CLI writes that capability to a local cap file by
 default and only prints raw tokens with `--emit-capability`.
 
-The local web transport is a browser-facing adapter over the same gateway. It
-does not define new daemon operation names: `/rpc` preserves daemon method names
-and request/response shapes, projection routes compose existing daemon
-projections, and `/runs/:runId/events` translates the shared event cursor
-contract into SSE frames.
+The local web transport is a browser-facing adapter over the same gateway.
+`/rpc` preserves daemon method names and request/response shapes, projection
+routes compose existing daemon projections, and `/runs/:runId/events` translates
+the shared event cursor contract into SSE frames. The web runs inbox uses the
+bounded `listRunsPage` daemon method so large journals are not materialized just
+to render the browser page.
 
 ## Development And Operations
 

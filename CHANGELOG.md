@@ -3,6 +3,29 @@
 ## [Unreleased]
 
 ### Added
+- Production React/Vite/TypeScript web UI foundation under `web/`, including
+  the shared operator shell, design primitives, typed browser API client,
+  fetch-based SSE parser, frontend tests, root `web:*` scripts, and `web/dist`
+  build output for `keel web`.
+- The production web UI now includes a grouped runs inbox, live run detail tabs,
+  fetch-based SSE watching with reconnect cursors, coalesced transcript display,
+  raw event inspection, and a RunProjection-backed graph/timeline view.
+- The production web UI now includes current `ctx.human` approval decisions and
+  retained workspace list/detail/diff views with admin-confirmed merge, discard,
+  and workspace GC controls.
+- The production web UI now includes saved workflow list/detail/source views, a
+  browser-secret-free saved workflow launch form, read-only schedule
+  list/detail/source inspection, profile and setting get/check inspection, and
+  system status cards backed by `/health` and `/api/system`.
+- The production web UI now includes final console polish: container-responsive
+  runs tables, keyboard row navigation, copyable CLI equivalents for approval,
+  run, and workspace actions, and a denser workspace review panel with explicit
+  disabled-state explanations.
+- The web runs projection now defaults to a bounded latest-run page, accepts an
+  explicit `limit` up to the documented maximum, uses a bounded daemon
+  `listRunsPage` RPC before per-run enrichment, enforces the same maximum on
+  direct RPC calls, and returns page metadata so the UI can disclose truncated
+  browser history without materializing every historical run.
 - Agent specs and persistent profiles now support `environment: { vars, secrets }`.
   Literal `vars` are passed as provider environment variables and hashed by
   value; `environment.secrets` requests named run-secret values supplied through

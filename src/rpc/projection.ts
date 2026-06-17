@@ -6,11 +6,19 @@
 
 import type { AgentConcurrencyWaitSnapshot } from "../agents/concurrency.ts";
 import type { JournalStore } from "../journal/store.ts";
-import type { EffectType, JournalStatus, RunStatus, ScheduleRow } from "../journal/types.ts";
+import type {
+  EffectType,
+  JournalStatus,
+  RunRow,
+  RunStatus,
+  ScheduleRow,
+} from "../journal/types.ts";
 import { isRunOwnerStale, ownerStaleWindowMs } from "../kernel/liveness.ts";
 import { RUN_FINISHED_INLINE_OUTPUT_BYTES } from "../kernel/output.ts";
 import { workflowDefinitionSourceSelection } from "../workflow-definitions/source-view.ts";
 import type { WorkflowDefinitionSourceView } from "./contract.ts";
+
+export const MAX_RUN_SUMMARY_PAGE_LIMIT = 500;
 
 export interface NodeView {
   stableKey: string;
@@ -483,8 +491,22 @@ export interface RunSummary {
   parentRunId: string | null;
 }
 
+export interface RunSummaryPage {
+  runs: RunSummary[];
+  total: number;
+}
+
 export function listRunSummaries(store: JournalStore): RunSummary[] {
-  return store.listRuns().map((r) => ({
+  return store.listRuns().map(runSummary);
+}
+
+export function listRunSummaryPage(store: JournalStore, limit: number): RunSummaryPage {
+  const page = store.listRunsPage(limit);
+  return { runs: page.runs.map(runSummary), total: page.total };
+}
+
+function runSummary(r: RunRow): RunSummary {
+  return {
     runId: r.runId,
     workflowName: r.workflowName,
     status: r.status,
@@ -492,5 +514,5 @@ export function listRunSummaries(store: JournalStore): RunSummary[] {
     createdAtMs: r.createdAtMs,
     finishedAtMs: r.finishedAtMs,
     parentRunId: r.parentRunId,
-  }));
+  };
 }

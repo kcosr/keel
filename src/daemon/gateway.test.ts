@@ -13,6 +13,7 @@ import type { RunStatus } from "../journal/types.ts";
 import { RealmKernel } from "../kernel/realm/realm-host.ts";
 import { EventHub } from "../rpc/event-hub.ts";
 import { InProcessKeel } from "../rpc/in-process.ts";
+import { MAX_RUN_SUMMARY_PAGE_LIMIT } from "../rpc/projection.ts";
 import { captureWorkflowFile } from "../workflow-definitions/capture.ts";
 import { type GatewayEventFrame, type GatewaySession, KeelOperationGateway } from "./gateway.ts";
 
@@ -225,9 +226,19 @@ describe("KeelOperationGateway", () => {
       ).resolves.toEqual({ ok: true });
       expect(session.getCredential()).toBe("kc_run_invalid_gateway");
       await expect(fail(harness, session, "listRuns")).resolves.toMatch(/capability is invalid/);
+      await expect(fail(harness, session, "listRunsPage", { limit: 1 })).resolves.toMatch(
+        /capability is invalid/,
+      );
 
       await ok(harness, session, "authenticate", { token: ADMIN_TOKEN });
       await expect(ok(harness, session, "listRuns")).resolves.toEqual([]);
+      await expect(ok(harness, session, "listRunsPage", { limit: 1 })).resolves.toEqual({
+        runs: [],
+        total: 0,
+      });
+      await expect(
+        fail(harness, session, "listRunsPage", { limit: MAX_RUN_SUMMARY_PAGE_LIMIT + 1 }),
+      ).resolves.toBe(`listRunsPage limit must be <= ${MAX_RUN_SUMMARY_PAGE_LIMIT}`);
 
       const launched = await ok<{ runId: string; capability: string; capabilityId: string }>(
         harness,

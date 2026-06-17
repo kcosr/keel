@@ -6,7 +6,12 @@ import { MockProvider } from "../agents/mock.ts";
 import { AgentProviderRegistry } from "../agents/types.ts";
 import { hashCapabilityToken } from "../auth/capabilities.ts";
 import { JournalStore } from "../journal/store.ts";
-import { type KeelWebServer, startWebServer } from "../web/server.ts";
+import {
+  DEFAULT_WEB_RUNS_LIMIT,
+  type KeelWebServer,
+  MAX_WEB_RUNS_LIMIT,
+  startWebServer,
+} from "../web/server.ts";
 import { captureWorkflowFile } from "../workflow-definitions/capture.ts";
 import { DaemonClient } from "./client.ts";
 import { KeelDaemon } from "./server.ts";
@@ -337,12 +342,91 @@ describe("web transport", () => {
         headers: auth(ADMIN_TOKEN),
       });
       expect(workspaces.status).toBe(200);
-      expect(workspaces.body.workspaces).toEqual([]);
+      expect(workspaces.body).toMatchObject({
+        workspaces: [],
+        mutationAuthority: "admin",
+        mutationAuthorized: true,
+      });
 
       const system = await jsonFetch(`${web.url}/api/system`, { headers: auth(ADMIN_TOKEN) });
       expect(system.status).toBe(200);
       expect(system.body.warnings[0]).toContain("daemon version");
     } finally {
+      web.stop(true);
+      daemon.stop();
+    }
+  });
+
+  test("runs projection applies a bounded list before per-run enrichment", async () => {
+    let nowMs = 1_000;
+    const { daemon, socketPath } = startDaemon({ clock: () => nowMs++ });
+    await daemon.start();
+    const web = startWebServer({ socketPath, port: 0, apiOnly: true });
+    const client = await DaemonClient.connect(socketPath);
+    try {
+      await client.authenticate(ADMIN_TOKEN);
+      const launched: string[] = [];
+      for (let index = 0; index < 3; index += 1) {
+        const run = await client.launchRun({
+          ...onceUrl,
+          input: null,
+          target: dir,
+          name: `bounded-runs-${index}`,
+        });
+        await client.waitForRun(run.runId);
+        launched.push(run.runId);
+      }
+      (daemon as unknown as { api: { listRuns: () => unknown } }).api.listRuns = () => {
+        throw new Error("web runs projection must not call unbounded listRuns");
+      };
+
+      const limited = await jsonFetch(`${web.url}/api/runs?limit=2`, {
+        headers: auth(ADMIN_TOKEN),
+      });
+      expect(limited.status).toBe(200);
+      expect(limited.body.runs).toHaveLength(2);
+      expect(limited.body.page).toEqual({
+        limit: 2,
+        defaultLimit: DEFAULT_WEB_RUNS_LIMIT,
+        maxLimit: MAX_WEB_RUNS_LIMIT,
+        returned: 2,
+        total: 3,
+        truncated: true,
+      });
+      expect(limited.body.runs.map((run: { runId: string }) => run.runId)).toEqual(
+        launched.slice(-2).reverse(),
+      );
+      expect(
+        limited.body.runs.every(
+          (run: { run: unknown; blockage: unknown; workspaceSummary: unknown }) =>
+            run.run !== undefined &&
+            run.blockage !== undefined &&
+            run.workspaceSummary !== undefined,
+        ),
+      ).toBe(true);
+
+      const defaulted = await jsonFetch(`${web.url}/api/runs`, {
+        headers: auth(ADMIN_TOKEN),
+      });
+      expect(defaulted.status).toBe(200);
+      expect(defaulted.body.page).toEqual({
+        limit: DEFAULT_WEB_RUNS_LIMIT,
+        defaultLimit: DEFAULT_WEB_RUNS_LIMIT,
+        maxLimit: MAX_WEB_RUNS_LIMIT,
+        returned: 3,
+        total: 3,
+        truncated: false,
+      });
+
+      const invalid = await jsonFetch(`${web.url}/api/runs?limit=${MAX_WEB_RUNS_LIMIT + 1}`, {
+        headers: auth(ADMIN_TOKEN),
+      });
+      expect(invalid.status).toBe(400);
+      expect(invalid.body).toEqual({
+        error: { message: `limit must be <= ${MAX_WEB_RUNS_LIMIT}` },
+      });
+    } finally {
+      client.close();
       web.stop(true);
       daemon.stop();
     }
@@ -693,6 +777,26 @@ describe("web transport", () => {
       expect(approvals.body.approvals[0]).toMatchObject({
         runId: launched.runId,
         gateId: "approve-deploy",
+        requiredAuthority: "admin",
+      });
+      expect(approvals.body).toMatchObject({
+        decisionAuthority: "admin",
+        decisionAuthorized: true,
+      });
+      const scopedDetail = await jsonFetch(`${web.url}/api/runs/${launched.runId}`, {
+        headers: auth(launched.capability as string),
+      });
+      expect(scopedDetail.status).toBe(200);
+      expect(
+        scopedDetail.body.availableCommands.map((command: { name: string }) => command.name),
+      ).not.toContain("decideApproval");
+
+      const adminDetail = await jsonFetch(`${web.url}/api/runs/${launched.runId}`, {
+        headers: auth(ADMIN_TOKEN),
+      });
+      expect(adminDetail.status).toBe(200);
+      expect(adminDetail.body.availableCommands).toContainEqual({
+        name: "decideApproval",
         requiredAuthority: "admin",
       });
 

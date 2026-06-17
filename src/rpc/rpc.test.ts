@@ -34,6 +34,7 @@ import {
 import { normalizeEventCursorInput } from "./event-cursor.ts";
 import { EventHub } from "./event-hub.ts";
 import { InProcessKeel } from "./in-process.ts";
+import { MAX_RUN_SUMMARY_PAGE_LIMIT } from "./projection.ts";
 
 const FIX = new URL("../kernel/realm/fixtures/", import.meta.url);
 const onceUrl = captureWorkflowFile(new URL("agent-once.workflow.ts", FIX).pathname);
@@ -871,6 +872,17 @@ describe("RPC contract drives a workflow end-to-end", () => {
           parentRunId: null,
         },
       ]);
+
+      expect(api.listRunsPage({ limit: 2 })).toEqual({
+        runs: runs.slice(0, 2),
+        total: 3,
+      });
+      expect(() => api.listRunsPage({ limit: 0 })).toThrow(
+        /listRunsPage limit must be a positive integer/,
+      );
+      expect(() => api.listRunsPage({ limit: MAX_RUN_SUMMARY_PAGE_LIMIT + 1 })).toThrow(
+        `listRunsPage limit must be <= ${MAX_RUN_SUMMARY_PAGE_LIMIT}`,
+      );
     },
     WORKFLOW_TEST_TIMEOUT_MS,
   );
@@ -2066,6 +2078,8 @@ describe("workspace lifecycle operations", () => {
         workspaceStatus: "pending_review",
       });
       expect(api.discardRunWorkspace("r-discard", "ws_agent").status).toBe("discarded");
+      expect(api.getRunWorkspace("r-discard", "ws_agent")?.diffSupported).toBe(false);
+      expect(api.getRunWorkspace("r-discard", "ws_agent")?.discardSupported).toBe(false);
       expect(existsSync(discardPath)).toBe(false);
       expect(() => api.mergeRunWorkspace("r-discard", "ws_agent")).toThrow(/status discarded/);
       expect(() => api.discardRunWorkspace("r-discard", "ws_agent")).toThrow(/status discarded/);

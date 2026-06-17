@@ -23,6 +23,7 @@ import type {
   RunProjection,
   RunReport,
   RunSummary,
+  RunSummaryPage,
   ScheduleErrorProjection,
   ScheduleSummary,
   ScheduleView,
@@ -209,6 +210,7 @@ export interface RunWorkspaceView {
   lastErrorEventSeq: number | null;
   cleanupError: unknown | null;
   mergeSupported: boolean;
+  discardSupported: boolean;
   diffSupported: boolean;
   createdAtMs: number;
   updatedAtMs: number;
@@ -418,6 +420,8 @@ export interface KeelApi {
   getBlockage(runId: string): Blockage;
   /** Summaries of all runs. */
   listRuns(): RunSummary[];
+  /** Newest run summaries with total count for bounded browser lists. */
+  listRunsPage(req: { limit: number }): RunSummaryPage;
   listRunWorkspaces(
     runId: string,
     opts?: { includeRemoved?: boolean },

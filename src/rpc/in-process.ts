@@ -76,9 +76,11 @@ import { cursorAfterSeq } from "./event-cursor.ts";
 import { EventHub } from "./event-hub.ts";
 import {
   type Blockage,
+  MAX_RUN_SUMMARY_PAGE_LIMIT,
   type RunProjection,
   type RunReport,
   type RunSummary,
+  type RunSummaryPage,
   type ScheduleSummary,
   type ScheduleView,
   buildProjection,
@@ -87,6 +89,7 @@ import {
   getBlockage,
   isVisibleBlockage,
   listRunSummaries,
+  listRunSummaryPage,
   listScheduleSummaries,
 } from "./projection.ts";
 
@@ -110,6 +113,16 @@ function agentConcurrencyBlockage(queued: AgentConcurrencyWaitSnapshot): Blockag
     context: `agent ${queued.stableKey} waiting ${queued.queuedForMs}ms for ${queued.provider} capacity (provider ${queued.providerScope.active}/${providerLimit}, total ${queued.total.active}/${totalLimit})`,
     agentConcurrency: queued,
   };
+}
+
+function requireRunPageLimit(limit: unknown): number {
+  if (typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1) {
+    throw new Error("listRunsPage limit must be a positive integer");
+  }
+  if (limit > MAX_RUN_SUMMARY_PAGE_LIMIT) {
+    throw new Error(`listRunsPage limit must be <= ${MAX_RUN_SUMMARY_PAGE_LIMIT}`);
+  }
+  return limit;
 }
 
 function concurrencyLimitText(limit: AgentConcurrencyWaitSnapshot["total"]["limit"]): string {
@@ -451,6 +464,10 @@ export class InProcessKeel implements KeelApi {
 
   listRuns(): RunSummary[] {
     return listRunSummaries(this.store);
+  }
+
+  listRunsPage(req: { limit: number }): RunSummaryPage {
+    return listRunSummaryPage(this.store, requireRunPageLimit(req?.limit));
   }
 
   listRunWorkspaces(runId: string, opts: { includeRemoved?: boolean } = {}): RunWorkspaceView[] {
@@ -996,13 +1013,17 @@ function isTerminalRunStatus(status: RunStatus): boolean {
 }
 
 function workspaceView(row: AgentWorkspaceRow, runStatus: RunStatus | null): RunWorkspaceView {
-  const mergeSupported =
+  const operatorBaseSupported =
     runStatus !== null &&
     isTerminalRunStatus(runStatus) &&
     row.owned &&
-    row.sourceMergeEligible &&
-    WORKSPACE_MERGEABLE_STATUSES.has(row.status) &&
+    row.mode !== "direct" &&
     !row.activeHolderKind;
+  const mergeSupported =
+    operatorBaseSupported &&
+    row.sourceMergeEligible &&
+    WORKSPACE_MERGEABLE_STATUSES.has(row.status);
+  const discardSupported = operatorBaseSupported && WORKSPACE_DISCARDABLE_STATUSES.has(row.status);
   return {
     runId: row.runId,
     workspaceId: row.workspaceId,
@@ -1043,6 +1064,10 @@ function workspaceView(row: AgentWorkspaceRow, runStatus: RunStatus | null): Run
     discardedAtMs: row.discardedAtMs,
     removedAtMs: row.removedAtMs,
     mergeSupported,
-    diffSupported: row.owned && row.mode !== "direct" && row.status !== "removed",
+    discardSupported,
+    diffSupported:
+      row.owned &&
+      row.mode !== "direct" &&
+      !["abandoned", "discarded", "removed"].includes(row.status),
   };
 }

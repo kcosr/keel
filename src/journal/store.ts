@@ -261,6 +261,17 @@ export class JournalStore {
       .map(mapRun);
   }
 
+  listRunsPage(limit: number): { runs: RunRow[]; total: number } {
+    const runs = this.db
+      .query<RawRunRow, [number]>(
+        "SELECT * FROM runs ORDER BY created_at_ms DESC, run_id DESC LIMIT ?",
+      )
+      .all(limit)
+      .map(mapRun);
+    const total = this.db.query<{ c: number }, []>("SELECT COUNT(*) AS c FROM runs").get()?.c ?? 0;
+    return { runs, total };
+  }
+
   listRunsByStatus(status: RunRow["status"]): RunRow[] {
     return this.db
       .query<RawRunRow, [string]>("SELECT * FROM runs WHERE status = ? ORDER BY created_at_ms ASC")

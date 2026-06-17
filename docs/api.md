@@ -9,6 +9,7 @@ types is:
 - `src/rpc/contract.ts` for the `KeelApi` interface and RPC request/response
   types.
 - `src/rpc/projection.ts` for `RunProjection`, `RunReport`, `RunSummary`,
+  `RunSummaryPage`,
   schedule projections, and blockage/read-model shapes.
 - `src/daemon/gateway.ts` for socket/RPC authorization and transport method
   names.
@@ -35,7 +36,7 @@ observe progress.
 | Family | RPC methods | CLI surface | Execute surface | Notes |
 |---|---|---|---|---|
 | Run launch | `launchRun`, `launchSavedWorkflow` | `launch`, `run`, `workflow run` | `keel.launch` | Launch mints a run capability for follow-up run-scoped operations. Request `runSecrets`/`--secret*` here when agents use `environment.secrets`. |
-| Run reads | `listRuns`, `getRun`, `getRunReport`, `getRunOutput`, `getBlockage` | `list`, `get`, `report`, `output` | `keel.get`, `keel.report`, `keel.output`, `keel.blockage` | RPC `getRunOutput` returns the current run outcome; CLI `output` and execute `keel.output` require finished output. `getBlockage` may return diagnostic `running`; report/projection surfaces render only actionable blockage such as agent concurrency queues, durable waits, interruptions, or stale owner heartbeats. |
+| Run reads | `listRuns`, `listRunsPage`, `getRun`, `getRunReport`, `getRunOutput`, `getBlockage` | `list`, `get`, `report`, `output` | `keel.get`, `keel.report`, `keel.output`, `keel.blockage` | `listRuns` remains the unbounded CLI/TUI summary source; `listRunsPage({ limit })` returns newest summaries plus total count for bounded browser inboxes and rejects limits above 500. RPC `getRunOutput` returns the current run outcome; CLI `output` and execute `keel.output` require finished output. `getBlockage` may return diagnostic `running`; report/projection surfaces render only actionable blockage such as agent concurrency queues, durable waits, interruptions, or stale owner heartbeats. |
 | Run events/wait | `waitForRun`, `subscribeEvents` | `watch`; attached lifecycle commands reuse watch formatting | `keel.wait`, `keel.events` | Durable events backfill by sequence; ephemeral live frames are not replayed. |
 | Run lifecycle | `resumeRun`, `retryRun`, `rewindRun`, `forkRun`, `interruptRun`, `rerunRun` | `resume`, `retry`, `rewind`, `fork`, `interrupt`; no CLI rerun command | `keel.resume`, `keel.retry`, `keel.rewind`, `keel.fork`, `keel.interrupt`; no execute rerun helper | `retryRun`, `rewindRun`, and RPC-only `rerunRun` accept fresh `runSecrets` for re-executed agents. |
 | Signals and approvals | gateway `sendSignal`, gateway `decideApproval` | `signal`, `approve`, `deny` | `keel.signal`, `keel.approve`, `keel.deny` | Signal uses run authority; approval decisions are admin-only. Delivery acknowledges durable input plus wake start; it does not wait for resumed work to finish. |

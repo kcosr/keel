@@ -110,6 +110,17 @@ describe("JournalStore (in-memory)", () => {
     expect(store.listRuns().map((run) => run.runId)).toEqual(["r_c", "r_b", "r_a"]);
   });
 
+  test("listRunsPage returns a newest-first page with the total run count", () => {
+    store.insertRun({ ...newRun("r_a"), createdAtMs: 1000 });
+    store.insertRun({ ...newRun("r_c"), createdAtMs: 2000 });
+    store.insertRun({ ...newRun("r_b"), createdAtMs: 2000 });
+
+    const page = store.listRunsPage(2);
+
+    expect(page.runs.map((run) => run.runId)).toEqual(["r_c", "r_b"]);
+    expect(page.total).toBe(3);
+  });
+
   test("updateRun patches only named columns", () => {
     store.insertRun(newRun("r1"));
     store.updateRun("r1", { status: "finished", finishedAtMs: 2000 });

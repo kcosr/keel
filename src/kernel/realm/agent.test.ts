@@ -19,6 +19,9 @@ import { captureWorkflowFile } from "../../workflow-definitions/capture.ts";
 import { RealmKernel } from "./realm-host.ts";
 
 const FIX = new URL("./fixtures/", import.meta.url);
+const providerToolAliasUrl = captureWorkflowFile(
+  new URL("agent-provider-tool-alias.workflow.ts", FIX).pathname,
+);
 const reviewUrl = captureWorkflowFile(new URL("agent-review.workflow.ts", FIX).pathname);
 const singleUrl = captureWorkflowFile(new URL("agent-single.workflow.ts", FIX).pathname);
 const TASK_REVIEW = new URL("../../../workflows/task-review-guidance/", import.meta.url);
@@ -71,6 +74,28 @@ const mockProfiles = {
 };
 
 describe("ctx.agent — structured output + fan-out", () => {
+  test("known provider tool aliases reject before provider invocation", async () => {
+    const store = JournalStore.memory();
+    const calls: AgentInvocation[] = [];
+    const provider: AgentProvider = {
+      name: "pi",
+      async generate(invocation: AgentInvocation): Promise<AgentResult> {
+        calls.push(invocation);
+        return { text: '{"value":"should not run"}', transcript: [] };
+      },
+    };
+
+    await expect(
+      kernel(store, provider, { agents: new AgentProviderRegistry().register(provider) }).run(
+        providerToolAliasUrl,
+        null,
+        { name: "bad-tools", target: process.cwd() },
+      ),
+    ).rejects.toThrow(/pi provider tool "run" is not canonical; use "bash"/);
+    expect(calls).toHaveLength(0);
+    expect(store.getRun("run_0")?.status).toBe("failed");
+  });
+
   test("a fan-out of agents validates output and aggregates", async () => {
     const store = JournalStore.memory();
     const mock = new MockProvider({

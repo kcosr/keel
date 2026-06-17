@@ -220,13 +220,20 @@ function insertWorkspaceFixture(
 describe("agent profile RPC", () => {
   test("manages catalog profiles with generation preconditions and programmatic source visibility", () => {
     const store = JournalStore.memory();
+    const piProvider: AgentProvider = {
+      name: "pi",
+      async generate(): Promise<AgentResult> {
+        return { text: "ok", transcript: [] };
+      },
+    };
+    const registry = new AgentProviderRegistry().register(new MockProvider()).register(piProvider);
     const kernel = new RealmKernel(store, {
       idgen: () => "run_profiles",
-      agents: new AgentProviderRegistry().register(new MockProvider()),
+      agents: registry,
       agentProfiles: { builtin: { provider: "mock", model: "fixed" } },
     });
     const api = new InProcessKeel(kernel, store, new EventHub(), {
-      agents: new AgentProviderRegistry().register(new MockProvider()),
+      agents: registry,
       clock: () => 10,
     });
 
@@ -244,6 +251,13 @@ describe("agent profile RPC", () => {
         ifGeneration: 2,
       }),
     ).toThrow(/generation precondition/);
+    expect(() =>
+      api.putAgentProfile({
+        name: "pi-reviewer",
+        config: { provider: "pi", toolPolicy: "read-only", allowTools: ["run"] },
+        createOnly: true,
+      }),
+    ).toThrow(/pi provider tool "run" is not canonical; use "bash"/);
     expect(api.checkAgentProfile({ name: "reviewer" }).ok).toBe(true);
     expect(() => api.putAgentProfile({ name: "builtin", config: {} })).toThrow(/programmatic/);
     expect(api.deleteAgentProfile({ name: "reviewer", ifGeneration: 1 })).toEqual({

@@ -7,6 +7,7 @@ import {
   resolveToolPolicy,
   resolvedToolPolicyToCodexParams,
   validateCapabilitiesDeclaration,
+  validateProviderToolPolicy,
 } from "./capabilities.ts";
 
 describe("Codex capability mapping", () => {
@@ -136,6 +137,30 @@ describe("Codex capability mapping", () => {
         allowTools: "bash" as never,
       }),
     ).toThrow(/allowTools must be an array/);
+  });
+
+  test("known providers reject non-canonical provider tool names before adapter invocation", () => {
+    expect(() =>
+      validateProviderToolPolicy(
+        "pi",
+        resolveToolPolicy({ toolPolicy: "read-only", allowTools: ["run"] }),
+        'ctx.agent("review")',
+      ),
+    ).toThrow(/pi provider tool "run" is not canonical; use "bash"/);
+    expect(() =>
+      validateProviderToolPolicy(
+        "claude",
+        resolveToolPolicy({ toolPolicy: "read-only", denyTools: ["search"] }),
+        'ctx.agent("review")',
+      ),
+    ).toThrow(/claude provider tool "search" is not canonical; use "WebSearch"/);
+    expect(() =>
+      validateProviderToolPolicy(
+        "custom",
+        resolveToolPolicy({ toolPolicy: "read-only", allowTools: ["run"] }),
+        'ctx.agent("review")',
+      ),
+    ).not.toThrow();
   });
 
   test("unrestricted maps to Codex yolo params", () => {

@@ -182,9 +182,7 @@ export function resolvedToolPolicyToCodexParams(
 ): CodexCapabilityParams {
   const existingCwd = requireCodexCwd(cwd);
 
-  if (resolved.allowTools.length > 0 || resolved.denyTools.length > 0) {
-    throw new Error("codex provider does not support allowTools or denyTools");
-  }
+  validateProviderToolPolicy("codex", resolved);
 
   const sandbox = codexSandboxForCapabilities(resolved.capabilities);
   switch (sandbox) {
@@ -213,6 +211,31 @@ export function resolvedToolPolicyToCodexParams(
         thread: { approvalPolicy: "never", sandbox: "danger-full-access" },
         turn: { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } },
       };
+  }
+}
+
+export function validateProviderToolPolicy(
+  provider: string,
+  resolved: ResolvedToolPolicy,
+  path = "agent",
+): void {
+  switch (provider) {
+    case "pi":
+      for (const tool of resolved.allowTools) requireExactPiToolName(tool);
+      for (const tool of resolved.denyTools) requireExactPiToolName(tool);
+      return;
+    case "claude":
+      for (const tool of resolved.allowTools) requireExactClaudeToolName(tool);
+      for (const tool of resolved.denyTools) requireExactClaudeToolName(tool);
+      return;
+    case "codex":
+      if (resolved.allowTools.length > 0 || resolved.denyTools.length > 0) {
+        throw new Error(`${path} provider "codex" does not support allowTools or denyTools`);
+      }
+      codexSandboxForCapabilities(resolved.capabilities);
+      return;
+    default:
+      return;
   }
 }
 

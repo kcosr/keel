@@ -25,14 +25,6 @@ export function requireRunTarget(value: unknown, context: string): string {
   return value;
 }
 
-export function optionalRunTarget(
-  value: string | null | undefined,
-  context: string,
-): string | null {
-  if (value == null) return null;
-  return requireRunTarget(value, context);
-}
-
 export function clientRunTargetOrCwd(
   value: string | undefined,
   context: string,

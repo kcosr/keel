@@ -5,7 +5,12 @@
 // which runs workflow modules in a Worker while sharing the same StepEngine.
 
 import { AsyncLocalStorage } from "node:async_hooks";
-import { type Capabilities, type ToolPolicy, resolveToolPolicy } from "../agents/capabilities.ts";
+import {
+  type Capabilities,
+  type ToolPolicy,
+  resolveToolPolicy,
+  validateProviderToolPolicy,
+} from "../agents/capabilities.ts";
 import { DEFAULT_AGENT_PROVIDER, DEFAULT_SCHEMA_MAX_RETRIES } from "../agents/defaults.ts";
 import { AgentFailure, executeAgent, runAgentWithStall } from "../agents/execute.ts";
 import { type AgentProfiles, resolveProfile } from "../agents/profiles.ts";
@@ -426,6 +431,7 @@ export class WorkflowCtx implements Ctx {
       },
       { path: `ctx.agent("${spec.key}")` },
     );
+    validateProviderToolPolicy(provider, tools, `ctx.agent("${spec.key}")`);
     const caps = tools.capabilities;
     const workspaceHandle = this.resolveAgentWorkspaceHandle(spec.workspace);
     const workspaceId = workspaceHandle.id;

@@ -178,6 +178,8 @@ export class PiProvider implements AgentProvider {
       }
     };
     function malformedRpcStdout(line: string): void {
+      // Pi RPC stdout is a JSON-lines protocol. Non-empty non-JSON stdout is a
+      // provider protocol error, not ignorable diagnostic noise.
       streamErr = `pi agent "${invocation.key}" emitted malformed RPC stdout: ${JSON.stringify(
         excerpt(line, 400),
       )}`;

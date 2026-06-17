@@ -15,7 +15,11 @@
 /// <reference lib="webworker" />
 
 import { AsyncLocalStorage } from "node:async_hooks";
-import { type ToolPolicy, resolveToolPolicy } from "../../agents/capabilities.ts";
+import {
+  type ToolPolicy,
+  resolveToolPolicy,
+  validateProviderToolPolicy,
+} from "../../agents/capabilities.ts";
 import { DEFAULT_AGENT_PROVIDER } from "../../agents/defaults.ts";
 import { type AgentProfiles, resolveProfile } from "../../agents/profiles.ts";
 import { resolveSelectedProviderConfig } from "../../agents/provider-config.ts";
@@ -581,6 +585,7 @@ const ctx = Object.freeze({
       },
       { path: `ctx.agent("${spec.key}")` },
     );
+    validateProviderToolPolicy(provider, tools, `ctx.agent("${spec.key}")`);
     const caps = tools.capabilities;
     rejectRemovedWorkspaceFields(rawSpec, `ctx.agent("${spec.key}")`);
     const workspaceId = resolveWorkspaceId(spec.workspace);
@@ -702,6 +707,7 @@ const ctx = Object.freeze({
       },
       { path: `ctx.agentSession("${sessionSpec.key}")` },
     );
+    validateProviderToolPolicy(provider, tools, `ctx.agentSession("${sessionSpec.key}")`);
     const caps = tools.capabilities;
     rejectRemovedWorkspaceFields(rawSessionSpec, `ctx.agentSession("${sessionSpec.key}")`);
     const workspaceId = resolveWorkspaceId(sessionSpec.workspace);

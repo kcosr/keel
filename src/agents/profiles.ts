@@ -1,11 +1,11 @@
 import { type Json, canonicalJson, sha256Hex } from "../hash.ts";
 import {
   type ToolPolicy,
-  codexSandboxForCapabilities,
   normalizeProviderToolList,
   rejectArrayNonJsonKeys,
   resolveToolPolicy,
   validateCapabilitiesDeclaration,
+  validateProviderToolPolicy,
 } from "./capabilities.ts";
 import { normalizeCodexProviderConfig } from "./codex.ts";
 import { normalizeProviderConfigMap, normalizeProviderConfigValue } from "./provider-config.ts";
@@ -349,21 +349,18 @@ function assertProviderSupportsProfile(
   config: PersistentAgentProfileConfig,
   path: string,
 ): void {
-  if (provider !== "codex") return;
   const tools = resolveToolPolicy({
     ...(config.capabilities ? { capabilities: config.capabilities } : {}),
     ...(config.toolPolicy ? { toolPolicy: config.toolPolicy } : {}),
     ...(config.allowTools ? { allowTools: config.allowTools } : {}),
     ...(config.denyTools ? { denyTools: config.denyTools } : {}),
   });
-  if (tools.allowTools.length > 0 || tools.denyTools.length > 0) {
-    throw new Error(`${path} provider "codex" does not support allowTools or denyTools`);
-  }
   try {
-    codexSandboxForCapabilities(tools.capabilities);
+    validateProviderToolPolicy(provider, tools, path);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`${path} provider "codex": ${message}`);
+    if (message.startsWith(`${path} `)) throw new Error(message);
+    throw new Error(`${path} provider "${provider}": ${message}`);
   }
 }
 

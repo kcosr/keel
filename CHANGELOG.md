@@ -107,6 +107,9 @@
 - Saved workflow launches and saved-ref schedules no longer accept the
   undocumented daemon RPC `clientDefaultTarget` wrapper field. Use explicit
   `target`/`--target`, or configure a saved workflow default target.
+- Pi RPC stdout is now treated as a strict JSON-lines protocol: non-empty
+  malformed stdout fails the agent attempt with a bounded excerpt instead of
+  being ignored as diagnostic noise.
 - RealmKernel launch boundaries now reject missing or blank run targets before
   persisting a run; CLI/client layers remain responsible for cwd defaults.
 - Workflow definition schema v21 normalizes legacy code-only and empty-module

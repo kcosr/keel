@@ -984,6 +984,63 @@ describe("schema migrations", () => {
     }
   });
 
+  test("v21 workflow source migration merges source-map-only legacy collisions", () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-mig-v21-source-map-collision-"));
+    try {
+      const path = join(dir, "old.db");
+      makeV20Db(path);
+      const db = new Database(path);
+      const source = "export default async () => 'ok';\n";
+      db.query(
+        `INSERT INTO workflow_definitions (
+          hash, name, kind, code, source_map, manifest_json, created_at_ms
+        ) VALUES ('wf_sha256_legacy_a', 'legacy-a', 'source', ?, 'old-map-a', NULL, 1)`,
+      ).run(source);
+      db.query(
+        `INSERT INTO workflow_definitions (
+          hash, name, kind, code, source_map, manifest_json, created_at_ms
+        ) VALUES ('wf_sha256_legacy_b', 'legacy-b', 'source', ?, 'old-map-b', NULL, 2)`,
+      ).run(source);
+      db.query(
+        `INSERT INTO runs (
+          run_id, workflow_name, definition_version, workflow_ref, run_target, status,
+          input_ref, created_at_ms
+        ) VALUES ('r_a', 'legacy-a', 'wf_sha256_legacy_a', 'wf_sha256_legacy_a', '/tmp/repo', 'finished', 'null', 1)`,
+      ).run();
+      db.query(
+        `INSERT INTO runs (
+          run_id, workflow_name, definition_version, workflow_ref, run_target, status,
+          input_ref, created_at_ms
+        ) VALUES ('r_b', 'legacy-b', 'wf_sha256_legacy_b', 'wf_sha256_legacy_b', '/tmp/repo', 'finished', 'null', 2)`,
+      ).run();
+      db.close();
+
+      const store = JournalStore.open(path);
+      const runA = store.getRun("r_a");
+      const runB = store.getRun("r_b");
+      expect(runA?.definitionVersion).toBe(runB?.definitionVersion);
+      expect(runA?.workflowRef).toBe(runA?.definitionVersion);
+      expect(runB?.workflowRef).toBe(runB?.definitionVersion);
+      expect(store.getWorkflowDefinition("wf_sha256_legacy_a")).toBeNull();
+      expect(store.getWorkflowDefinition("wf_sha256_legacy_b")).toBeNull();
+      expect(
+        store.db.query<{ c: number }, []>("SELECT COUNT(*) AS c FROM workflow_definitions").get()
+          ?.c,
+      ).toBe(1);
+      const normalized = store.getWorkflowDefinition(runA?.definitionVersion ?? "");
+      expect(normalized?.sourceMap).toBe("old-map-a");
+      expect(
+        workflowDefinitionSourceSelection(normalized as NonNullable<typeof normalized>),
+      ).toEqual({
+        entry: "entry.ts",
+        files: [{ path: "entry.ts", code: source, entry: true }],
+      });
+      store.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("v21 workflow source migration rejects legacy entry-only local imports", () => {
     const dir = mkdtempSync(join(tmpdir(), "keel-mig-v21-workflow-source-invalid-"));
     try {

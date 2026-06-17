@@ -505,7 +505,9 @@ function legacyEntryOnlyExternalImports(hash: string, code: string): string[] {
       );
     }
     if (spec !== "@kcosr/keel") {
-      throw new Error(`workflow import "${spec}" is not allowed; only @kcosr/keel is supported`);
+      throw new Error(
+        `workflow definition ${hash} imports unsupported external "${spec}"; only @kcosr/keel is supported`,
+      );
     }
     external.add(spec);
   }
@@ -583,7 +585,6 @@ function assertWorkflowDefinitionV21CollisionIsMergeable(
   if (
     existing.kind !== oldRow.kind ||
     existing.code !== oldRow.code ||
-    existing.source_map !== oldRow.source_map ||
     existing.manifest_json !== canonicalManifestJson
   ) {
     throw new Error(

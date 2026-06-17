@@ -554,7 +554,7 @@ h3 {
 
 .dtable {
   border-collapse: collapse;
-  min-width: 980px;
+  min-width: 720px;
   table-layout: fixed;
   width: 100%;
 }
@@ -824,6 +824,27 @@ h3 {
   background: var(--surface-2);
   border-color: var(--border);
   color: var(--text);
+}
+
+@media (max-width: 1320px) {
+  .run-group .dtable {
+    min-width: 0;
+  }
+
+  .run-group .run-table-secondary,
+  .run-group .run-table-compact-hidden {
+    display: none;
+  }
+
+  .run-group .dtable th,
+  .run-group .dtable td {
+    padding-left: 8px;
+    padding-right: 8px;
+  }
+
+  .run-detail-screen .event-row {
+    grid-template-columns: 1fr;
+  }
 }
 
 .graph-canvas {

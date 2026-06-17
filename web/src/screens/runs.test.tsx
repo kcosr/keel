@@ -21,6 +21,12 @@ describe("RunsScreen", () => {
 
     await screen.findByText("Needs Decision");
     expect(screen.getByText("Recently Finished")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Other" })).not.toBeInTheDocument();
+    expect(
+      Array.from(document.querySelectorAll(".run-group .section-title")).map(
+        (heading) => heading.textContent,
+      ),
+    ).toEqual(["Active", "Recently Finished", "Needs Decision"]);
 
     const active = screen.getByRole("heading", { name: "Active" }).closest("section");
     expect(active).not.toBeNull();

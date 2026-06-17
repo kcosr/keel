@@ -34,7 +34,7 @@ const STATUS_FILTERS: Array<RunStatus | "all"> = [
 ];
 
 interface RunGroup {
-  id: "needs-decision" | "active" | "finished" | "other";
+  id: "needs-decision" | "active" | "finished";
   title: string;
   rows: RunListItem[];
 }
@@ -295,7 +295,7 @@ function columns(): Array<Column<RunListItem>> {
     {
       key: "run",
       header: "Run",
-      width: "190px",
+      width: "156px",
       render: (run) => (
         <div className="run-cell">
           <StatusPill tone={toneForStatus(run.status)} dot>
@@ -324,12 +324,14 @@ function columns(): Array<Column<RunListItem>> {
     {
       key: "target",
       header: "Target",
-      width: "150px",
+      width: "124px",
+      className: "run-table-secondary",
       render: (run) => <span className="mono text-truncate">{run.runTarget ?? "-"}</span>,
     },
     {
       key: "current",
       header: "Current / Blockage",
+      className: "run-table-secondary",
       render: (run) => (
         <div className="cell-stack">
           <span className="text-truncate">
@@ -344,7 +346,8 @@ function columns(): Array<Column<RunListItem>> {
     {
       key: "status",
       header: "Status",
-      width: "150px",
+      width: "136px",
+      className: "run-table-compact-hidden",
       render: (run) => (
         <StatusPill tone={toneForStatus(run.status)} dot>
           {run.status}
@@ -354,13 +357,14 @@ function columns(): Array<Column<RunListItem>> {
     {
       key: "age",
       header: "Duration",
-      width: "110px",
+      width: "96px",
       render: (run) => formatDuration(run.createdAtMs, run.finishedAtMs),
     },
     {
       key: "actions",
       header: "",
-      width: "88px",
+      width: "68px",
+      className: "run-table-compact-hidden",
       align: "right",
       render: (run) => (
         <div className="row-actions">
@@ -417,20 +421,6 @@ function groupRuns(rows: RunListItem[]): RunGroup[] {
       title: "Recently Finished",
       rows: rows.filter((run) =>
         ["finished", "failed", "cancelled", "continued"].includes(run.status),
-      ),
-    },
-    {
-      id: "other",
-      title: "Other",
-      rows: rows.filter(
-        (run) =>
-          !isNeedsDecision(run) &&
-          !(
-            run.status === "running" ||
-            run.status.startsWith("waiting") ||
-            run.status === "interrupted" ||
-            ["finished", "failed", "cancelled", "continued"].includes(run.status)
-          ),
       ),
     },
   ];

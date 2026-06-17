@@ -85,9 +85,10 @@ export function RunDetailScreen({
 
   useEffect(() => {
     const seq = detailState.data?.eventCursor?.seq ?? null;
-    if (seq === null || latestSeqRef.current !== null) return;
-    latestSeqRef.current = seq;
-    setStreamState((state) => ({ ...state, cursorSeq: seq }));
+    if (seq === null) return;
+    const nextSeq = Math.max(latestSeqRef.current ?? seq, seq);
+    latestSeqRef.current = nextSeq;
+    setStreamState((state) => ({ ...state, cursorSeq: nextSeq }));
   }, [detailState.data?.eventCursor?.seq]);
 
   useEffect(() => {
@@ -137,11 +138,11 @@ export function RunDetailScreen({
 
   const detail = detailState.data;
   const allEvents = useMemo(
-    () => [...(detail?.events ?? []), ...liveEvents],
+    () => mergeEventFrames(detail?.events ?? [], liveEvents),
     [detail?.events, liveEvents],
   );
   const rawFrames = useMemo(
-    () => [...tailRawFrames(detail?.events ?? []), ...rawLiveFrames],
+    () => mergeRawFrames(tailRawFrames(detail?.events ?? []), rawLiveFrames),
     [detail?.events, rawLiveFrames],
   );
 
@@ -505,8 +506,30 @@ function cursorInputForMode(
   if (mode === "beginning") return { kind: "beginning" };
   if (mode === "now") return { kind: "now" };
   if (mode === "tail") return { kind: "tail", count: 100 };
-  const seq = latestSeq ?? detail?.eventCursor?.seq;
+  const loadedSeq = detail?.eventCursor?.seq ?? null;
+  const seq =
+    latestSeq === null && loadedSeq === null ? null : Math.max(latestSeq ?? 0, loadedSeq ?? 0);
   return typeof seq === "number" ? { kind: "after-seq", seq } : { kind: "tail", count: 100 };
+}
+
+export function mergeEventFrames(
+  detailEvents: EventStreamFrame[],
+  liveEvents: EventStreamFrame[],
+): EventStreamFrame[] {
+  return mergeOrderedFrames([
+    ...orderEventFrames(detailEvents, 0),
+    ...orderEventFrames(liveEvents, detailEvents.length),
+  ]).map((item) => item.frame);
+}
+
+export function mergeRawFrames(
+  tailFrames: RawEventFrame[],
+  liveFrames: RawEventFrame[],
+): RawEventFrame[] {
+  return mergeOrderedFrames([
+    ...orderRawFrames(tailFrames, 0),
+    ...orderRawFrames(liveFrames, tailFrames.length),
+  ]).map((item) => item.frame);
 }
 
 function streamFrameFromSse(frame: SseMessage): EventStreamFrame | null {
@@ -553,6 +576,95 @@ function tailRawFrames(events: EventStreamFrame[]): RawEventFrame[] {
     source: "tail",
     receivedAtMs: event.kind === "control" ? Date.now() : event.atMs,
   }));
+}
+
+interface OrderedFrame<T> {
+  frame: T;
+  identity: string | null;
+  order: number;
+  position: number;
+}
+
+function mergeOrderedFrames<T>(frames: Array<OrderedFrame<T>>): Array<OrderedFrame<T>> {
+  const latestByIdentity = new Map<string, OrderedFrame<T>>();
+  for (const frame of frames) {
+    if (frame.identity !== null) latestByIdentity.set(frame.identity, frame);
+  }
+
+  return frames
+    .filter((frame) => frame.identity === null || latestByIdentity.get(frame.identity) === frame)
+    .sort((a, b) => a.position - b.position || a.order - b.order);
+}
+
+function orderEventFrames(
+  frames: EventStreamFrame[],
+  offset: number,
+): Array<OrderedFrame<EventStreamFrame>> {
+  return orderFrames(frames, offset, eventPosition, eventIdentity);
+}
+
+function orderRawFrames(
+  frames: RawEventFrame[],
+  offset: number,
+): Array<OrderedFrame<RawEventFrame>> {
+  return orderFrames(frames, offset, rawFramePosition, rawFrameIdentity);
+}
+
+function orderFrames<T>(
+  frames: T[],
+  offset: number,
+  knownPosition: (frame: T) => number | null,
+  identity: (frame: T) => string | null,
+): Array<OrderedFrame<T>> {
+  const nextPositions = new Array<number | null>(frames.length);
+  let next: number | null = null;
+  for (let index = frames.length - 1; index >= 0; index -= 1) {
+    const position = knownPosition(frames[index] as T);
+    nextPositions[index] = next;
+    if (position !== null) next = position;
+  }
+
+  let previous: number | null = null;
+  return frames.map((frame, index) => {
+    const position = knownPosition(frame);
+    const ordered = {
+      frame,
+      identity: identity(frame),
+      order: offset + index,
+      position: position ?? inferredPosition(previous, nextPositions[index] ?? null),
+    };
+    if (position !== null) previous = position;
+    return ordered;
+  });
+}
+
+function inferredPosition(previous: number | null, next: number | null): number {
+  if (previous !== null && next !== null) {
+    return next > previous ? previous + (next - previous) / 2 : previous + 0.5;
+  }
+  if (previous !== null) return previous + 0.5;
+  if (next !== null) return next - 0.5;
+  return Number.MAX_SAFE_INTEGER;
+}
+
+function eventPosition(event: EventStreamFrame): number | null {
+  if (event.kind === "durable") return event.seq;
+  if (event.kind === "control") return event.cursor.seq + 0.75;
+  return null;
+}
+
+function rawFramePosition(frame: RawEventFrame): number | null {
+  return isEventFrame(frame.data) ? eventPosition(frame.data) : null;
+}
+
+function eventIdentity(event: EventStreamFrame): string | null {
+  if (event.kind === "durable") return `durable:${event.seq}`;
+  if (event.kind === "control") return `control:${event.type}:${event.cursor.seq}`;
+  return null;
+}
+
+function rawFrameIdentity(frame: RawEventFrame): string | null {
+  return isEventFrame(frame.data) ? eventIdentity(frame.data) : null;
 }
 
 function streamTone(streamState: StreamState, live: boolean): Tone {

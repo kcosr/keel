@@ -4,6 +4,7 @@ export interface Column<T> {
   key: string;
   header: ReactNode;
   width?: string;
+  className?: string;
   align?: "left" | "center" | "right";
   render(row: T): ReactNode;
 }
@@ -32,13 +33,17 @@ export function DenseTable<T>({
       <table className="dtable">
         <colgroup>
           {columns.map((column) => (
-            <col key={column.key} style={column.width ? { width: column.width } : undefined} />
+            <col
+              className={column.className}
+              key={column.key}
+              style={column.width ? { width: column.width } : undefined}
+            />
           ))}
         </colgroup>
         <thead>
           <tr>
             {columns.map((column) => (
-              <th className={column.align ? `align-${column.align}` : undefined} key={column.key}>
+              <th className={columnClassName(column)} key={column.key}>
                 {column.header}
               </th>
             ))}
@@ -66,10 +71,7 @@ export function DenseTable<T>({
                 tabIndex={onRowClick ? 0 : undefined}
               >
                 {columns.map((column) => (
-                  <td
-                    className={column.align ? `align-${column.align}` : undefined}
-                    key={column.key}
-                  >
+                  <td className={columnClassName(column)} key={column.key}>
                     {column.render(row)}
                   </td>
                 ))}
@@ -80,4 +82,9 @@ export function DenseTable<T>({
       </table>
     </div>
   );
+}
+
+function columnClassName<T>(column: Column<T>): string | undefined {
+  const classes = [column.align ? `align-${column.align}` : null, column.className].filter(Boolean);
+  return classes.length > 0 ? classes.join(" ") : undefined;
 }

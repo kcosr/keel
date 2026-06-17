@@ -61,6 +61,7 @@ import type {
   RunWorkspaceView,
   SaveWorkflowRequest,
   SavedWorkflowSourceView,
+  SubscribeEventsRequest,
   WorkflowDefinitionSourceView,
   WorkflowProvenance,
   WorkspaceGcResult,
@@ -823,11 +824,18 @@ export class InProcessKeel implements KeelApi {
   }
 
   subscribeEvents(
-    runId: string,
-    afterSeq: number,
+    req: SubscribeEventsRequest,
     onEvent: (event: EventEnvelope) => void,
+    onControl?: Parameters<KeelApi["subscribeEvents"]>[2],
   ): () => void {
-    return this.eventHub.subscribe(this.store, runId, afterSeq, onEvent);
+    const subscription = this.eventHub.subscribe(this.store, req, onEvent, onControl);
+    const unsubscribe = subscription.unsubscribe as (() => void) & {
+      cursor?: typeof subscription.cursor;
+      closedStatus?: string | null;
+    };
+    unsubscribe.cursor = subscription.cursor;
+    unsubscribe.closedStatus = subscription.closedStatus;
+    return unsubscribe;
   }
 
   close(): void {

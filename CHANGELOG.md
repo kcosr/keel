@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### Added
+- Shared event stream cursor contract for daemon, CLI, TUI, execute, and
+  in-process subscriptions, plus `keel watch --from`, `--after-seq`, and
+  `--tail` cursor controls.
+- Durable `docs/events.md` reference covering event envelopes, cursor semantics,
+  catch-up/closed boundaries, and stream authorization behavior.
 - Source-backed daemon API orientation in `docs/api.md` and a more granular
   control-surface matrix for run, workflow, schedule, workspace, profile, and
   settings operation families.

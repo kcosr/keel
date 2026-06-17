@@ -139,7 +139,7 @@ acknowledgement behavior.
 | `resume` | yes | terminal/parked/interrupted by default; start acknowledgement with `--detach` | yes when attached | yes | text watch when attached; `<runId>\t<status>` when detached | attached run outcome, or resume success/failure when detached |
 | `retry` | yes | terminal/parked/interrupted by default; start acknowledgement with `--detach` | yes when attached | yes | text watch when attached; `<runId>\t<status>` when detached | attached run outcome, or retry success/failure when detached |
 | `rewind` | yes | terminal/parked/interrupted by default; start acknowledgement with `--detach` | yes when attached | yes | text watch when attached; `<runId>\t<status>` when detached | attached run outcome, or rewind success/failure when detached |
-| `watch` | no | terminal/parked/interrupted event after catch-up | yes | no | NDJSON | observed run status |
+| `watch` | no | terminal/parked/interrupted event or closed stream status after catch-up | yes | no | NDJSON | observed run status |
 | `tui` | no by itself | user exits | live view | no | interactive terminal UI | user exit or startup failure |
 | `interrupt` | stops active work | interruption persistence | no | no | `<runId>\tinterrupted` | interruption success/failure |
 | `signal` | maybe starts wake | delivery and wake-start acknowledgement | no | no | status line | delivery success/failure |

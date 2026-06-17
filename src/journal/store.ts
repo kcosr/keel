@@ -937,6 +937,27 @@ export class JournalStore {
       .map(mapEvent);
   }
 
+  eventHighWater(runId: string): number {
+    return (
+      this.db
+        .query<{ highWater: number | null }, [string]>(
+          "SELECT MAX(seq) AS highWater FROM events WHERE run_id = ?",
+        )
+        .get(runId)?.highWater ?? 0
+    );
+  }
+
+  eventTailFloor(runId: string, count: number): number {
+    if (count === 0) return this.eventHighWater(runId);
+    const rows = this.db
+      .query<{ seq: number }, [string, number]>(
+        "SELECT seq FROM events WHERE run_id = ? ORDER BY seq DESC LIMIT ?",
+      )
+      .all(runId, count);
+    if (rows.length === 0) return 0;
+    return Math.max(0, Math.min(...rows.map((row) => row.seq)) - 1);
+  }
+
   private notifyEventAppended(event: EventRow): void {
     if (this.transactionDepth > 0) {
       this.pendingEventNotifications.push(event);

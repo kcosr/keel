@@ -1005,7 +1005,10 @@ describe("capability auth", () => {
       await client.authenticate(capability as string);
 
       const events: string[] = [];
-      const unsubscribe = client.subscribeEvents(runId, 0, (event) => events.push(event.type));
+      const unsubscribe = client.subscribeEvents(
+        { runId: runId, cursor: { kind: "beginning" } },
+        (event) => events.push(event.type),
+      );
       const waiting = client.waitForRun(runId);
       await Bun.sleep(150);
 
@@ -1045,13 +1048,32 @@ describe("capability auth", () => {
       await client.waitForRun(runId);
 
       const events: string[] = [];
-      const unsubscribe = client.subscribeEvents(runId, 0, (event) => events.push(event.type));
+      let finishedSeq = 0;
+      const controls: string[] = [];
+      const caughtUp: Array<string | null> = [];
+      const unsubscribe = client.subscribeEvents(
+        { runId: runId, cursor: { kind: "beginning" }, includeControlFrames: true },
+        (event) => {
+          events.push(event.type);
+          if (event.kind === "durable" && event.type === "run.finished") finishedSeq = event.seq;
+        },
+        undefined,
+        (result) => caughtUp.push(result.closedStatus),
+        (frame) => controls.push(`${frame.type}:${frame.cursor.seq}`),
+      );
       await until(() => Promise.resolve(events.includes("run.finished")), 2000);
+      await until(
+        () => Promise.resolve(controls.some((frame) => frame.startsWith("closed:"))),
+        2000,
+      );
       unsubscribe();
 
       expect(events[0]).toBe("run.started");
       expect(events).toContain("step.completed");
       expect(events).toContain("run.finished");
+      expect(controls).toContain(`caught-up:${finishedSeq}`);
+      expect(controls).toContain(`closed:${finishedSeq}`);
+      expect(caughtUp).toEqual(["finished"]);
       client.close();
     } finally {
       daemon.stop();
@@ -1074,8 +1096,9 @@ describe("capability auth", () => {
       const first = await client.launchRun({ ...onceUrl, input: null, name: "first" });
       await client.authenticate(first.capability as string);
       const firstEvents: string[] = [];
-      const unsubscribe = client.subscribeEvents(first.runId, 0, (event) =>
-        firstEvents.push(event.type),
+      const unsubscribe = client.subscribeEvents(
+        { runId: first.runId, cursor: { kind: "beginning" } },
+        (event) => firstEvents.push(event.type),
       );
       await until(() => Promise.resolve(firstEvents.includes("run.started")), 2000);
 

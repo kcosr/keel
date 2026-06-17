@@ -1,6 +1,12 @@
 import { redactCapabilityTokens } from "../auth/redaction.ts";
 import type { DaemonClient } from "../daemon/client.ts";
-import type { EventEnvelope, RunOutcome, RunStart } from "../rpc/contract.ts";
+import type {
+  EventEnvelope,
+  RunOutcome,
+  RunStart,
+  SubscribeEventsRequest,
+  SubscribeEventsResult,
+} from "../rpc/contract.ts";
 import type { Blockage, RunProjection, RunReport, RunSummary } from "../rpc/projection.ts";
 import { createTuiWatchFormatter } from "./events.ts";
 import {
@@ -51,11 +57,10 @@ export interface TuiClient {
   sendSignal(runId: string, name: string, payload: unknown): Promise<{ status: string }>;
   getRunOutput(runId: string): Promise<RunOutcome>;
   subscribeEvents(
-    runId: string,
-    afterSeq: number,
+    req: SubscribeEventsRequest,
     onEvent: (event: EventEnvelope) => void,
     onError?: (err: unknown) => void,
-    onCaughtUp?: () => void,
+    onCaughtUp?: (result: SubscribeEventsResult) => void,
   ): () => void;
 }
 
@@ -231,7 +236,7 @@ export async function runTui(options: RunTuiOptions): Promise<number> {
 
       const attachWatch = (runId: string) => {
         detachWatch(null);
-        const afterSeq = lastSeqForRun(state, runId);
+        const seq = lastSeqForRun(state, runId);
         state = startWatchState(state, runId);
         render();
         const formatter = createTuiWatchFormatter();
@@ -241,8 +246,7 @@ export async function runTui(options: RunTuiOptions): Promise<number> {
           state.watch.attached &&
           state.watch.runId === runId;
         localUnsubscribe = client.subscribeEvents(
-          runId,
-          afterSeq,
+          { runId, cursor: seq === 0 ? { kind: "beginning" } : { kind: "after-seq", seq } },
           (event) => {
             if (!isCurrentSubscription()) return;
             const formatted = formatter.push(event);

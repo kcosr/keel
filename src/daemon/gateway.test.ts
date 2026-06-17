@@ -539,13 +539,25 @@ describe("KeelOperationGateway", () => {
       putCapability(harness.store, eventToken, { kind: "run", runId }, ["run:events"]);
       harness.store.appendEvent(runId, "run.started", { token: "kc_run_backfill_secret" }, 1);
 
-      const sub = await ok<{ subId: string }>(
-        harness,
-        session,
-        "subscribeEvents",
-        { runId, afterSeq: 0 },
-        eventToken,
-      );
+      const sub = await ok<{
+        subId: string;
+        cursor: { kind: "after-seq"; runId: string; seq: number };
+      }>(harness, session, "subscribeEvents", { runId, cursor: { kind: "beginning" } }, eventToken);
+      expect(sub.cursor).toEqual({ kind: "after-seq", runId, seq: 1 });
+      await expect(
+        fail(harness, session, "subscribeEvents", { runId, afterSeq: 0 }, eventToken),
+      ).resolves.toContain("numeric afterSeq is not supported");
+      const badCursorSession = new FakeGatewaySession("bad-cursor");
+      await expect(
+        fail(
+          harness,
+          badCursorSession,
+          "subscribeEvents",
+          { runId, cursor: { kind: "after-seq", seq: -1 } },
+          eventToken,
+        ),
+      ).resolves.toContain("cursor seq must be a non-negative integer");
+      expect(badCursorSession.cleanups.size).toBe(0);
       expect(session.events).toEqual([
         {
           subId: sub.subId,
@@ -575,10 +587,45 @@ describe("KeelOperationGateway", () => {
         payload: { token: "«redacted-capability»" },
       });
 
+      const controlSession = new FakeGatewaySession("control");
+      putCapability(harness.store, "kc_run_gateway_events_control", { kind: "run", runId }, [
+        "run:events",
+      ]);
+      const controlSub = await ok<{ subId: string }>(
+        harness,
+        controlSession,
+        "subscribeEvents",
+        { runId, cursor: { kind: "after-seq", seq: 2 }, includeControlFrames: true },
+        "kc_run_gateway_events_control",
+      );
+      expect(controlSession.events).toContainEqual({
+        subId: controlSub.subId,
+        kind: "control",
+        type: "caught-up",
+        cursor: { kind: "after-seq", runId, seq: 2 },
+      });
+      putCapability(
+        harness.store,
+        "kc_run_gateway_events_control",
+        { kind: "run", runId },
+        ["run:events"],
+        { revokedAtMs: Date.now() },
+      );
+      harness.store.appendEvent(runId, "run.control-revoke", { token: "kc_run_control_secret" }, 4);
+      expect(controlSession.events.at(-1)).toMatchObject({
+        subId: controlSub.subId,
+        kind: "control",
+        type: "authorization.failed",
+        cursor: { kind: "after-seq", runId, seq: 2 },
+      });
+      expect(JSON.stringify(controlSession.events.at(-1))).not.toContain("kc_run_control_secret");
+      expect(controlSession.cleanups.size).toBe(0);
+      controlSession.close();
+
       putCapability(harness.store, eventToken, { kind: "run", runId }, ["run:events"], {
         revokedAtMs: Date.now(),
       });
-      harness.store.appendEvent(runId, "run.after-revoke", {}, 4);
+      harness.store.appendEvent(runId, "run.after-revoke", {}, 5);
       expect(session.events.at(-1)).toMatchObject({
         subId: sub.subId,
         kind: "ephemeral",
@@ -586,7 +633,7 @@ describe("KeelOperationGateway", () => {
       });
       expect(session.cleanups.size).toBe(0);
       const eventCountAfterFailure = session.events.length;
-      harness.store.appendEvent(runId, "run.ignored", {}, 5);
+      harness.store.appendEvent(runId, "run.ignored", {}, 6);
       expect(session.events).toHaveLength(eventCountAfterFailure);
 
       const idleRunId = "run_gateway_events_idle";
@@ -598,7 +645,7 @@ describe("KeelOperationGateway", () => {
         harness,
         idleSession,
         "subscribeEvents",
-        { runId: idleRunId, afterSeq: 0 },
+        { runId: idleRunId, cursor: { kind: "beginning" } },
         idleToken,
       );
       putCapability(harness.store, idleToken, { kind: "run", runId: idleRunId }, ["run:events"], {
@@ -621,12 +668,12 @@ describe("KeelOperationGateway", () => {
         harness,
         cleanupSession,
         "subscribeEvents",
-        { runId, afterSeq: 5 },
+        { runId, cursor: { kind: "after-seq", seq: 6 } },
         "kc_run_gateway_events_2",
       );
       expect(cleanupSession.cleanups.size).toBe(1);
       cleanupSession.close();
-      harness.store.appendEvent(runId, "run.after-close", {}, 6);
+      harness.store.appendEvent(runId, "run.after-close", {}, 7);
       expect(cleanupSession.events.some((event) => event.subId === cleanupSub.subId)).toBe(false);
       expect(cleanupSession.cleanups.size).toBe(0);
     } finally {

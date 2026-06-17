@@ -855,9 +855,10 @@ operation does not continue with a missing durable audit row. When an agent turn
 successfully completes, the daemon persists at most one non-empty `agent.message`
 row containing the final assistant answer text used for schema extraction; it no
 longer reconstructs interleaved prose from live text deltas. `subscribeEvents`
-registers, backfills durable rows with `seq > afterSeq`, then tails pushed
-durable rows and live ephemeral frames, so late subscribers see durable tool and
-final-message rows but not earlier live deltas. Duplicate-looking tool rows after
+accepts a request-object cursor, resolves it to a private durable sequence floor,
+backfills matching durable rows, then tails pushed durable rows and live
+ephemeral frames, so late subscribers see durable tool and final-message rows but
+not earlier live deltas. Duplicate-looking tool rows after
 retry or recovery remain append-only audit history; replay correctness comes from
 the completed journal step result, not transcript rows.
 

@@ -321,17 +321,35 @@ describe("keel CLI", () => {
       runId: "run_123",
       output: "ndjson",
       tools: false,
+      cursor: { kind: "beginning" },
     });
     expect(parseWatchArgs(["run_123", "--output", "text"])).toEqual({
       runId: "run_123",
       output: "text",
       tools: false,
+      cursor: { kind: "beginning" },
     });
     expect(parseWatchArgs(["run_123", "--output", "text", "--tools"])).toEqual({
       runId: "run_123",
       output: "text",
       tools: true,
+      cursor: { kind: "beginning" },
     });
+    expect(parseWatchArgs(["run_123", "--from", "now"]).cursor).toEqual({ kind: "now" });
+    expect(parseWatchArgs(["run_123", "--after-seq", "12"]).cursor).toEqual({
+      kind: "after-seq",
+      seq: 12,
+    });
+    expect(parseWatchArgs(["run_123", "--tail", "0"]).cursor).toEqual({
+      kind: "tail",
+      count: 0,
+    });
+    expect(() => parseWatchArgs(["run_123", "--from", "tail"])).toThrow(
+      "--from must be beginning or now",
+    );
+    expect(() => parseWatchArgs(["run_123", "--from", "now", "--tail", "5"])).toThrow(
+      "--tail cannot be combined with --from",
+    );
     expect(() => parseWatchArgs(["run_123", "--tools"])).toThrow("attached watch --output text");
     expect(parseOutputFormat("json")).toBe("json");
     expect(() => parseOutputFormat("events")).toThrow("expected json, text, or ndjson");
@@ -455,7 +473,11 @@ describe("keel CLI", () => {
   });
 
   test("watchRun flushes partial text streams before terminal events", async () => {
-    const client = fakeWatchClient(({ onEvent, onCaughtUp }) => {
+    const client = fakeWatchClient(({ req, onEvent, onCaughtUp }) => {
+      expect(req).toEqual({
+        runId: "run_terminal_flush",
+        cursor: { kind: "beginning" },
+      });
       onEvent({
         kind: "ephemeral",
         type: "agent.event",
@@ -463,7 +485,11 @@ describe("keel CLI", () => {
         atMs: 1,
       });
       onEvent({ kind: "durable", seq: 2, type: "run.finished", payload: {}, atMs: 2 });
-      onCaughtUp?.();
+      onCaughtUp?.({
+        subId: "sub_1",
+        cursor: { kind: "after-seq", runId: "run_terminal_flush", seq: 2 },
+        closedStatus: null,
+      });
     });
 
     const captured = await captureProcessWrites(() =>
@@ -501,6 +527,27 @@ describe("keel CLI", () => {
       { stream: "stdout", text: "\n" },
       { stream: "stderr", text: "subscribe failed\n" },
     ]);
+  });
+
+  test("watchRun exits from closed subscription status after catch-up", async () => {
+    const client = fakeWatchClient(({ req, onCaughtUp }) => {
+      expect(req).toEqual({
+        runId: "run_closed_now",
+        cursor: { kind: "now" },
+      });
+      onCaughtUp?.({
+        subId: "sub_1",
+        cursor: { kind: "after-seq", runId: "run_closed_now", seq: 9 },
+        closedStatus: "finished",
+      });
+    });
+
+    const captured = await captureProcessWrites(() =>
+      watchRun(client, "run_closed_now", { output: "ndjson", cursor: { kind: "now" } }),
+    );
+
+    expect(captured.result).toBe("finished");
+    expect(captured.writes).toEqual([]);
   });
 
   test("launch input defaults to an object and rejects empty --input values", () => {
@@ -2056,21 +2103,21 @@ describe("keel CLI", () => {
 });
 
 type FakeWatchSubscription = {
-  onEvent: Parameters<DaemonClient["subscribeEvents"]>[2];
-  onError: Parameters<DaemonClient["subscribeEvents"]>[3];
-  onCaughtUp: Parameters<DaemonClient["subscribeEvents"]>[4];
+  req: Parameters<DaemonClient["subscribeEvents"]>[0];
+  onEvent: Parameters<DaemonClient["subscribeEvents"]>[1];
+  onError: Parameters<DaemonClient["subscribeEvents"]>[2];
+  onCaughtUp: Parameters<DaemonClient["subscribeEvents"]>[3];
 };
 
 function fakeWatchClient(run: (subscription: FakeWatchSubscription) => void): DaemonClient {
   return {
     subscribeEvents(
-      _runId: string,
-      _afterSeq: number,
+      req: FakeWatchSubscription["req"],
       onEvent: FakeWatchSubscription["onEvent"],
       onError?: FakeWatchSubscription["onError"],
       onCaughtUp?: FakeWatchSubscription["onCaughtUp"],
     ) {
-      queueMicrotask(() => run({ onEvent, onError, onCaughtUp }));
+      queueMicrotask(() => run({ req, onEvent, onError, onCaughtUp }));
       return () => {};
     },
   } as DaemonClient;

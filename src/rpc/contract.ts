@@ -260,6 +260,44 @@ export interface EphemeralEventEnvelope {
 
 export type EventEnvelope = DurableEventEnvelope | EphemeralEventEnvelope;
 
+export const MAX_EVENT_TAIL_COUNT = 10_000;
+
+export type EventCursorInput =
+  | { kind: "beginning" }
+  | { kind: "after-seq"; seq: number }
+  | { kind: "tail"; count: number }
+  | { kind: "now" };
+
+export interface EventCursor {
+  kind: "after-seq";
+  runId: string;
+  seq: number;
+}
+
+export type StreamControlFrame =
+  | { kind: "control"; type: "caught-up"; cursor: EventCursor }
+  | { kind: "control"; type: "closed"; cursor: EventCursor; status: string }
+  | {
+      kind: "control";
+      type: "authorization.failed";
+      cursor: EventCursor;
+      payload: { message: string };
+    };
+
+export type EventStreamFrame = EventEnvelope | StreamControlFrame;
+
+export interface SubscribeEventsRequest {
+  runId: string;
+  cursor?: EventCursorInput;
+  includeControlFrames?: boolean;
+}
+
+export interface SubscribeEventsResult {
+  subId: string;
+  cursor: EventCursor;
+  closedStatus: string | null;
+}
+
 export interface PutAgentProfileRequest {
   name: string;
   config: PersistentAgentProfileConfig;
@@ -429,10 +467,10 @@ export interface KeelApi {
     workflowDefinitionsRemoved: number;
     definitionCacheEntriesRemoved: number;
   }>;
-  /** Subscribe to a run's events after `afterSeq`; returns an unsubscribe fn. */
+  /** Subscribe to a run's events; returns an unsubscribe fn. */
   subscribeEvents(
-    runId: string,
-    afterSeq: number,
+    req: SubscribeEventsRequest,
     onEvent: (event: EventEnvelope) => void,
+    onControl?: (frame: StreamControlFrame) => void,
   ): () => void;
 }

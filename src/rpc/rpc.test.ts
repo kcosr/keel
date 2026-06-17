@@ -30,6 +30,7 @@ import {
   createRetainedWorktree,
   retainedWorkspacePath,
 } from "../workspace/worktree.ts";
+import { normalizeEventCursorInput } from "./event-cursor.ts";
 import { EventHub } from "./event-hub.ts";
 import { InProcessKeel } from "./in-process.ts";
 
@@ -823,7 +824,7 @@ describe("event subscription", () => {
         input: { n: 2 },
         name: "chain",
       });
-      const unsub = api.subscribeEvents(runId, 0, (e) =>
+      const unsub = api.subscribeEvents({ runId: runId, cursor: { kind: "beginning" } }, (e) =>
         seen.push({ type: e.type, payload: e.payload }),
       );
       await api.waitForRun(runId);
@@ -855,7 +856,7 @@ describe("event subscription", () => {
       const frames: { kind: string; type: string; payload: unknown }[] = [];
 
       const { runId } = await api.launchRun({ ...onceUrl, input: null, name: "once" });
-      const unsub = api.subscribeEvents(runId, 0, (e) =>
+      const unsub = api.subscribeEvents({ runId: runId, cursor: { kind: "beginning" } }, (e) =>
         frames.push({ kind: e.kind, type: e.type, payload: e.payload }),
       );
       provider.release();
@@ -924,7 +925,7 @@ describe("event subscription", () => {
       const frames: { kind: string; type: string; payload: unknown }[] = [];
 
       const { runId } = await api.launchRun({ ...onceUrl, input: null, name: "once" });
-      const unsub = api.subscribeEvents(runId, 0, (e) =>
+      const unsub = api.subscribeEvents({ runId: runId, cursor: { kind: "beginning" } }, (e) =>
         frames.push({ kind: e.kind, type: e.type, payload: e.payload }),
       );
       const outcome = await api.waitForRun(runId);
@@ -967,7 +968,7 @@ describe("event subscription", () => {
       const frames: { kind: string; type: string; payload: unknown }[] = [];
 
       const { runId } = await api.launchRun({ ...onceUrl, input: null, name: "once" });
-      const unsub = api.subscribeEvents(runId, 0, (e) =>
+      const unsub = api.subscribeEvents({ runId: runId, cursor: { kind: "beginning" } }, (e) =>
         frames.push({ kind: e.kind, type: e.type, payload: e.payload }),
       );
       await provider.waitForFirstEvent();
@@ -994,7 +995,7 @@ describe("event subscription", () => {
       });
 
       const backfilled: { kind: string; type: string; payload: unknown }[] = [];
-      const lateUnsub = api.subscribeEvents(runId, 0, (e) =>
+      const lateUnsub = api.subscribeEvents({ runId: runId, cursor: { kind: "beginning" } }, (e) =>
         backfilled.push({ kind: e.kind, type: e.type, payload: e.payload }),
       );
       lateUnsub();
@@ -1024,15 +1025,116 @@ describe("event subscription", () => {
     store.appendEvent("r", "two", {}, 2);
 
     const seen: string[] = [];
-    const unsub = hub.subscribe(store, "r", 0, (event) => {
+    const sub = hub.subscribe(store, { runId: "r", cursor: { kind: "beginning" } }, (event) => {
       seen.push(event.type);
       if (event.kind === "durable" && event.type === "one") {
         store.appendEvent("r", "three", {}, 3);
       }
     });
-    unsub();
+    sub.unsubscribe();
 
     expect(seen).toEqual(["one", "two", "three"]);
+  });
+
+  test("event cursor validation rejects malformed inputs", () => {
+    expect(() => normalizeEventCursorInput(0)).toThrow("event cursor must be an object");
+    expect(() => normalizeEventCursorInput({ kind: "after-seq", seq: -1 })).toThrow(
+      "cursor seq must be a non-negative integer",
+    );
+    expect(() => normalizeEventCursorInput({ kind: "after-seq", seq: 1.5 })).toThrow(
+      "cursor seq must be a non-negative integer",
+    );
+    expect(() =>
+      normalizeEventCursorInput({ kind: "tail", count: Number.POSITIVE_INFINITY }),
+    ).toThrow("tail count must be a non-negative integer");
+    expect(() => normalizeEventCursorInput({ kind: "sideways" })).toThrow(
+      "unknown event cursor kind sideways",
+    );
+  });
+
+  test("event cursors select beginning, after-seq, tail, and now backfill windows", () => {
+    const store = JournalStore.memory();
+    const hub = new EventHub();
+    store.onEventAppended((event) => hub.publishDurable(event));
+    store.appendEvent("r", "one", {}, 1);
+    store.appendEvent("r", "two", {}, 2);
+    store.appendEvent("r", "three", {}, 3);
+
+    const collect = (cursor: Parameters<EventHub["subscribe"]>[1]["cursor"]) => {
+      const seen: string[] = [];
+      const sub = hub.subscribe(store, { runId: "r", cursor }, (event) => seen.push(event.type));
+      sub.unsubscribe();
+      return { seen, cursor: sub.cursor };
+    };
+
+    expect(collect({ kind: "beginning" })).toEqual({
+      seen: ["one", "two", "three"],
+      cursor: { kind: "after-seq", runId: "r", seq: 3 },
+    });
+    expect(collect({ kind: "after-seq", seq: 1 }).seen).toEqual(["two", "three"]);
+    expect(collect({ kind: "tail", count: 2 }).seen).toEqual(["two", "three"]);
+    expect(collect({ kind: "tail", count: 0 })).toEqual({
+      seen: [],
+      cursor: { kind: "after-seq", runId: "r", seq: 3 },
+    });
+    expect(collect({ kind: "now" })).toEqual({
+      seen: [],
+      cursor: { kind: "after-seq", runId: "r", seq: 3 },
+    });
+  });
+
+  test("caught-up and closed control frames carry resolved durable cursors", () => {
+    const store = JournalStore.memory();
+    const hub = new EventHub();
+    seedReportRun(store, "closed");
+    store.appendEvent("closed", "run.started", {}, 1);
+    store.appendEvent("closed", "run.finished", {}, 2);
+
+    const controls: string[] = [];
+    const sub = hub.subscribe(
+      store,
+      { runId: "closed", cursor: { kind: "now" } },
+      () => {
+        throw new Error("now cursor should skip existing durable events");
+      },
+      (frame) => {
+        if (frame.type === "caught-up") controls.push(`caught-up:${frame.cursor.seq}`);
+        if (frame.type === "closed") controls.push(`closed:${frame.cursor.seq}:${frame.status}`);
+      },
+    );
+    sub.unsubscribe();
+
+    expect(controls).toEqual(["caught-up:2", "closed:2:finished"]);
+  });
+
+  test("closed status is recomputed after backfill restart events", () => {
+    const store = JournalStore.memory();
+    const hub = new EventHub();
+    store.onEventAppended((event) => hub.publishDurable(event));
+    seedReportRun(store, "restart");
+    store.updateRun("restart", { status: "waiting-human", finishedAtMs: null });
+    store.appendEvent("restart", "run.parked", { kind: "human" }, 1);
+
+    const events: string[] = [];
+    const controls: string[] = [];
+    const sub = hub.subscribe(
+      store,
+      { runId: "restart", cursor: { kind: "beginning" } },
+      (event) => {
+        events.push(event.type);
+        if (event.type === "run.parked") {
+          store.updateRun("restart", { status: "running", finishedAtMs: null });
+          store.appendEvent("restart", "run.resumed", {}, 2);
+        }
+      },
+      (frame) => controls.push(frame.type),
+    );
+    sub.unsubscribe();
+
+    expect(events).toEqual(["run.parked", "run.resumed"]);
+    expect(controls).toEqual(["caught-up"]);
+    expect(sub.closedStatus).toBeNull();
+    expect(sub.cursor).toEqual({ kind: "after-seq", runId: "restart", seq: 2 });
   });
 
   test(
@@ -1050,7 +1152,7 @@ describe("event subscription", () => {
       const frames: { kind: string; type: string; payload: unknown }[] = [];
 
       const { runId } = await api.launchRun({ ...onceUrl, input: null, name: "once" });
-      const unsub = api.subscribeEvents(runId, 0, (e) =>
+      const unsub = api.subscribeEvents({ runId: runId, cursor: { kind: "beginning" } }, (e) =>
         frames.push({ kind: e.kind, type: e.type, payload: e.payload }),
       );
       provider.release();
@@ -1205,7 +1307,7 @@ describe("event subscription", () => {
       await provider.waitForFirstEvent();
 
       const frames: { kind: string; type: string; payload: unknown }[] = [];
-      const unsub = api.subscribeEvents(runId, 0, (e) =>
+      const unsub = api.subscribeEvents({ runId: runId, cursor: { kind: "beginning" } }, (e) =>
         frames.push({ kind: e.kind, type: e.type, payload: e.payload }),
       );
       provider.release();

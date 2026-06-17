@@ -160,7 +160,7 @@ bun src/cli/keel.ts <command> [args]
 | `link [dir]` | Symlink this repo's SDK into `<dir>/node_modules`; defaults to the current directory. |
 | `launch [workflow.ts] [--name n] [--input json] [--target dir] [--output json\|text\|ndjson] [--tools] [--detach] [--emit-capability]` | Start a run from client-captured workflow source. Attached launch streams NDJSON by default; detached launch prints JSON. |
 | `run [workflow.ts] [--name n] [--input json] [--target dir] [--output json\|text\|ndjson] [--tools]` | Launch a run and print a JSON envelope, text transcript, or NDJSON events. |
-| `watch <runId> [--output ndjson\|text] [--tools]` | Stream run events until terminal or parked. |
+| `watch <runId> [--output ndjson\|text] [--from beginning\|now \| --after-seq n \| --tail n] [--tools]` | Stream run events until terminal or parked. |
 | `get <runId>` | Print the canonical run projection as JSON. |
 | `output <runId> [--output json\|text]` | Print the terminal workflow output. |
 | `report <runId> [--output json\|text]` | Print a journaled per-node result digest. |
@@ -234,6 +234,9 @@ connected watchers. Finalized tool calls/results are durable immediately as
 
 ```bash
 keel watch run_...
+keel watch run_... --from now
+keel watch run_... --after-seq 123
+keel watch run_... --tail 100
 ```
 
 ```json
@@ -274,6 +277,19 @@ not an interleaving of earlier text deltas. New transcript rows include
 `attempt`; tool rows include `toolCallId` when the provider supplies a stable id.
 Retries or recovery can produce duplicate-looking durable tool rows, which are
 kept as append-only audit history.
+
+Watch cursor options select the durable backfill window:
+
+- `--from beginning` is the default and backfills all durable events.
+- `--from now` skips existing durable events and tails live frames.
+- `--after-seq n` starts after durable sequence `n`.
+- `--tail n` backfills at most the last `n` durable events; `--tail 0` skips
+  durable backfill.
+
+`--from`, `--after-seq`, and `--tail` are mutually exclusive. If a cursor skips an
+already-terminal, parked, or interrupted event, watch still exits from the
+daemon's closed stream status after catch-up. See `docs/events.md` for the
+shared cursor contract.
 
 ### Run, Output, And Report Formats
 
@@ -362,9 +378,10 @@ browser (or quits direct mode), and `q` quits. Approval decisions remain
 admin-gated in v1; pressing `a` without known admin credentials reports
 `approval requires admin credentials` instead of attempting a run-scoped action.
 
-Watch uses `subscribeEvents(runId, afterSeq)`: the first attach backfills durable
-events from sequence `0`, reattach resumes after the last durable sequence seen
-for that run, and local detach/exit only removes the TUI subscriber. Live
+Watch uses the shared `subscribeEvents({ runId, cursor })` request shape: the
+first attach uses `{ kind: "beginning" }`, reattach resumes after the last
+durable sequence seen for that run, and local detach/exit only removes the TUI
+subscriber. Live
 `agent.event` frames are displayed while connected but are not replayable. If the
 daemon emits `authorization.failed` or the subscription errors, the TUI detaches
 locally and shows the error in the status line.
@@ -662,6 +679,12 @@ return {
 contract: they return after durable delivery and wake-start handling, not after
 the resumed workflow finishes. Call `keel.wait(runId)` afterwards when the script
 needs the final status or output.
+
+`keel.events({ runId, cursor })` returns an async iterable of raw event
+envelopes. The cursor shape matches `keel watch`: `{ kind: "beginning" }`,
+`{ kind: "now" }`, `{ kind: "after-seq", seq }`, or `{ kind: "tail", count }`.
+When a cursor skips an already-closed run status, iteration completes after
+catch-up instead of waiting for a skipped terminal event.
 
 `execute` can also manage run workspaces without shelling out to the CLI:
 `keel.listRunWorkspaces`, `keel.getRunWorkspace`, `keel.getRunWorkspaceDiff`,

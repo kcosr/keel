@@ -1,4 +1,5 @@
 import { Check, X } from "lucide-react";
+import { useEffect, useState } from "react";
 import type { KeelWebClient } from "../api/client";
 import type { ApprovalView } from "../api/types";
 import {
@@ -19,7 +20,12 @@ export function ApprovalsScreen({
 }: { client: KeelWebClient; refreshKey: number }) {
   const state = useAsync(() => client.listApprovals(), [client, refreshKey]);
   const approvals = state.data?.approvals ?? [];
-  const selected = approvals[0] ?? null;
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  useEffect(() => {
+    if (selectedKey && approvals.some((approval) => approvalKey(approval) === selectedKey)) return;
+    setSelectedKey(approvals[0] ? approvalKey(approvals[0]) : null);
+  }, [approvals, selectedKey]);
+  const selected = approvals.find((approval) => approvalKey(approval) === selectedKey) ?? null;
 
   return (
     <div className="content-split">
@@ -29,7 +35,9 @@ export function ApprovalsScreen({
         {!state.loading && !state.error ? (
           <DenseTable
             rows={approvals}
-            rowKey={(approval) => `${approval.runId}:${approval.gateId ?? "gate"}`}
+            rowKey={approvalKey}
+            selectedKey={selectedKey}
+            onRowClick={(approval) => setSelectedKey(approvalKey(approval))}
             empty={<EmptyState title="No approvals waiting" />}
             columns={approvalColumns()}
           />
@@ -53,12 +61,26 @@ export function ApprovalsScreen({
                 <dd className="mono">{selected.cli ?? "-"}</dd>
               </div>
             </dl>
+            <p className="muted">
+              Approval and denial actions are not available in the web UI yet; use the CLI command
+              shown above.
+            </p>
             <div className="btn-row">
-              <Button icon={Check} variant="primary" disabled title="Requires admin authority">
-                Approve
+              <Button
+                icon={Check}
+                variant="primary"
+                disabled
+                title="Web approval action deferred; use the CLI command shown above"
+              >
+                Approve unavailable
               </Button>
-              <Button icon={X} variant="danger" disabled title="Requires admin authority">
-                Deny
+              <Button
+                icon={X}
+                variant="danger"
+                disabled
+                title="Web denial action deferred; use keel deny"
+              >
+                Deny unavailable
               </Button>
             </div>
           </>
@@ -68,6 +90,10 @@ export function ApprovalsScreen({
       </Inspector>
     </div>
   );
+}
+
+function approvalKey(approval: ApprovalView): string {
+  return `${approval.runId}:${approval.gateId ?? "gate"}`;
 }
 
 function approvalColumns(): Array<Column<ApprovalView>> {

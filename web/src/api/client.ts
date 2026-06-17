@@ -4,7 +4,6 @@ import type {
   ApprovalsResponse,
   EventCursorInput,
   HealthResponse,
-  RpcResponse,
   RunDetailResponse,
   RunsResponse,
   SavedWorkflowSummary,
@@ -92,14 +91,11 @@ export class KeelWebClient {
   }
 
   async rpc<T>(method: string, params: unknown = {}): Promise<T> {
-    const response = await this.requestJson<RpcResponse<T>>("/rpc", {
+    const response = await this.requestJson<{ result: T }>("/rpc", {
       method: "POST",
       body: JSON.stringify({ method, params }),
     });
-    if (response.error) {
-      throw new ApiError(response.error.message, 500, response.error);
-    }
-    return response.result as T;
+    return response.result;
   }
 
   watchRunEvents(runId: string, opts: WatchRunEventsOptions): () => void {
@@ -113,7 +109,11 @@ export class KeelWebClient {
       .then(async (response) => {
         if (!response.ok) throw await toApiError(response);
         if (!response.body) throw new ApiError("event stream did not include a body", 500, null);
-        await parseSseStream(response.body, { onMessage: opts.onFrame });
+        await parseSseStream(response.body, {
+          onMessage: (frame) => {
+            if (frame.event !== "heartbeat") opts.onFrame(frame);
+          },
+        });
       })
       .catch((err) => {
         if (controller.signal.aborted) return;

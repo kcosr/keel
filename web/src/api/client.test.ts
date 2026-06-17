@@ -55,6 +55,19 @@ describe("KeelWebClient", () => {
     });
   });
 
+  test("preserves HTTP status for RPC errors", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () =>
+      jsonResponse({ error: { message: "admin required" } }, { status: 403 }),
+    );
+    const client = new KeelWebClient({ baseUrl: "http://keel.test", fetchImpl });
+
+    await expect(client.rpc("listSchedules")).rejects.toMatchObject({
+      name: "ApiError",
+      status: 403,
+      message: "admin required",
+    });
+  });
+
   test("watches run events with cursor query and authorization header", async () => {
     const encoder = new TextEncoder();
     const fetchImpl = vi.fn<typeof fetch>(
@@ -87,6 +100,37 @@ describe("KeelWebClient", () => {
     const [input, init] = fetchImpl.mock.calls[0] ?? [];
     expect(String(input)).toBe("http://keel.test/runs/run_1/events?afterSeq=7");
     expect(new Headers(init?.headers).get("authorization")).toBe("Bearer kc_run_token");
+  });
+
+  test("suppresses heartbeat keepalives from watched event callbacks", async () => {
+    const encoder = new TextEncoder();
+    const fetchImpl = vi.fn<typeof fetch>(
+      async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(
+                encoder.encode(': heartbeat 1\n\nevent: event\ndata: {"seq":1}\n\n'),
+              );
+              controller.close();
+            },
+          }),
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        ),
+    );
+    const frames: unknown[] = [];
+    const client = new KeelWebClient({ baseUrl: "http://keel.test", fetchImpl });
+
+    const stop = client.watchRunEvents("run_1", {
+      onFrame: (frame) => frames.push(frame),
+    });
+
+    await vi.waitFor(() => expect(frames).toHaveLength(1));
+    stop();
+
+    expect(frames).toEqual([
+      { event: "event", data: { seq: 1 }, raw: 'event: event\ndata: {"seq":1}' },
+    ]);
   });
 });
 

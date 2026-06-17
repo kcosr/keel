@@ -631,6 +631,13 @@ h3 {
   color: var(--failed);
 }
 
+.state-error-message {
+  align-items: baseline;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .state-loading {
   color: var(--text-2);
 }

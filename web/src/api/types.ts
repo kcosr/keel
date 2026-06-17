@@ -28,12 +28,6 @@ export interface GatewayErrorEnvelope {
   resource?: unknown;
 }
 
-export interface RpcResponse<T> {
-  id?: unknown;
-  result?: T;
-  error?: GatewayErrorEnvelope;
-}
-
 export interface HealthResponse {
   ok: boolean;
   web: { ok: boolean; apiOnly: boolean };

@@ -162,7 +162,7 @@ export function ErrorState({ error, onRetry }: { error: Error; onRetry?: () => v
   return (
     <div className="state state-error" role="alert">
       <AlertCircle size={17} />
-      <div>
+      <div className="state-error-message">
         <strong>{error.message}</strong>
         {onRetry ? (
           <button className="inline-link" type="button" onClick={onRetry}>

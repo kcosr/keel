@@ -137,6 +137,8 @@ function insertWorkspaceFixture(
     runStatus: RunStatus;
     workspaceStatus: AgentWorkspaceStatus;
     activeTurn?: boolean;
+    heartbeatAtMs?: number | null;
+    runtimeOwnerId?: string | null;
     updatedAtMs?: number;
   },
 ): void {
@@ -152,8 +154,8 @@ function insertWorkspaceFixture(
     inputRef: "null",
     outputRef: null,
     errorJson: null,
-    heartbeatAtMs: null,
-    runtimeOwnerId: null,
+    heartbeatAtMs: opts.heartbeatAtMs ?? null,
+    runtimeOwnerId: opts.runtimeOwnerId ?? null,
     createdAtMs: 1,
     finishedAtMs: ["finished", "failed", "cancelled", "continued"].includes(opts.runStatus)
       ? 2
@@ -826,6 +828,7 @@ describe("projection is golden-locked", () => {
             effectType: "pure",
             status: "completed",
             attempt: 1,
+            startedAtMs: 1,
             dependsOn: [],
             artifactBacked: false,
           },
@@ -834,6 +837,7 @@ describe("projection is golden-locked", () => {
             effectType: "pure",
             status: "completed",
             attempt: 1,
+            startedAtMs: 1,
             dependsOn: [],
             artifactBacked: false,
           },
@@ -842,6 +846,7 @@ describe("projection is golden-locked", () => {
             effectType: "pure",
             status: "completed",
             attempt: 1,
+            startedAtMs: 1,
             dependsOn: [],
             artifactBacked: false,
           },
@@ -2048,6 +2053,33 @@ describe("workspace lifecycle operations", () => {
       const pendingGc = api.gcWorkspaces({ olderThanMs: 0, includePending: true });
       expect(pendingGc.removed.map((w) => w.runId)).toEqual(["r-pending"]);
       expect(store.getAgentWorkspaceByKey("r-pending", "agent_session", "agent")).toBeNull();
+
+      const liveCreatingPath = retainedWorkspacePath(workspaceStore, "r-creating-live", "agent");
+      createRetainedWorktree(repo, liveCreatingPath, baseCommit);
+      insertWorkspaceFixture(store, {
+        runId: "r-creating-live",
+        agentKey: "agent",
+        repo,
+        baseCommit,
+        workspacePath: liveCreatingPath,
+        runStatus: "running",
+        workspaceStatus: "creating",
+        runtimeOwnerId: "daemon_a",
+        heartbeatAtMs: 10_000,
+      });
+      const longWindowKernel = new RealmKernel(store, {
+        idgen: () => "run_unused",
+        clock: () => 50_000,
+        rng: () => 0.5,
+      });
+      const longWindowApi = new TestInProcessKeel(longWindowKernel, store, new EventHub(), {
+        clock: () => 50_000,
+        ownerStaleWindowMs: 60_000,
+      });
+      expect(longWindowApi.gcWorkspaces({ olderThanMs: 0 }).removed).toEqual([]);
+      expect(
+        store.getAgentWorkspaceByKey("r-creating-live", "agent_session", "agent")?.status,
+      ).toBe("creating");
     } finally {
       store.close();
       rmSync(dir, { recursive: true, force: true });

@@ -35,6 +35,7 @@ const projection: RunProjection = {
       effectType: "pure",
       status: "completed",
       attempt: 1,
+      startedAtMs: 1,
       dependsOn: [],
       artifactBacked: false,
     },
@@ -122,6 +123,19 @@ describe("tui views", () => {
     ]);
   });
 
+  test("does not render diagnostic running as a blockage", () => {
+    let state = createTuiState({ runId: "run_1", nowMs: Date.UTC(2026, 5, 14, 1, 0, 2, 0) });
+    state = setDetailData(state, {
+      projection,
+      report: null,
+      blockage: { reason: "running", blockedOn: null, context: "executing normally" },
+    });
+
+    const lines = renderTuiLines(state, { width: 100, height: 10 });
+
+    expect(lines.some((line) => line.startsWith("blockage:"))).toBe(false);
+  });
+
   test("prefers run detail over an empty detached watch footer in small terminals", () => {
     let state = createTuiState({ runId: "run_1", nowMs: Date.UTC(2026, 5, 14, 1, 0, 2, 0) });
     state = setDetailData(state, { projection, report: null, blockage: null });
@@ -143,6 +157,7 @@ describe("tui views", () => {
           effectType: "effectful",
           status: "pending",
           attempt: index + 1,
+          startedAtMs: index + 1,
           dependsOn: [],
           artifactBacked: false,
         })),

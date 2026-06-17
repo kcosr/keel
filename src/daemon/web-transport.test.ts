@@ -344,6 +344,46 @@ describe("web transport", () => {
     }
   });
 
+  test("projection routes hide diagnostic running blockage", async () => {
+    const { daemon, socketPath } = startDaemon({ providerDelayMs: 1500 });
+    await daemon.start();
+    const web = startWebServer({ socketPath, port: 0, apiOnly: true });
+    const client = await DaemonClient.connect(socketPath);
+    try {
+      const { runId, capability } = await client.launchRun({
+        ...onceUrl,
+        input: null,
+        target: dir,
+        name: "running-projection",
+      });
+      await client.authenticate(capability as string);
+
+      const runs = await jsonFetch(`${web.url}/api/runs`, { headers: auth(ADMIN_TOKEN) });
+      expect(runs.status).toBe(200);
+      const row = runs.body.runs.find((candidate: { runId: string }) => candidate.runId === runId);
+      expect(row).toMatchObject({
+        runId,
+        run: { runId, status: "running" },
+        blockage: null,
+      });
+
+      const detail = await jsonFetch(`${web.url}/api/runs/${runId}`, {
+        headers: auth(ADMIN_TOKEN),
+      });
+      expect(detail.status).toBe(200);
+      expect(detail.body).toMatchObject({
+        run: { runId, status: "running" },
+        blockage: null,
+      });
+
+      await client.waitForRun(runId);
+    } finally {
+      client.close();
+      web.stop(true);
+      daemon.stop();
+    }
+  });
+
   test("streams snapshot, durable backfill, caught-up adapter frame, closed frame, and reconnect cursors", async () => {
     const { daemon, socketPath } = startDaemon();
     await daemon.start();

@@ -195,7 +195,7 @@ export function materializeWorkflowDefinition(
   const manifest = parseManifest(row);
   validateWorkflowSdkAbi(hash, manifest);
   const root = join(cacheRoot, hash);
-  const entryPath = join(root, manifest.modules.length === 0 ? "entry.ts" : manifest.entry);
+  const entryPath = join(root, manifest.entry);
   if (isMaterializationComplete(root, manifest)) {
     validateExternalPackagePins(manifest.externalPackages);
     return entryPath;
@@ -209,11 +209,6 @@ export function materializeWorkflowDefinition(
     const dest = join(tmp, module.path);
     mkdirSync(dirname(dest), { recursive: true });
     writeFileSync(dest, rewriteSdkImportsForMaterialization(module.code, module.path), "utf8");
-  }
-  if (manifest.modules.length === 0) {
-    const entry = join(tmp, "entry.ts");
-    mkdirSync(dirname(entry), { recursive: true });
-    writeFileSync(entry, rewriteSdkImportsForMaterialization(row.code, "entry.ts"), "utf8");
   }
 
   linkExternalResolution(
@@ -239,10 +234,9 @@ export function materializeWorkflowDefinition(
 }
 
 function isMaterializationComplete(root: string, manifest: WorkflowDefinitionManifest): boolean {
-  const entryPath = join(root, manifest.modules.length === 0 ? "entry.ts" : manifest.entry);
+  const entryPath = join(root, manifest.entry);
   if (!existsSync(entryPath)) return false;
-  const modules = manifest.modules.length > 0 ? manifest.modules : [{ path: "entry.ts", code: "" }];
-  for (const module of modules) {
+  for (const module of manifest.modules) {
     if (!existsSync(join(root, module.path))) return false;
   }
   for (const specifier of manifest.externalImports) {
@@ -517,14 +511,15 @@ function validatePersistedImportBoundary(
   if (!Array.isArray(manifest.externalPackages)) {
     throw new Error(`workflow definition ${row.hash} manifest externalPackages must be an array`);
   }
-  const modules =
-    manifest.modules.length > 0 ? manifest.modules : [{ path: "entry.ts", code: row.code }];
-  if (modules.length > MAX_WORKFLOW_BUNDLE_MODULES) {
+  if (manifest.modules.length === 0) {
+    throw new Error(`workflow definition ${row.hash} manifest modules must not be empty`);
+  }
+  if (manifest.modules.length > MAX_WORKFLOW_BUNDLE_MODULES) {
     throw new Error(
       `workflow definition ${row.hash} manifest has more than ${MAX_WORKFLOW_BUNDLE_MODULES} modules`,
     );
   }
-  const totalBytes = modules.reduce(
+  const totalBytes = manifest.modules.reduce(
     (sum, module) =>
       sum +
       (typeof module.code === "string" ? new TextEncoder().encode(module.code).byteLength : 0),
@@ -536,14 +531,14 @@ function validatePersistedImportBoundary(
     );
   }
   const modulesByPath = new Map<string, WorkflowSourceModule>();
-  const expectedOrder = [...modules].sort((a, b) => a.path.localeCompare(b.path));
+  const expectedOrder = [...manifest.modules].sort((a, b) => a.path.localeCompare(b.path));
   if (
-    canonicalJson(modules.map((module) => module.path)) !==
+    canonicalJson(manifest.modules.map((module) => module.path)) !==
     canonicalJson(expectedOrder.map((module) => module.path))
   ) {
     throw new Error(`workflow definition ${row.hash} manifest modules must be sorted by path`);
   }
-  for (const module of modules) {
+  for (const module of manifest.modules) {
     if (typeof module.path !== "string" || typeof module.code !== "string") {
       throw new Error(`workflow definition ${row.hash} manifest module entries are invalid`);
     }
@@ -561,25 +556,30 @@ function validatePersistedImportBoundary(
     }
     modulesByPath.set(module.path, module);
   }
-  const entry = manifest.modules.length > 0 ? manifest.entry : "entry.ts";
   try {
-    validateWorkflowModulePath(entry, "workflow entry path");
+    validateWorkflowModulePath(manifest.entry, "workflow entry path");
   } catch (err) {
     throw new Error(
       `workflow definition ${row.hash} manifest ${err instanceof Error ? err.message : String(err)}`,
     );
   }
-  if (!modulesByPath.has(entry)) {
-    throw new Error(`workflow definition ${row.hash} manifest entry ${entry} is missing`);
+  if (!modulesByPath.has(manifest.entry)) {
+    throw new Error(`workflow definition ${row.hash} manifest entry ${manifest.entry} is missing`);
   }
-  const reachable = validateBundleGraph(entry, modulesByPath, `workflow definition ${row.hash}`);
-  if (reachable.size !== modules.length) {
-    const extra = modules.map((module) => module.path).filter((path) => !reachable.has(path));
+  const reachable = validateBundleGraph(
+    manifest.entry,
+    modulesByPath,
+    `workflow definition ${row.hash}`,
+  );
+  if (reachable.size !== manifest.modules.length) {
+    const extra = manifest.modules
+      .map((module) => module.path)
+      .filter((path) => !reachable.has(path));
     throw new Error(
       `workflow definition ${row.hash} manifest contains unreachable modules: ${extra.join(", ")}`,
     );
   }
-  const actualImports = collectExternalImports(modules).sort();
+  const actualImports = collectExternalImports(manifest.modules).sort();
   for (const spec of actualImports) {
     try {
       assertAllowedExternalWorkflowImport(spec, "workflow definition manifest");

@@ -667,7 +667,7 @@ describe("workflow definition snapshots", () => {
     }
   });
 
-  test("source view formats persisted multi-file and legacy definitions", () => {
+  test("source view formats persisted multi-file definitions", () => {
     const store = JournalStore.memory();
     try {
       putPersistedDefinitionWithModules(store, "wf_sha256_view", "workflows/main.workflow.ts", [
@@ -704,50 +704,6 @@ describe("workflow definition snapshots", () => {
           file: "shared/helper.ts",
         }).files,
       ).toEqual([{ path: "shared/helper.ts", code: "export const value = 1;\n", entry: false }]);
-
-      store.putWorkflowDefinition({
-        hash: "wf_sha256_codeonly",
-        name: "legacy",
-        kind: "source",
-        code: "export default async () => 2;",
-        sourceMap: null,
-        manifestJson: null,
-        createdAtMs: 2,
-      });
-      const codeOnly = store.getWorkflowDefinition("wf_sha256_codeonly");
-      expect(workflowDefinitionSourceSelection(codeOnly as NonNullable<typeof codeOnly>)).toEqual({
-        entry: "entry.ts",
-        files: [{ path: "entry.ts", code: "export default async () => 2;", entry: true }],
-      });
-
-      store.putWorkflowDefinition({
-        hash: "wf_sha256_emptymodules_view",
-        name: "legacy-empty-modules",
-        kind: "source",
-        code: "export default async () => 3;",
-        sourceMap: null,
-        manifestJson: JSON.stringify({
-          format: "keel.workflow-definition.v1",
-          entry: "entry.ts",
-          modules: [],
-          externalImports: [],
-          externalPackages: [],
-          sourceRoot: "client-captured://source",
-          runtime: {
-            bunVersion: Bun.version,
-            keelDefinitionAbi: 1,
-            workflowSdkAbi: WORKFLOW_SDK_ABI_VERSION,
-          },
-        }),
-        createdAtMs: 3,
-      });
-      const emptyModules = store.getWorkflowDefinition("wf_sha256_emptymodules_view");
-      expect(
-        workflowDefinitionSourceSelection(emptyModules as NonNullable<typeof emptyModules>),
-      ).toEqual({
-        entry: "entry.ts",
-        files: [{ path: "entry.ts", code: "export default async () => 3;", entry: true }],
-      });
     } finally {
       store.close();
     }
@@ -777,6 +733,52 @@ describe("workflow definition snapshots", () => {
           >,
         ),
       ).toThrow(/cannot display source: workflow entry path/);
+
+      store.putWorkflowDefinition({
+        hash: "wf_sha256_codeonly",
+        name: "legacy",
+        kind: "source",
+        code: "export default async () => 2;",
+        sourceMap: null,
+        manifestJson: null,
+        createdAtMs: 2,
+      });
+      expect(() =>
+        workflowDefinitionSourceSelection(
+          store.getWorkflowDefinition("wf_sha256_codeonly") as NonNullable<
+            ReturnType<typeof store.getWorkflowDefinition>
+          >,
+        ),
+      ).toThrow(/cannot display source: missing manifest_json/);
+
+      store.putWorkflowDefinition({
+        hash: "wf_sha256_emptymodules_view",
+        name: "legacy-empty-modules",
+        kind: "source",
+        code: "export default async () => 3;",
+        sourceMap: null,
+        manifestJson: JSON.stringify({
+          format: "keel.workflow-definition.v1",
+          entry: "entry.ts",
+          modules: [],
+          externalImports: [],
+          externalPackages: [],
+          sourceRoot: "client-captured://source",
+          runtime: {
+            bunVersion: Bun.version,
+            keelDefinitionAbi: 1,
+            workflowSdkAbi: WORKFLOW_SDK_ABI_VERSION,
+          },
+        }),
+        createdAtMs: 3,
+      });
+      expect(() =>
+        workflowDefinitionSourceSelection(
+          store.getWorkflowDefinition("wf_sha256_emptymodules_view") as NonNullable<
+            ReturnType<typeof store.getWorkflowDefinition>
+          >,
+        ),
+      ).toThrow(/cannot display source: manifest modules must not be empty/);
 
       store.putWorkflowDefinition({
         hash: "wf_sha256_bad_code",

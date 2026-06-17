@@ -425,14 +425,14 @@ describe("saved workflow RPC", () => {
       definitionHash: "wf_sha256_emptymodules",
       createdAtMs: 1,
     });
-    expect(api.getSavedWorkflowSource({ name: "legacy-source" }).files).toEqual([
-      { path: "entry.ts", code: "export default async () => 7;\n", entry: true },
-    ]);
-    expect(
+    expect(() => api.getSavedWorkflowSource({ name: "legacy-source" })).toThrow(
+      /cannot display source: manifest modules must not be empty/,
+    );
+    expect(() =>
       api.getWorkflowDefinitionSource({
         lookup: { kind: "definition", definitionHash: "wf_sha256_emptymodules" },
-      }).files,
-    ).toEqual([{ path: "entry.ts", code: "export default async () => 7;\n", entry: true }]);
+      }),
+    ).toThrow(/cannot display source: manifest modules must not be empty/);
 
     store.putWorkflowDefinition({
       hash: "wf_sha256_codeonly_rpc",
@@ -460,9 +460,9 @@ describe("saved workflow RPC", () => {
       createdAtMs: 2,
       finishedAtMs: 2,
     });
-    expect(
-      api.getWorkflowDefinitionSource({ lookup: { kind: "run", runId: "run_codeonly" } }).files,
-    ).toEqual([{ path: "entry.ts", code: "export default async () => 8;\n", entry: true }]);
+    expect(() =>
+      api.getWorkflowDefinitionSource({ lookup: { kind: "run", runId: "run_codeonly" } }),
+    ).toThrow(/cannot display source: missing manifest_json/);
     expect(() =>
       api.getWorkflowDefinitionSource({ lookup: { kind: "run", runId: "run_missing" } }),
     ).toThrow(/run run_missing not found/);

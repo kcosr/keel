@@ -45,12 +45,6 @@ export function workflowDefinitionSourceFiles(
 ): WorkflowDefinitionSourceSelection {
   try {
     const manifest = parseSourceManifest(row);
-    if (manifest === null || manifest.modules.length === 0) {
-      return {
-        entry: "entry.ts",
-        files: [{ path: "entry.ts", code: row.code, entry: true }],
-      };
-    }
     validateWorkflowModulePath(manifest.entry, "workflow entry path");
     const seen = new Set<string>();
     let entryCount = 0;
@@ -74,10 +68,11 @@ export function workflowDefinitionSourceFiles(
   }
 }
 
-function parseSourceManifest(
-  row: WorkflowDefinitionRow,
-): { entry: string; modules: Array<{ path: string; code: string }> } | null {
-  if (!row.manifestJson) return null;
+function parseSourceManifest(row: WorkflowDefinitionRow): {
+  entry: string;
+  modules: Array<{ path: string; code: string }>;
+} {
+  if (!row.manifestJson) throw new Error("missing manifest_json");
   const parsed = JSON.parse(row.manifestJson) as PersistedWorkflowDefinitionManifest;
   if (parsed.format !== "keel.workflow-definition.v1") {
     throw new Error("unsupported workflow definition manifest");
@@ -86,7 +81,7 @@ function parseSourceManifest(
     throw new Error("manifest modules must be an array");
   }
   if (parsed.modules.length === 0) {
-    return { entry: "entry.ts", modules: [] };
+    throw new Error("manifest modules must not be empty");
   }
   if (typeof parsed.entry !== "string") {
     throw new Error("manifest entry must be a string");

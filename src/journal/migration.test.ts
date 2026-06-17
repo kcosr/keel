@@ -3,7 +3,7 @@
 
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RealmKernel } from "../kernel/realm/realm-host.ts";
@@ -13,11 +13,13 @@ import {
   materializeWorkflowDefinition,
   snapshotWorkflowSource,
 } from "../workflow-definitions/snapshot.ts";
+import { workflowDefinitionSourceSelection } from "../workflow-definitions/source-view.ts";
 import {
   applyMigration,
   canonicalWorkflowDefinitionManifestV12,
   workflowDefinitionHashForV12Migration,
 } from "./migrations.ts";
+import { DDL, SCHEMA_VERSION } from "./schema.ts";
 import { JournalStore } from "./store.ts";
 
 /** Build a minimal v4-era DB by hand: journal WITHOUT seq, approvals WITHOUT
@@ -181,6 +183,14 @@ function makeV11Db(path: string): void {
   db.close();
 }
 
+function makeV20Db(path: string): void {
+  const db = new Database(path, { create: true });
+  db.exec("PRAGMA journal_mode = WAL;");
+  db.exec(DDL);
+  db.query("INSERT INTO schema_meta (key, value) VALUES ('schema_version', '20')").run();
+  db.close();
+}
+
 function insertOldWorkflowDefinition(
   db: Database,
   hash: string,
@@ -209,7 +219,7 @@ describe("schema migrations", () => {
       const ver = store.db
         .query<{ value: string }, []>("SELECT value FROM schema_meta WHERE key='schema_version'")
         .get();
-      expect(ver?.value).toBe("20");
+      expect(ver?.value).toBe(String(SCHEMA_VERSION));
 
       // new columns exist
       const jcols = store.db.query<{ name: string }, []>("PRAGMA table_info(journal)").all();
@@ -507,7 +517,7 @@ describe("schema migrations", () => {
     const ver = store.db
       .query<{ value: string }, []>("SELECT value FROM schema_meta WHERE key='schema_version'")
       .get();
-    expect(ver?.value).toBe("20");
+    expect(ver?.value).toBe(String(SCHEMA_VERSION));
     const savedWorkflows = store.db
       .query<{ name: string }, []>("PRAGMA table_info(saved_workflows)")
       .all();
@@ -610,7 +620,7 @@ describe("schema migrations", () => {
       const ver = store.db
         .query<{ value: string }, []>("SELECT value FROM schema_meta WHERE key='schema_version'")
         .get();
-      expect(ver?.value).toBe("20");
+      expect(ver?.value).toBe(String(SCHEMA_VERSION));
 
       const schedule = store.db
         .query<
@@ -856,6 +866,140 @@ describe("schema migrations", () => {
           ?.c,
       ).toBe(1);
       store.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("v21 workflow source migration normalizes legacy code-only and empty-module definitions", () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-mig-v21-workflow-source-"));
+    try {
+      const path = join(dir, "old.db");
+      makeV20Db(path);
+      const db = new Database(path);
+      const codeOnlyHash = "wf_sha256_legacy_codeonly";
+      const emptyModulesHash = "wf_sha256_legacy_empty_modules";
+      const codeOnlySource =
+        'import { passthrough } from "@kcosr/keel";\nexport default async () => passthrough<string>().parse("ok");\n';
+      const emptyModulesSource = "export default async () => 7;\n";
+      db.query(
+        `INSERT INTO workflow_definitions (
+          hash, name, kind, code, source_map, manifest_json, created_at_ms
+        ) VALUES (?, 'legacy-code', 'source', ?, NULL, NULL, 1)`,
+      ).run(codeOnlyHash, codeOnlySource);
+      db.query(
+        `INSERT INTO workflow_definitions (
+          hash, name, kind, code, source_map, manifest_json, created_at_ms
+        ) VALUES (?, 'legacy-empty', 'source', ?, NULL, ?, 2)`,
+      ).run(
+        emptyModulesHash,
+        emptyModulesSource,
+        JSON.stringify({
+          format: "keel.workflow-definition.v1",
+          entry: "ignored.ts",
+          modules: [],
+          externalImports: [],
+          externalPackages: [],
+          sourceRoot: "client-captured://source",
+          runtime: {
+            bunVersion: Bun.version,
+            keelDefinitionAbi: 1,
+            workflowSdkAbi: WORKFLOW_SDK_ABI_VERSION,
+          },
+        }),
+      );
+      db.query(
+        `INSERT INTO runs (
+          run_id, workflow_name, definition_version, workflow_ref, run_target, status,
+          input_ref, created_at_ms
+        ) VALUES ('r_code', 'legacy-code', ?, ?, '/tmp/repo', 'finished', 'null', 1)`,
+      ).run(codeOnlyHash, codeOnlyHash);
+      db.query(
+        `INSERT INTO schedules (
+          name, workflow_ref, input_json, schedule_target, interval_ms, next_fire_ms, enabled
+        ) VALUES ('hourly', ?, 'null', '/tmp/repo', 60000, 1, 1)`,
+      ).run(emptyModulesHash);
+      db.query(
+        `INSERT INTO saved_workflows (
+          name, tags_json, created_at_ms, updated_at_ms
+        ) VALUES ('legacy', '[]', 1, 1)`,
+      ).run();
+      db.query(
+        `INSERT INTO saved_workflow_versions (
+          name, version, definition_hash, created_at_ms
+        ) VALUES ('legacy', 1, ?, 1)`,
+      ).run(codeOnlyHash);
+      db.close();
+
+      const store = JournalStore.open(path);
+      const migratedRun = store.getRun("r_code");
+      const schedule = store.db
+        .query<{ workflow_ref: string }, []>(
+          "SELECT workflow_ref FROM schedules WHERE name='hourly'",
+        )
+        .get();
+      const saved = store.db
+        .query<{ definition_hash: string }, []>(
+          "SELECT definition_hash FROM saved_workflow_versions WHERE name='legacy'",
+        )
+        .get();
+      expect(migratedRun).not.toBeNull();
+      expect(schedule).not.toBeNull();
+      if (!migratedRun) throw new Error("missing migrated run");
+      if (!schedule) throw new Error("missing migrated schedule");
+      expect(migratedRun.workflowRef).not.toBeNull();
+      expect(migratedRun.definitionVersion).not.toBe(codeOnlyHash);
+      expect(migratedRun.definitionVersion).toBe(migratedRun.workflowRef as string);
+      expect(saved?.definition_hash).toBe(migratedRun.definitionVersion);
+      expect(schedule.workflow_ref).not.toBe(emptyModulesHash);
+      expect(store.getWorkflowDefinition(codeOnlyHash)).toBeNull();
+      expect(store.getWorkflowDefinition(emptyModulesHash)).toBeNull();
+
+      const codeDefinition = store.getWorkflowDefinition(migratedRun.definitionVersion);
+      expect(codeDefinition?.manifestJson).not.toBeNull();
+      expect(
+        workflowDefinitionSourceSelection(codeDefinition as NonNullable<typeof codeDefinition>),
+      ).toEqual({
+        entry: "entry.ts",
+        files: [{ path: "entry.ts", code: codeOnlySource, entry: true }],
+      });
+      const emptyModulesDefinition = store.getWorkflowDefinition(schedule.workflow_ref);
+      expect(
+        workflowDefinitionSourceSelection(
+          emptyModulesDefinition as NonNullable<typeof emptyModulesDefinition>,
+        ),
+      ).toEqual({
+        entry: "entry.ts",
+        files: [{ path: "entry.ts", code: emptyModulesSource, entry: true }],
+      });
+      const entryPath = materializeWorkflowDefinition(
+        store,
+        schedule.workflow_ref,
+        join(dir, "definitions"),
+      );
+      expect(readFileSync(entryPath, "utf8")).toBe(emptyModulesSource);
+      store.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("v21 workflow source migration rejects legacy entry-only local imports", () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-mig-v21-workflow-source-invalid-"));
+    try {
+      const path = join(dir, "old.db");
+      makeV20Db(path);
+      const db = new Database(path);
+      db.query(
+        `INSERT INTO workflow_definitions (
+          hash, name, kind, code, source_map, manifest_json, created_at_ms
+        ) VALUES ('wf_sha256_legacy_local_import', 'legacy', 'source', ?, NULL, NULL, 1)`,
+      ).run('import "./helper";\nexport default async () => 1;\n');
+      db.close();
+
+      expect(() => JournalStore.open(path)).toThrow(
+        /legacy entry-only source imports local module "\.\/helper"/,
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

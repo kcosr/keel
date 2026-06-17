@@ -18,7 +18,8 @@
 // → v17 daemon settings catalog and run setting snapshots
 // → v18 managed workspace copy/clone metadata and workspace identities
 // → v19 branch-backed worktree checkout metadata
-// → v20 saved workflow registry tables.
+// → v20 saved workflow registry tables
+// → v21 normalize legacy workflow definition source manifests.
 
 import type { Database } from "bun:sqlite";
 import { parse } from "acorn";
@@ -350,6 +351,9 @@ export function applyMigration(db: Database, fromVersion: number): void {
     case 19: // → v20: saved workflow registry tables.
       createSavedWorkflowRegistry(db);
       break;
+    case 20: // → v21: normalize legacy workflow definition source manifests.
+      normalizeLegacyWorkflowDefinitionSources(db);
+      break;
     default:
       throw new Error(`no migration defined from schema version ${fromVersion}`);
   }
@@ -390,6 +394,202 @@ function createSavedWorkflowRegistry(db: Database): void {
     ON saved_workflow_versions (name, version DESC)`);
   db.exec(`CREATE INDEX IF NOT EXISTS saved_workflow_versions_by_name_created
     ON saved_workflow_versions (name, created_at_ms DESC)`);
+}
+
+function normalizeLegacyWorkflowDefinitionSources(db: Database): void {
+  const rows = db.query<RawWorkflowDefinitionV11, []>("SELECT * FROM workflow_definitions").all();
+  for (const row of rows) {
+    const normalized = normalizedWorkflowDefinitionSourceManifest(row);
+    if (!normalized) continue;
+
+    if (normalized.hash === row.hash) {
+      db.query("UPDATE workflow_definitions SET manifest_json = ? WHERE hash = ?").run(
+        normalized.manifestJson,
+        row.hash,
+      );
+      continue;
+    }
+
+    const existing = db
+      .query<RawWorkflowDefinitionV11, [string]>(
+        "SELECT * FROM workflow_definitions WHERE hash = ?",
+      )
+      .get(normalized.hash);
+    if (existing) {
+      assertWorkflowDefinitionV21CollisionIsMergeable(
+        existing,
+        row,
+        normalized.manifestJson,
+        normalized.hash,
+      );
+    } else {
+      db.query(
+        `INSERT INTO workflow_definitions (
+           hash, name, kind, code, source_map, manifest_json, created_at_ms
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        normalized.hash,
+        row.name,
+        row.kind,
+        row.code,
+        row.source_map,
+        normalized.manifestJson,
+        row.created_at_ms,
+      );
+    }
+
+    updateWorkflowDefinitionReferences(db, row.hash, normalized.hash);
+    deleteUnreferencedWorkflowDefinition(db, row.hash);
+  }
+}
+
+function normalizedWorkflowDefinitionSourceManifest(
+  row: RawWorkflowDefinitionV11,
+): { hash: string; manifestJson: string } | null {
+  if (!row.manifest_json) {
+    const manifest = entryOnlyWorkflowDefinitionManifestForV21(row.hash, row.code, null);
+    return {
+      hash: workflowDefinitionHashForV21Migration(manifest),
+      manifestJson: canonicalJson(manifest),
+    };
+  }
+
+  const manifest = JSON.parse(row.manifest_json) as WorkflowDefinitionManifestV11;
+  if (manifest.format !== "keel.workflow-definition.v1") return null;
+  if (!Array.isArray(manifest.modules)) {
+    throw new Error(`workflow definition ${row.hash} manifest modules must be an array`);
+  }
+  if (manifest.modules.length > 0) return null;
+
+  const normalized = entryOnlyWorkflowDefinitionManifestForV21(row.hash, row.code, manifest);
+  return {
+    hash: workflowDefinitionHashForV21Migration(normalized),
+    manifestJson: canonicalJson(normalized),
+  };
+}
+
+function entryOnlyWorkflowDefinitionManifestForV21(
+  hash: string,
+  code: string,
+  manifest: WorkflowDefinitionManifestV11 | null,
+): Record<string, unknown> {
+  const externalImports = legacyEntryOnlyExternalImports(hash, code);
+  const externalPackages = legacyExternalPackagesForV21(hash, manifest);
+  const runtime =
+    manifest?.runtime && typeof manifest.runtime === "object" && !Array.isArray(manifest.runtime)
+      ? manifest.runtime
+      : {};
+  return {
+    format: "keel.workflow-definition.v1",
+    entry: "entry.ts",
+    modules: [{ path: "entry.ts", code }],
+    externalImports,
+    externalPackages,
+    sourceRoot:
+      typeof manifest?.sourceRoot === "string" ? manifest.sourceRoot : "client-captured://source",
+    runtime: {
+      ...runtime,
+      workflowSdkAbi:
+        typeof runtime.workflowSdkAbi === "number" ? runtime.workflowSdkAbi : WORKFLOW_SDK_ABI_V12,
+    },
+  };
+}
+
+function legacyEntryOnlyExternalImports(hash: string, code: string): string[] {
+  const imports = staticImportsForV12Migration(code, "entry.ts");
+  const external = new Set<string>();
+  for (const spec of imports) {
+    if (spec.startsWith(".") || spec.startsWith("/")) {
+      throw new Error(
+        `workflow definition ${hash} legacy entry-only source imports local module "${spec}"`,
+      );
+    }
+    if (spec !== "@kcosr/keel") {
+      throw new Error(`workflow import "${spec}" is not allowed; only @kcosr/keel is supported`);
+    }
+    external.add(spec);
+  }
+  return [...external].sort();
+}
+
+function legacyExternalPackagesForV21(
+  hash: string,
+  manifest: WorkflowDefinitionManifestV11 | null,
+): unknown[] {
+  if (!manifest) return [];
+  if (!Array.isArray(manifest.externalPackages)) {
+    throw new Error(`workflow definition ${hash} manifest externalPackages must be an array`);
+  }
+  for (const pinned of manifest.externalPackages) {
+    if (!isCapturedExternalPackageV11(pinned)) {
+      throw new Error(`workflow definition ${hash} manifest external package entries are invalid`);
+    }
+    if (pinned.name !== "@kcosr/keel") {
+      throw new Error(
+        `workflow definition ${hash} includes unsupported external package "${pinned.name}"`,
+      );
+    }
+  }
+  return [];
+}
+
+function workflowDefinitionHashForV21Migration(manifest: Record<string, unknown>): string {
+  return `${DEFINITION_PREFIX}${sha256Hex(
+    canonicalJson({
+      format: manifest.format,
+      entry: manifest.entry,
+      modules: manifest.modules,
+      externalImports: manifest.externalImports,
+      externalPackages: manifest.externalPackages,
+      runtime: manifest.runtime,
+    }),
+  )}`;
+}
+
+function updateWorkflowDefinitionReferences(db: Database, oldHash: string, newHash: string): void {
+  db.query("UPDATE runs SET definition_version = ? WHERE definition_version = ?").run(
+    newHash,
+    oldHash,
+  );
+  db.query("UPDATE runs SET workflow_ref = ? WHERE workflow_ref = ?").run(newHash, oldHash);
+  db.query("UPDATE schedules SET workflow_ref = ? WHERE workflow_ref = ?").run(newHash, oldHash);
+  if (tableExists(db, "saved_workflow_versions")) {
+    db.query(
+      "UPDATE saved_workflow_versions SET definition_hash = ? WHERE definition_hash = ?",
+    ).run(newHash, oldHash);
+  }
+}
+
+function deleteUnreferencedWorkflowDefinition(db: Database, hash: string): void {
+  const savedClause = tableExists(db, "saved_workflow_versions")
+    ? "AND hash NOT IN (SELECT definition_hash FROM saved_workflow_versions WHERE deleted_at_ms IS NULL)"
+    : "";
+  db.query(
+    `DELETE FROM workflow_definitions
+     WHERE hash = ?
+       AND hash NOT IN (SELECT definition_version FROM runs)
+       AND hash NOT IN (SELECT workflow_ref FROM runs WHERE workflow_ref IS NOT NULL)
+       AND hash NOT IN (SELECT workflow_ref FROM schedules)
+       ${savedClause}`,
+  ).run(hash);
+}
+
+function assertWorkflowDefinitionV21CollisionIsMergeable(
+  existing: RawWorkflowDefinitionV11,
+  oldRow: RawWorkflowDefinitionV11,
+  canonicalManifestJson: string,
+  newHash: string,
+): void {
+  if (
+    existing.kind !== oldRow.kind ||
+    existing.code !== oldRow.code ||
+    existing.source_map !== oldRow.source_map ||
+    existing.manifest_json !== canonicalManifestJson
+  ) {
+    throw new Error(
+      `workflow definition source normalization collision for ${newHash}: existing row differs from normalized content`,
+    );
+  }
 }
 
 function migrateDaemonSettingsToV17(db: Database): void {

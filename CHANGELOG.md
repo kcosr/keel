@@ -109,6 +109,9 @@
   `target`/`--target`, or configure a saved workflow default target.
 - RealmKernel launch boundaries now reject missing or blank run targets before
   persisting a run; CLI/client layers remain responsible for cwd defaults.
+- Workflow definition schema v21 normalizes legacy code-only and empty-module
+  source rows during migration; runtime source display and materialization now
+  reject current rows that lack a manifest or persisted modules.
 - Obsolete `AgentSessionWorkspace` store APIs/types have been removed; runtime
   code and tests use unified `AgentWorkspaceRow` records outside migrations.
 - The current capability auth contract no longer exposes deferred

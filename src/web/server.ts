@@ -256,6 +256,14 @@ async function healthProjection(
   };
 }
 
+async function connectGatewaySocket(socketPath: string): Promise<GatewaySocket> {
+  try {
+    return await GatewaySocket.connect(socketPath);
+  } catch {
+    throw new HttpError(503, { message: "daemon unreachable" });
+  }
+}
+
 async function rpcRoute(request: Request, socketPath: string): Promise<Response> {
   const credential = bearerCredential(request);
   const body = await request.json().catch(() => {
@@ -282,7 +290,7 @@ async function projectionRoute(
   runId?: string,
 ): Promise<Response> {
   const credential = bearerCredential(request);
-  const conn = await GatewaySocket.connect(socketPath);
+  const conn = await connectGatewaySocket(socketPath);
   try {
     const call = <T>(method: string, params: unknown = {}) =>
       gatewayResultOn<T>(conn, method, params, credential);
@@ -438,7 +446,7 @@ async function eventsRoute(
       cleanup = close;
       request.signal.addEventListener("abort", close, { once: true });
       heartbeat = setInterval(() => write(`: heartbeat ${Date.now()}\n\n`), heartbeatMs);
-      void GatewaySocket.connect(socketPath).then(
+      void connectGatewaySocket(socketPath).then(
         async (conn) => {
           if (closed) {
             conn.close();
@@ -499,7 +507,11 @@ async function eventsRoute(
         },
         (err) => {
           if (!snapshotSent) sendSnapshot(null);
-          write(sseFrame("error", { message: err instanceof Error ? err.message : String(err) }));
+          const error =
+            err instanceof HttpError
+              ? err.error
+              : { message: err instanceof Error ? err.message : String(err) };
+          write(sseFrame("error", redactCapabilityTokensInValue(error)));
           scheduleClose();
         },
       );
@@ -530,7 +542,7 @@ async function collectEventsOn(
   try {
     conn.onEvent = (frame) => {
       if (frame.kind === "control" && frame.type === "caught-up") caughtUp = frame.cursor;
-      else {
+      else if (frame.kind === "durable") {
         const { subId: _subId, ...event } = frame;
         events.push(event as EventStreamFrame);
       }
@@ -577,7 +589,7 @@ async function unary(
   credential: string | null,
   requestId?: unknown,
 ): Promise<GatewayResponse> {
-  const conn = await GatewaySocket.connect(socketPath);
+  const conn = await connectGatewaySocket(socketPath);
   try {
     return await conn.request(method, params, credential, requestId);
   } finally {
@@ -689,7 +701,7 @@ function safeJoin(root: string, rel: string): string | null {
   const full = resolve(root, normalized);
   const back = relative(root, full);
   if (back.startsWith("..") || back.includes(`..${sep}`) || resolve(root) === full) {
-    return full === resolve(root) ? null : null;
+    return null;
   }
   return full;
 }

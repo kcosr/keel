@@ -199,6 +199,26 @@ describe("web transport", () => {
       });
       expect(JSON.stringify(health.body)).not.toContain(dir);
       expect(JSON.stringify(health.body)).not.toContain("keel.sock");
+
+      const rpc = await jsonFetch(`${web.url}/rpc`, {
+        method: "POST",
+        body: JSON.stringify({ method: "ping", params: {} }),
+      });
+      expect(rpc.status).toBe(503);
+      expect(rpc.body).toEqual({ error: { message: "daemon unreachable" } });
+
+      const runs = await jsonFetch(`${web.url}/api/runs`);
+      expect(runs.status).toBe(503);
+      expect(runs.body).toEqual({ error: { message: "daemon unreachable" } });
+
+      const events = await jsonFetch(`${web.url}/runs/run_missing/events?from=beginning`);
+      expect(events.status).toBe(503);
+      expect(events.body).toEqual({ error: { message: "daemon unreachable" } });
+
+      for (const body of [rpc.body, runs.body, events.body]) {
+        expect(JSON.stringify(body)).not.toContain(dir);
+        expect(JSON.stringify(body)).not.toContain("keel.sock");
+      }
     } finally {
       web.stop(true);
     }
@@ -371,6 +391,14 @@ describe("web transport", () => {
         "caught-up",
         "closed",
       ]);
+
+      const detail = await jsonFetch(`${web.url}/api/runs/${launched.runId}`, {
+        headers: auth(launched.capability as string),
+      });
+      expect(detail.status).toBe(200);
+      expect(detail.body.events.every((frame: { kind: string }) => frame.kind === "durable")).toBe(
+        true,
+      );
 
       const badCursor = await fetch(`${web.url}/runs/${launched.runId}/events?afterSeq=abc`, {
         headers: auth(launched.capability as string),

@@ -121,9 +121,13 @@ daemon gateway, not a second operation dispatcher:
 The React UI foundation lives under `web/` and is served by `keel web` from the
 `web/dist` bundle when present. It is a browser client over this same API, not a
 new operation boundary. Current UI coverage includes runs, run detail, approval
-decisions, workspace diff/review controls, workflows, schedules, profiles,
-settings, and system views. Browser mutations remain disabled or deferred unless
-a screen explicitly wires the operation through bearer-authorized `/rpc` calls.
+decisions, workspace diff/review controls, saved workflow list/detail/source/run,
+read-only schedule list/detail/source, profile and setting list/get/check
+inspection, and system views. Browser mutations remain disabled or deferred
+unless a screen explicitly wires the operation through bearer-authorized `/rpc`
+calls. The system view uses only `/health` and `/api/system`; daemon internals
+such as journal paths, schema versions, systemd state, logs, and restart
+controls are not inferred.
 
 ## Current Matrix
 
@@ -142,13 +146,15 @@ a screen explicitly wires the operation through bearer-authorized `/rpc` calls.
 | schedule put | implemented | implemented | deferred | deferred | not-applicable | deferred | not-applicable | `admin` |
 | schedule list/show | implemented | implemented | implemented | implemented | not-applicable | deferred | not-applicable | `admin` |
 | saved workflow save/install | implemented | implemented | deferred | deferred | not-applicable | deferred | not-applicable | `admin`, `workflow:save` |
-| saved workflow list/show/source | implemented | implemented | deferred | partial | not-applicable | deferred | not-applicable | `admin`, `workflow:read` |
-| saved workflow run | implemented | implemented | deferred | deferred | not-applicable | deferred | not-applicable | `workflow:run`; follow-up uses minted run capability |
+| saved workflow list/show/source | implemented | implemented | deferred | implemented | not-applicable | deferred | not-applicable | `admin`, `workflow:read` |
+| saved workflow run | implemented | implemented | deferred | implemented | not-applicable | deferred | not-applicable | `workflow:run`; follow-up uses minted run capability |
 | saved workflow enable/disable/deprecate/delete | implemented | implemented | deferred | deferred | not-applicable | deferred | not-applicable | `admin`, `workflow:save` for scoped non-delete metadata |
 | workflow definition preview/source | implemented | implemented | deferred | deferred | not-applicable | deferred | not-applicable | `admin`, `run:source` depending selector |
 | workflow definition GC | implemented | implemented | deferred | deferred | not-applicable | deferred | not-applicable | `admin` |
-| profile catalog | implemented | implemented | deferred | partial | not-applicable | deferred | `profile` field consumes snapshots | `admin` for catalog management |
-| settings catalog | implemented | implemented | deferred | partial | not-applicable | deferred | workflow-visible settings snapshot; daemon-operational agent concurrency limits are not SDK-visible | `admin` |
+| profile catalog list/get/check | implemented | implemented | deferred | implemented | not-applicable | deferred | `profile` field consumes snapshots | `admin` |
+| profile catalog set/delete | implemented | implemented | deferred | deferred | not-applicable | deferred | not-applicable | `admin` |
+| settings catalog list/get/check | implemented | implemented | deferred | implemented | not-applicable | deferred | workflow-visible settings snapshot; daemon-operational agent concurrency limits are not SDK-visible | `admin` |
+| settings catalog set/unset | implemented | implemented | deferred | deferred | not-applicable | deferred | not-applicable | `admin` |
 | workspace list/show/diff | implemented | implemented | implemented | implemented | deferred | deferred | not-applicable | `run:read` |
 | workspace merge/discard/gc | implemented | implemented | implemented | implemented | deferred | deferred | not-applicable | `admin` |
 

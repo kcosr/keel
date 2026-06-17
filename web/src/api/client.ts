@@ -1,15 +1,21 @@
 import { type SseMessage, parseSseStream } from "./sse";
 import type {
+  AgentProfileCheckResult,
   AgentProfileView,
   ApprovalsResponse,
   EventCursorInput,
   HealthResponse,
   RunDetailResponse,
+  RunLaunchResult,
   RunWorkspaceDiff,
   RunWorkspaceView,
   RunsResponse,
+  SavedWorkflowSourceView,
   SavedWorkflowSummary,
+  SavedWorkflowView,
   ScheduleSummary,
+  ScheduleView,
+  SettingCheckResult,
   SettingView,
   SystemProjection,
   WorkspaceGcResult,
@@ -121,6 +127,10 @@ export class KeelWebClient {
     return this.rpc("listSchedules", { includeDisabled: true });
   }
 
+  getSchedule(name: string): Promise<ScheduleView | null> {
+    return this.rpc("getSchedule", { name, includeSource: true });
+  }
+
   listSavedWorkflows(): Promise<SavedWorkflowSummary[]> {
     return this.rpc("listSavedWorkflows", {
       includeDisabled: true,
@@ -128,12 +138,61 @@ export class KeelWebClient {
     });
   }
 
-  listAgentProfiles(): Promise<AgentProfileView[]> {
-    return this.rpc("listAgentProfiles", { source: "all" });
+  getSavedWorkflow(name: string): Promise<SavedWorkflowView | null> {
+    return this.rpc("getSavedWorkflow", { name });
+  }
+
+  getSavedWorkflowSource(req: {
+    name: string;
+    version?: number | "latest";
+  }): Promise<SavedWorkflowSourceView> {
+    return this.rpc("getSavedWorkflowSource", { ...req, all: true, allowDeprecated: true });
+  }
+
+  launchSavedWorkflow(req: {
+    name: string;
+    version?: number | "latest";
+    allowDeprecated?: boolean;
+    input?: unknown;
+    target?: string;
+    runName?: string | null;
+  }): Promise<RunLaunchResult> {
+    return this.rpc("launchSavedWorkflow", {
+      ref: {
+        name: req.name,
+        version: req.version ?? "latest",
+        ...(req.allowDeprecated ? { allowDeprecated: true } : {}),
+      },
+      ...(req.input !== undefined ? { input: req.input } : {}),
+      ...(req.target ? { target: req.target } : {}),
+      name: req.runName ?? null,
+    });
+  }
+
+  listAgentProfiles(
+    source: "all" | "catalog" | "programmatic" = "all",
+  ): Promise<AgentProfileView[]> {
+    return this.rpc("listAgentProfiles", { source });
+  }
+
+  getAgentProfile(name: string): Promise<AgentProfileView | null> {
+    return this.rpc("getAgentProfile", { name });
+  }
+
+  checkAgentProfile(name: string): Promise<AgentProfileCheckResult> {
+    return this.rpc("checkAgentProfile", { name });
   }
 
   listSettings(): Promise<SettingView[]> {
     return this.rpc("listSettings", {});
+  }
+
+  getSetting(key: string): Promise<SettingView | null> {
+    return this.rpc("getSetting", { key });
+  }
+
+  checkSetting(key: string, value: unknown): Promise<SettingCheckResult> {
+    return this.rpc("checkSetting", { key, value });
   }
 
   async rpc<T>(method: string, params: unknown = {}): Promise<T> {

@@ -195,6 +195,13 @@ export interface RunDetailResponse {
   availableCommands: Array<{ name: string; requiredAuthority: string }>;
 }
 
+export interface RunLaunchResult {
+  runId: string;
+  attachCursor: EventCursor;
+  capability?: string;
+  capabilityId?: string;
+}
+
 export interface ApprovalView {
   runId: string;
   runName: string | null;
@@ -293,7 +300,33 @@ export interface ScheduleSummary {
   lastError: ScheduleErrorProjection;
 }
 
-export interface SavedWorkflowSummary {
+export interface ScheduleView extends ScheduleSummary {
+  input: unknown;
+  inputJson: string | null;
+  source?: WorkflowDefinitionSourceView | null;
+}
+
+export interface SavedWorkflowVersionView {
+  name: string;
+  version: number;
+  definitionHash: string;
+  workflowName: string | null;
+  inputSchema: unknown | null;
+  inputSchemaSet: boolean;
+  defaultInput: unknown | null;
+  defaultInputSet: boolean;
+  defaultTarget: string | null;
+  metadata: unknown | null;
+  sourceProvenance: unknown | null;
+  createdBy: string | null;
+  createdAtMs: number;
+  enabled: boolean;
+  deprecatedAtMs: number | null;
+  deprecationMessage: string | null;
+  deletedAtMs: number | null;
+}
+
+export interface SavedWorkflowView {
   name: string;
   title: string | null;
   description: string | null;
@@ -302,28 +335,64 @@ export interface SavedWorkflowSummary {
   updatedAtMs: number;
   disabledAtMs: number | null;
   deletedAtMs: number | null;
+  versions: SavedWorkflowVersionView[];
+}
+
+export interface SavedWorkflowSummary extends SavedWorkflowView {
   latestVersion: number | null;
   latestDefinitionHash: string | null;
-  workflowName?: string | null;
-  [key: string]: unknown;
+}
+
+export interface SavedWorkflowSourceView {
+  name: string;
+  version: number;
+  definitionHash: string;
+  entry: string;
+  files: Array<{ path: string; code: string; entry: boolean }>;
+}
+
+export interface AgentProfileDiagnostic {
+  level: "error" | "warning" | "info";
+  path: string;
+  message: string;
+}
+
+export interface AgentProfileCheckResult {
+  ok: boolean;
+  diagnostics: AgentProfileDiagnostic[];
 }
 
 export interface AgentProfileView {
   name: string;
-  source?: string;
-  generation?: number;
-  config?: unknown;
-  diagnostics?: unknown[];
-  [key: string]: unknown;
+  source: "catalog" | "programmatic";
+  config: Record<string, unknown>;
+  configHash: string;
+  generation: number | null;
+  createdAtMs: number | null;
+  updatedAtMs: number | null;
+}
+
+export interface SettingsDiagnostic {
+  level: "error" | "warning" | "info";
+  path: string;
+  message: string;
 }
 
 export interface SettingView {
   key: string;
+  class: "workflow-visible" | "daemon-operational";
   value: unknown;
-  source?: string;
-  generation?: number;
-  diagnostics?: unknown[];
-  [key: string]: unknown;
+  defaultValue: unknown;
+  isDefault: boolean;
+  readOnly: boolean;
+  generation: number | null;
+  updatedAtMs: number | null;
+  description: string;
+}
+
+export interface SettingCheckResult {
+  ok: boolean;
+  diagnostics: SettingsDiagnostic[];
 }
 
 export interface SystemProjection {

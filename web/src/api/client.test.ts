@@ -68,6 +68,56 @@ describe("KeelWebClient", () => {
     });
   });
 
+  test("uses current RPC shapes for workflow, schedule, profile, and setting detail calls", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () => jsonResponse({ result: null }));
+    const client = new KeelWebClient({
+      baseUrl: "http://keel.test",
+      getCredential: () => "kc_admin",
+      fetchImpl,
+    });
+
+    await client.getSavedWorkflow("review-loop");
+    await client.getSavedWorkflowSource({ name: "review-loop", version: 3 });
+    await client.launchSavedWorkflow({
+      name: "review-loop",
+      version: 3,
+      input: { n: 1 },
+      target: "/tmp/work",
+      runName: "manual run",
+    });
+    await client.getSchedule("hourly");
+    await client.getAgentProfile("codex-default");
+    await client.checkAgentProfile("codex-default");
+    await client.getSetting("agent.defaultTimeoutMs");
+    await client.checkSetting("agent.defaultTimeoutMs", 120000);
+
+    const bodies = fetchImpl.mock.calls.map(
+      ([, init]) => JSON.parse(String(init?.body)) as { method: string; params: unknown },
+    );
+    expect(bodies).toEqual([
+      { method: "getSavedWorkflow", params: { name: "review-loop" } },
+      {
+        method: "getSavedWorkflowSource",
+        params: { name: "review-loop", version: 3, all: true, allowDeprecated: true },
+      },
+      {
+        method: "launchSavedWorkflow",
+        params: {
+          ref: { name: "review-loop", version: 3 },
+          input: { n: 1 },
+          target: "/tmp/work",
+          name: "manual run",
+        },
+      },
+      { method: "getSchedule", params: { name: "hourly", includeSource: true } },
+      { method: "getAgentProfile", params: { name: "codex-default" } },
+      { method: "checkAgentProfile", params: { name: "codex-default" } },
+      { method: "getSetting", params: { key: "agent.defaultTimeoutMs" } },
+      { method: "checkSetting", params: { key: "agent.defaultTimeoutMs", value: 120000 } },
+    ]);
+    for (const body of bodies) expect(JSON.stringify(body)).not.toContain("runSecrets");
+  });
+
   test("watches run events with cursor query and authorization header", async () => {
     const encoder = new TextEncoder();
     const fetchImpl = vi.fn<typeof fetch>(

@@ -13,6 +13,10 @@
 - The production web UI now includes current `ctx.human` approval decisions and
   retained workspace list/detail/diff views with admin-confirmed merge, discard,
   and workspace GC controls.
+- The production web UI now includes saved workflow list/detail/source views, a
+  browser-secret-free saved workflow launch form, read-only schedule
+  list/detail/source inspection, profile and setting get/check inspection, and
+  system status cards backed by `/health` and `/api/system`.
 - Agent specs and persistent profiles now support `environment: { vars, secrets }`.
   Literal `vars` are passed as provider environment variables and hashed by
   value; `environment.secrets` requests named run-secret values supplied through

@@ -34,7 +34,9 @@ Keel is active local-first infrastructure for durable agent workflows. It has a
 working daemon, CLI, workflow SDK, journal, replay model, durable waits,
 agent-provider integrations, reusable workflow registry, run workspaces, and
 operator controls. A local React web console foundation is available through
-`keel web` when `web/dist` has been built; some planned surfaces, especially MCP
+`keel web` when `web/dist` has been built; it covers live runs, approvals,
+workspaces, saved workflows, read-only schedules, profiles, settings, and
+system status at the current API baseline. Some planned surfaces, especially MCP
 and richer web mutations, remain deferred. See [`USAGE.md`](./USAGE.md#known-limitations) and
 [`docs/control-surfaces.md`](./docs/control-surfaces.md).
 

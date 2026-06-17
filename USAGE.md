@@ -173,6 +173,7 @@ bun src/cli/keel.ts <command> [args]
 | `settings list/get/set/unset/check ...` | Manage typed daemon settings. Requires admin. |
 | `workspace list/show/diff/merge/discard/gc ...` | Inspect and manage retained isolated agent/session workspaces by `workspaceId`. |
 | `tui [runId] [--status status] [--limit n] [--output text]` | Open an interactive run browser or direct run detail/watch view. Browser mode requires admin. |
+| `web [--host 127.0.0.1] [--port 7879] [--socket path] [--assets dir] [--api-only]` | Serve the local browser API transport. |
 | `gc` | Prune unreferenced workflow definition rows and cache entries. Requires admin. |
 | `resume [--detach] [--tools] <runId>` | Resume a parked, interrupted, or incomplete run. Watches by default. |
 | `interrupt <runId> [reason]` | Stop active work and park a non-terminal run until explicit `resume`. |
@@ -183,6 +184,56 @@ bun src/cli/keel.ts <command> [args]
 | `approve <runId> <key> [note]` | Approve a `ctx.human` gate and acknowledge delivery/wake start. |
 | `deny <runId> <key> [note]` | Deny a `ctx.human` gate and acknowledge delivery/wake start. |
 | `signal <runId> <name> [json]` | Deliver a payload to `ctx.signal(name)` and acknowledge delivery/wake start. |
+
+### Local Web API Transport
+
+`keel web` starts a local HTTP/SSE adapter for browser clients. It does not
+start or manage the daemon; it connects to the daemon socket resolved from
+`KEEL_SOCKET` or `$KEEL_DIR/keel.sock`, the same as other CLI commands.
+
+```bash
+keel web
+keel web --host 127.0.0.1 --port 7879
+keel web --socket "$KEEL_SOCKET"
+keel web --assets ./web/dist
+keel web --api-only
+```
+
+Defaults:
+
+- host: `127.0.0.1`;
+- port: `7879`;
+- assets: `web/dist` when that production bundle exists, otherwise API-only;
+  `--assets` points at an alternate bundle and `--api-only` disables bundle
+  serving.
+
+Do not expose this server remotely by default. Binding a non-local host is an
+explicit local operator choice; TLS, CORS, browser sessions, and remote exposure
+policy are not part of this transport.
+
+Routes:
+
+- `GET /health` is unauthenticated and reports web status, daemon reachability,
+  daemon `ping` owner data, and bundle availability. It does not expose run,
+  workspace, path, token, or environment data.
+- `POST /rpc` accepts `{"method":"...", "params":{...}}` and forwards the
+  operation through the daemon gateway with the request's bearer credential.
+  Structured daemon errors are preserved in the JSON response.
+- `GET /runs/:runId/events` streams SSE frames. It sends a `snapshot` frame
+  first, durable and live event frames as `event`, an adapter-level `caught-up`
+  frame after backfill, optional `closed` or `authorization.failed` control
+  frames, and heartbeat comments. Cursor query parameters are `from=beginning`,
+  `from=now`, `afterSeq=<n>`, `tail=<n>`, or `cursor=<json>`.
+- `GET /api/runs`, `/api/runs/:runId`, `/api/approvals`, `/api/workspaces`, and
+  `/api/system` return server-side projections layered on daemon RPC calls.
+- `GET /assets/*` serves files from `--assets`; other non-API paths fall back to
+  `index.html` when a bundle is present.
+
+Authenticated web requests use `Authorization: Bearer <capability>`. Browser
+event clients must use `fetch()` with a readable response stream so the header
+can be sent; native `EventSource` with query-string tokens is not supported.
+The web transport treats captured-source `launchRun` as admin-only even though
+it remains open on the trusted local Unix socket.
 
 ### Attach And Detach Behavior
 
@@ -610,6 +661,11 @@ collected when no longer needed.
 Keel uses daemon-enforced bearer capabilities. Launch is open to local callers,
 but controlling an existing run requires a run capability or an admin
 capability. The daemon stores only token hashes.
+
+The web transport requires an explicit `Authorization: Bearer ...` header for
+protected data and mutations. `launchRun` from captured source is admin-only
+through the web transport; the open launch path is limited to the trusted local
+Unix socket and CLI/client wrappers.
 
 By default, commands that create a protected run write a capability file under
 `$KEEL_CAP_DIR` or `$KEEL_DIR/caps` and return a `capabilityRef`:
@@ -1425,6 +1481,12 @@ resumed workflow reached a parked or terminal status. Use `waitForRun`,
 returns a raw run capability on launch/fork so clients can establish authority
 for follow-up operations. The CLI writes that capability to a local cap file by
 default and only prints raw tokens with `--emit-capability`.
+
+The local web transport is a browser-facing adapter over the same gateway. It
+does not define new daemon operation names: `/rpc` preserves daemon method names
+and request/response shapes, projection routes compose existing daemon
+projections, and `/runs/:runId/events` translates the shared event cursor
+contract into SSE frames.
 
 ## Development And Operations
 

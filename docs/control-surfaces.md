@@ -8,7 +8,7 @@ Keel exposes operator behavior through several surfaces:
 - CLI commands;
 - `keel execute` control scripts;
 - TUI;
-- planned local web API/UI;
+- local web API and planned React UI;
 - planned MCP tools;
 - SDK/workflow authoring APIs when behavior is durable and replay-visible.
 
@@ -81,9 +81,9 @@ without shelling out. Execute must wrap daemon behavior, not invent behavior
 missing from RPC.
 
 Add web routes or views when the data benefits from visual inspection, live
-refresh, graph/table layout, or browser-side interaction. Browser mutations
-remain `deferred` unless a feature spec defines local-browser authorization and
-CSRF posture.
+refresh, graph/table layout, or browser-side interaction. Browser mutations must
+use explicit bearer authorization through the daemon gateway; remote exposure,
+TLS, CORS, browser sessions, and CSRF posture require a separate design.
 
 Add TUI exposure when the operation belongs in an interactive terminal workflow
 and can reuse CLI/RPC contracts.
@@ -97,20 +97,38 @@ replay-visible behavior, such as new `ctx.*` methods, exported SDK names, or
 workflow source capture semantics. If SDK exposure is `required`, also evaluate
 `WORKFLOW_SDK_ABI_VERSION`.
 
+## Current Web API
+
+`keel web` serves a local HTTP/SSE API transport. It is an adapter over the
+daemon gateway, not a second operation dispatcher:
+
+- `POST /rpc` forwards unary daemon operation names and shapes, preserving
+  structured gateway errors.
+- `GET /runs/:runId/events` translates the shared event cursor contract into SSE
+  frames with `snapshot`, raw `event`, adapter-level `caught-up`, `closed`,
+  `authorization.failed`, and heartbeat frames.
+- Projection routes currently cover runs, run detail, approvals, workspaces, and
+  system status.
+- Captured-source `launchRun` is admin-only through the web surface even though
+  it remains open on the trusted local Unix socket.
+
+The React UI is still deferred; the web column below tracks backend API exposure
+unless a row explicitly says UI.
+
 ## Current Matrix
 
 | Operation | RPC | CLI | Execute | Web | TUI | MCP | SDK | Authority |
 |---|---|---|---|---|---|---|---|---|
-| run launch from captured source | implemented | implemented | implemented | deferred | not-applicable | deferred | not-applicable | open on local socket; follow-up uses minted run capability |
-| run list | implemented | implemented | deferred | deferred | implemented | deferred | not-applicable | `admin` |
-| run get/report/output/blockage | implemented | implemented | implemented | deferred | implemented | deferred | not-applicable | `run:read`, `run:output` |
-| run watch/events/wait | implemented | implemented | implemented | deferred | partial | deferred | not-applicable | `run:watch`, `run:events` |
-| resume/retry | implemented | implemented | implemented | deferred | implemented | deferred | not-applicable | `run:resume`, `run:retry` |
-| rewind/fork | implemented | implemented | implemented | deferred | partial | deferred | not-applicable | `run:rewind`, `run:fork` |
-| rerun/source override | implemented | deferred | deferred | deferred | deferred | deferred | not-applicable | `run:retry` |
-| interrupt run | implemented | implemented | implemented | deferred | not-applicable | deferred | not-applicable | `run:interrupt` |
-| signal delivery | implemented | implemented | implemented | deferred | implemented | deferred | `ctx.signal` implemented | `run:signal` |
-| approval decision | implemented | implemented | implemented | deferred | implemented | deferred | `ctx.human` implemented | `admin` |
+| run launch from captured source | implemented | implemented | implemented | implemented | not-applicable | deferred | not-applicable | open on local socket; admin on web; follow-up uses minted run capability |
+| run list | implemented | implemented | deferred | implemented | implemented | deferred | not-applicable | `admin` |
+| run get/report/output/blockage | implemented | implemented | implemented | implemented | implemented | deferred | not-applicable | `run:read`, `run:output` |
+| run watch/events/wait | implemented | implemented | implemented | implemented | partial | deferred | not-applicable | `run:watch`, `run:events` |
+| resume/retry | implemented | implemented | implemented | implemented | implemented | deferred | not-applicable | `run:resume`, `run:retry` |
+| rewind/fork | implemented | implemented | implemented | implemented | partial | deferred | not-applicable | `run:rewind`, `run:fork` |
+| rerun/source override | implemented | deferred | deferred | implemented | deferred | deferred | not-applicable | `run:retry` |
+| interrupt run | implemented | implemented | implemented | implemented | not-applicable | deferred | not-applicable | `run:interrupt` |
+| signal delivery | implemented | implemented | implemented | implemented | implemented | deferred | `ctx.signal` implemented | `run:signal` |
+| approval decision | implemented | implemented | implemented | implemented | implemented | deferred | `ctx.human` implemented | `admin` |
 | schedule put | implemented | implemented | deferred | deferred | not-applicable | deferred | not-applicable | `admin` |
 | schedule list/show | implemented | implemented | implemented | deferred | not-applicable | deferred | not-applicable | `admin` |
 | saved workflow save/install | implemented | implemented | deferred | deferred | not-applicable | deferred | not-applicable | `admin`, `workflow:save` |
@@ -121,8 +139,8 @@ workflow source capture semantics. If SDK exposure is `required`, also evaluate
 | workflow definition GC | implemented | implemented | deferred | deferred | not-applicable | deferred | not-applicable | `admin` |
 | profile catalog | implemented | implemented | deferred | deferred | not-applicable | deferred | `profile` field consumes snapshots | `admin` for catalog management |
 | settings catalog | implemented | implemented | deferred | deferred | not-applicable | deferred | workflow-visible settings snapshot | `admin` |
-| workspace list/show/diff | implemented | implemented | implemented | deferred | deferred | deferred | not-applicable | `run:read` |
-| workspace merge/discard/gc | implemented | implemented | implemented | deferred | deferred | deferred | not-applicable | `admin` |
+| workspace list/show/diff | implemented | implemented | implemented | implemented | deferred | deferred | not-applicable | `run:read` |
+| workspace merge/discard/gc | implemented | implemented | implemented | implemented | deferred | deferred | not-applicable | `admin` |
 
 Keep this table descriptive until the API stabilizes enough to justify generated
 surface documentation.

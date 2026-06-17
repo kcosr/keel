@@ -104,6 +104,9 @@
   `run.interrupted` audit events and best-effort active worker/provider abort.
 
 ### Changed
+- The current capability auth contract no longer exposes deferred
+  approval-scoped resources or saved-task actions; approval decisions remain
+  admin-only until scoped approvals or saved tasks ship.
 - `allowTools` and `denyTools` now require exact provider-native tool names for
   known built-in tools. Generic aliases for the selected provider, such as
   `shell`, `run`, `exec`, `list`, and Claude's `fetch`/`search`, plus

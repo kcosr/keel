@@ -5,7 +5,6 @@ import type { CapabilityRow } from "../journal/types.ts";
 
 export type CapabilityResource =
   | { kind: "run"; runId: string }
-  | { kind: "approval"; runId: string; key: string }
   | { kind: "workflow"; name: string; version?: number }
   | { kind: "daemon" };
 
@@ -25,8 +24,6 @@ export type CapabilityAction =
   | "workflow:read"
   | "workflow:run"
   | "workflow:save"
-  | "task:run"
-  | "task:save"
   | "admin";
 
 export interface AuthorizationRequest {
@@ -155,8 +152,6 @@ function sameResource(a: CapabilityResource, b: CapabilityResource): boolean {
       return true;
     case "run":
       return b.kind === "run" && a.runId === b.runId;
-    case "approval":
-      return b.kind === "approval" && a.runId === b.runId && a.key === b.key;
     case "workflow":
       return (
         b.kind === "workflow" &&
@@ -168,11 +163,7 @@ function sameResource(a: CapabilityResource, b: CapabilityResource): boolean {
 
 function denied(message: string, request: AuthorizationRequest): AuthorizationError {
   const resource =
-    request.resource.kind === "run"
-      ? `run ${request.resource.runId}`
-      : request.resource.kind === "approval"
-        ? `approval ${request.resource.key} on run ${request.resource.runId}`
-        : request.resource.kind;
+    request.resource.kind === "run" ? `run ${request.resource.runId}` : request.resource.kind;
   return new AuthorizationError(
     `${message}; ${request.action} on ${resource} is not authorized`,
     request,

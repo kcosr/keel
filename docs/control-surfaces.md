@@ -54,11 +54,15 @@ implemented boundary.
 Use the real capability model in `src/auth/capabilities.ts`. Do not invent a
 parallel authorization taxonomy.
 
-Current resources are `run`, `approval`, `workflow`, and `daemon`. Current
+Current resources are `run`, `workflow`, and `daemon`. Current
 actions include `run:read`, `run:source`, `run:watch`, `run:events`,
 `run:output`, `run:resume`, `run:interrupt`, `run:retry`, `run:rewind`,
 `run:fork`, `run:signal`, `run:cancel`, `workflow:read`, `workflow:run`,
-`workflow:save`, `task:run`, `task:save`, and `admin`.
+`workflow:save`, and `admin`.
+
+Approval decisions are admin operations at this baseline. Keel does not expose
+approval-scoped capability resources or saved-task capability actions until
+those product surfaces ship.
 
 `run:cancel` is currently only a defined capability action; no public RPC, CLI,
 or execute operation is wired to it. Mark a cancel surface `implemented` only

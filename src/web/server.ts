@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { type Socket, createConnection } from "node:net";
+import { Socket as NetSocket, type Socket } from "node:net";
 import { extname, join, normalize, relative, resolve, sep } from "node:path";
 import { redactCapabilityTokensInValue } from "../auth/redaction.ts";
 import type {
@@ -59,10 +59,9 @@ class GatewaySocket {
 
   static connect(socketPath: string): Promise<GatewaySocket> {
     return new Promise((resolve, reject) => {
-      const socket = createConnection(socketPath);
+      const socket = new NetSocket();
       const client = new GatewaySocket(socket);
       const failOpen = (err: unknown) => {
-        socket.destroy();
         reject(err);
       };
       socket.once("connect", () => {
@@ -73,6 +72,7 @@ class GatewaySocket {
         resolve(client);
       });
       socket.once("error", failOpen);
+      socket.connect(socketPath);
     });
   }
 
@@ -221,8 +221,15 @@ async function handleWebRequest(
     }
     return json({ error: { message: "not found" } }, 404);
   } catch (err) {
-    if (err instanceof HttpError) return json({ error: err.error }, err.status);
-    return json({ error: { message: err instanceof Error ? err.message : String(err) } }, 500);
+    if (err instanceof HttpError) {
+      return json(redactCapabilityTokensInValue({ error: err.error }), err.status);
+    }
+    return json(
+      redactCapabilityTokensInValue({
+        error: { message: err instanceof Error ? err.message : String(err) },
+      }),
+      500,
+    );
   }
 }
 
@@ -236,9 +243,9 @@ async function healthProjection(
       response.error
         ? { reachable: true, error: response.error }
         : { reachable: true, ...(response.result as Record<string, unknown>) },
-    (err) => ({
+    () => ({
       reachable: false,
-      error: { message: err instanceof Error ? err.message : String(err) },
+      error: { message: "daemon unreachable" },
     }),
   );
   return {
@@ -272,100 +279,107 @@ async function projectionRoute(
   runId?: string,
 ): Promise<Response> {
   const credential = bearerCredential(request);
-  const call = <T>(method: string, params: unknown = {}) =>
-    gatewayResult<T>(socketPath, method, params, credential);
-  if (kind === "runs") {
-    const summaries = await call<Array<{ runId: string }>>("listRuns");
-    const runs = await Promise.all(
-      summaries.map(async (summary) => {
-        const [run, blockage, workspaces] = await Promise.all([
-          call("getRun", { runId: summary.runId }),
-          call("getBlockage", { runId: summary.runId }),
-          call<unknown[]>("listRunWorkspaces", { runId: summary.runId, includeRemoved: true }),
-        ]);
-        return {
-          ...summary,
-          run,
-          blockage,
-          workspaceSummary: { count: workspaces.length },
-        };
-      }),
-    );
-    return json({ runs });
-  }
-  if (kind === "run") {
-    if (!runId) throw new HttpError(400, { message: "run id is required" });
-    const [run, report, blockage, workspaces, source, eventTail, hasAdmin] = await Promise.all([
-      call("getRun", { runId }),
-      call("getRunReport", { runId }),
-      call("getBlockage", { runId }),
-      call("listRunWorkspaces", { runId, includeRemoved: true }),
-      call("getWorkflowDefinitionSource", { lookup: { kind: "run", runId }, all: true }),
-      collectEvents(socketPath, runId, { kind: "tail", count: 100 }, credential),
-      hasAdminAuthority(socketPath, credential),
-    ]);
-    return json({
-      run,
-      report,
-      blockage,
-      workspaces,
-      source,
-      events: eventTail.events,
-      eventCursor: eventTail.cursor,
-      rawEvents: { href: `/runs/${encodeURIComponent(runId)}/events` },
-      availableCommands: availableRunCommands(run, blockage, hasAdmin),
-    });
-  }
-  if (kind === "approvals") {
-    const summaries =
-      await call<Array<{ runId: string; workflowName: string | null; status: string }>>("listRuns");
-    const approvals = [];
-    for (const summary of summaries) {
-      if (summary.status !== "waiting-human") continue;
-      const blockage = await call<{
-        reason: string;
-        blockedOn: { stableKey: string; since: number } | null;
-        context: string;
-      }>("getBlockage", { runId: summary.runId });
-      if (blockage.reason === "waiting_human") {
-        approvals.push({
-          runId: summary.runId,
-          runName: summary.workflowName,
-          status: summary.status,
-          gateId: blockage.blockedOn?.stableKey ?? null,
-          prompt: blockage.context.replace(/^awaiting decision: /, ""),
-          createdAtMs: blockage.blockedOn?.since ?? null,
-          requiredAuthority: "admin",
-          cli: blockage.blockedOn?.stableKey
-            ? `keel approve ${summary.runId} ${blockage.blockedOn.stableKey}`
-            : null,
-        });
-      }
+  const conn = await GatewaySocket.connect(socketPath);
+  try {
+    const call = <T>(method: string, params: unknown = {}) =>
+      gatewayResultOn<T>(conn, method, params, credential);
+    if (kind === "runs") {
+      const summaries = await call<Array<{ runId: string }>>("listRuns");
+      const runs = await Promise.all(
+        summaries.map(async (summary) => {
+          const [run, blockage, workspaces] = await Promise.all([
+            call("getRun", { runId: summary.runId }),
+            call("getBlockage", { runId: summary.runId }),
+            call<unknown[]>("listRunWorkspaces", { runId: summary.runId, includeRemoved: true }),
+          ]);
+          return {
+            ...summary,
+            run,
+            blockage,
+            workspaceSummary: { count: workspaces.length },
+          };
+        }),
+      );
+      return projectionJson({ runs });
     }
-    return json({ approvals });
+    if (kind === "run") {
+      if (!runId) throw new HttpError(400, { message: "run id is required" });
+      const [run, report, blockage, workspaces, source, eventTail, hasAdmin] = await Promise.all([
+        call("getRun", { runId }),
+        call("getRunReport", { runId }),
+        call("getBlockage", { runId }),
+        call("listRunWorkspaces", { runId, includeRemoved: true }),
+        call("getWorkflowDefinitionSource", { lookup: { kind: "run", runId }, all: true }),
+        collectEventsOn(conn, runId, { kind: "tail", count: 100 }, credential),
+        hasAdminAuthorityOn(conn, credential),
+      ]);
+      return projectionJson({
+        run,
+        report,
+        blockage,
+        workspaces,
+        source,
+        events: eventTail.events,
+        eventCursor: eventTail.cursor,
+        rawEvents: { href: `/runs/${encodeURIComponent(runId)}/events` },
+        availableCommands: availableRunCommands(run, blockage, hasAdmin),
+      });
+    }
+    if (kind === "approvals") {
+      const summaries =
+        await call<Array<{ runId: string; workflowName: string | null; status: string }>>(
+          "listRuns",
+        );
+      const approvals = [];
+      for (const summary of summaries) {
+        if (summary.status !== "waiting-human") continue;
+        const blockage = await call<{
+          reason: string;
+          blockedOn: { stableKey: string; since: number } | null;
+          context: string;
+        }>("getBlockage", { runId: summary.runId });
+        if (blockage.reason === "waiting_human") {
+          approvals.push({
+            runId: summary.runId,
+            runName: summary.workflowName,
+            status: summary.status,
+            gateId: blockage.blockedOn?.stableKey ?? null,
+            prompt: blockage.context.replace(/^awaiting decision: /, ""),
+            createdAtMs: blockage.blockedOn?.since ?? null,
+            requiredAuthority: "admin",
+            cli: blockage.blockedOn?.stableKey
+              ? `keel approve ${summary.runId} ${blockage.blockedOn.stableKey}`
+              : null,
+          });
+        }
+      }
+      return projectionJson({ approvals });
+    }
+    if (kind === "workspaces") {
+      const summaries = await call<Array<{ runId: string }>>("listRuns");
+      const nested = await Promise.all(
+        summaries.map((summary) =>
+          call<unknown[]>("listRunWorkspaces", { runId: summary.runId, includeRemoved: true }),
+        ),
+      );
+      return projectionJson({ workspaces: nested.flat() });
+    }
+    const [ping, profiles, settings] = await Promise.all([
+      call("ping"),
+      call("listAgentProfiles", { source: "all" }),
+      call("listSettings"),
+    ]);
+    return projectionJson({
+      daemon: ping,
+      profiles,
+      settings,
+      warnings: [
+        "daemon version and journal schema are unavailable until a daemon status RPC exists",
+      ],
+    });
+  } finally {
+    conn.close();
   }
-  if (kind === "workspaces") {
-    const summaries = await call<Array<{ runId: string }>>("listRuns");
-    const nested = await Promise.all(
-      summaries.map((summary) =>
-        call<unknown[]>("listRunWorkspaces", { runId: summary.runId, includeRemoved: true }),
-      ),
-    );
-    return json({ workspaces: nested.flat() });
-  }
-  const [ping, profiles, settings] = await Promise.all([
-    call("ping"),
-    call("listAgentProfiles", { source: "all" }),
-    call("listSettings"),
-  ]);
-  return json({
-    daemon: ping,
-    profiles,
-    settings,
-    warnings: [
-      "daemon version and journal schema are unavailable until a daemon status RPC exists",
-    ],
-  });
 }
 
 async function eventsRoute(
@@ -505,8 +519,23 @@ async function collectEvents(
   credential: string | null,
 ): Promise<{ events: EventStreamFrame[]; cursor: EventCursor | null }> {
   const conn = await GatewaySocket.connect(socketPath);
+  try {
+    return await collectEventsOn(conn, runId, cursor, credential);
+  } finally {
+    conn.close();
+  }
+}
+
+async function collectEventsOn(
+  conn: GatewaySocket,
+  runId: string,
+  cursor: EventCursorInput,
+  credential: string | null,
+): Promise<{ events: EventStreamFrame[]; cursor: EventCursor | null }> {
   const events: EventStreamFrame[] = [];
   let caughtUp: EventCursor | null = null;
+  const previousOnEvent = conn.onEvent;
+  let response: GatewayResponse;
   try {
     conn.onEvent = (frame) => {
       if (frame.kind === "control" && frame.type === "caught-up") caughtUp = frame.cursor;
@@ -515,24 +544,24 @@ async function collectEvents(
         events.push(event as EventStreamFrame);
       }
     };
-    const response = await conn.request(
+    response = await conn.request(
       "subscribeEvents",
       { runId, cursor, includeControlFrames: true },
       credential,
     );
-    if (response.error) throw new HttpError(statusForGatewayError(response.error), response.error);
-    return {
-      events,
-      cursor:
-        caughtUp ??
-        ((response.result as { cursor?: EventCursor } | undefined)?.cursor as
-          | EventCursor
-          | undefined) ??
-        null,
-    };
   } finally {
-    conn.close();
+    conn.onEvent = previousOnEvent;
   }
+  if (response.error) throw new HttpError(statusForGatewayError(response.error), response.error);
+  return {
+    events,
+    cursor:
+      caughtUp ??
+      ((response.result as { cursor?: EventCursor } | undefined)?.cursor as
+        | EventCursor
+        | undefined) ??
+      null,
+  };
 }
 
 async function gatewayResult<T>(
@@ -542,6 +571,20 @@ async function gatewayResult<T>(
   credential: string | null,
 ): Promise<T> {
   const response = await unary(socketPath, method, params, credential);
+  return resultOrHttpError<T>(response);
+}
+
+async function gatewayResultOn<T>(
+  conn: GatewaySocket,
+  method: string,
+  params: unknown,
+  credential: string | null,
+): Promise<T> {
+  const response = await conn.request(method, params, credential);
+  return resultOrHttpError<T>(response);
+}
+
+function resultOrHttpError<T>(response: GatewayResponse): T {
   if (response.error) throw new HttpError(statusForGatewayError(response.error), response.error);
   return response.result as T;
 }
@@ -563,6 +606,14 @@ async function unary(
 
 async function hasAdminAuthority(socketPath: string, credential: string | null): Promise<boolean> {
   const response = await unary(socketPath, "listRuns", {}, credential);
+  return !response.error;
+}
+
+async function hasAdminAuthorityOn(
+  conn: GatewaySocket,
+  credential: string | null,
+): Promise<boolean> {
+  const response = await conn.request("listRuns", {}, credential);
   return !response.error;
 }
 
@@ -735,6 +786,10 @@ function statusForGatewayError(error: GatewayErrorEnvelope): number {
 
 function requestKey(id: unknown): string {
   return JSON.stringify(id) ?? "undefined";
+}
+
+function projectionJson(value: unknown, status = 200): Response {
+  return json(redactCapabilityTokensInValue(value), status);
 }
 
 function json(value: unknown, status = 200): Response {

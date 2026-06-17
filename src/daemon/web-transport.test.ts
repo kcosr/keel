@@ -187,8 +187,25 @@ async function startCliWeb(socketPath: string): Promise<{ url: string; stop(): P
 }
 
 describe("web transport", () => {
+  test("health does not expose daemon socket paths when the daemon is unreachable", async () => {
+    const missingSocket = join(dir, "missing", "keel.sock");
+    const web = startWebServer({ socketPath: missingSocket, port: 0, apiOnly: true });
+    try {
+      const health = await jsonFetch(`${web.url}/health`);
+      expect(health.status).toBe(200);
+      expect(health.body.daemon).toEqual({
+        reachable: false,
+        error: { message: "daemon unreachable" },
+      });
+      expect(JSON.stringify(health.body)).not.toContain(dir);
+      expect(JSON.stringify(health.body)).not.toContain("keel.sock");
+    } finally {
+      web.stop(true);
+    }
+  });
+
   test("forwards RPC through the daemon gateway, fails launch closed, and serves projections", async () => {
-    const { daemon, socketPath } = startDaemon();
+    const { daemon, socketPath, dbPath } = startDaemon();
     await daemon.start();
     const web = startWebServer({ socketPath, port: 0, apiOnly: true });
     try {
@@ -223,6 +240,12 @@ describe("web transport", () => {
       expect(launched.body.result.capability).toStartWith("kc_run_");
       const runId = launched.body.result.runId as string;
       const runCap = launched.body.result.capability as string;
+      const store = JournalStore.open(dbPath);
+      try {
+        store.appendEvent(runId, "phase", { title: "kc_run_projection_secret" }, Date.now());
+      } finally {
+        store.close();
+      }
 
       const unknown = await jsonFetch(`${web.url}/rpc`, {
         method: "POST",
@@ -254,18 +277,29 @@ describe("web transport", () => {
       expect(runs.status).toBe(200);
       expect(runs.body.runs[0]).toMatchObject({
         runId,
-        run: { runId, workflowName: "web-launch" },
+        run: { runId, workflowName: "web-launch", phase: "«redacted-capability»" },
         workspaceSummary: { count: 0 },
       });
+      expect(JSON.stringify(runs.body)).not.toContain("kc_run_projection_secret");
 
       const detail = await jsonFetch(`${web.url}/api/runs/${runId}`, { headers: auth(runCap) });
       expect(detail.status).toBe(200);
       expect(detail.body).toMatchObject({
-        run: { runId },
+        run: { runId, phase: "«redacted-capability»" },
         rawEvents: { href: `/runs/${runId}/events` },
         eventCursor: { kind: "after-seq", runId },
       });
+      expect(JSON.stringify(detail.body)).not.toContain("kc_run_projection_secret");
       expect(Array.isArray(detail.body.availableCommands)).toBe(true);
+
+      const redactedProjectionError = await jsonFetch(
+        `${web.url}/api/runs/kc_run_projection_error_secret`,
+      );
+      expect(redactedProjectionError.status).toBe(401);
+      expect(JSON.stringify(redactedProjectionError.body)).toContain("«redacted-capability»");
+      expect(JSON.stringify(redactedProjectionError.body)).not.toContain(
+        "kc_run_projection_error_secret",
+      );
 
       const workspaces = await jsonFetch(`${web.url}/api/workspaces`, {
         headers: auth(ADMIN_TOKEN),

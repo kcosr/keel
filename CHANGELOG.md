@@ -112,6 +112,15 @@
 - Workflow definition schema v21 normalizes legacy code-only and empty-module
   source rows during migration; runtime source display and materialization now
   reject current rows that lack a manifest or persisted modules.
+- Codex app-server notification parsing now accepts only the current v2 scoped
+  event shapes: `thread/started` uses nested `thread.id`, turn lifecycle events
+  use `threadId` plus nested `turn.id`/status, item and error events use
+  top-level `threadId`/`turnId`, agent-message deltas use top-level `delta`,
+  completed agent messages use `type: "agentMessage"` with `text`, and unscoped
+  or alternate-shape notifications are ignored instead of being applied to the
+  active turn. Ignored current-thread turn lifecycle and error notifications now
+  emit a diagnostic error trace event before Keel waits for the eventual
+  terminal event.
 - Obsolete `AgentSessionWorkspace` store APIs/types have been removed; runtime
   code and tests use unified `AgentWorkspaceRow` records outside migrations.
 - The current capability auth contract no longer exposes deferred

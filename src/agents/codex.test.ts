@@ -14,6 +14,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { captureWorkflowFile } from "../workflow-definitions/capture.ts";
 import {
+  CODEX_FAST_SERVICE_TIER_WIRE_VALUE,
+  CODEX_NORMAL_SERVICE_TIER_WIRE_VALUE,
   CodexProvider,
   type CodexTransport,
   type CodexTransportConfig,
@@ -21,6 +23,7 @@ import {
   type CodexTransportFactory,
   normalizeCodexProviderConfig,
 } from "./codex.ts";
+import { executeAgent } from "./execute.ts";
 import type {
   AgentHooks,
   AgentInvocation,
@@ -197,24 +200,49 @@ function basicScript(message: Record<string, unknown>, transport: ScriptedTransp
 
 describe("Codex provider config", () => {
   test("defaults to stdio when selected config is absent", () => {
-    expect(normalizeCodexProviderConfig(undefined)).toEqual({ type: "stdio" });
+    expect(normalizeCodexProviderConfig(undefined)).toEqual({ transport: { type: "stdio" } });
   });
 
   test("accepts and normalizes explicit transports", () => {
     expect(normalizeCodexProviderConfig({ transport: { type: "stdio" } })).toEqual({
-      type: "stdio",
+      transport: { type: "stdio" },
     });
     expect(
       normalizeCodexProviderConfig({ transport: { type: "ws", url: "ws://127.0.0.1:9" } }),
     ).toEqual({
-      type: "ws",
-      url: "ws://127.0.0.1:9/",
+      transport: { type: "ws", url: "ws://127.0.0.1:9/" },
     });
     expect(
       normalizeCodexProviderConfig({ transport: { type: "uds", path: "/tmp/codex.sock" } }),
     ).toEqual({
-      type: "uds",
-      path: "/tmp/codex.sock",
+      transport: { type: "uds", path: "/tmp/codex.sock" },
+    });
+  });
+
+  test("accepts serviceTier and maps Keel values to Codex app-server wire values", () => {
+    // openai/codex config_types.rs pins ServiceTier::Fast.request_value() as "priority".
+    expect(CODEX_FAST_SERVICE_TIER_WIRE_VALUE).toBe("priority");
+    // openai/codex model_switching.rs proves null suppresses catalog fast defaults.
+    expect(CODEX_NORMAL_SERVICE_TIER_WIRE_VALUE).toBeNull();
+    expect(
+      normalizeCodexProviderConfig({
+        transport: { type: "stdio" },
+        serviceTier: "fast",
+      }),
+    ).toEqual({
+      transport: { type: "stdio" },
+      serviceTier: "fast",
+      codexServiceTierParam: "priority",
+    });
+    expect(
+      normalizeCodexProviderConfig({
+        transport: { type: "stdio" },
+        serviceTier: "normal",
+      }),
+    ).toEqual({
+      transport: { type: "stdio" },
+      serviceTier: "normal",
+      codexServiceTierParam: null,
     });
   });
 
@@ -235,6 +263,9 @@ describe("Codex provider config", () => {
     expect(() =>
       normalizeCodexProviderConfig({ transport: { type: "uds", path: "rel.sock" } }),
     ).toThrow(/providerConfig\.codex\.transport\.path/);
+    expect(() =>
+      normalizeCodexProviderConfig({ transport: { type: "stdio" }, serviceTier: "priority" }),
+    ).toThrow(/providerConfig\.codex\.serviceTier/);
   });
 });
 
@@ -248,6 +279,12 @@ describe("Codex provider cwd", () => {
 });
 
 describe("Codex JSON-RPC flow", () => {
+  const transportConfigs: Array<[string, CodexTransportConfig]> = [
+    ["stdio", { type: "stdio" }],
+    ["ws", { type: "ws", url: "ws://127.0.0.1:9/rpc" }],
+    ["uds", { type: "uds", path: "/tmp/codex.sock" }],
+  ];
+
   test("handshakes, captures thread id before turn/start, and returns transcript", async () => {
     const tokens: string[] = [];
     const transport = new ScriptedTransport((message, t) => {
@@ -289,6 +326,47 @@ describe("Codex JSON-RPC flow", () => {
     expect(events).toEqual(result.transcript);
     expect(events).toContainEqual({ type: "session", data: "thread-1" });
     expect(events).toContainEqual({ type: "text", data: "hello" });
+  });
+
+  for (const [name, transportConfig] of transportConfigs) {
+    test(`serviceTier fast is sent as priority on ${name} turn/start`, async () => {
+      const transport = new ScriptedTransport(basicScript);
+      const { factory } = await runWithTransport(transport, {
+        providerConfig: { transport: transportConfig, serviceTier: "fast" },
+      });
+
+      const turnStart = transport.sent.find((message) => message.method === "turn/start");
+      const params = turnStart?.params as Record<string, unknown>;
+      expect(params.serviceTier).toBe(CODEX_FAST_SERVICE_TIER_WIRE_VALUE);
+      expect(factory.config).toEqual(
+        name === "ws" ? { type: "ws", url: "ws://127.0.0.1:9/rpc" } : transportConfig,
+      );
+      expect(factory.config).not.toHaveProperty("serviceTier");
+    });
+
+    test(`serviceTier normal is sent as present null on ${name} turn/start`, async () => {
+      const transport = new ScriptedTransport(basicScript);
+      await runWithTransport(transport, {
+        providerConfig: { transport: transportConfig, serviceTier: "normal" },
+      });
+
+      const turnStart = transport.sent.find((message) => message.method === "turn/start");
+      const params = turnStart?.params as Record<string, unknown>;
+      expect(Object.hasOwn(params, "serviceTier")).toBe(true);
+      expect(params.serviceTier).toBe(CODEX_NORMAL_SERVICE_TIER_WIRE_VALUE);
+    });
+  }
+
+  test("omitted serviceTier does not send a turn/start serviceTier key", async () => {
+    const transport = new ScriptedTransport(basicScript);
+
+    await runWithTransport(transport, {
+      providerConfig: { transport: { type: "stdio" } },
+    });
+
+    const turnStart = transport.sent.find((message) => message.method === "turn/start");
+    const params = turnStart?.params as Record<string, unknown>;
+    expect(Object.hasOwn(params, "serviceTier")).toBe(false);
   });
 
   test("read-only policy sends Codex read-only thread and turn sandbox params", async () => {
@@ -561,6 +639,159 @@ describe("Codex JSON-RPC flow", () => {
     });
     expect(result.sessionToken).toBe("thread-1");
     expect(result.text).toBe("again");
+  });
+
+  test("resumed turns keep the configured serviceTier", async () => {
+    const transport = new ScriptedTransport((message, t) => {
+      switch (message.method) {
+        case "initialize":
+          t.respond(message.id, {});
+          break;
+        case "initialized":
+          break;
+        case "thread/read":
+          t.respond(message.id, {
+            thread: { id: "thread-1", cwd: process.cwd(), status: { type: "idle" } },
+          });
+          break;
+        case "thread/resume":
+          t.respond(message.id, { thread: { id: "thread-1" } });
+          break;
+        case "turn/start":
+          expect((message.params as Record<string, unknown>).serviceTier).toBe(
+            CODEX_FAST_SERVICE_TIER_WIRE_VALUE,
+          );
+          t.respond(message.id, { turn: { id: "turn-2" } });
+          t.notify("turn/started", { threadId: "thread-1", turn: { id: "turn-2" } });
+          t.notify("item/agentMessage/delta", {
+            threadId: "thread-1",
+            turnId: "turn-2",
+            delta: "again",
+          });
+          t.notify("turn/completed", {
+            threadId: "thread-1",
+            turn: { id: "turn-2", status: "completed" },
+          });
+          break;
+        default:
+          throw new Error(`unexpected ${String(message.method)}`);
+      }
+    });
+
+    const { result } = await runWithTransport(transport, {
+      resumeToken: "thread-1",
+      providerConfig: { transport: { type: "stdio" }, serviceTier: "fast" },
+    });
+
+    expect(result.sessionToken).toBe("thread-1");
+    expect(result.text).toBe("again");
+  });
+
+  test("schema retry resumes the Codex thread and preserves configured serviceTier", async () => {
+    const transports: ScriptedTransport[] = [];
+    const configs: CodexTransportConfig[] = [];
+    let openCount = 0;
+    const factory: CodexTransportFactory = {
+      async open(config, context) {
+        configs.push(config);
+        const attempt = ++openCount;
+        const transport = new ScriptedTransport((message, t) => {
+          switch (message.method) {
+            case "initialize":
+              t.respond(message.id, {});
+              break;
+            case "initialized":
+              break;
+            case "thread/start":
+              expect(attempt).toBe(1);
+              t.respond(message.id, { thread: { id: "thread-1" } });
+              break;
+            case "thread/read":
+              expect(attempt).toBe(2);
+              t.respond(message.id, {
+                thread: { id: "thread-1", cwd: context.cwd, status: { type: "idle" } },
+              });
+              break;
+            case "thread/resume":
+              expect(attempt).toBe(2);
+              t.respond(message.id, { thread: { id: "thread-1" } });
+              break;
+            case "turn/start": {
+              const params = message.params as Record<string, unknown>;
+              expect(Object.hasOwn(params, "serviceTier")).toBe(true);
+              expect(params.serviceTier).toBe(CODEX_NORMAL_SERVICE_TIER_WIRE_VALUE);
+              const turnId = attempt === 1 ? "turn-1" : "turn-2";
+              t.respond(message.id, { turn: { id: turnId } });
+              t.notify("turn/started", { threadId: "thread-1", turn: { id: turnId } });
+              t.notify("item/completed", {
+                threadId: "thread-1",
+                turnId,
+                item: {
+                  id: `msg-${attempt}`,
+                  type: "agentMessage",
+                  text: attempt === 1 ? '{"wrong":true}' : '{"severity":"high"}',
+                },
+              });
+              t.notify("turn/completed", {
+                threadId: "thread-1",
+                turn: { id: turnId, status: "completed" },
+              });
+              break;
+            }
+            default:
+              throw new Error(`unexpected ${String(message.method)} on attempt ${attempt}`);
+          }
+        });
+        transports.push(transport);
+        return transport;
+      },
+    };
+    const provider = new CodexProvider({
+      transportFactory: factory,
+      rpcTimeoutMs: 1_000,
+      turnTimeoutMs: 1_000,
+    });
+
+    const result = await executeAgent(
+      provider,
+      {
+        key: "schema-tier",
+        provider: "codex",
+        prompt: "return severity",
+        toolPolicy: "unrestricted",
+        cwd: process.cwd(),
+        providerConfig: { transport: { type: "stdio" }, serviceTier: "normal" },
+      },
+      {},
+      {
+        maxRetries: 1,
+        jsonSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["severity"],
+          properties: { severity: { type: "string", enum: ["high", "low"] } },
+        },
+      },
+    );
+
+    expect(result.output).toEqual({ severity: "high" });
+    expect(result.sessionToken).toBe("thread-1");
+    expect(openCount).toBe(2);
+    expect(configs).toEqual([{ type: "stdio" }, { type: "stdio" }]);
+    expect(transports.map((transport) => transport.closed)).toEqual([true, true]);
+    expect(transports[0]?.sent.map((message) => message.method)).toEqual([
+      "initialize",
+      "initialized",
+      "thread/start",
+      "turn/start",
+    ]);
+    expect(transports[1]?.sent.map((message) => message.method)).toEqual([
+      "initialize",
+      "initialized",
+      "thread/read",
+      "thread/resume",
+      "turn/start",
+    ]);
   });
 
   test("active resumed threads are interrupted before starting the next turn", async () => {

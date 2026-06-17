@@ -228,7 +228,16 @@ describe("agent profile RPC", () => {
         return { text: "ok", transcript: [] };
       },
     };
-    const registry = new AgentProviderRegistry().register(new MockProvider()).register(piProvider);
+    const codexProvider: AgentProvider = {
+      name: "codex",
+      async generate(): Promise<AgentResult> {
+        return { text: "ok", transcript: [] };
+      },
+    };
+    const registry = new AgentProviderRegistry()
+      .register(new MockProvider())
+      .register(piProvider)
+      .register(codexProvider);
     const kernel = new RealmKernel(store, {
       idgen: () => "run_profiles",
       agents: registry,
@@ -260,6 +269,33 @@ describe("agent profile RPC", () => {
         createOnly: true,
       }),
     ).toThrow(/pi provider tool "run" is not canonical; use "bash"/);
+    const codexSaved = api.putAgentProfile({
+      name: "codex-reviewer",
+      config: {
+        provider: "codex",
+        toolPolicy: "read-only",
+        providerConfig: { codex: { transport: { type: "stdio" }, serviceTier: "fast" } },
+      },
+      createOnly: true,
+    });
+    expect(codexSaved).toMatchObject({ name: "codex-reviewer", source: "catalog" });
+    expect(api.checkAgentProfile({ name: "codex-reviewer" }).ok).toBe(true);
+    expect(
+      api.checkAgentProfile({
+        config: {
+          provider: "codex",
+          providerConfig: { codex: { transport: { type: "stdio" }, serviceTier: "priority" } },
+        },
+      }),
+    ).toMatchObject({
+      ok: false,
+      diagnostics: [
+        {
+          level: "error",
+          message: expect.stringMatching(/providerConfig\.codex\.serviceTier/),
+        },
+      ],
+    });
     expect(api.checkAgentProfile({ name: "reviewer" }).ok).toBe(true);
     expect(() => api.putAgentProfile({ name: "builtin", config: {} })).toThrow(/programmatic/);
     expect(api.deleteAgentProfile({ name: "reviewer", ifGeneration: 1 })).toEqual({

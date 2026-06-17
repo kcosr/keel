@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### Added
+- Codex `providerConfig.codex.serviceTier` now lets workflows and agent
+  profiles request `"fast"` priority service or force `"normal"` standard
+  routing as replay-visible agent identity.
 - Run blockage diagnostics now reserve `stalled_no_heartbeat` for stale
   daemon-owner heartbeats instead of long pending step age. Reports and web/TUI
   projections hide diagnostic `running` as a visible blockage, while node views

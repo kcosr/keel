@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### Added
+- Local web API transport via `keel web`, with localhost-only default binding,
+  `/health`, `/rpc`, projection routes, static asset serving, and SSE run event
+  streams using the shared cursor/control-frame contract.
 - Shared event stream cursor contract for daemon, CLI, TUI, execute, and
   in-process subscriptions, plus `keel watch --from`, `--after-seq`, and
   `--tail` cursor controls.

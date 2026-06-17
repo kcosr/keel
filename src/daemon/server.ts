@@ -269,6 +269,12 @@ export class KeelDaemon {
         id: raw.id,
         method: typeof raw.method === "string" ? raw.method : String(raw.method),
         params: raw.params,
+        credential:
+          typeof (raw as { credential?: unknown }).credential === "string" ||
+          (raw as { credential?: unknown }).credential === null
+            ? ((raw as { credential?: string | null }).credential ?? null)
+            : undefined,
+        surface: (raw as { surface?: unknown }).surface === "web" ? "web" : "local",
       };
     } catch {
       return;

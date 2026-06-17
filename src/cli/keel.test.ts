@@ -30,6 +30,7 @@ import {
   parseScheduleShowArgs,
   parseTuiArgs,
   parseWatchArgs,
+  parseWebArgs,
   resolveWorkflowPath,
   watchRun,
   workflowName,
@@ -172,6 +173,39 @@ describe("keel CLI", () => {
     );
     expect(() => parseListArgs(["--output", "xml"])).toThrow("invalid --output xml for list");
     expect(() => parseListArgs(["run_123"])).toThrow("unexpected argument run_123 for list");
+  });
+
+  test("web args default to localhost API transport settings", () => {
+    const parsed = parseWebArgs([]);
+    expect(parsed.host).toBe("127.0.0.1");
+    expect(parsed.port).toBe(7879);
+    expect(parsed.socket).toEndWith("keel.sock");
+    expect(parsed.apiOnly).toBe(false);
+
+    const explicit = parseWebArgs([
+      "--host",
+      "0.0.0.0",
+      "--port",
+      "0",
+      "--socket",
+      "/tmp/keel.sock",
+      "--assets",
+      ".",
+      "--api-only",
+    ]);
+    expect(explicit).toMatchObject({
+      host: "0.0.0.0",
+      port: 0,
+      socket: "/tmp/keel.sock",
+      apiOnly: true,
+    });
+    expect(explicit.assets).toBe(process.cwd());
+
+    expect(() => parseWebArgs(["--port", "70000"])).toThrow(
+      "--port must be an integer between 0 and 65535",
+    );
+    expect(() => parseWebArgs(["--host", ""])).toThrow("--host must be non-empty");
+    expect(() => parseWebArgs(["extra"])).toThrow("unexpected argument extra for web");
   });
 
   test("list formatter renders deterministic UTC timestamps and durations", () => {

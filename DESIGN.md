@@ -426,12 +426,15 @@ writes ≈ 1 s — negligible against 106 minutes).
 
 Transport adapters are intentionally thin. The local Unix socket owns socket
 binding, JSON-line framing, connection-scoped `authenticate`, and connection
-cleanup; HTTP/SSE, WebSocket, and MCP adapters should own only their transport
-framing. All daemon operations that read or mutate durable state route through
+cleanup; the local HTTP/SSE web transport owns only HTTP routing, static assets,
+bearer-header extraction, SSE framing, heartbeats, and browser projection
+wrapping. All daemon operations that read or mutate durable state route through
 `KeelOperationGateway`, which centralizes method dispatch, capability
 authorization, run ownership claims, launch/fork capability issuance,
 approval/signal wakeups, event redaction, long-lived authorization rechecks, and
-subscription cleanup. This keeps future transports from becoming independent
+subscription cleanup. The gateway also receives a transport surface marker for
+policy differences such as web `launchRun` requiring admin while trusted local
+Unix-socket launch remains open. This keeps transports from becoming independent
 authorization boundaries.
 
 **The daemon — never the CLI — spawns agent subprocesses.** The CLI sends one

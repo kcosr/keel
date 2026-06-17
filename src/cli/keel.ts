@@ -10,6 +10,7 @@
 //   keel resume <runId>                 resume a non-terminal run
 //   keel list [--output text|json]      list runs
 //   keel tui [runId]                   interactive run browser/detail/watch
+//   keel web                           start the local browser API transport
 //
 // Socket + db paths default under ~/.keel (override with KEEL_SOCKET / KEEL_DB).
 
@@ -54,6 +55,12 @@ import type { RunReport } from "../rpc/projection.ts";
 import { effectiveOperationalSettings } from "../settings/catalog.ts";
 import { cliTargetPath } from "../target.ts";
 import { runTui } from "../tui/index.ts";
+import {
+  DEFAULT_WEB_ASSETS_DIR,
+  DEFAULT_WEB_HOST,
+  DEFAULT_WEB_PORT,
+  startWebServer,
+} from "../web/server.ts";
 import { captureWorkflowFile } from "../workflow-definitions/capture.ts";
 import { keelPackageRoot } from "../workflow-definitions/snapshot.ts";
 import type { WorkflowSourceInput } from "../workflow-definitions/source.ts";
@@ -134,6 +141,11 @@ const COMMANDS: [string, string, string][] = [
     "tui",
     "[runId] [--status status] [--limit n] [--output text]",
     "open the interactive run browser",
+  ],
+  [
+    "web",
+    "[--host 127.0.0.1] [--port 7879] [--socket path] [--assets dir] [--api-only]",
+    "serve the local browser API transport",
   ],
   ["schedule", "put|list|show ...", "create and inspect cron schedules"],
   ["profiles", "list|get|set|delete|check ...", "manage persistent agent profile catalog"],
@@ -261,6 +273,30 @@ async function dispatch(argv: string[]): Promise<number> {
       }
       symlinkSync(repoRoot, link, "dir");
       process.stdout.write(`linked @kcosr/keel → ${repoRoot}\n  ${link}\n`);
+      return 0;
+    }
+    case "web": {
+      const parsed = parseWebArgs(rest);
+      const assets =
+        parsed.assets ??
+        (parsed.apiOnly || !existsSync(join(DEFAULT_WEB_ASSETS_DIR, "index.html"))
+          ? undefined
+          : DEFAULT_WEB_ASSETS_DIR);
+      const server = startWebServer({
+        socketPath: parsed.socket,
+        host: parsed.host,
+        port: parsed.port,
+        ...(assets ? { assetsDir: assets } : {}),
+        apiOnly: parsed.apiOnly,
+      });
+      process.stdout.write(`keel web listening on ${server.url}\n`);
+      process.stdout.write(`daemon socket: ${parsed.socket}\n`);
+      process.stdout.write(assets ? `assets: ${assets}\n` : "assets: API-only\n");
+      process.on("SIGINT", () => {
+        server.stop(true);
+        process.exit(0);
+      });
+      await new Promise(() => {});
       return 0;
     }
     case "launch": {
@@ -682,11 +718,62 @@ export interface ListArgs {
   output: ListOutputFormat;
 }
 
+export interface WebArgs {
+  host: string;
+  port: number;
+  socket: string;
+  assets?: string;
+  apiOnly: boolean;
+}
+
 export interface TuiArgs {
   runId?: string;
   status?: string;
   limit?: number;
   output: "text";
+}
+
+export function parseWebArgs(args: string[]): WebArgs {
+  const out: WebArgs = {
+    host: DEFAULT_WEB_HOST,
+    port: DEFAULT_WEB_PORT,
+    socket: SOCKET,
+    apiOnly: false,
+  };
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    switch (arg) {
+      case "--host":
+        out.host = requireFlagValue(args, i, "--host");
+        i++;
+        break;
+      case "--port": {
+        const value = Number(requireFlagValue(args, i, "--port"));
+        if (!Number.isInteger(value) || value < 0 || value > 65_535) {
+          throw new Error("--port must be an integer between 0 and 65535");
+        }
+        out.port = value;
+        i++;
+        break;
+      }
+      case "--socket":
+        out.socket = requireFlagValue(args, i, "--socket");
+        i++;
+        break;
+      case "--assets":
+        out.assets = resolve(requireFlagValue(args, i, "--assets"));
+        i++;
+        break;
+      case "--api-only":
+        out.apiOnly = true;
+        break;
+      default:
+        throw new Error(`unexpected argument ${arg} for web`);
+    }
+  }
+  if (out.host.trim() === "") throw new Error("--host must be non-empty");
+  if (out.socket.trim() === "") throw new Error("--socket must be non-empty");
+  return out;
 }
 
 export function parseListArgs(args: string[]): ListArgs {

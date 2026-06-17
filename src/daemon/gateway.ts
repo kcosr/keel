@@ -51,6 +51,7 @@ export interface GatewayRequest {
   method: string;
   params?: unknown;
   credential?: string | null;
+  surface?: "local" | "web";
 }
 
 export interface GatewayResponse {
@@ -92,6 +93,7 @@ type GatewayHandler = (
 
 interface GatewayMethod {
   kind: "session" | "health" | "core" | "daemon";
+  webRequiresAdmin?: boolean;
   handle: GatewayHandler;
 }
 
@@ -115,6 +117,7 @@ export class KeelOperationGateway {
     },
     launchRun: {
       kind: "core",
+      webRequiresAdmin: true,
       handle: async (_session, p) => {
         const target = requireRunTarget(p.target, "launchRun");
         const res = await this.opts.api.launchRun({
@@ -617,6 +620,9 @@ export class KeelOperationGateway {
       const params = paramsObject(request.params);
       const credential =
         request.credential !== undefined ? request.credential : session.getCredential();
+      if (request.surface === "web" && method.webRequiresAdmin) {
+        this.authorizeAdmin(credential);
+      }
       const result = await method.handle(session, params, credential);
       return { id: request.id, result };
     } catch (err) {

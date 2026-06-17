@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { KeyboardEvent, ReactNode } from "react";
 
 export interface Column<T> {
   key: string;
@@ -50,21 +50,37 @@ export function DenseTable<T>({
           </tr>
         </thead>
         <tbody>
-          {rows.map((row) => {
+          {rows.map((row, index) => {
             const key = rowKey(row);
             const selected = selectedKey === key;
             const activate = () => onRowClick?.(row);
+            const activateAt = (event: KeyboardEvent<HTMLTableRowElement>, nextIndex: number) => {
+              const next = rows[nextIndex];
+              if (!next) return;
+              event.preventDefault();
+              const nextRow = event.currentTarget.parentElement?.children.item(nextIndex);
+              if (nextRow instanceof HTMLElement) nextRow.focus();
+              onRowClick?.(next);
+            };
             return (
               <tr
+                aria-selected={selected}
                 className={`${selected ? "is-selected" : ""} ${onRowClick ? "is-clickable" : ""}`}
                 key={key}
                 onClick={onRowClick ? activate : undefined}
                 onKeyDown={
                   onRowClick
                     ? (event) => {
-                        if (event.key !== "Enter" && event.key !== " ") return;
-                        event.preventDefault();
-                        activate();
+                        if (isInteractiveEventTarget(event.target, event.currentTarget)) return;
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          activate();
+                          return;
+                        }
+                        if (event.key === "ArrowDown") activateAt(event, index + 1);
+                        if (event.key === "ArrowUp") activateAt(event, index - 1);
+                        if (event.key === "Home") activateAt(event, 0);
+                        if (event.key === "End") activateAt(event, rows.length - 1);
                       }
                     : undefined
                 }
@@ -87,4 +103,12 @@ export function DenseTable<T>({
 function columnClassName<T>(column: Column<T>): string | undefined {
   const classes = [column.align ? `align-${column.align}` : null, column.className].filter(Boolean);
   return classes.length > 0 ? classes.join(" ") : undefined;
+}
+
+function isInteractiveEventTarget(target: EventTarget, row: HTMLTableRowElement): boolean {
+  if (!(target instanceof Element) || target === row) return false;
+  const interactive = target.closest(
+    "a, button, input, select, textarea, [role='button'], [role='link'], [contenteditable='true']",
+  );
+  return interactive !== null && row.contains(interactive);
 }

@@ -17,6 +17,10 @@
   browser-secret-free saved workflow launch form, read-only schedule
   list/detail/source inspection, profile and setting get/check inspection, and
   system status cards backed by `/health` and `/api/system`.
+- The production web UI now includes final console polish: container-responsive
+  runs tables, keyboard row navigation, copyable CLI equivalents for approval,
+  run, and workspace actions, and a denser workspace review panel with explicit
+  disabled-state explanations.
 - Agent specs and persistent profiles now support `environment: { vars, secrets }`.
   Literal `vars` are passed as provider environment variables and hashed by
   value; `environment.secrets` requests named run-secret values supplied through

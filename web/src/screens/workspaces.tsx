@@ -1,17 +1,19 @@
-import { ArchiveX, GitMerge, RefreshCw, Trash2 } from "lucide-react";
+import { ArchiveX, Copy, GitMerge, RefreshCw, Trash2 } from "lucide-react";
+import type { ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
 import { ApiError, type KeelWebClient } from "../api/client";
 import type { RunWorkspaceDiff, RunWorkspaceView } from "../api/types";
 import {
   Button,
+  CommandCopyButton,
   EmptyState,
   ErrorState,
-  KeyValueList,
   LoadingState,
   Select,
   StatusPill,
   Tabs,
   TextInput,
+  copyTextToClipboard,
   formatTime,
   toneForStatus,
 } from "../components/controls";
@@ -114,6 +116,7 @@ export function WorkspacesScreen({
   const detailLoading = detailState.loading || detailStale;
   const detail = detailCurrent ? (detailState.data?.workspace ?? selected) : selected;
   const diff = detailCurrent ? (detailState.data?.diff ?? null) : null;
+  const summary = useMemo(() => workspaceSummary(workspaces), [workspaces]);
 
   const runWorkspaceAction = async (action: "merge" | "discard") => {
     if (!detail || !mutationAuthorized || pendingAction) return;
@@ -183,7 +186,9 @@ export function WorkspacesScreen({
           </Select>
         </div>
         <div className="toolbar-right">
-          <StatusPill tone="neutral">{workspaces.length} total</StatusPill>
+          <StatusPill tone="waiting">{summary.review} review</StatusPill>
+          <StatusPill tone="info">{summary.diffable} diffable</StatusPill>
+          <StatusPill tone="neutral">{summary.total} total</StatusPill>
           <StatusPill tone={mutationAuthorized ? "success" : "waiting"}>admin</StatusPill>
           <Button icon={RefreshCw} size="sm" onClick={listState.reload}>
             Refresh
@@ -193,7 +198,11 @@ export function WorkspacesScreen({
             size="sm"
             variant="danger"
             disabled={!mutationAuthorized || pendingAction !== null}
-            title={mutationAuthorized ? "Garbage collect eligible workspaces" : "Requires admin"}
+            title={
+              mutationAuthorized
+                ? "Garbage collect eligible workspaces. CLI: keel workspace gc"
+                : "Requires admin authority. CLI: keel workspace gc"
+            }
             onClick={() => void runGc()}
           >
             {pendingAction === "gc" ? "GC running" : "GC"}
@@ -207,7 +216,7 @@ export function WorkspacesScreen({
       {!mutationAuthorized && !listState.loading && !listState.error ? (
         <div className="notice-panel">
           Workspace mutation requires admin authority. Merge, discard, and GC controls stay disabled
-          without it.
+          without it; use the CLI equivalents below with an admin credential.
         </div>
       ) : null}
       <div className="workspace-layout">
@@ -247,6 +256,7 @@ export function WorkspacesScreen({
                 <ErrorState error={detailState.error} onRetry={detailState.reload} />
               ) : null}
               <WorkspaceMetadata workspace={detail} />
+              <WorkspaceCommands workspace={detail} mutationAuthorized={mutationAuthorized} />
               {!detail.diffSupported ? (
                 <EmptyState
                   title="Diff unavailable"
@@ -324,29 +334,120 @@ function WorkspaceDetailHeader({
 function WorkspaceMetadata({ workspace }: { workspace: RunWorkspaceView }) {
   return (
     <section className="panel workspace-metadata">
-      <KeyValueList
-        rows={[
-          {
-            label: "Status",
-            value: (
-              <StatusPill tone={toneForStatus(workspace.status)}>{workspace.status}</StatusPill>
-            ),
-          },
-          { label: "Mode", value: workspace.mode },
-          { label: "Owner", value: `${workspace.ownerKind}:${workspace.key}` },
-          { label: "Source", value: workspace.sourceKind ?? "-" },
-          {
-            label: "Source path",
-            value: workspace.sourcePath ?? workspace.sourceUri ?? "-",
-            mono: true,
-          },
-          { label: "Base commit", value: stringField(workspace, "baseCommit"), mono: true },
-          { label: "Workspace path", value: workspace.workspacePath, mono: true },
-          { label: "Updated", value: formatTime(workspace.updatedAtMs) },
-          { label: "Merged", value: formatTime(workspace.mergedAtMs) },
-          { label: "Discarded", value: formatTime(workspace.discardedAtMs) },
-        ]}
-      />
+      <div className="workspace-meta-strip">
+        <StatusPill tone={toneForStatus(workspace.status)}>{workspace.status}</StatusPill>
+        <StatusPill tone="neutral">{workspace.mode}</StatusPill>
+        <StatusPill tone={workspace.diffSupported ? "info" : "neutral"}>
+          {workspace.diffSupported ? "diffable" : "no diff"}
+        </StatusPill>
+        <StatusPill tone={workspace.mergeSupported ? "success" : "neutral"}>
+          {workspace.mergeSupported ? "mergeable" : "merge blocked"}
+        </StatusPill>
+      </div>
+      <div className="workspace-meta-grid">
+        <MetadataItem label="Owner" value={`${workspace.ownerKind}:${workspace.key}`} />
+        <MetadataItem
+          label="Run"
+          value={
+            <a className="inline-link mono" href={`#/runs/${encodeURIComponent(workspace.runId)}`}>
+              {workspace.runId}
+            </a>
+          }
+        />
+        <MetadataItem label="Updated" value={formatTime(workspace.updatedAtMs)} />
+        <MetadataItem label="Source" value={workspace.sourceKind ?? "-"} />
+        <MetadataItem label="Base" value={stringField(workspace, "baseCommit")} mono />
+        <MetadataItem
+          label="Lifecycle"
+          value={`merged ${formatTime(workspace.mergedAtMs)} / discarded ${formatTime(
+            workspace.discardedAtMs,
+          )}`}
+        />
+        <MetadataItem
+          label="Source path"
+          value={workspace.sourcePath ?? workspace.sourceUri ?? "-"}
+          mono
+          wide
+        />
+        <MetadataItem label="Workspace path" value={workspace.workspacePath} mono wide />
+      </div>
+    </section>
+  );
+}
+
+function MetadataItem({
+  label,
+  value,
+  mono = false,
+  wide = false,
+}: {
+  label: string;
+  value: ReactNode;
+  mono?: boolean;
+  wide?: boolean;
+}) {
+  return (
+    <div className={`workspace-meta-item ${wide ? "workspace-meta-wide" : ""}`}>
+      <span>{label}</span>
+      <strong className={mono ? "mono" : undefined}>{value}</strong>
+    </div>
+  );
+}
+
+function WorkspaceCommands({
+  workspace,
+  mutationAuthorized,
+}: {
+  workspace: RunWorkspaceView;
+  mutationAuthorized: boolean;
+}) {
+  return (
+    <section className="panel workspace-command-panel">
+      <div className="panel-heading">
+        <h2>CLI Equivalents</h2>
+        <button
+          className="inline-link workspace-copy-id"
+          type="button"
+          onClick={() => void copyTextToClipboard(workspace.workspaceId)}
+        >
+          <Copy size={13} />
+          Copy workspace id
+        </button>
+      </div>
+      <div className="command-copy-grid">
+        <CommandCopyButton
+          label="Copy show command"
+          command={`keel workspace show ${workspace.runId} ${workspace.workspaceId}`}
+        />
+        <CommandCopyButton
+          label="Copy diff command"
+          command={`keel workspace diff ${workspace.runId} ${workspace.workspaceId}`}
+          detail={workspace.diffSupported ? null : "This workspace does not support diff."}
+        />
+        <CommandCopyButton
+          label="Copy merge command"
+          command={`keel workspace merge ${workspace.runId} ${workspace.workspaceId}`}
+          detail={
+            !mutationAuthorized
+              ? "Requires admin authority."
+              : !workspace.mergeSupported
+                ? "Workspace is not currently mergeable."
+                : null
+          }
+        />
+        <CommandCopyButton
+          label="Copy discard command"
+          command={`keel workspace discard ${workspace.runId} ${workspace.workspaceId}`}
+          detail={
+            !mutationAuthorized
+              ? "Requires admin authority."
+              : !workspace.discardSupported
+                ? "Workspace is not currently discardable."
+                : null
+          }
+        />
+        <CommandCopyButton label="Copy GC command" command="keel workspace gc" />
+      </div>
     </section>
   );
 }
@@ -440,6 +541,18 @@ function workspaceKey(workspace: RunWorkspaceView): string {
   return `${workspace.runId}:${workspace.workspaceId}`;
 }
 
+function workspaceSummary(workspaces: RunWorkspaceView[]): {
+  total: number;
+  review: number;
+  diffable: number;
+} {
+  return {
+    total: workspaces.length,
+    review: workspaces.filter((workspace) => workspace.status === "pending_review").length,
+    diffable: workspaces.filter((workspace) => workspace.diffSupported).length,
+  };
+}
+
 function diffChanges(diff: RunWorkspaceDiff): Array<{
   path: string;
   status: "added" | "modified" | "deleted" | "type_changed";
@@ -478,11 +591,13 @@ function workspaceMutationTitle(
   mutationAuthorized: boolean,
   action: "merge" | "discard",
 ): string {
-  if (!mutationAuthorized) return "Requires admin authority";
+  if (!mutationAuthorized) {
+    return `Requires admin authority. CLI: keel workspace ${action} ${workspace.runId} ${workspace.workspaceId}`;
+  }
   const supported = action === "merge" ? workspace.mergeSupported : workspace.discardSupported;
   if (!supported)
     return `Workspace is not currently ${action === "merge" ? "mergeable" : "discardable"}`;
-  return `${titleCase(action)} retained workspace ${workspace.workspaceId}`;
+  return `${titleCase(action)} retained workspace ${workspace.workspaceId}. CLI: keel workspace ${action} ${workspace.runId} ${workspace.workspaceId}`;
 }
 
 function workspaceConfirmation(action: "merge" | "discard", workspace: RunWorkspaceView): string {

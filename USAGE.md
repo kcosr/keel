@@ -232,13 +232,17 @@ frames. The approvals view lists current workflow-authored `ctx.human` gates and
 uses admin-authorized `decideApproval` calls for approve/deny decisions. The
 workspaces view lists retained run workspaces, loads detail/diff through daemon
 RPC, and requires admin authority plus browser confirmation for merge, discard,
-and workspace GC. The workflows view uses saved-workflow RPCs for list, detail,
-exact stored source, and launch without browser-supplied raw secrets. Schedules
-are read-only and use `listSchedules`/`getSchedule` including source when
-available. Profiles and settings expose current catalog list/get/check state;
-set/delete/unset controls are not part of the browser UI at this baseline. The
-system view uses only `/health` and `/api/system`; it does not infer journal
-paths, schema versions, systemd state, daemon logs, or restart controls.
+and workspace GC. Mutating browser controls expose the required authority and
+copyable CLI equivalents; disabled controls explain the missing authority or
+unsupported workspace state. Tables support row selection with Enter/Space and
+Arrow/Home/End navigation where a row action exists. The workflows view uses
+saved-workflow RPCs for list, detail, exact stored source, and launch without
+browser-supplied raw secrets. Schedules are read-only and use
+`listSchedules`/`getSchedule` including source when available. Profiles and
+settings expose current catalog list/get/check state; set/delete/unset controls
+are not part of the browser UI at this baseline. The system view uses only
+`/health` and `/api/system`; it does not infer journal paths, schema versions,
+systemd state, daemon logs, or restart controls.
 
 Do not expose this server remotely by default. Binding a non-local host is an
 explicit local operator choice; TLS, CORS, browser sessions, and remote exposure
@@ -259,6 +263,9 @@ Routes:
   `from=now`, `afterSeq=<n>`, `tail=<n>`, or `cursor=<json>`.
 - `GET /api/runs`, `/api/runs/:runId`, `/api/approvals`, `/api/workspaces`, and
   `/api/system` return server-side projections layered on daemon RPC calls.
+- The workspace browser projection currently aggregates per-run workspace RPCs
+  across known runs. Very large journals may prefer `keel workspace ...`
+  commands until a first-class aggregate workspace projection is added.
 - Saved workflow, schedule, profile, and setting browser views call current
   daemon RPC methods through `POST /rpc`; there are no fixture-backed web data
   paths.

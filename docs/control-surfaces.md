@@ -125,9 +125,12 @@ decisions, workspace diff/review controls, saved workflow list/detail/source/run
 read-only schedule list/detail/source, profile and setting list/get/check
 inspection, and system views. Browser mutations remain disabled or deferred
 unless a screen explicitly wires the operation through bearer-authorized `/rpc`
-calls. The system view uses only `/health` and `/api/system`; daemon internals
-such as journal paths, schema versions, systemd state, logs, and restart
-controls are not inferred.
+calls. Wired mutation controls show the required authority and copyable CLI
+equivalent; disabled controls explain the missing authority or unsupported
+resource state. The current workspace browser projection fans out over per-run
+workspace RPCs instead of a daemon-native aggregate. The system view uses only
+`/health` and `/api/system`; daemon internals such as journal paths, schema
+versions, systemd state, logs, and restart controls are not inferred.
 
 ## Current Matrix
 

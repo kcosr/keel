@@ -6,6 +6,7 @@ import type { EventCursorInput, EventStreamFrame, NodeView, RunDetailResponse } 
 import { CodeViewer } from "../components/code-viewer";
 import {
   Button,
+  CommandCopyButton,
   EmptyState,
   ErrorState,
   JsonBlock,
@@ -15,6 +16,7 @@ import {
   StatusPill,
   Tabs,
   type Tone,
+  copyTextToClipboard,
   formatDuration,
   formatTime,
   toneForStatus,
@@ -374,14 +376,18 @@ function ApprovalPanel({
           ]}
         />
         <div className="command-copy-grid">
-          <button type="button" onClick={() => copyText(approve)}>
-            <span>Copy approve command</span>
-            <code>{approve}</code>
-          </button>
-          <button type="button" onClick={() => copyText(deny)}>
-            <span>Copy deny command</span>
-            <code>{deny}</code>
-          </button>
+          <CommandCopyButton
+            label="Copy approve command"
+            command={approve}
+            disabled={gate === "<gate>"}
+            detail={gate === "<gate>" ? "Gate key unavailable" : null}
+          />
+          <CommandCopyButton
+            label="Copy deny command"
+            command={deny}
+            disabled={gate === "<gate>"}
+            detail={gate === "<gate>" ? "Gate key unavailable" : null}
+          />
         </div>
         <textarea
           className="field-textarea"
@@ -529,9 +535,13 @@ function RunDetailInspector({
                   className="command-row"
                   key={command.name}
                   type="button"
-                  onClick={() => copyText(cliForCommand(command.name, run.runId))}
+                  title={`Copy ${cliForCommand(command.name, run.runId)}`}
+                  onClick={() => void copyTextToClipboard(cliForCommand(command.name, run.runId))}
                 >
-                  <span>{command.name}</span>
+                  <span className="command-row-main">
+                    <strong>{command.name}</strong>
+                    <code>{cliForCommand(command.name, run.runId)}</code>
+                  </span>
                   <StatusPill tone="info">{command.requiredAuthority}</StatusPill>
                 </button>
               ))}
@@ -786,8 +796,4 @@ function cliForCommand(command: string, runId: string): string {
   if (command === "viewSource") return `keel workflow source --run ${runId}`;
   if (command === "decideApproval") return `keel approve ${runId} <gate>`;
   return `keel ${command} ${runId}`;
-}
-
-function copyText(value: string): void {
-  void navigator.clipboard?.writeText(value).catch(() => undefined);
 }

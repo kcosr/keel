@@ -5,6 +5,7 @@ import type { KeelWebClient } from "../api/client";
 import type { ApprovalView } from "../api/types";
 import {
   Button,
+  CommandCopyButton,
   EmptyState,
   ErrorState,
   LoadingState,
@@ -89,14 +90,24 @@ export function ApprovalsScreen({
                 <dd className="mono">{selected.gateId ?? "-"}</dd>
               </div>
               <div className="kv-row">
-                <dt>CLI</dt>
-                <dd className="mono">{selected.cli ?? "-"}</dd>
-              </div>
-              <div className="kv-row">
-                <dt>Deny CLI</dt>
-                <dd className="mono">{denyCli(selected) ?? "-"}</dd>
+                <dt>Authority</dt>
+                <dd>{selected.requiredAuthority}</dd>
               </div>
             </dl>
+            <div className="command-copy-grid">
+              <CommandCopyButton
+                label="Copy approve command"
+                command={selected.cli ?? approveCliFallback(selected)}
+                disabled={!selected.gateId}
+                detail={selected.gateId ? null : "Gate key unavailable"}
+              />
+              <CommandCopyButton
+                label="Copy deny command"
+                command={denyCli(selected) ?? `keel deny ${selected.runId} <gate>`}
+                disabled={!selected.gateId}
+                detail={selected.gateId ? null : "Gate key unavailable"}
+              />
+            </div>
             <textarea
               className="field-textarea"
               rows={3}
@@ -106,7 +117,9 @@ export function ApprovalsScreen({
               aria-label="Decision note"
             />
             {!decisionAuthorized ? (
-              <p className="muted">Requires admin authority. Use the CLI command shown above.</p>
+              <p className="muted">
+                Requires admin authority. Use the copied CLI equivalent with an admin credential.
+              </p>
             ) : null}
             {selected.gateId ? null : (
               <p className="muted">The daemon did not expose a gate key for this approval.</p>
@@ -148,6 +161,12 @@ function approvalKey(approval: ApprovalView): string {
 
 function denyCli(approval: ApprovalView): string | null {
   return approval.gateId ? `keel deny ${approval.runId} ${approval.gateId}` : null;
+}
+
+function approveCliFallback(approval: ApprovalView): string {
+  return approval.gateId
+    ? `keel approve ${approval.runId} ${approval.gateId}`
+    : `keel approve ${approval.runId} <gate>`;
 }
 
 function decisionTitle(canDecide: boolean, action: "approve" | "deny"): string {

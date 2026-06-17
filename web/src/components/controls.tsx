@@ -1,4 +1,5 @@
-import { AlertCircle, Loader2, type LucideIcon } from "lucide-react";
+import { AlertCircle, Check, Copy, Loader2, type LucideIcon } from "lucide-react";
+import { useState } from "react";
 import type { ReactNode } from "react";
 
 export type Tone = "success" | "running" | "waiting" | "failed" | "info" | "neutral" | "future";
@@ -89,6 +90,51 @@ export function IconButton({
       <Icon size={16} />
     </button>
   );
+}
+
+export function CommandCopyButton({
+  label,
+  command,
+  detail,
+  disabled = false,
+}: {
+  label: string;
+  command: string;
+  detail?: ReactNode;
+  disabled?: boolean;
+}) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      className="command-copy-button"
+      type="button"
+      disabled={disabled}
+      title={disabled ? undefined : `Copy ${label}`}
+      onClick={async () => {
+        const ok = await copyTextToClipboard(command);
+        if (!ok) return;
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1400);
+      }}
+    >
+      <span className="command-copy-label">
+        {copied ? <Check size={14} /> : <Copy size={14} />}
+        <span>{copied ? "Copied" : label}</span>
+      </span>
+      <code>{command}</code>
+      {detail ? <small>{detail}</small> : null}
+    </button>
+  );
+}
+
+export async function copyTextToClipboard(value: string): Promise<boolean> {
+  if (!navigator.clipboard) return false;
+  try {
+    await navigator.clipboard.writeText(value);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function TextInput(props: React.InputHTMLAttributes<HTMLInputElement>) {

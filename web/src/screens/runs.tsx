@@ -11,6 +11,7 @@ import {
   StatusPill,
   TextInput,
   Toggle,
+  copyTextToClipboard,
   formatDuration,
   formatTime,
   toneForStatus,
@@ -355,6 +356,14 @@ function columns(): Array<Column<RunListItem>> {
       ),
     },
     {
+      key: "workspaces",
+      header: "Ws",
+      width: "58px",
+      className: "run-table-compact-hidden",
+      align: "right",
+      render: (run) => run.workspaceSummary.count,
+    },
+    {
       key: "age",
       header: "Duration",
       width: "96px",
@@ -374,7 +383,7 @@ function columns(): Array<Column<RunListItem>> {
             title="Copy run id"
             onClick={(event) => {
               event.stopPropagation();
-              copyText(run.runId);
+              void copyTextToClipboard(run.runId);
             }}
           >
             <Copy size={14} />
@@ -474,5 +483,5 @@ function navigateToRun(runId: string): void {
 }
 
 function copyText(value: string): void {
-  void navigator.clipboard?.writeText(value).catch(() => undefined);
+  void copyTextToClipboard(value);
 }

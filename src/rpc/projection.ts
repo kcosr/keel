@@ -4,6 +4,7 @@
 // MCP) consumes THIS — no surface reconstructs run state independently. Building
 // it here prevents per-surface drift.
 
+import type { AgentConcurrencyWaitSnapshot } from "../agents/concurrency.ts";
 import type { JournalStore } from "../journal/store.ts";
 import type { EffectType, JournalStatus, RunStatus, ScheduleRow } from "../journal/types.ts";
 import { isRunOwnerStale, ownerStaleWindowMs } from "../kernel/liveness.ts";
@@ -332,6 +333,7 @@ function resultJsonForReport(
 export type BlockageReason =
   | "none"
   | "running"
+  | "agent_concurrency"
   | "stalled_no_heartbeat"
   | "waiting_human"
   | "waiting_signal"
@@ -351,6 +353,7 @@ export interface Blockage {
   blockedOn: { stableKey: string; since: number } | null;
   context: string;
   interrupted?: InterruptionBlockageDetails;
+  agentConcurrency?: AgentConcurrencyWaitSnapshot;
 }
 
 export function isVisibleBlockage(blockage: Blockage | null | undefined): blockage is Blockage {

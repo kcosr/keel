@@ -4,6 +4,10 @@
 // this same logic behind a Unix socket; clients see the identical KeelApi.
 
 import { existsSync } from "node:fs";
+import type {
+  AgentConcurrencyLimiter,
+  AgentConcurrencyWaitSnapshot,
+} from "../agents/concurrency.ts";
 import {
   type AgentProfileView,
   agentProfileConfigHash,
@@ -81,6 +85,7 @@ import {
   buildRunReport,
   buildScheduleView,
   getBlockage,
+  isVisibleBlockage,
   listRunSummaries,
   listScheduleSummaries,
 } from "./projection.ts";
@@ -96,6 +101,21 @@ const WORKSPACE_DISCARDABLE_STATUSES = new Set<AgentWorkspaceRow["status"]>([
   "abandoned",
 ]);
 
+function agentConcurrencyBlockage(queued: AgentConcurrencyWaitSnapshot): Blockage {
+  const totalLimit = concurrencyLimitText(queued.total.limit);
+  const providerLimit = concurrencyLimitText(queued.providerScope.limit);
+  return {
+    reason: "agent_concurrency",
+    blockedOn: { stableKey: queued.stableKey, since: queued.queuedAtMs },
+    context: `agent ${queued.stableKey} waiting ${queued.queuedForMs}ms for ${queued.provider} capacity (provider ${queued.providerScope.active}/${providerLimit}, total ${queued.total.active}/${totalLimit})`,
+    agentConcurrency: queued,
+  };
+}
+
+function concurrencyLimitText(limit: AgentConcurrencyWaitSnapshot["total"]["limit"]): string {
+  return limit === "unlimited" ? "unlimited" : String(limit);
+}
+
 export class InProcessKeel implements KeelApi {
   private readonly running = new Map<string, Promise<RunHandle<unknown>>>();
   private readonly unsubscribeStoreEvents: () => void;
@@ -108,6 +128,7 @@ export class InProcessKeel implements KeelApi {
       agents?: AgentProviderRegistry;
       clock?: () => number;
       ownerStaleWindowMs?: number;
+      agentConcurrency?: AgentConcurrencyLimiter;
     } = {},
   ) {
     this.kernel.setLiveEventSink((runId, type, payload, atMs) =>
@@ -408,21 +429,24 @@ export class InProcessKeel implements KeelApi {
   }
 
   getRunReport(runId: string): RunReport | null {
-    return buildRunReport(this.store, runId, {
+    const report = buildRunReport(this.store, runId, {
       nowMs: this.opts.clock?.() ?? Date.now(),
       ...(this.opts.ownerStaleWindowMs !== undefined
         ? { ownerStaleWindowMs: this.opts.ownerStaleWindowMs }
         : {}),
     });
+    if (!report || report.blockage) return report;
+    const blockage = this.getBlockage(runId);
+    if (isVisibleBlockage(blockage)) report.blockage = blockage;
+    return report;
   }
 
   getBlockage(runId: string): Blockage {
-    return getBlockage(
-      this.store,
-      runId,
-      this.opts.clock?.() ?? Date.now(),
-      this.opts.ownerStaleWindowMs,
-    );
+    const nowMs = this.opts.clock?.() ?? Date.now();
+    const blockage = getBlockage(this.store, runId, nowMs, this.opts.ownerStaleWindowMs);
+    if (blockage.reason !== "running") return blockage;
+    const queued = this.opts.agentConcurrency?.queuedWaitForRun(runId, nowMs);
+    return queued ? agentConcurrencyBlockage(queued) : blockage;
   }
 
   listRuns(): RunSummary[] {

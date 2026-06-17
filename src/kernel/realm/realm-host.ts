@@ -9,6 +9,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import type { AgentConcurrencyLimiter } from "../../agents/concurrency.ts";
 import {
   type NormalizedAgentEnvironment,
   hasAgentEnvironment,
@@ -136,6 +137,8 @@ export interface RealmKernelOptions {
   definitionCacheRoot?: string;
   /** Push a live, non-durable event frame to current watchers. */
   liveEvent?: CtxHost["liveEvent"];
+  /** Daemon-local backpressure for provider calls. */
+  agentConcurrency?: AgentConcurrencyLimiter;
 }
 
 const TERMINAL: ReadonlySet<RunStatus> = new Set<RunStatus>([
@@ -160,6 +163,13 @@ class RunInterruptedError extends Error {
   constructor(runId: string) {
     super(`run ${runId} interrupted`);
     this.name = "RunInterruptedError";
+  }
+}
+
+class RunSettledError extends Error {
+  constructor(runId: string) {
+    super(`run ${runId} settled`);
+    this.name = "RunSettledError";
   }
 }
 
@@ -283,6 +293,7 @@ export class RealmKernel {
   private readonly lintEnabled: boolean;
   private readonly registry?: AgentProviderRegistry;
   private readonly definitionCacheRoot: string;
+  private readonly agentConcurrency?: AgentConcurrencyLimiter;
   private readonly activeSessionRuns = new Set<string>();
   private readonly activeWorkers = new Set<Worker>();
   private readonly activeExecutions = new Map<string, Set<ActiveExecution>>();
@@ -299,6 +310,7 @@ export class RealmKernel {
     if (opts.onStepExecute) this.onStepExecute = opts.onStepExecute;
     this.lintEnabled = opts.lint ?? true;
     this.definitionCacheRoot = opts.definitionCacheRoot ?? defaultDefinitionCacheRoot();
+    if (opts.agentConcurrency) this.agentConcurrency = opts.agentConcurrency;
     if (opts.agents) this.registry = opts.agents;
     if (opts.secrets) this.secrets = opts.secrets;
     if (opts.workspaceStore) this.workspaceStore = opts.workspaceStore;
@@ -2138,6 +2150,21 @@ export class RealmKernel {
     return this.store.getRun(runId)?.status === "interrupted";
   }
 
+  private async withAgentConcurrency<T>(
+    runId: string,
+    stableKey: string,
+    provider: string,
+    signal: AbortSignal,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const permit = await this.agentConcurrency?.acquire({ runId, stableKey, provider, signal });
+    try {
+      return await fn();
+    } finally {
+      permit?.release();
+    }
+  }
+
   private execute<O>(runId: string, workflowUrl: string, input: unknown): Promise<RunHandle<O>> {
     let sessionRunGuarded = false;
     if (this.store.hasAgentSessions(runId)) {
@@ -2173,6 +2200,9 @@ export class RealmKernel {
       const finish = (fn: () => void): void => {
         if (settled) return;
         settled = true;
+        if (!runAbortController.signal.aborted) {
+          runAbortController.abort(new RunSettledError(runId));
+        }
         if (sessionRunGuarded) this.activeSessionRuns.delete(runId);
         this.activeWorkers.delete(worker);
         unregisterActive();
@@ -2348,6 +2378,22 @@ export class RealmKernel {
                 reply(m.id, { ok: false, error: { name: "Error", message: err.message } });
                 break;
               }
+              let provider: AgentProvider;
+              try {
+                provider = registry.get(m.provider);
+              } catch (err) {
+                engine.failStep(
+                  m.key,
+                  begun.attempt,
+                  m.version,
+                  begun.inputHash,
+                  begun.startedAtMs,
+                  err,
+                  "effectful",
+                );
+                reply(m.id, { ok: false, error: serializeError(err) });
+                break;
+              }
               // §11: an explicitly isolated agent edits in a git worktree;
               // secrets are injected as invocation env from the side channel.
               const caps = m.capabilities ?? undefined;
@@ -2392,53 +2438,60 @@ export class RealmKernel {
 
               void (async () => {
                 try {
-                  const execution = await runAgentWithStall(
-                    (signal) =>
-                      executeAgent(
-                        registry.get(m.provider),
+                  const execution = await this.withAgentConcurrency(
+                    runId,
+                    m.key,
+                    m.provider,
+                    runAbortController.signal,
+                    () =>
+                      runAgentWithStall(
+                        (signal) =>
+                          executeAgent(
+                            provider,
+                            {
+                              key: m.key,
+                              provider: m.provider,
+                              prompt: m.prompt,
+                              ...(providerConfig !== undefined ? { providerConfig } : {}),
+                              ...(m.model ? { model: m.model } : {}),
+                              toolPolicy: m.toolPolicy,
+                              allowTools: m.allowTools,
+                              denyTools: m.denyTools,
+                              ...(m.reasoning ? { reasoning: m.reasoning } : {}),
+                              ...(caps ? { capabilities: caps } : {}),
+                              cwd: workspace.cwd,
+                              ...(invocationEnv !== undefined ? { env: invocationEnv } : {}),
+                              ...(begun.resumeToken ? { resumeToken: begun.resumeToken } : {}),
+                              abortSignal: signal,
+                              timeoutMs: m.timeoutMs ?? settings.agentDefaultTimeoutMs,
+                            },
+                            {
+                              onSessionToken: (tok) => {
+                                if (!settled && !this.isRunInterrupted(runId)) {
+                                  engine.recordSessionToken(m.key, begun.attempt, tok);
+                                }
+                              },
+                              // Tool calls/results are durably appended here before
+                              // returning to the adapter; text/reasoning frames are live-only.
+                              onEvent: (ev) => {
+                                if (!settled && !this.isRunInterrupted(runId)) {
+                                  this.emitAgentTrace(engine, m.key, begun.attempt, ev);
+                                }
+                              },
+                            },
+                            {
+                              ...(m.jsonSchema != null ? { jsonSchema: m.jsonSchema } : {}),
+                              maxRetries: m.maxRetries,
+                              ...(m.lenient ? { coerce: true } : {}),
+                            },
+                          ),
                         {
-                          key: m.key,
-                          provider: m.provider,
-                          prompt: m.prompt,
-                          ...(providerConfig !== undefined ? { providerConfig } : {}),
-                          ...(m.model ? { model: m.model } : {}),
-                          toolPolicy: m.toolPolicy,
-                          allowTools: m.allowTools,
-                          denyTools: m.denyTools,
-                          ...(m.reasoning ? { reasoning: m.reasoning } : {}),
-                          ...(caps ? { capabilities: caps } : {}),
-                          cwd: workspace.cwd,
-                          ...(invocationEnv !== undefined ? { env: invocationEnv } : {}),
-                          ...(begun.resumeToken ? { resumeToken: begun.resumeToken } : {}),
-                          abortSignal: signal,
                           timeoutMs: m.timeoutMs ?? settings.agentDefaultTimeoutMs,
-                        },
-                        {
-                          onSessionToken: (tok) => {
-                            if (!settled && !this.isRunInterrupted(runId)) {
-                              engine.recordSessionToken(m.key, begun.attempt, tok);
-                            }
-                          },
-                          // Tool calls/results are durably appended here before
-                          // returning to the adapter; text/reasoning frames are live-only.
-                          onEvent: (ev) => {
-                            if (!settled && !this.isRunInterrupted(runId)) {
-                              this.emitAgentTrace(engine, m.key, begun.attempt, ev);
-                            }
-                          },
-                        },
-                        {
-                          ...(m.jsonSchema != null ? { jsonSchema: m.jsonSchema } : {}),
-                          maxRetries: m.maxRetries,
-                          ...(m.lenient ? { coerce: true } : {}),
+                          stallRetries: m.stallRetries ?? settings.agentDefaultStallRetries,
+                          signal: runAbortController.signal,
+                          onStall: (a) => engine.emit("agent.stalled", { key: m.key, attempt: a }),
                         },
                       ),
-                    {
-                      timeoutMs: m.timeoutMs ?? settings.agentDefaultTimeoutMs,
-                      stallRetries: m.stallRetries ?? settings.agentDefaultStallRetries,
-                      signal: runAbortController.signal,
-                      onStall: (a) => engine.emit("agent.stalled", { key: m.key, attempt: a }),
-                    },
                   );
                   if (settled || this.isRunInterrupted(runId)) {
                     this.releaseWorkspaceHolder(runId, workspace.workspaceId, workspaceHolder, {
@@ -2615,59 +2668,66 @@ export class RealmKernel {
 
               void (async () => {
                 try {
-                  const execution = await runAgentWithStall(
-                    (signal) =>
-                      executeAgent(
-                        provider,
+                  const execution = await this.withAgentConcurrency(
+                    runId,
+                    m.stableKey,
+                    m.provider,
+                    runAbortController.signal,
+                    () =>
+                      runAgentWithStall(
+                        (signal) =>
+                          executeAgent(
+                            provider,
+                            {
+                              key: m.stableKey,
+                              provider: m.provider,
+                              prompt: m.prompt,
+                              ...(providerConfig !== undefined ? { providerConfig } : {}),
+                              ...(m.model ? { model: m.model } : {}),
+                              toolPolicy: m.toolPolicy,
+                              allowTools: m.allowTools,
+                              denyTools: m.denyTools,
+                              ...(m.reasoning ? { reasoning: m.reasoning } : {}),
+                              ...(caps ? { capabilities: caps } : {}),
+                              cwd: begun.cwd,
+                              ...(invocationEnv !== undefined ? { env: invocationEnv } : {}),
+                              ...(begun.resumeToken ? { resumeToken: begun.resumeToken } : {}),
+                              abortSignal: signal,
+                              timeoutMs: m.timeoutMs ?? settings.agentDefaultTimeoutMs,
+                            },
+                            {
+                              onSessionToken: (tok) => {
+                                if (!settled && !this.isRunInterrupted(runId)) {
+                                  this.recordAgentSessionToken(
+                                    engine,
+                                    runId,
+                                    m,
+                                    begun.attempt,
+                                    tok,
+                                    begun.resumeToken,
+                                  );
+                                }
+                              },
+                              onEvent: (ev) => {
+                                if (!settled && !this.isRunInterrupted(runId)) {
+                                  this.emitAgentTrace(engine, m.stableKey, begun.attempt, ev);
+                                }
+                              },
+                            },
+                            {
+                              ...(m.jsonSchema != null ? { jsonSchema: m.jsonSchema } : {}),
+                              maxRetries: m.maxRetries,
+                              ...(m.lenient ? { coerce: true } : {}),
+                            },
+                          ),
                         {
-                          key: m.stableKey,
-                          provider: m.provider,
-                          prompt: m.prompt,
-                          ...(providerConfig !== undefined ? { providerConfig } : {}),
-                          ...(m.model ? { model: m.model } : {}),
-                          toolPolicy: m.toolPolicy,
-                          allowTools: m.allowTools,
-                          denyTools: m.denyTools,
-                          ...(m.reasoning ? { reasoning: m.reasoning } : {}),
-                          ...(caps ? { capabilities: caps } : {}),
-                          cwd: begun.cwd,
-                          ...(invocationEnv !== undefined ? { env: invocationEnv } : {}),
-                          ...(begun.resumeToken ? { resumeToken: begun.resumeToken } : {}),
-                          abortSignal: signal,
                           timeoutMs: m.timeoutMs ?? settings.agentDefaultTimeoutMs,
-                        },
-                        {
-                          onSessionToken: (tok) => {
-                            if (!settled && !this.isRunInterrupted(runId)) {
-                              this.recordAgentSessionToken(
-                                engine,
-                                runId,
-                                m,
-                                begun.attempt,
-                                tok,
-                                begun.resumeToken,
-                              );
-                            }
-                          },
-                          onEvent: (ev) => {
-                            if (!settled && !this.isRunInterrupted(runId)) {
-                              this.emitAgentTrace(engine, m.stableKey, begun.attempt, ev);
-                            }
-                          },
-                        },
-                        {
-                          ...(m.jsonSchema != null ? { jsonSchema: m.jsonSchema } : {}),
-                          maxRetries: m.maxRetries,
-                          ...(m.lenient ? { coerce: true } : {}),
+                          stallRetries: m.stallRetries ?? settings.agentDefaultStallRetries,
+                          signal: runAbortController.signal,
+                          onStall: (a) =>
+                            engine.emit("agent.stalled", { key: m.stableKey, attempt: a }),
                         },
                       ),
-                    {
-                      timeoutMs: m.timeoutMs ?? settings.agentDefaultTimeoutMs,
-                      stallRetries: m.stallRetries ?? settings.agentDefaultStallRetries,
-                      signal: runAbortController.signal,
-                      onStall: (a) =>
-                        engine.emit("agent.stalled", { key: m.stableKey, attempt: a }),
-                    },
                   );
                   if (settled || this.isRunInterrupted(runId)) {
                     this.releaseWorkspaceHolder(

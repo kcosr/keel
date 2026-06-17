@@ -1,5 +1,10 @@
 import { CODEX_CONNECT_TIMEOUT_MS, CODEX_RPC_RESPONSE_TIMEOUT_MS } from "../agents/codex.ts";
 import {
+  type AgentConcurrencyLimit,
+  DEFAULT_AGENT_MAX_CONCURRENT_BY_PROVIDER,
+  DEFAULT_AGENT_MAX_CONCURRENT_TOTAL,
+} from "../agents/concurrency.ts";
+import {
   DEFAULT_AGENT_LENIENT,
   DEFAULT_AGENT_ON_FAILURE,
   DEFAULT_AGENT_TIMEOUT_MS,
@@ -53,6 +58,14 @@ export interface WorkflowVisibleSettings {
   agentDefaultMaxRetries: number;
   agentDefaultLenient: boolean;
   agentDefaultOnFailure: "throw" | "null";
+}
+
+export interface OperationalSettings {
+  codexRpcTimeoutMs: number;
+  codexConnectTimeoutMs: number;
+  workflowDefinitionGcTtlMs: number;
+  agentMaxConcurrentTotal: AgentConcurrencyLimit;
+  agentMaxConcurrentByProvider: Record<string, AgentConcurrencyLimit>;
 }
 
 interface SettingDefinition {
@@ -134,6 +147,24 @@ const SETTINGS: SettingDefinition[] = [
     description:
       "Default TTL used by workflow definition garbage collection when the request does not supply ttlMs.",
     validate: integerValidator(">= 0", (n) => n >= 0),
+  },
+  {
+    key: "agent.maxConcurrentTotal",
+    class: "daemon-operational",
+    defaultValue: DEFAULT_AGENT_MAX_CONCURRENT_TOTAL,
+    readOnly: false,
+    description:
+      'Maximum number of concurrent daemon-owned agent calls across all providers, or "unlimited". Restart the daemon for changes to take effect.',
+    validate: concurrencyLimitValidator,
+  },
+  {
+    key: "agent.maxConcurrentByProvider",
+    class: "daemon-operational",
+    defaultValue: DEFAULT_AGENT_MAX_CONCURRENT_BY_PROVIDER,
+    readOnly: false,
+    description:
+      'Provider-specific concurrent daemon-owned agent call limits as a JSON object, e.g. {"claude":1}, with values as positive integers or "unlimited". Restart the daemon for changes to take effect.',
+    validate: providerConcurrencyLimitsValidator,
   },
 ];
 
@@ -293,11 +324,7 @@ export function effectiveSettingsHash(rows: RunSettingSnapshotRowLike[]): string
   );
 }
 
-export function effectiveOperationalSettings(rows: DaemonSettingCatalogRow[]): {
-  codexRpcTimeoutMs: number;
-  codexConnectTimeoutMs: number;
-  workflowDefinitionGcTtlMs: number;
-} {
+export function effectiveOperationalSettings(rows: DaemonSettingCatalogRow[]): OperationalSettings {
   const view = (key: string) => {
     const row = rows.find((candidate) => candidate.key === key);
     const definition = getSettingDefinition(key);
@@ -312,6 +339,11 @@ export function effectiveOperationalSettings(rows: DaemonSettingCatalogRow[]): {
     codexRpcTimeoutMs: view("codex.rpcTimeoutMs") as number,
     codexConnectTimeoutMs: view("codex.connectTimeoutMs") as number,
     workflowDefinitionGcTtlMs: view("workflowDefinition.gcTtlMs") as number,
+    agentMaxConcurrentTotal: view("agent.maxConcurrentTotal") as AgentConcurrencyLimit,
+    agentMaxConcurrentByProvider: view("agent.maxConcurrentByProvider") as Record<
+      string,
+      AgentConcurrencyLimit
+    >,
   };
 }
 
@@ -362,6 +394,54 @@ function integerValidator(
     }
     return [];
   };
+}
+
+function concurrencyLimitValidator(value: unknown): SettingsDiagnostic[] {
+  if (value === "unlimited") return [];
+  if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) return [];
+  return [
+    {
+      level: "error",
+      path: "value",
+      message: 'expected positive integer or "unlimited"',
+    },
+  ];
+}
+
+function providerConcurrencyLimitsValidator(value: unknown): SettingsDiagnostic[] {
+  if (!isPlainObject(value)) {
+    return [
+      {
+        level: "error",
+        path: "value",
+        message: 'expected object mapping provider names to positive integers or "unlimited"',
+      },
+    ];
+  }
+  const diagnostics: SettingsDiagnostic[] = [];
+  for (const [provider, limit] of Object.entries(value)) {
+    if (provider.trim().length === 0) {
+      diagnostics.push({
+        level: "error",
+        path: "value",
+        message: "provider name must not be empty",
+      });
+      continue;
+    }
+    for (const diagnostic of concurrencyLimitValidator(limit)) {
+      diagnostics.push({
+        ...diagnostic,
+        path: `value.${provider}`,
+      });
+    }
+  }
+  return diagnostics;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }
 
 function booleanValidator(value: unknown): SettingsDiagnostic[] {

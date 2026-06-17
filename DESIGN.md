@@ -1118,15 +1118,26 @@ can retry according to the agent policy; slow but healthy provider work remains
 visible through durable node `startedAtMs`, which renderers can use to derive
 pending age without treating it as a daemon-owner failure.
 
+Daemon-owned agent calls also pass through an in-memory operational concurrency
+limiter before provider execution. `agent.maxConcurrentTotal` and
+`agent.maxConcurrentByProvider` are daemon-operational settings read at daemon
+startup; they do not enter workflow identity or run setting snapshots. A queued
+`ctx.agent` call or `ctx.agentSession().turn` keeps the run `running`, waits for
+capacity without consuming the agent stall timeout, and resumes automatically
+when a permit is released. The queue is not durable: after daemon restart,
+normal replay reaches the pending effect and queues it again if the live limits
+still require that.
+
 The as-built API method is **`getBlockage(runId)`** (KeelApi), returning
 `{ reason, blockedOn, context }`. `running` is a diagnostic state and is not
 rendered as a visible blockage by reports, TUI detail, or web projections.
-Actionable/current blockage reasons include `waiting_human`, `waiting_signal`,
-`waiting_timer`, `stalled_no_heartbeat`, and `interrupted`; `waiting_human`
-surfaces the persisted approval prompt, and `interrupted` includes the redacted
-reason, previous status, last phase, and last wait metadata. This preserves
-stall debugging as one call instead of log archaeology while keeping healthy
-long-running work distinct from stale ownership.
+Actionable/current blockage reasons include `agent_concurrency`,
+`waiting_human`, `waiting_signal`, `waiting_timer`, `stalled_no_heartbeat`, and
+`interrupted`; `waiting_human` surfaces the persisted approval prompt, and
+`interrupted` includes the redacted reason, previous status, last phase, and last
+wait metadata. This preserves stall debugging as one call instead of log
+archaeology while keeping healthy long-running work distinct from stale
+ownership.
 
 ### 12.3 Agent-facing surface (deferred tier)
 

@@ -4,6 +4,7 @@
   "description": "Durable agent-workflow orchestrator",
   "type": "module",
   "private": true,
+  "workspaces": ["web"],
   "module": "src/index.ts",
   "exports": {
     ".": "./src/sdk.ts",
@@ -16,9 +17,14 @@
   "scripts": {
     "build": "bun build src/cli/keel.ts --compile --outfile dist/keel",
     "test": "bun test",
-    "typecheck": "tsc --noEmit",
-    "lint": "biome check src",
-    "lint:fix": "biome check --write src"
+    "typecheck": "tsc --noEmit && bun run web:typecheck",
+    "lint": "biome check src web",
+    "lint:fix": "biome check --write src web",
+    "web:dev": "bun --cwd web vite --host 127.0.0.1",
+    "web:build": "bun --cwd web vite build",
+    "web:preview": "bun --cwd web vite preview --host 127.0.0.1",
+    "web:test": "bun --cwd web vitest run --config vitest.config.ts",
+    "web:typecheck": "bun --cwd web tsc --noEmit"
   },
   "dependencies": {
     "acorn": "^8.16.0",

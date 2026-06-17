@@ -207,6 +207,21 @@ Defaults:
   `--assets` points at an alternate bundle and `--api-only` disables bundle
   serving.
 
+Frontend development and verification scripts:
+
+```bash
+bun run web:dev       # Vite dev server, proxying to keel web on 127.0.0.1:7879
+bun run web:build     # emits the production bundle to web/dist
+bun run web:test      # frontend unit tests
+bun run web:preview   # preview the built Vite bundle
+```
+
+The production React UI is a browser client over the same web transport routes
+listed below. It stores a manually entered bearer token in `sessionStorage` for
+the current browser session only, not `localStorage`, and sends it as
+`Authorization: Bearer <capability>`. Event watching uses `fetch()` plus a
+readable stream parser so credentials stay in headers.
+
 Do not expose this server remotely by default. Binding a non-local host is an
 explicit local operator choice; TLS, CORS, browser sessions, and remote exposure
 policy are not part of this transport.

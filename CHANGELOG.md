@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### Added
+- Production React/Vite/TypeScript web UI foundation under `web/`, including
+  the shared operator shell, design primitives, typed browser API client,
+  fetch-based SSE parser, frontend tests, root `web:*` scripts, and `web/dist`
+  build output for `keel web`.
 - Agent specs and persistent profiles now support `environment: { vars, secrets }`.
   Literal `vars` are passed as provider environment variables and hashed by
   value; `environment.secrets` requests named run-secret values supplied through

@@ -8,7 +8,7 @@ Keel exposes operator behavior through several surfaces:
 - CLI commands;
 - `keel execute` control scripts;
 - TUI;
-- local web API and planned React UI;
+- local web API and React UI;
 - planned MCP tools;
 - SDK/workflow authoring APIs when behavior is durable and replay-visible.
 
@@ -118,8 +118,12 @@ daemon gateway, not a second operation dispatcher:
 - Captured-source `launchRun` is admin-only through the web surface even though
   it remains open on the trusted local Unix socket.
 
-The React UI is still deferred; the web column below tracks backend API exposure
-unless a row explicitly says UI.
+The React UI foundation lives under `web/` and is served by `keel web` from the
+`web/dist` bundle when present. It is a browser client over this same API, not a
+new operation boundary. Current UI coverage is read-heavy: runs, run detail,
+approvals, workflows, workspaces, schedules, profiles, settings, and system
+views are present, while mutation controls remain disabled or deferred unless a
+screen explicitly wires the operation.
 
 ## Current Matrix
 
@@ -136,15 +140,15 @@ unless a row explicitly says UI.
 | signal delivery | implemented | implemented | implemented | implemented | implemented | deferred | `ctx.signal` implemented | `run:signal` |
 | approval decision | implemented | implemented | implemented | implemented | implemented | deferred | `ctx.human` implemented | `admin` |
 | schedule put | implemented | implemented | deferred | deferred | not-applicable | deferred | not-applicable | `admin` |
-| schedule list/show | implemented | implemented | implemented | deferred | not-applicable | deferred | not-applicable | `admin` |
+| schedule list/show | implemented | implemented | implemented | implemented | not-applicable | deferred | not-applicable | `admin` |
 | saved workflow save/install | implemented | implemented | deferred | deferred | not-applicable | deferred | not-applicable | `admin`, `workflow:save` |
-| saved workflow list/show/source | implemented | implemented | deferred | deferred | not-applicable | deferred | not-applicable | `admin`, `workflow:read` |
+| saved workflow list/show/source | implemented | implemented | deferred | partial | not-applicable | deferred | not-applicable | `admin`, `workflow:read` |
 | saved workflow run | implemented | implemented | deferred | deferred | not-applicable | deferred | not-applicable | `workflow:run`; follow-up uses minted run capability |
 | saved workflow enable/disable/deprecate/delete | implemented | implemented | deferred | deferred | not-applicable | deferred | not-applicable | `admin`, `workflow:save` for scoped non-delete metadata |
 | workflow definition preview/source | implemented | implemented | deferred | deferred | not-applicable | deferred | not-applicable | `admin`, `run:source` depending selector |
 | workflow definition GC | implemented | implemented | deferred | deferred | not-applicable | deferred | not-applicable | `admin` |
-| profile catalog | implemented | implemented | deferred | deferred | not-applicable | deferred | `profile` field consumes snapshots | `admin` for catalog management |
-| settings catalog | implemented | implemented | deferred | deferred | not-applicable | deferred | workflow-visible settings snapshot; daemon-operational agent concurrency limits are not SDK-visible | `admin` |
+| profile catalog | implemented | implemented | deferred | partial | not-applicable | deferred | `profile` field consumes snapshots | `admin` for catalog management |
+| settings catalog | implemented | implemented | deferred | partial | not-applicable | deferred | workflow-visible settings snapshot; daemon-operational agent concurrency limits are not SDK-visible | `admin` |
 | workspace list/show/diff | implemented | implemented | implemented | implemented | deferred | deferred | not-applicable | `run:read` |
 | workspace merge/discard/gc | implemented | implemented | implemented | implemented | deferred | deferred | not-applicable | `admin` |
 

@@ -143,6 +143,7 @@ done
           key: "pi-abort",
           provider: "pi",
           prompt: "hello",
+          cwd: dir,
           toolPolicy: "none",
           abortSignal: controller.signal,
         },
@@ -193,7 +194,7 @@ for await (const chunk of Bun.stdin.stream()) {
 
       const provider = new PiProvider();
       const result = await provider.generate(
-        { key: "pi-env", provider: "pi", prompt: "hello", toolPolicy: "none" },
+        { key: "pi-env", provider: "pi", prompt: "hello", cwd: dir, toolPolicy: "none" },
         {},
       );
 
@@ -244,6 +245,7 @@ for await (const chunk of Bun.stdin.stream()) {
           key: "raw",
           provider: "pi",
           prompt: "hello",
+          cwd: dir,
           model: "missing-model",
           toolPolicy: "none",
         },
@@ -302,7 +304,7 @@ for await (const chunk of Bun.stdin.stream()) {
       const events: unknown[] = [];
       const provider = new PiProvider({ bin });
       const result = await provider.generate(
-        { key: "tool-id", provider: "pi", prompt: "hello", toolPolicy: "none" },
+        { key: "tool-id", provider: "pi", prompt: "hello", cwd: dir, toolPolicy: "none" },
         { onEvent: (event) => events.push(event) },
       );
 
@@ -363,7 +365,7 @@ for await (const chunk of Bun.stdin.stream()) {
       const started = Date.now();
       await expect(
         provider.generate(
-          { key: "event-hook", provider: "pi", prompt: "hello", toolPolicy: "none" },
+          { key: "event-hook", provider: "pi", prompt: "hello", cwd: dir, toolPolicy: "none" },
           {
             onEvent: (event) => {
               if (event.type === "tool_call") throw new Error("durable append failed");
@@ -417,6 +419,7 @@ for await (const chunk of Bun.stdin.stream()) {
           key: "resolved-caps",
           provider: "pi",
           prompt: "hello",
+          cwd: dir,
           toolPolicy: "workspace-write",
           capabilities: {
             fs: "read",
@@ -482,7 +485,7 @@ for await (const chunk of Bun.stdin.stream()) {
       const events: unknown[] = [];
       const provider = new PiProvider({ bin });
       const result = await provider.generate(
-        { key: "retry", provider: "pi", prompt: "hello", toolPolicy: "none" },
+        { key: "retry", provider: "pi", prompt: "hello", cwd: dir, toolPolicy: "none" },
         { onEvent: (event) => events.push(event) },
       );
 
@@ -544,7 +547,7 @@ for await (const chunk of Bun.stdin.stream()) {
       const provider = new PiProvider({ bin });
       await expect(
         provider.generate(
-          { key: "final-error", provider: "pi", prompt: "hello", toolPolicy: "none" },
+          { key: "final-error", provider: "pi", prompt: "hello", cwd: dir, toolPolicy: "none" },
           {},
         ),
       ).rejects.toThrow('pi agent "final-error" ended with error: Invalid model.');
@@ -569,6 +572,7 @@ describe.if(LIVE)("LIVE pi smoke", () => {
         key: "live-1",
         provider: "pi",
         prompt: 'Return ONLY this JSON and nothing else: {"value": 42}',
+        cwd: process.cwd(),
         toolPolicy: "read-only",
       },
       { onSessionToken: (t) => tokens.push(t) },

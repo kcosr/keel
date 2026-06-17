@@ -6,6 +6,7 @@ import { type TLSSocket, connect as tlsConnect } from "node:tls";
 import { resolveInvocationToolPolicy, resolvedToolPolicyToCodexParams } from "./capabilities.ts";
 import { DEFAULT_AGENT_TIMEOUT_MS } from "./defaults.ts";
 import { ProviderConfigValidationError } from "./provider-config.ts";
+import { requireInvocationCwd } from "./types.ts";
 import type {
   AgentHooks,
   AgentInvocation,
@@ -92,14 +93,14 @@ export class CodexProvider implements AgentProvider {
 
   async generate(invocation: AgentInvocation, hooks: AgentHooks): Promise<AgentResult> {
     const config = normalizeCodexProviderConfig(invocation.providerConfig);
+    const cwd = requireInvocationCwd(invocation, this.name);
     const resolved = resolveInvocationToolPolicy({
       ...(invocation.capabilities ? { capabilities: invocation.capabilities } : {}),
       ...(invocation.toolPolicy ? { toolPolicy: invocation.toolPolicy } : {}),
       ...(invocation.allowTools ? { allowTools: invocation.allowTools } : {}),
       ...(invocation.denyTools ? { denyTools: invocation.denyTools } : {}),
     });
-    const codexCaps = resolvedToolPolicyToCodexParams(resolved, invocation.cwd);
-    const cwd = invocation.cwd as string;
+    const codexCaps = resolvedToolPolicyToCodexParams(resolved, cwd);
     if (config.type !== "stdio" && Object.keys(invocation.env ?? {}).length > 0) {
       throw new Error(
         `codex ${transportDescriptor(config)} transport cannot receive secret env values; first-cut Codex env injection is supported only for stdio`,

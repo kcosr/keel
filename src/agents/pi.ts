@@ -12,6 +12,7 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { resolveInvocationToolPolicy, resolvedToolPolicyToPiArgs } from "./capabilities.ts";
 import { DEFAULT_AGENT_TIMEOUT_MS } from "./defaults.ts";
+import { requireInvocationCwd } from "./types.ts";
 import type {
   AgentHooks,
   AgentInvocation,
@@ -21,8 +22,6 @@ import type {
 } from "./types.ts";
 
 export interface PiProviderOptions {
-  /** Working directory (pi scopes sessions by cwd); defaults to process.cwd(). */
-  cwd?: string;
   /** Binary name/path (default KEEL_PI_BIN, then "pi"). */
   bin?: string;
   /** Per-call timeout in ms before abort (default 1 hour). */
@@ -47,14 +46,12 @@ interface PiMessage {
 export class PiProvider implements AgentProvider {
   readonly name = "pi";
   readonly supportsSessions = true;
-  private readonly cwd: string;
   private readonly bin: string;
   private readonly timeoutMs: number;
   private readonly extraEnv: Record<string, string>;
   private readonly rawLogPath?: string;
 
   constructor(opts: PiProviderOptions = {}) {
-    this.cwd = opts.cwd ?? process.cwd();
     this.bin = opts.bin ?? process.env.KEEL_PI_BIN ?? "pi";
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_AGENT_TIMEOUT_MS;
     this.extraEnv = opts.env ?? {};
@@ -78,7 +75,7 @@ export class PiProvider implements AgentProvider {
     // Reconnect to a prior session (mid-call crash recovery, §10.4).
     if (invocation.resumeToken) args.push("--session", invocation.resumeToken);
 
-    const cwd = invocation.cwd ?? this.cwd;
+    const cwd = requireInvocationCwd(invocation, this.name);
     this.rawLog(invocation.key, "spawn", { bin: this.bin, args, cwd });
     const proc = Bun.spawn([this.bin, ...args], {
       cwd,

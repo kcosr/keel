@@ -48,7 +48,7 @@ export interface AgentInvocation {
   /** Resolved capabilities (mapped to vendor enforcement; §11). */
   capabilities?: Capabilities;
   /** Provider working directory resolved from the run workspace. */
-  cwd?: string;
+  cwd: string;
   /** Secret env injected at invocation (§11.2), wiped from the side channel after terminal cleanup. */
   env?: Record<string, string>;
   /** Fires when the kernel abandons a stalled attempt — kill the subprocess. */
@@ -77,6 +77,13 @@ export interface AgentProvider {
   /** True when resumeToken is a stable handle to one forward-only backend thread. */
   readonly supportsSessions?: boolean;
   generate(invocation: AgentInvocation, hooks: AgentHooks): Promise<AgentResult>;
+}
+
+export function requireInvocationCwd(invocation: AgentInvocation, providerName: string): string {
+  if (typeof invocation.cwd !== "string" || invocation.cwd.trim().length === 0) {
+    throw new Error(`${providerName} agent "${invocation.key}" requires a resolved invocation cwd`);
+  }
+  return invocation.cwd;
 }
 
 export class AgentProviderRegistry {

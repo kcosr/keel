@@ -134,6 +134,7 @@ while true; do sleep 0.1; done
           key: "claude-abort",
           provider: "claude",
           prompt: "hello",
+          cwd: dir,
           toolPolicy: "none",
           abortSignal: controller.signal,
         },
@@ -159,7 +160,7 @@ while true; do sleep 0.1; done
 
       const provider = new ClaudeProvider({ timeoutMs: 5_000 });
       const result = await provider.generate(
-        { key: "claude-env", provider: "claude", prompt: "env", toolPolicy: "none" },
+        { key: "claude-env", provider: "claude", prompt: "env", cwd: dir, toolPolicy: "none" },
         {},
       );
 
@@ -186,6 +187,7 @@ while true; do sleep 0.1; done
           key: "claude",
           provider: "claude",
           prompt: "hello",
+          cwd: dir,
           model: "sonnet",
           reasoning: "high",
           toolPolicy: "read-only",
@@ -256,6 +258,7 @@ while true; do sleep 0.1; done
           key: "claude-resume",
           provider: "claude",
           prompt: "resume",
+          cwd: dir,
           resumeToken: RESUME_ID,
           toolPolicy: "none",
         },
@@ -301,6 +304,7 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
             key: "claude-token-hook",
             provider: "claude",
             prompt: "resume",
+            cwd: dir,
             resumeToken: RESUME_ID,
             toolPolicy: "none",
           },
@@ -327,7 +331,13 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
       const provider = new ClaudeProvider({ bin, timeoutMs: 5_000 });
       await expect(
         provider.generate(
-          { key: "claude-event-hook", provider: "claude", prompt: "hook", toolPolicy: "none" },
+          {
+            key: "claude-event-hook",
+            provider: "claude",
+            prompt: "hook",
+            cwd: dir,
+            toolPolicy: "none",
+          },
           {
             onEvent: (event) => {
               if (event.type === "tool_call") throw new Error("durable append failed");
@@ -353,6 +363,7 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
           key: "claude-resolved-caps",
           provider: "claude",
           prompt: "caps",
+          cwd: dir,
           toolPolicy: "workspace-write",
           capabilities: {
             fs: "read",
@@ -393,6 +404,7 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
           key: "claude-cleanup",
           provider: "claude",
           prompt: "cleanup",
+          cwd: dir,
           toolPolicy: "none",
         },
         {},
@@ -435,6 +447,7 @@ process.exit(0);
           key: "claude-stderr-open",
           provider: "claude",
           prompt: "stderr-open",
+          cwd: dir,
           toolPolicy: "none",
         },
         {},
@@ -499,6 +512,7 @@ describe.if(LIVE)("LIVE claude smoke", () => {
         key: "live-claude-1",
         provider: "claude",
         prompt: 'Return ONLY this JSON and nothing else: {"value": 42}',
+        cwd: process.cwd(),
         toolPolicy: "none",
       },
       { onSessionToken: (t) => tokens.push(t) },
@@ -605,6 +619,7 @@ describe.if(LIVE)("LIVE claude smoke", () => {
         key: "live-claude-retry-resume",
         provider: "claude",
         prompt: "retry-resume",
+        cwd: process.cwd(),
         toolPolicy: "none",
       },
       {},

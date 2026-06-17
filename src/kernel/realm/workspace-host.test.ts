@@ -1320,7 +1320,7 @@ describe("durable diff + worktree cleanup", () => {
       name: "one-shot-default-retry",
     };
     let calls = 0;
-    let firstCwd: string | undefined;
+    let firstCwd = "";
     let secondSawFirstAttempt = true;
     const failsThenSucceeds: AgentProvider = {
       name: "writer",
@@ -1328,12 +1328,12 @@ describe("durable diff + worktree cleanup", () => {
         calls += 1;
         if (calls === 1) {
           firstCwd = inv.cwd;
-          if (inv.cwd) writeFileSync(join(inv.cwd, "attempt-1.txt"), "attempt 1\n");
+          writeFileSync(join(inv.cwd, "attempt-1.txt"), "attempt 1\n");
           throw new Error("transient write failure");
         }
         expect(inv.cwd).toBe(firstCwd);
-        secondSawFirstAttempt = inv.cwd ? existsSync(join(inv.cwd, "attempt-1.txt")) : true;
-        if (inv.cwd) writeFileSync(join(inv.cwd, "attempt-2.txt"), "attempt 2\n");
+        secondSawFirstAttempt = existsSync(join(inv.cwd, "attempt-1.txt"));
+        writeFileSync(join(inv.cwd, "attempt-2.txt"), "attempt 2\n");
         return { text: "ok", transcript: [] };
       },
     };

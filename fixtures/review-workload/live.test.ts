@@ -29,9 +29,7 @@ describe.if(LIVE)("LIVE review workload rehearsal", () => {
     const { RealmKernel } = await import("../../src/kernel/realm/realm-host.ts");
 
     const store = JournalStore.memory();
-    const agents = new AgentProviderRegistry().register(
-      new PiProvider({ cwd: targetRoot, timeoutMs: 120_000 }),
-    );
+    const agents = new AgentProviderRegistry().register(new PiProvider({ timeoutMs: 120_000 }));
     const input = {
       root: targetRoot,
       provider: "pi",

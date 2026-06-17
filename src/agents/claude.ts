@@ -8,6 +8,7 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { resolveInvocationToolPolicy, resolvedToolPolicyToClaudeArgs } from "./capabilities.ts";
 import { DEFAULT_AGENT_TIMEOUT_MS } from "./defaults.ts";
+import { requireInvocationCwd } from "./types.ts";
 import type {
   AgentHooks,
   AgentInvocation,
@@ -20,8 +21,6 @@ const CLAUDE_EXIT_GRACE_MS = 5_000;
 const STDERR_DRAIN_GRACE_MS = 100;
 
 export interface ClaudeProviderOptions {
-  /** Working directory; defaults to process.cwd(). */
-  cwd?: string;
   /** Claude binary name/path (default KEEL_CLAUDE_BIN, then "claude"). */
   bin?: string;
   /** Per-call timeout in ms before abort (default 1 hour). */
@@ -35,14 +34,12 @@ export interface ClaudeProviderOptions {
 export class ClaudeProvider implements AgentProvider {
   readonly name = "claude";
   readonly supportsSessions = true;
-  private readonly cwd: string;
   private readonly bin: string;
   private readonly timeoutMs: number;
   private readonly extraEnv: Record<string, string>;
   private readonly rawLogPath?: string;
 
   constructor(opts: ClaudeProviderOptions = {}) {
-    this.cwd = opts.cwd ?? process.cwd();
     this.bin = opts.bin ?? process.env.KEEL_CLAUDE_BIN ?? "claude";
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_AGENT_TIMEOUT_MS;
     this.extraEnv = opts.env ?? {};
@@ -58,6 +55,7 @@ export class ClaudeProvider implements AgentProvider {
       hooks.onEvent?.({ type: "session", data: token });
       hooks.onSessionToken?.(token);
     };
+    const cwd = requireInvocationCwd(invocation, this.name);
 
     const args = ["-p", "--output-format", "stream-json", "--verbose"];
     if (invocation.resumeToken) {
@@ -81,7 +79,6 @@ export class ClaudeProvider implements AgentProvider {
 
     noteSessionToken(requestedSessionToken);
 
-    const cwd = invocation.cwd ?? this.cwd;
     this.rawLog(invocation.key, "spawn", { bin: this.bin, args, cwd });
     const proc = Bun.spawn([this.bin, ...args], {
       cwd,

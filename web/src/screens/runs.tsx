@@ -90,6 +90,7 @@ export function RunsScreen({
   const counts = summarizeRuns(runsState.data?.runs ?? []);
   const groups = groupRuns(rows);
   const page = runsState.data?.page ?? null;
+  const countScopeLabel = page?.truncated ? " on page" : "";
 
   return (
     <div className="content-split runs-screen">
@@ -128,8 +129,12 @@ export function RunsScreen({
             <Toggle label="Blocked" checked={blockedOnly} onChange={setBlockedOnly} />
           </div>
           <div className="toolbar-right">
-            <StatusPill tone="running">{counts.active} active</StatusPill>
-            <StatusPill tone="waiting">{counts.blocked} blocked</StatusPill>
+            <StatusPill tone="running">
+              {counts.active} active{countScopeLabel}
+            </StatusPill>
+            <StatusPill tone="waiting">
+              {counts.blocked} blocked{countScopeLabel}
+            </StatusPill>
             <StatusPill tone={page?.truncated ? "waiting" : "neutral"}>
               {page?.truncated ? `${page.returned} shown` : `${counts.total} total`}
             </StatusPill>

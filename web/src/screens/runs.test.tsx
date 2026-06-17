@@ -41,15 +41,20 @@ describe("RunsScreen", () => {
   test("discloses when the browser run list is truncated", async () => {
     const client = {
       listRuns: async () => ({
-        runs: [run("run_new", "running", 40)],
-        page: page(150, { returned: 100, truncated: true }),
+        runs: [
+          run("run_new", "running", 40),
+          run("run_wait", "waiting-human", 20, "waiting_human"),
+        ],
+        page: page(150, { returned: 2, truncated: true }),
       }),
     } as KeelWebClient;
 
     render(<RunsScreen client={client} globalSearch="" refreshKey={0} />);
 
-    expect(await screen.findByText(/Showing the latest 100 of 150 runs/i)).toBeInTheDocument();
-    expect(screen.getByText("100 shown")).toBeInTheDocument();
+    expect(await screen.findByText(/Showing the latest 2 of 150 runs/i)).toBeInTheDocument();
+    expect(screen.getByText(/2 active on page/)).toBeInTheDocument();
+    expect(screen.getByText(/1 blocked on page/)).toBeInTheDocument();
+    expect(screen.getByText("2 shown")).toBeInTheDocument();
     expect(screen.getByText("keel list")).toBeInTheDocument();
   });
 });

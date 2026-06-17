@@ -17,6 +17,7 @@ development-only database surgery.
 | [`iterative-review/`](./iterative-review/) | An implementer or human owns fixes, while a durable reviewer session waits for follow-up signals. |
 | [`implement-review-loop/`](./implement-review-loop/) | Keel should autonomously loop a write-capable implementer with a read-only code reviewer. |
 | [`branch-worktree-implement-review/`](./branch-worktree-implement-review/) | Keel should create a generated-branch worktree, then autonomously loop a write-capable implementer with a read-only code reviewer in that shared worktree. |
+| [`model-routing/`](./model-routing/) | Workflow authors want captured helper code for bounded static or read-only-agent routing of profile/reasoning choices. |
 | [`task-review-guidance/code-review.workflow.ts`](./task-review-guidance/) | One-shot read-only code review using shared captured guidance helpers. |
 | [`task-review-guidance/plan-review.workflow.ts`](./task-review-guidance/) | One-shot design/spec review using shared guidance, with optional correspondence append. |
 | [`task-review-guidance/docs-review.workflow.ts`](./task-review-guidance/) | One-shot read-only documentation review against the repository's public surface. |

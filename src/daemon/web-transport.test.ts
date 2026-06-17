@@ -124,7 +124,9 @@ class SseReader {
   }
 }
 
-function startDaemon(opts: { providerDelayMs?: number } = {}): {
+function startDaemon(
+  opts: { providerDelayMs?: number; heartbeatMs?: number; clock?: () => number } = {},
+): {
   daemon: KeelDaemon;
   socketPath: string;
   dbPath: string;
@@ -140,6 +142,8 @@ function startDaemon(opts: { providerDelayMs?: number } = {}): {
       }),
     ),
     adminToken: ADMIN_TOKEN,
+    ...(opts.heartbeatMs !== undefined ? { heartbeatMs: opts.heartbeatMs } : {}),
+    ...(opts.clock ? { clock: opts.clock } : {}),
   });
   return { daemon, socketPath, dbPath };
 }
@@ -377,6 +381,114 @@ describe("web transport", () => {
       });
 
       await client.waitForRun(runId);
+    } finally {
+      client.close();
+      web.stop(true);
+      daemon.stop();
+    }
+  });
+
+  test("projection routes distinguish stale owner heartbeat from aged pending work", async () => {
+    const nowMs = 100_000;
+    const { daemon, socketPath, dbPath } = startDaemon({
+      heartbeatMs: 20_000,
+      clock: () => nowMs,
+    });
+    await daemon.start();
+    const web = startWebServer({ socketPath, port: 0, apiOnly: true });
+    const client = await DaemonClient.connect(socketPath);
+    await client.authenticate(ADMIN_TOKEN);
+    try {
+      const stale = await client.launchRun({
+        ...chainUrl,
+        input: { n: 1 },
+        target: dir,
+        name: "stale-owner",
+      });
+      await client.waitForRun(stale.runId);
+
+      const fresh = await client.launchRun({
+        ...chainUrl,
+        input: { n: 1 },
+        target: dir,
+        name: "fresh-owner-old-pending",
+      });
+      await client.waitForRun(fresh.runId);
+
+      const store = JournalStore.open(dbPath);
+      try {
+        store.updateRun(stale.runId, {
+          status: "running",
+          finishedAtMs: null,
+          heartbeatAtMs: 10_000,
+          runtimeOwnerId: "daemon_stale",
+        });
+        store.updateRun(fresh.runId, {
+          status: "running",
+          finishedAtMs: null,
+          heartbeatAtMs: 90_000,
+          runtimeOwnerId: "daemon_fresh",
+        });
+        store.putJournalRow({
+          runId: fresh.runId,
+          stableKey: "manual-old-pending",
+          effectType: "effectful",
+          status: "pending",
+          version: "v",
+          inputHash: "h",
+          startedAtMs: 1_000,
+        });
+      } finally {
+        store.close();
+      }
+
+      expect(await client.getBlockage(stale.runId)).toMatchObject({
+        reason: "stalled_no_heartbeat",
+        blockedOn: null,
+      });
+      expect(await client.getBlockage(fresh.runId)).toMatchObject({
+        reason: "running",
+        blockedOn: null,
+      });
+      expect(await client.getRunReport(stale.runId)).toMatchObject({
+        blockage: { reason: "stalled_no_heartbeat" },
+      });
+      expect(await client.getRunReport(fresh.runId)).not.toHaveProperty("blockage");
+
+      const runs = await jsonFetch(`${web.url}/api/runs`, { headers: auth(ADMIN_TOKEN) });
+      expect(runs.status).toBe(200);
+      const staleRow = runs.body.runs.find(
+        (candidate: { runId: string }) => candidate.runId === stale.runId,
+      );
+      const freshRow = runs.body.runs.find(
+        (candidate: { runId: string }) => candidate.runId === fresh.runId,
+      );
+      expect(staleRow).toMatchObject({
+        runId: stale.runId,
+        blockage: { reason: "stalled_no_heartbeat" },
+      });
+      expect(freshRow).toMatchObject({
+        runId: fresh.runId,
+        blockage: null,
+      });
+
+      const staleDetail = await jsonFetch(`${web.url}/api/runs/${stale.runId}`, {
+        headers: auth(ADMIN_TOKEN),
+      });
+      expect(staleDetail.status).toBe(200);
+      expect(staleDetail.body).toMatchObject({
+        blockage: { reason: "stalled_no_heartbeat" },
+        report: { blockage: { reason: "stalled_no_heartbeat" } },
+      });
+
+      const freshDetail = await jsonFetch(`${web.url}/api/runs/${fresh.runId}`, {
+        headers: auth(ADMIN_TOKEN),
+      });
+      expect(freshDetail.status).toBe(200);
+      expect(freshDetail.body).toMatchObject({
+        blockage: null,
+      });
+      expect(freshDetail.body.report).not.toHaveProperty("blockage");
     } finally {
       client.close();
       web.stop(true);

@@ -463,7 +463,7 @@ export class InProcessKeel implements KeelApi {
     updated: RunWorkspaceView[];
     deleted: RunWorkspaceView[];
   } {
-    const nowMs = opts.nowMs ?? Date.now();
+    const nowMs = opts.nowMs ?? this.opts.clock?.() ?? Date.now();
     const staleBeforeMs = opts.staleBeforeMs ?? nowMs - this.ownerStaleWindowMs();
     const updated: RunWorkspaceView[] = [];
     const deleted: RunWorkspaceView[] = [];

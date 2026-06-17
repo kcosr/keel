@@ -21,5 +21,6 @@ export type {
   WorkspaceRetention,
   WorkspaceSpec,
 } from "./kernel/ctx.ts";
+export type { AgentEnvironmentSpec } from "./agents/environment.ts";
 export type { Capabilities, ToolPolicy } from "./agents/capabilities.ts";
 export type { ProviderConfigMap, ProviderConfigValue } from "./agents/types.ts";

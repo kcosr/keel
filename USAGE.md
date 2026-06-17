@@ -542,6 +542,16 @@ in the daemon's in-memory run secret side channel and are wiped when the run
 reaches a terminal cleanup path. Saved workflows and schedules do not persist
 raw secret values.
 
+Programmatic embedders that construct a local daemon can import the default
+trusted-local store with:
+
+```ts
+import { SecretStore } from "@kcosr/keel/secrets";
+```
+
+The web transport rejects `runSecrets` until Keel has an explicit
+browser-specific local secret authorization model.
+
 Stdin launches are still a single module named `entry.ts`; local relative
 imports from stdin are rejected with guidance to launch from a file. The only
 external import a workflow source may use is the exact SDK import

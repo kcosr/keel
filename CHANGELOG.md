@@ -10,6 +10,8 @@
 - `runSecrets` are accepted on daemon launch/restart APIs and exposed in the CLI
   through repeatable `--secret NAME=VALUE` and `--secret-env NAME[=ENV]` flags
   on `launch`, `run`, `workflow run`, `retry`, and `rewind`.
+- Programmatic embedders can import `SecretStore` from `@kcosr/keel/secrets`;
+  the workflow authoring SDK exports the `AgentEnvironmentSpec` type.
 - Codex `providerConfig.codex.serviceTier` now lets workflows and agent
   profiles request `"fast"` priority service or force `"normal"` standard
   routing as replay-visible agent identity.
@@ -125,6 +127,8 @@
   `environment.secrets`; the bundled daemon now constructs the in-memory
   `SecretStore` by default, and missing run secret values fail the agent step
   instead of being silently omitted.
+- The web transport rejects `runSecrets` on launch/restart requests until a
+  browser-specific local secret authorization model exists.
 - Saved workflow launches and saved-ref schedules no longer accept the
   undocumented daemon RPC `clientDefaultTarget` wrapper field. Use explicit
   `target`/`--target`, or configure a saved workflow default target.

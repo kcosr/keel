@@ -154,7 +154,9 @@ Run-secret delivery is part of existing launch/restart surfaces, not a separate
 operation. RPC accepts `runSecrets` on `launchRun`, `launchSavedWorkflow`,
 `retryRun`, `rewindRun`, and `rerunRun`; CLI exposes `--secret`/`--secret-env`
 on `launch`, `run`, `workflow run`, `retry`, and `rewind`; execute exposes
-`runSecrets` on `keel.launch`, `keel.retry`, and `keel.rewind`.
+`runSecrets` on `keel.launch`, `keel.retry`, and `keel.rewind`. The web
+transport rejects raw `runSecrets` until a browser-specific local secret
+authorization model exists.
 
 ## CLI Interaction Behavior
 

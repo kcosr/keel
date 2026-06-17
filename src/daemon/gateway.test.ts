@@ -256,6 +256,44 @@ describe("KeelOperationGateway", () => {
     }
   });
 
+  test("web surface rejects raw runSecrets before dispatch", async () => {
+    const harness = createHarness();
+    const session = new FakeGatewaySession("web-run-secrets");
+    try {
+      const topLevel = await harness.gateway.handle(session, {
+        id: "web-launch-secret",
+        method: "launchRun",
+        surface: "web",
+        credential: ADMIN_TOKEN,
+        params: {
+          ...chainUrl,
+          input: { n: 0 },
+          target: dir,
+          runSecrets: { TOKEN: "top-level-secret" },
+        },
+      });
+      expect(topLevel.result).toBeUndefined();
+      expect(topLevel.error?.message).toBe("runSecrets are not accepted from the web surface");
+      expect(JSON.stringify(topLevel)).not.toContain("top-level-secret");
+
+      const nested = await harness.gateway.handle(session, {
+        id: "web-rerun-secret",
+        method: "rerunRun",
+        surface: "web",
+        credential: ADMIN_TOKEN,
+        params: {
+          runId: "run_missing_web_secret",
+          opts: { runSecrets: { TOKEN: "nested-secret" } },
+        },
+      });
+      expect(nested.result).toBeUndefined();
+      expect(nested.error?.message).toBe("runSecrets are not accepted from the web surface");
+      expect(JSON.stringify(nested)).not.toContain("nested-secret");
+    } finally {
+      harness.close();
+    }
+  });
+
   test("enforces workflow-scoped save/read/run authorization with version semantics", async () => {
     const harness = createHarness();
     const session = new FakeGatewaySession("workflow-auth");

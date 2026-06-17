@@ -67,7 +67,9 @@ trusted-local raw secret values keyed by environment variable name. They are not
 persisted in the journal; the daemon stores them in its in-memory side channel
 for the run and wipes them when the run reaches a terminal cleanup path. The same
 shape is accepted on `retryRun`, `rewindRun`, and `rerunRun` options for agents
-that re-execute after the original values have expired or rotated.
+that re-execute after the original values have expired or rotated. The web
+transport rejects these raw secret fields until Keel has a browser-specific
+local secret authorization model.
 
 ## Authority Notes
 

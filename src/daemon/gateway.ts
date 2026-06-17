@@ -622,6 +622,9 @@ export class KeelOperationGateway {
       const params = paramsObject(request.params);
       const credential =
         request.credential !== undefined ? request.credential : session.getCredential();
+      if (request.surface === "web" && hasRunSecretsParam(params)) {
+        throw new Error("runSecrets are not accepted from the web surface");
+      }
       if (request.surface === "web" && method.webRequiresAdmin) {
         this.authorizeAdmin(credential);
       }
@@ -863,6 +866,16 @@ export class KeelOperationGateway {
       });
     return { status: "running" };
   }
+}
+
+function hasRunSecretsParam(params: Record<string, unknown>): boolean {
+  if (Object.prototype.hasOwnProperty.call(params, "runSecrets")) return true;
+  const opts = params.opts;
+  return (
+    opts !== null &&
+    typeof opts === "object" &&
+    Object.prototype.hasOwnProperty.call(opts, "runSecrets")
+  );
 }
 
 function paramsObject(params: unknown): Record<string, unknown> {

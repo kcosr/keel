@@ -121,8 +121,8 @@ describe("capabilities → Pi tool flags", () => {
   test("explicit allow and deny tools adjust the final Pi allowlist", () => {
     const resolved = resolveToolPolicy({
       toolPolicy: "read-only",
-      allowTools: ["Bash"],
-      denyTools: ["LS"],
+      allowTools: ["bash"],
+      denyTools: ["ls"],
     });
     expect(resolved.capabilities.shell).toBe(false);
     expect(resolvedToolPolicyToPiArgs(resolved)).toEqual(["--tools", "read,grep,bash"]);
@@ -148,8 +148,8 @@ describe("capabilities → Pi tool flags", () => {
   test("tool policy maps to Claude available tools with provider-native adjustments", () => {
     const resolved = resolveToolPolicy({
       toolPolicy: "read-only",
-      allowTools: ["bash"],
-      denyTools: ["glob"],
+      allowTools: ["Bash"],
+      denyTools: ["Glob"],
     });
     expect(resolvedToolPolicyToClaudeArgs(resolved)).toEqual([
       "--allowed-tools",
@@ -158,6 +158,33 @@ describe("capabilities → Pi tool flags", () => {
       "LS",
       "Bash",
     ]);
+  });
+
+  test("provider-native tool adjustments reject generic aliases and non-canonical built-ins", () => {
+    expect(() =>
+      resolvedToolPolicyToPiArgs(
+        resolveToolPolicy({ toolPolicy: "read-only", allowTools: ["Bash"] }),
+      ),
+    ).toThrow(/pi provider tool "Bash" is not canonical; use "bash"/);
+    expect(() =>
+      resolvedToolPolicyToPiArgs(
+        resolveToolPolicy({ toolPolicy: "read-only", allowTools: ["run"] }),
+      ),
+    ).toThrow(/pi provider tool "run" is not canonical; use "bash"/);
+    expect(() =>
+      resolvedToolPolicyToClaudeArgs(
+        resolveToolPolicy({ toolPolicy: "read-only", allowTools: ["bash"] }),
+      ),
+    ).toThrow(/claude provider tool "bash" is not canonical; use "Bash"/);
+    expect(() =>
+      resolvedToolPolicyToClaudeArgs(
+        resolveToolPolicy({ toolPolicy: "read-only", denyTools: ["search"] }),
+      ),
+    ).toThrow(/claude provider tool "search" is not canonical; use "WebSearch"/);
+
+    const custom = resolveToolPolicy({ toolPolicy: "read-only", allowTools: ["mcp__foo__bar"] });
+    expect(resolvedToolPolicyToPiArgs(custom)).toEqual(["--tools", "read,grep,ls,mcp__foo__bar"]);
+    expect(resolvedToolPolicyToClaudeArgs(custom)).toContain("mcp__foo__bar");
   });
 
   test("unrestricted leaves provider defaults alone unless adjusted", () => {

@@ -26,7 +26,7 @@ describe("two-tier artifact store", () => {
     const handle = await fixed(store).run<number>(
       url("artifact.workflow.ts"),
       { size: 5000 },
-      { name: "a" },
+      { name: "a", target: process.cwd() },
     );
     expect(handle.status).toBe("finished");
     expect(handle.output).toBe(5000 + 5000 + 4);
@@ -62,7 +62,9 @@ describe("two-tier artifact store", () => {
         if (p === "before-commit" && k === "small") throw new Error("CRASH");
       },
     });
-    await k1.run(url("artifact.workflow.ts"), { size: 4000 }, { name: "a" }).catch(() => null);
+    await k1
+      .run(url("artifact.workflow.ts"), { size: 4000 }, { name: "a", target: process.cwd() })
+      .catch(() => null);
     expect(exec).toContain("big");
     exec.length = 0;
 
@@ -82,7 +84,9 @@ describe("two-tier artifact store", () => {
         if (p === "before-commit" && k === "big") throw new Error("CRASH");
       },
     });
-    await k1.run(url("artifact.workflow.ts"), { size: 6000 }, { name: "a" }).catch(() => null);
+    await k1
+      .run(url("artifact.workflow.ts"), { size: 6000 }, { name: "a", target: process.cwd() })
+      .catch(() => null);
     // big is pending (not completed), and no artifact was committed
     const big = store.getJournalRow("run_0", "big", 1);
     expect(big?.status).toBe("pending");

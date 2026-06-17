@@ -29,7 +29,14 @@ describe("#1 helper-closure versioning", () => {
     const exec: string[] = [];
     const k = fixed(store, { onStepExecute: (key: string) => exec.push(key) });
 
-    const first = await k.run<number>(url("helper-v1.workflow.ts"), { n: 5 }, { name: "h" });
+    const first = await k.run<number>(
+      url("helper-v1.workflow.ts"),
+      { n: 5 },
+      {
+        name: "h",
+        target: process.cwd(),
+      },
+    );
     expect(first.output).toBe(10); // 5 * 2
     expect(exec).toEqual(["compute"]);
     exec.length = 0;
@@ -63,7 +70,13 @@ describe("#1 helper-closure versioning", () => {
         definitionCacheRoot: join(dir, "definitions"),
         onStepExecute: (key: string) => exec.push(key),
       });
-      const first = await kernel.run<number>(captureWorkflowFile(workflow), { n: 5 });
+      const first = await kernel.run<number>(
+        captureWorkflowFile(workflow),
+        { n: 5 },
+        {
+          target: dir,
+        },
+      );
       expect(first.output).toBe(10);
       expect(exec).toEqual(["compute"]);
 
@@ -90,7 +103,9 @@ describe("#2 resume uses immutable workflow snapshots", () => {
         if (p === "after-pending" && key === "compute") throw new Error("CRASH");
       },
     });
-    await k1.run(url("helper-v1.workflow.ts"), { n: 1 }, { name: "h" }).catch(() => null);
+    await k1
+      .run(url("helper-v1.workflow.ts"), { n: 1 }, { name: "h", target: process.cwd() })
+      .catch(() => null);
     expect(store.getRun("run_0")?.status).toBe("running");
 
     // The supplied path is ignored for snapshotted runs; resume uses the stored
@@ -123,7 +138,7 @@ describe("#2 resume uses immutable workflow snapshots", () => {
         },
       });
       const captured = captureWorkflowFile(workflow);
-      await k1.run(captured, { n: 7 }, { name: "snapshot" }).catch(() => null);
+      await k1.run(captured, { n: 7 }, { name: "snapshot", target: dir }).catch(() => null);
       expect(store.getRun("run_0")?.status).toBe("running");
       expect(store.getRun("run_0")?.definitionVersion.startsWith("wf_sha256_")).toBe(true);
 
@@ -164,7 +179,9 @@ describe("#2 resume uses immutable workflow snapshots", () => {
           if (p === "after-pending" && key === "compute") throw new Error("CRASH");
         },
       });
-      await k1.run(captureWorkflowFile(workflow), { n: 7 }, { name: "snapshot" }).catch(() => null);
+      await k1
+        .run(captureWorkflowFile(workflow), { n: 7 }, { name: "snapshot", target: dir })
+        .catch(() => null);
       expect(store.getRun("run_0")?.status).toBe("running");
 
       rmSync(helper);
@@ -259,7 +276,14 @@ describe("#3 rerun persists override input and clears stale result", () => {
   test("an override input is persisted; a later input-less rerun uses it", async () => {
     const store = JournalStore.memory();
     const k = fixed(store);
-    await k.run<number>(url("helper-v1.workflow.ts"), { n: 5 }, { name: "h" });
+    await k.run<number>(
+      url("helper-v1.workflow.ts"),
+      { n: 5 },
+      {
+        name: "h",
+        target: process.cwd(),
+      },
+    );
     expect(JSON.parse(store.getRun("run_0")?.inputRef ?? "null")).toEqual({ n: 5 });
 
     // rerun with an override input

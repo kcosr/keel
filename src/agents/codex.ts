@@ -6,6 +6,7 @@ import { type TLSSocket, connect as tlsConnect } from "node:tls";
 import { resolveInvocationToolPolicy, resolvedToolPolicyToCodexParams } from "./capabilities.ts";
 import { DEFAULT_AGENT_TIMEOUT_MS } from "./defaults.ts";
 import { ProviderConfigValidationError } from "./provider-config.ts";
+import { requireInvocationCwd } from "./types.ts";
 import type {
   AgentHooks,
   AgentInvocation,
@@ -35,8 +36,6 @@ export type CodexTransportConfig =
 
 export interface CodexProviderOptions {
   bin?: string;
-  /** Per-request protocol timeout for setup/handshake RPCs. */
-  timeoutMs?: number;
   /** Per-request protocol timeout for setup/handshake RPCs without affecting model turns. */
   rpcTimeoutMs?: number;
   /** Long-running model turn timeout; defaults to Keel's normal agent timeout. */
@@ -81,10 +80,8 @@ export class CodexProvider implements AgentProvider {
 
   constructor(opts: CodexProviderOptions = {}) {
     this.bin = opts.bin ?? process.env[CODEX_BIN_ENV] ?? "codex";
-    this.rpcTimeoutMs = opts.rpcTimeoutMs ?? opts.timeoutMs ?? CODEX_RPC_RESPONSE_TIMEOUT_MS;
-    // Keep opts.timeoutMs as a legacy/test single-knob override, but production
-    // callers should use turnTimeoutMs when tuning long-running model turns.
-    this.turnTimeoutMs = opts.turnTimeoutMs ?? opts.timeoutMs ?? CODEX_TURN_COMPLETION_TIMEOUT_MS;
+    this.rpcTimeoutMs = opts.rpcTimeoutMs ?? CODEX_RPC_RESPONSE_TIMEOUT_MS;
+    this.turnTimeoutMs = opts.turnTimeoutMs ?? CODEX_TURN_COMPLETION_TIMEOUT_MS;
     this.connectTimeoutMs = opts.connectTimeoutMs ?? CODEX_CONNECT_TIMEOUT_MS;
     this.rawLogPath = opts.rawLogPath ?? process.env[CODEX_RAW_LOG_ENV];
     this.transportFactory = opts.transportFactory ?? new DefaultCodexTransportFactory();
@@ -92,14 +89,17 @@ export class CodexProvider implements AgentProvider {
 
   async generate(invocation: AgentInvocation, hooks: AgentHooks): Promise<AgentResult> {
     const config = normalizeCodexProviderConfig(invocation.providerConfig);
-    const resolved = resolveInvocationToolPolicy({
-      ...(invocation.capabilities ? { capabilities: invocation.capabilities } : {}),
-      ...(invocation.toolPolicy ? { toolPolicy: invocation.toolPolicy } : {}),
-      ...(invocation.allowTools ? { allowTools: invocation.allowTools } : {}),
-      ...(invocation.denyTools ? { denyTools: invocation.denyTools } : {}),
-    });
-    const codexCaps = resolvedToolPolicyToCodexParams(resolved, invocation.cwd);
-    const cwd = invocation.cwd as string;
+    const cwd = requireInvocationCwd(invocation, this.name);
+    const resolved = resolveInvocationToolPolicy(
+      {
+        ...(invocation.capabilities ? { capabilities: invocation.capabilities } : {}),
+        ...(invocation.toolPolicy ? { toolPolicy: invocation.toolPolicy } : {}),
+        ...(invocation.allowTools ? { allowTools: invocation.allowTools } : {}),
+        ...(invocation.denyTools ? { denyTools: invocation.denyTools } : {}),
+      },
+      { path: `${this.name} agent "${invocation.key}"` },
+    );
+    const codexCaps = resolvedToolPolicyToCodexParams(resolved, cwd);
     if (config.type !== "stdio" && Object.keys(invocation.env ?? {}).length > 0) {
       throw new Error(
         `codex ${transportDescriptor(config)} transport cannot receive secret env values; first-cut Codex env injection is supported only for stdio`,
@@ -956,14 +956,17 @@ function handleCodexNotification(
 ): void {
   switch (method) {
     case "thread/started": {
-      const threadId = extractThreadId(params);
+      const threadId = threadStartedNotificationThreadId(params);
       if (threadId && !state.threadId) state.threadId = threadId;
       break;
     }
     case "turn/started": {
-      if (!matchesCurrentThread(params, state)) break;
-      const turnId = extractTurnId(params);
-      if (!turnId) break;
+      if (!matchesCurrentTurnNotificationThread(params, state)) break;
+      const turnId = turnLifecycleNotificationTurnId(params);
+      if (!turnId) {
+        emitIgnoredCurrentThreadNotification(emit, "turn/started", state, "missing-turn-id");
+        break;
+      }
       if (state.ignoredTurnIds.has(turnId)) break;
       if (state.turnId && state.turnId !== turnId) {
         throw new Error(
@@ -974,8 +977,8 @@ function handleCodexNotification(
       break;
     }
     case "item/agentMessage/delta": {
-      if (!matchesCurrentTurn(params, state)) break;
-      const delta = stringAt(params, ["delta"]) ?? stringAt(params, ["item", "delta"]);
+      if (!matchesCurrentScopedTurnNotification(params, state)) break;
+      const delta = stringAt(params, ["delta"]);
       if (!delta) break;
       const itemId = extractItemId(params);
       if (itemId && state.latestStreamItemId && state.latestStreamItemId !== itemId) {
@@ -987,11 +990,11 @@ function handleCodexNotification(
       break;
     }
     case "item/completed": {
-      if (!matchesCurrentTurn(params, state)) break;
+      if (!matchesCurrentScopedTurnNotification(params, state)) break;
       const item = recordAt(params, ["item"]);
       if (!item) break;
       const type = stringAt(item, ["type"]);
-      if (type !== "agentMessage" && type !== "agent_message") break;
+      if (type !== "agentMessage") break;
       const text = completedItemText(item);
       if (!text) break;
       const itemId = extractItemId(params) ?? stringAt(item, ["id"]);
@@ -1004,16 +1007,29 @@ function handleCodexNotification(
       break;
     }
     case "error": {
-      if (!errorAppliesToCurrentTurn(params, state)) break;
+      if (!errorAppliesToCurrentTurn(params, state)) {
+        emitIgnoredErrorNotification(params, state, emit);
+        break;
+      }
       emit({ type: "error", data: params });
       const message = bestErrorMessage(params);
       if (message) state.latestScopedError = message;
       break;
     }
     case "turn/completed": {
-      if (!matchesCurrentTurn(params, state)) break;
-      const turnId = extractTurnId(params);
-      if (turnId && !state.turnId) state.turnId = turnId;
+      if (!matchesCurrentTurnNotificationThread(params, state)) break;
+      const turnId = turnLifecycleNotificationTurnId(params);
+      if (!turnId) {
+        emitIgnoredCurrentThreadNotification(emit, "turn/completed", state, "missing-turn-id");
+        break;
+      }
+      if (state.ignoredTurnIds.has(turnId)) break;
+      if (state.turnId !== turnId) {
+        emitIgnoredCurrentThreadNotification(emit, "turn/completed", state, "turn-id-mismatch", {
+          observedTurnId: turnId,
+        });
+        break;
+      }
       const terminal = {
         status: terminalStatus(params) ?? "unknown",
         ...((terminalMessage(params) ?? state.latestScopedError)
@@ -1040,7 +1056,7 @@ async function resumeThread(
   if (!token) throw new Error("codex resume requires a thread id");
   state.threadId = token;
   const readResult = await client.request("thread/read", { threadId: token });
-  const readThreadId = extractThreadId(readResult);
+  const readThreadId = requiredThreadIdFromResult(readResult);
   if (readThreadId && readThreadId !== token) {
     throw new Error(`codex resumed thread id mismatch: expected ${token}, got ${readThreadId}`);
   }
@@ -1330,76 +1346,89 @@ function requiredTurnIdFromResult(value: unknown): string | undefined {
   return stringAt(value, ["turn", "id"]);
 }
 
-function extractThreadId(value: unknown): string | undefined {
-  return (
-    stringAt(value, ["thread", "id"]) ??
-    stringAt(value, ["threadId"]) ??
-    stringAt(value, ["thread", "threadId"]) ??
-    stringAt(value, ["id"])
-  );
+function threadStartedNotificationThreadId(value: unknown): string | undefined {
+  return stringAt(value, ["thread", "id"]);
 }
 
-function extractTurnId(value: unknown): string | undefined {
-  return (
-    stringAt(value, ["turn", "id"]) ??
-    stringAt(value, ["turnId"]) ??
-    stringAt(value, ["turn", "turnId"]) ??
-    stringAt(value, ["id"])
-  );
+function notificationThreadId(value: unknown): string | undefined {
+  return stringAt(value, ["threadId"]);
+}
+
+function scopedNotificationTurnId(value: unknown): string | undefined {
+  return stringAt(value, ["turnId"]);
+}
+
+function turnLifecycleNotificationTurnId(value: unknown): string | undefined {
+  return stringAt(value, ["turn", "id"]);
 }
 
 function extractItemId(value: unknown): string | undefined {
   return stringAt(value, ["itemId"]) ?? stringAt(value, ["item", "id"]);
 }
 
-function matchesCurrentThread(params: unknown, state: CodexCallState): boolean {
-  const scopedThread = extractThreadId(params);
-  return !scopedThread || !state.threadId || scopedThread === state.threadId;
+function matchesCurrentTurnNotificationThread(params: unknown, state: CodexCallState): boolean {
+  const scopedThread = notificationThreadId(params);
+  if (!scopedThread) return false;
+  return state.threadId === scopedThread;
 }
 
-function matchesCurrentTurn(params: unknown, state: CodexCallState): boolean {
-  if (!matchesCurrentThread(params, state)) return false;
-  const scopedTurn = extractTurnId(params);
-  if (scopedTurn && state.ignoredTurnIds.has(scopedTurn)) return false;
-  return !scopedTurn || !state.turnId || scopedTurn === state.turnId;
+function matchesCurrentScopedTurnNotification(params: unknown, state: CodexCallState): boolean {
+  if (!matchesCurrentTurnNotificationThread(params, state)) return false;
+  const scopedTurn = scopedNotificationTurnId(params);
+  if (!scopedTurn) return false;
+  if (state.ignoredTurnIds.has(scopedTurn)) return false;
+  return state.turnId === scopedTurn;
 }
 
 function errorAppliesToCurrentTurn(params: unknown, state: CodexCallState): boolean {
-  const scopedThread = extractThreadId(params);
-  if (scopedThread && state.threadId && scopedThread !== state.threadId) return false;
-  const scopedTurn = extractTurnId(params);
-  if (scopedTurn && state.ignoredTurnIds.has(scopedTurn)) return false;
-  if (scopedTurn && state.turnId && scopedTurn !== state.turnId) return false;
-  return true;
+  return matchesCurrentScopedTurnNotification(params, state);
+}
+
+function emitIgnoredErrorNotification(
+  params: unknown,
+  state: CodexCallState,
+  emit: (event: TraceEvent) => void,
+): void {
+  if (!matchesCurrentTurnNotificationThread(params, state)) return;
+  const turnId = scopedNotificationTurnId(params);
+  if (!turnId) {
+    emitIgnoredCurrentThreadNotification(emit, "error", state, "missing-turn-id");
+    return;
+  }
+  if (state.ignoredTurnIds.has(turnId)) return;
+  if (state.turnId !== turnId) {
+    emitIgnoredCurrentThreadNotification(emit, "error", state, "turn-id-mismatch", {
+      observedTurnId: turnId,
+    });
+  }
+}
+
+function emitIgnoredCurrentThreadNotification(
+  emit: (event: TraceEvent) => void,
+  method: "turn/started" | "turn/completed" | "error",
+  state: CodexCallState,
+  reason: "missing-turn-id" | "turn-id-mismatch",
+  details: { observedTurnId?: string } = {},
+): void {
+  emit({
+    type: "error",
+    data: {
+      message: `codex ignored ${method} notification: ${reason}`,
+      method,
+      reason,
+      threadId: state.threadId,
+      expectedTurnId: state.turnId,
+      ...details,
+    },
+  });
 }
 
 function completedItemText(item: Record<string, unknown>): string | null {
-  const direct = stringAt(item, ["text"]);
-  if (direct) return direct;
-  const content = item.content;
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    let text = "";
-    for (const part of content) {
-      if (typeof part === "string") text += part;
-      else if (isPlainObject(part)) {
-        const partText = stringAt(part, ["text"]) ?? stringAt(part, ["content"]);
-        if (partText) text += partText;
-      }
-    }
-    return text || null;
-  }
-  const messageContent = recordAt(item, ["message"]);
-  return messageContent ? completedItemText(messageContent) : null;
+  return stringAt(item, ["text"]) ?? null;
 }
 
 function terminalStatus(params: unknown): string | undefined {
-  return (
-    stringAt(params, ["turn", "status", "type"]) ??
-    stringAt(params, ["turn", "status"]) ??
-    stringAt(params, ["status", "type"]) ??
-    stringAt(params, ["status"])
-  );
+  return stringAt(params, ["turn", "status", "type"]) ?? stringAt(params, ["turn", "status"]);
 }
 
 function turnListStatus(turn: Record<string, unknown>): string {
@@ -1407,13 +1436,7 @@ function turnListStatus(turn: Record<string, unknown>): string {
 }
 
 function terminalMessage(params: unknown): string | undefined {
-  return (
-    stringAt(params, ["turn", "error", "message"]) ??
-    stringAt(params, ["turn", "error"]) ??
-    stringAt(params, ["turn", "message"]) ??
-    stringAt(params, ["error", "message"]) ??
-    stringAt(params, ["message"])
-  );
+  return stringAt(params, ["turn", "error", "message"]) ?? stringAt(params, ["turn", "error"]);
 }
 
 function threadStatusType(value: unknown): string | undefined {

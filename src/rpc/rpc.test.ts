@@ -16,7 +16,7 @@ import {
   type AgentResult,
 } from "../agents/types.ts";
 import { JournalStore } from "../journal/store.ts";
-import type { AgentSessionWorkspaceStatus, RunStatus } from "../journal/types.ts";
+import type { AgentWorkspaceStatus, RunStatus } from "../journal/types.ts";
 import { RUN_FINISHED_INLINE_OUTPUT_BYTES } from "../kernel/output.ts";
 import { RealmKernel } from "../kernel/realm/realm-host.ts";
 import { captureWorkflowFile } from "../workflow-definitions/capture.ts";
@@ -135,7 +135,7 @@ function insertWorkspaceFixture(
     baseCommit: string;
     workspacePath: string;
     runStatus: RunStatus;
-    workspaceStatus: AgentSessionWorkspaceStatus;
+    workspaceStatus: AgentWorkspaceStatus;
     activeTurn?: boolean;
     updatedAtMs?: number;
   },
@@ -172,34 +172,68 @@ function insertWorkspaceFixture(
     createdAtMs: 1,
     updatedAtMs: 1,
   });
-  store.insertAgentSessionWorkspace({
+  store.insertAgentWorkspace({
     runId: opts.runId,
-    agentKey: opts.agentKey,
+    workspaceId: `ws_${opts.agentKey}`,
+    mode: "worktree",
+    ownerKind: "agent_session",
+    key: opts.agentKey,
+    lastAttempt: null,
+    retentionPolicy: "retain",
     workspacePath: opts.workspacePath,
+    sourceKind: "worktree-git",
     sourcePath: opts.repo,
+    sourceUri: null,
+    sourceBare: null,
+    sourceMergeEligible: true,
+    suppliedPath: null,
+    sourceRef: "HEAD",
+    resolvedRef: null,
+    checkoutBranch: null,
+    worktreeCheckoutKind: "detached",
+    worktreeBranchOwned: false,
     baseCommit: opts.baseCommit,
+    copyBaselinePath: null,
+    creationErrorJson: null,
+    workspaceIdentityJson: "{}",
+    workspaceIdentityHash: `${opts.runId}-${opts.agentKey}`,
+    owned: true,
     status: opts.workspaceStatus,
+    failureSeen: false,
     lastTurnKey: opts.activeTurn ? "turn" : null,
     lastTurnAttempt: opts.activeTurn ? 1 : null,
+    activeHolderKind: null,
+    activeHolderKey: null,
+    activeHolderAttempt: null,
+    activeStartedAtMs: null,
     lastDiffEventSeq: null,
     lastErrorEventSeq: null,
+    cleanupErrorJson: null,
     createdAtMs: 1,
     updatedAtMs: opts.updatedAtMs ?? 1,
     mergedAtMs: null,
     discardedAtMs: null,
+    removedAtMs: null,
   });
 }
 
 describe("agent profile RPC", () => {
   test("manages catalog profiles with generation preconditions and programmatic source visibility", () => {
     const store = JournalStore.memory();
+    const piProvider: AgentProvider = {
+      name: "pi",
+      async generate(): Promise<AgentResult> {
+        return { text: "ok", transcript: [] };
+      },
+    };
+    const registry = new AgentProviderRegistry().register(new MockProvider()).register(piProvider);
     const kernel = new RealmKernel(store, {
       idgen: () => "run_profiles",
-      agents: new AgentProviderRegistry().register(new MockProvider()),
+      agents: registry,
       agentProfiles: { builtin: { provider: "mock", model: "fixed" } },
     });
     const api = new InProcessKeel(kernel, store, new EventHub(), {
-      agents: new AgentProviderRegistry().register(new MockProvider()),
+      agents: registry,
       clock: () => 10,
     });
 
@@ -217,6 +251,13 @@ describe("agent profile RPC", () => {
         ifGeneration: 2,
       }),
     ).toThrow(/generation precondition/);
+    expect(() =>
+      api.putAgentProfile({
+        name: "pi-reviewer",
+        config: { provider: "pi", toolPolicy: "read-only", allowTools: ["run"] },
+        createOnly: true,
+      }),
+    ).toThrow(/pi provider tool "run" is not canonical; use "bash"/);
     expect(api.checkAgentProfile({ name: "reviewer" }).ok).toBe(true);
     expect(() => api.putAgentProfile({ name: "builtin", config: {} })).toThrow(/programmatic/);
     expect(api.deleteAgentProfile({ name: "reviewer", ifGeneration: 1 })).toEqual({
@@ -398,14 +439,14 @@ describe("saved workflow RPC", () => {
       definitionHash: "wf_sha256_emptymodules",
       createdAtMs: 1,
     });
-    expect(api.getSavedWorkflowSource({ name: "legacy-source" }).files).toEqual([
-      { path: "entry.ts", code: "export default async () => 7;\n", entry: true },
-    ]);
-    expect(
+    expect(() => api.getSavedWorkflowSource({ name: "legacy-source" })).toThrow(
+      /cannot display source: manifest modules must not be empty/,
+    );
+    expect(() =>
       api.getWorkflowDefinitionSource({
         lookup: { kind: "definition", definitionHash: "wf_sha256_emptymodules" },
-      }).files,
-    ).toEqual([{ path: "entry.ts", code: "export default async () => 7;\n", entry: true }]);
+      }),
+    ).toThrow(/cannot display source: manifest modules must not be empty/);
 
     store.putWorkflowDefinition({
       hash: "wf_sha256_codeonly_rpc",
@@ -433,9 +474,9 @@ describe("saved workflow RPC", () => {
       createdAtMs: 2,
       finishedAtMs: 2,
     });
-    expect(
-      api.getWorkflowDefinitionSource({ lookup: { kind: "run", runId: "run_codeonly" } }).files,
-    ).toEqual([{ path: "entry.ts", code: "export default async () => 8;\n", entry: true }]);
+    expect(() =>
+      api.getWorkflowDefinitionSource({ lookup: { kind: "run", runId: "run_codeonly" } }),
+    ).toThrow(/cannot display source: missing manifest_json/);
     expect(() =>
       api.getWorkflowDefinitionSource({ lookup: { kind: "run", runId: "run_missing" } }),
     ).toThrow(/run run_missing not found/);
@@ -1896,7 +1937,7 @@ describe("workspace lifecycle operations", () => {
       expect(() => api.discardRunWorkspace("r-running", "ws_agent")).toThrow(
         /while run is running/,
       );
-      store.deleteAgentSessionWorkspace("r-running", "agent");
+      store.deleteAgentWorkspace("r-running", "ws_agent");
       rmSync(nonTerminalPath, { recursive: true, force: true });
 
       const activePath = retainedWorkspacePath(workspaceStore, "r-active", "agent");
@@ -1912,7 +1953,7 @@ describe("workspace lifecycle operations", () => {
         activeTurn: true,
       });
       expect(() => api.discardRunWorkspace("r-active", "ws_agent")).toThrow(/turn is active/);
-      store.deleteAgentSessionWorkspace("r-active", "agent");
+      store.deleteAgentWorkspace("r-active", "ws_agent");
       rmSync(activePath, { recursive: true, force: true });
 
       const mergePath = retainedWorkspacePath(workspaceStore, "r-merge", "agent");
@@ -1994,15 +2035,19 @@ describe("workspace lifecycle operations", () => {
 
       const firstGc = api.gcWorkspaces({ olderThanMs: 0 });
       expect(firstGc.removed.map((w) => w.runId).sort()).toEqual(["r-diff-error-merge", "r-merge"]);
-      expect(store.getAgentSessionWorkspace("r-merge", "agent")).toBeNull();
-      expect(store.getAgentSessionWorkspace("r-discard", "agent")).toBeNull();
-      expect(store.getAgentSessionWorkspace("r-pending", "agent")?.status).toBe("pending_review");
-      expect(store.getAgentSessionWorkspace("r-diff-error", "agent")?.status).toBe("diff_error");
+      expect(store.getAgentWorkspaceByKey("r-merge", "agent_session", "agent")).toBeNull();
+      expect(store.getAgentWorkspaceByKey("r-discard", "agent_session", "agent")).toBeNull();
+      expect(store.getAgentWorkspaceByKey("r-pending", "agent_session", "agent")?.status).toBe(
+        "pending_review",
+      );
+      expect(store.getAgentWorkspaceByKey("r-diff-error", "agent_session", "agent")?.status).toBe(
+        "diff_error",
+      );
       expect(api.gcWorkspaces({ olderThanMs: 0 }).removed).toEqual([]);
 
       const pendingGc = api.gcWorkspaces({ olderThanMs: 0, includePending: true });
       expect(pendingGc.removed.map((w) => w.runId)).toEqual(["r-pending"]);
-      expect(store.getAgentSessionWorkspace("r-pending", "agent")).toBeNull();
+      expect(store.getAgentWorkspaceByKey("r-pending", "agent_session", "agent")).toBeNull();
     } finally {
       store.close();
       rmSync(dir, { recursive: true, force: true });

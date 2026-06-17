@@ -15,7 +15,11 @@
 /// <reference lib="webworker" />
 
 import { AsyncLocalStorage } from "node:async_hooks";
-import { type ToolPolicy, resolveToolPolicy } from "../../agents/capabilities.ts";
+import {
+  type ToolPolicy,
+  resolveToolPolicy,
+  validateProviderToolPolicy,
+} from "../../agents/capabilities.ts";
 import { DEFAULT_AGENT_PROVIDER } from "../../agents/defaults.ts";
 import { type AgentProfiles, resolveProfile } from "../../agents/profiles.ts";
 import { resolveSelectedProviderConfig } from "../../agents/provider-config.ts";
@@ -520,7 +524,6 @@ const ctx = Object.freeze({
       });
       return tag(result, key, reply.contentHash);
     } catch (err) {
-      if (err instanceof Error && err.name === "KeelAbort") throw err;
       await rpc({
         type: "step-fail",
         key,
@@ -573,12 +576,16 @@ const ctx = Object.freeze({
       profileProviderConfig,
     });
     const schema = spec.schema as Schema<unknown> | undefined;
-    const tools = resolveToolPolicy({
-      ...(spec.capabilities ? { capabilities: spec.capabilities } : {}),
-      ...(spec.toolPolicy ? { toolPolicy: spec.toolPolicy } : {}),
-      ...(spec.allowTools ? { allowTools: spec.allowTools } : {}),
-      ...(spec.denyTools ? { denyTools: spec.denyTools } : {}),
-    });
+    const tools = resolveToolPolicy(
+      {
+        ...(spec.capabilities ? { capabilities: spec.capabilities } : {}),
+        ...(spec.toolPolicy ? { toolPolicy: spec.toolPolicy } : {}),
+        ...(spec.allowTools ? { allowTools: spec.allowTools } : {}),
+        ...(spec.denyTools ? { denyTools: spec.denyTools } : {}),
+      },
+      { path: `ctx.agent("${spec.key}")` },
+    );
+    validateProviderToolPolicy(provider, tools, `ctx.agent("${spec.key}")`);
     const caps = tools.capabilities;
     rejectRemovedWorkspaceFields(rawSpec, `ctx.agent("${spec.key}")`);
     const workspaceId = resolveWorkspaceId(spec.workspace);
@@ -691,12 +698,16 @@ const ctx = Object.freeze({
       profileName: rawSessionSpec.profile,
       profileProviderConfig,
     });
-    const tools = resolveToolPolicy({
-      ...(sessionSpec.capabilities ? { capabilities: sessionSpec.capabilities } : {}),
-      ...(sessionSpec.toolPolicy ? { toolPolicy: sessionSpec.toolPolicy } : {}),
-      ...(sessionSpec.allowTools ? { allowTools: sessionSpec.allowTools } : {}),
-      ...(sessionSpec.denyTools ? { denyTools: sessionSpec.denyTools } : {}),
-    });
+    const tools = resolveToolPolicy(
+      {
+        ...(sessionSpec.capabilities ? { capabilities: sessionSpec.capabilities } : {}),
+        ...(sessionSpec.toolPolicy ? { toolPolicy: sessionSpec.toolPolicy } : {}),
+        ...(sessionSpec.allowTools ? { allowTools: sessionSpec.allowTools } : {}),
+        ...(sessionSpec.denyTools ? { denyTools: sessionSpec.denyTools } : {}),
+      },
+      { path: `ctx.agentSession("${sessionSpec.key}")` },
+    );
+    validateProviderToolPolicy(provider, tools, `ctx.agentSession("${sessionSpec.key}")`);
     const caps = tools.capabilities;
     rejectRemovedWorkspaceFields(rawSessionSpec, `ctx.agentSession("${sessionSpec.key}")`);
     const workspaceId = resolveWorkspaceId(sessionSpec.workspace);
@@ -939,8 +950,7 @@ async function start(workflowUrl: string, input: unknown): Promise<void> {
       post({ type: "parked", kind: err.parkKind, key: err.key, until: err.until });
       return;
     }
-    const aborted = err instanceof Error && err.name === "KeelAbort";
-    post({ type: "error", error: serializeError(err), aborted });
+    post({ type: "error", error: serializeError(err) });
   }
 }
 

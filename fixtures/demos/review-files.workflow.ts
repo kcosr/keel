@@ -33,7 +33,7 @@ const FindingsSchema = jsonSchema<{ findings: Finding[] }>({
 
 export default async function (ctx: Ctx, _input: Record<string, never>) {
   // Files we want reviewed
-  const files = ["src/kernel/kernel.ts", "src/agents/pi.ts", "src/daemon/server.ts"];
+  const files = ["src/kernel/realm/realm-host.ts", "src/agents/pi.ts", "src/daemon/server.ts"];
 
   // Fan out: run an agent for each file in parallel.
   const reviews = await Promise.all(

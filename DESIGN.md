@@ -670,7 +670,10 @@ interface AgentSpec<T> {
 exactly three parameters); `ctx.agent` carries `key` in its option bag.
 `toolPolicy` is the public shorthand over the capability enum; `allowTools` and
 `denyTools` are provider-native adjustments when a workflow intentionally needs
-to add or remove a specific backend tool. Workspace selection is explicit via
+to add or remove a specific backend tool. Those adjustment lists use exact
+provider-native names; known built-in aliases and case variants reject instead of
+normalizing to a broader backend tool, while unknown custom provider-native names
+pass through unchanged. Workspace selection is explicit via
 `ctx.workspace` handles, scoped with `ctx.withWorkspace`, or defaults to the run
 `__default` direct workspace at `ctx.run.target`; the resolved workspace id
 participates in agent identity. `providerConfig` is provider-owned JSON config,
@@ -1201,7 +1204,7 @@ live gate (Phase 14). Every phase ends green and is one reviewable commit.
 | # | Phase | Exit criteria (gates the commit) |
 |---|---|---|
 | 1 | Scaffold + journal store + hashing | CI green; transactional journal rows survive restart and reload identically; failed transaction leaves zero partial rows. |
-| 2 | Memoized re-execution core (in-process) | Linear pure-step workflow aborted at every boundary resumes re-running only incomplete steps; property test: identical `ctx.*` sequence across N re-runs. |
+| 2 | Memoized re-execution core | Crash/resume re-runs only incomplete steps; property tests cover identical `ctx.*` sequence across N re-runs and ambient replay across resume. |
 | 3 | Write-ahead crash protocol | Kill-at-every-boundary matrix: `completed` replays exactly-once, `pending` re-executes at-least-once, zero corrupt/dangling journal state. |
 | 4 | Deterministic realm + boundary hashing | Phases 2–3 suites pass unchanged inside the Bun Worker realm; forbidden-globals acceptance passes; explicit-input hashing and tagged-envelope edge detection proven across the JSON boundary; steps/sec benchmark recorded. |
 | 5 | Structural step identity + determinism lint | Comment/whitespace/rename edits re-execute zero steps; schema or prompt edit re-executes exactly that step; lint trio + capture-rule tests pass. |

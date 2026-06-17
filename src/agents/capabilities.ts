@@ -25,6 +25,10 @@ export interface ResolvedToolPolicy {
   capabilities: Capabilities;
 }
 
+export interface ToolPolicyResolutionOptions {
+  path?: string;
+}
+
 export const CAPABILITY_KEYS = [
   "fs",
   "network",
@@ -61,12 +65,15 @@ export function resolveCapabilities(spec: {
   return resolveToolPolicy(spec).capabilities;
 }
 
-export function resolveToolPolicy(spec: {
-  capabilities?: Partial<Capabilities>;
-  toolPolicy?: ToolPolicy;
-  allowTools?: string[];
-  denyTools?: string[];
-}): ResolvedToolPolicy {
+export function resolveToolPolicy(
+  spec: {
+    capabilities?: Partial<Capabilities>;
+    toolPolicy?: ToolPolicy;
+    allowTools?: string[];
+    denyTools?: string[];
+  },
+  opts: ToolPolicyResolutionOptions = {},
+): ResolvedToolPolicy {
   const toolPolicy = spec.toolPolicy;
   const baseCaps =
     toolPolicy !== undefined
@@ -74,8 +81,11 @@ export function resolveToolPolicy(spec: {
       : spec.capabilities
         ? capabilitiesFromPartial(spec.capabilities)
         : capabilitiesForToolPolicy(DEFAULT_TOOL_POLICY);
-  const allowTools = normalizeToolList(spec.allowTools);
-  const denyTools = normalizeToolList(spec.denyTools);
+  const allowTools = normalizeRuntimeToolList(
+    spec.allowTools,
+    toolListPath(opts.path, "allowTools"),
+  );
+  const denyTools = normalizeRuntimeToolList(spec.denyTools, toolListPath(opts.path, "denyTools"));
   const resolvedPolicy =
     toolPolicy ?? (spec.capabilities ? toolPolicyForCapabilities(baseCaps) : DEFAULT_TOOL_POLICY);
   rejectUnrestrictedAdjustments({ toolPolicy: resolvedPolicy, allowTools, denyTools });
@@ -87,16 +97,22 @@ export function resolveToolPolicy(spec: {
   };
 }
 
-export function resolveInvocationToolPolicy(spec: {
-  capabilities?: Capabilities;
-  toolPolicy?: ToolPolicy;
-  allowTools?: string[];
-  denyTools?: string[];
-}): ResolvedToolPolicy {
-  if (!spec.capabilities) return resolveToolPolicy(spec);
+export function resolveInvocationToolPolicy(
+  spec: {
+    capabilities?: Capabilities;
+    toolPolicy?: ToolPolicy;
+    allowTools?: string[];
+    denyTools?: string[];
+  },
+  opts: ToolPolicyResolutionOptions = {},
+): ResolvedToolPolicy {
+  if (!spec.capabilities) return resolveToolPolicy(spec, opts);
   const capabilities = cloneCapabilities(spec.capabilities);
-  const allowTools = normalizeToolList(spec.allowTools);
-  const denyTools = normalizeToolList(spec.denyTools);
+  const allowTools = normalizeRuntimeToolList(
+    spec.allowTools,
+    toolListPath(opts.path, "allowTools"),
+  );
+  const denyTools = normalizeRuntimeToolList(spec.denyTools, toolListPath(opts.path, "denyTools"));
   rejectUnrestrictedAdjustments({
     toolPolicy: spec.toolPolicy ?? toolPolicyForCapabilities(capabilities),
     allowTools,
@@ -121,9 +137,8 @@ export function resolvedToolPolicyToPiArgs(resolved: ResolvedToolPolicy): string
   rejectUnrestrictedAdjustments(resolved);
 
   const tools = new Set(capabilitiesToPiTools(resolved.capabilities));
-  for (const tool of resolved.allowTools) tools.add(normalizePiToolName(tool));
-  for (const tool of resolved.denyTools)
-    deleteToolCaseInsensitive(tools, normalizePiToolName(tool));
+  for (const tool of resolved.allowTools) tools.add(requireExactPiToolName(tool));
+  for (const tool of resolved.denyTools) tools.delete(requireExactPiToolName(tool));
   if (tools.size === 0) return ["--no-tools"];
   return ["--tools", [...tools].join(",")];
 }
@@ -139,9 +154,9 @@ export function resolvedToolPolicyToClaudeArgs(resolved: ResolvedToolPolicy): st
   rejectUnrestrictedAdjustments(resolved);
 
   const tools = new Set(capabilitiesToClaudeTools(resolved.capabilities));
-  for (const tool of resolved.allowTools) tools.add(normalizeClaudeToolName(tool));
+  for (const tool of resolved.allowTools) tools.add(requireExactClaudeToolName(tool));
   for (const tool of resolved.denyTools) {
-    deleteToolCaseInsensitive(tools, normalizeClaudeToolName(tool));
+    tools.delete(requireExactClaudeToolName(tool));
   }
   if (tools.size === 0) return ["--allowed-tools", ""];
   return ["--allowed-tools", ...tools];
@@ -167,9 +182,7 @@ export function resolvedToolPolicyToCodexParams(
 ): CodexCapabilityParams {
   const existingCwd = requireCodexCwd(cwd);
 
-  if (resolved.allowTools.length > 0 || resolved.denyTools.length > 0) {
-    throw new Error("codex provider does not support allowTools or denyTools");
-  }
+  validateProviderToolPolicy("codex", resolved);
 
   const sandbox = codexSandboxForCapabilities(resolved.capabilities);
   switch (sandbox) {
@@ -198,6 +211,31 @@ export function resolvedToolPolicyToCodexParams(
         thread: { approvalPolicy: "never", sandbox: "danger-full-access" },
         turn: { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } },
       };
+  }
+}
+
+export function validateProviderToolPolicy(
+  provider: string,
+  resolved: ResolvedToolPolicy,
+  path = "agent",
+): void {
+  switch (provider) {
+    case "pi":
+      for (const tool of resolved.allowTools) requireExactPiToolName(tool);
+      for (const tool of resolved.denyTools) requireExactPiToolName(tool);
+      return;
+    case "claude":
+      for (const tool of resolved.allowTools) requireExactClaudeToolName(tool);
+      for (const tool of resolved.denyTools) requireExactClaudeToolName(tool);
+      return;
+    case "codex":
+      if (resolved.allowTools.length > 0 || resolved.denyTools.length > 0) {
+        throw new Error(`${path} provider "codex" does not support allowTools or denyTools`);
+      }
+      codexSandboxForCapabilities(resolved.capabilities);
+      return;
+    default:
+      return;
   }
 }
 
@@ -368,68 +406,109 @@ function capabilitiesToClaudeTools(caps: Capabilities): string[] {
   return tools;
 }
 
-function normalizeToolList(tools: string[] | undefined): string[] {
-  if (!tools) return [];
+function normalizeRuntimeToolList(tools: string[] | undefined, path: string): string[] {
+  if (tools === undefined) return [];
+  return normalizeProviderToolList(tools, path);
+}
+
+function toolListPath(base: string | undefined, field: "allowTools" | "denyTools"): string {
+  return base ? `${base}.${field}` : field;
+}
+
+export function normalizeProviderToolList(value: unknown, path: string): string[] {
+  if (!Array.isArray(value)) throw new Error(`${path} must be an array`);
+  rejectArrayNonJsonKeys(value, path);
   const out: string[] = [];
   const seen = new Set<string>();
-  for (const raw of tools) {
+  for (let i = 0; i < value.length; i += 1) {
+    if (!(i in value)) throw new Error(`${path}[${i}] must not be a sparse array hole`);
+    const raw = value[i];
+    if (typeof raw !== "string" || raw.trim().length === 0) {
+      throw new Error(`${path}[${i}] must be a non-empty string`);
+    }
     const tool = raw.trim();
     const key = tool.toLowerCase();
-    if (!tool || seen.has(key)) continue;
+    if (seen.has(key)) throw new Error(`${path} contains duplicate tool "${tool}"`);
     seen.add(key);
     out.push(tool);
   }
   return out;
 }
 
-function normalizePiToolName(tool: string): string {
-  const trimmed = tool.trim();
-  const aliases: Record<string, string> = {
-    read: "read",
-    grep: "grep",
-    glob: "grep",
-    ls: "ls",
-    list: "ls",
-    edit: "edit",
-    write: "write",
-    bash: "bash",
-    shell: "bash",
-    run: "bash",
-    exec: "bash",
-  };
-  return aliases[trimmed.toLowerCase()] ?? trimmed;
-}
-
-function normalizeClaudeToolName(tool: string): string {
-  const key = tool
-    .trim()
-    .toLowerCase()
-    .replace(/[-_\s]/g, "");
-  const aliases: Record<string, string> = {
-    read: "Read",
-    grep: "Grep",
-    glob: "Glob",
-    ls: "LS",
-    list: "LS",
-    edit: "Edit",
-    write: "Write",
-    multiedit: "MultiEdit",
-    notebookedit: "NotebookEdit",
-    bash: "Bash",
-    shell: "Bash",
-    run: "Bash",
-    exec: "Bash",
-    webfetch: "WebFetch",
-    fetch: "WebFetch",
-    websearch: "WebSearch",
-    search: "WebSearch",
-  };
-  return aliases[key] ?? tool.trim();
-}
-
-function deleteToolCaseInsensitive(tools: Set<string>, tool: string): void {
-  const target = tool.toLowerCase();
-  for (const existing of tools) {
-    if (existing.toLowerCase() === target) tools.delete(existing);
+export function rejectArrayNonJsonKeys(value: unknown[], path: string): void {
+  for (const key of Reflect.ownKeys(value)) {
+    if (key === "length") continue;
+    if (typeof key === "symbol") throw new Error(`${path} must be JSON-serializable (symbol key)`);
+    if (!isArrayIndexKey(key, value.length)) {
+      throw new Error(`${path}.${key} must be JSON-serializable (array extra property)`);
+    }
+    const desc = Object.getOwnPropertyDescriptor(value, key);
+    if (!desc?.enumerable) {
+      throw new Error(`${path}[${key}] must be JSON-serializable (non-enumerable property)`);
+    }
   }
+}
+
+function isArrayIndexKey(key: string, length: number): boolean {
+  if (!/^(0|[1-9][0-9]*)$/.test(key)) return false;
+  const n = Number(key);
+  return Number.isSafeInteger(n) && n >= 0 && n < length;
+}
+
+const PI_EXACT_TOOLS = new Set(["read", "grep", "ls", "edit", "write", "bash"]);
+const PI_TOOL_ALIASES = new Map([
+  ["glob", "grep"],
+  ["list", "ls"],
+  ["shell", "bash"],
+  ["run", "bash"],
+  ["exec", "bash"],
+]);
+
+function requireExactPiToolName(tool: string): string {
+  if (PI_EXACT_TOOLS.has(tool)) return tool;
+  const lower = tool.toLowerCase();
+  const canonical = PI_EXACT_TOOLS.has(lower) ? lower : PI_TOOL_ALIASES.get(lower);
+  if (canonical) {
+    throw new Error(`pi provider tool "${tool}" is not canonical; use "${canonical}"`);
+  }
+  return tool;
+}
+
+const CLAUDE_EXACT_TOOLS = new Set([
+  "Read",
+  "Grep",
+  "Glob",
+  "LS",
+  "Edit",
+  "MultiEdit",
+  "Write",
+  "NotebookEdit",
+  "Bash",
+  "WebFetch",
+  "WebSearch",
+]);
+const CLAUDE_CANONICAL_BY_KEY = new Map(
+  [...CLAUDE_EXACT_TOOLS].map((tool) => [claudeToolKey(tool), tool]),
+);
+const CLAUDE_TOOL_ALIASES = new Map([
+  ["list", "LS"],
+  ["shell", "Bash"],
+  ["run", "Bash"],
+  ["exec", "Bash"],
+  ["fetch", "WebFetch"],
+  ["search", "WebSearch"],
+]);
+
+function requireExactClaudeToolName(tool: string): string {
+  if (CLAUDE_EXACT_TOOLS.has(tool)) return tool;
+  const key = claudeToolKey(tool);
+  const canonical = CLAUDE_CANONICAL_BY_KEY.get(key) ?? CLAUDE_TOOL_ALIASES.get(key);
+  if (canonical) {
+    throw new Error(`claude provider tool "${tool}" is not canonical; use "${canonical}"`);
+  }
+  return tool;
+}
+
+function claudeToolKey(tool: string): string {
+  return tool.toLowerCase().replace(/[-_\s]/g, "");
 }

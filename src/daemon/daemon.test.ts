@@ -296,6 +296,15 @@ describe("daemon multi-client over the socket", () => {
         intervalMs: 60_000,
       });
       expect(blank.error?.message).toMatch(/non-empty target/);
+
+      const legacy = await rawAdminRpc(socketPath, "putSchedule", {
+        name: "legacy-target",
+        source: chainUrl.source,
+        input: null,
+        clientDefaultTarget: dir,
+        intervalMs: 60_000,
+      });
+      expect(legacy.error?.message).toMatch(/putSchedule requires target/);
     } finally {
       daemon.stop();
     }
@@ -394,6 +403,56 @@ describe("daemon multi-client over the socket", () => {
     mkdirSync(activePath, { recursive: true });
 
     const store = JournalStore.open(dbPath);
+    const insertSessionWorkspaceFixture = (opts: {
+      runId: string;
+      workspacePath: string;
+      status: "creating" | "active";
+      lastTurnKey?: string | null;
+      lastTurnAttempt?: number | null;
+    }) =>
+      store.insertAgentWorkspace({
+        runId: opts.runId,
+        workspaceId: "ws_agent",
+        mode: "worktree",
+        ownerKind: "agent_session",
+        key: "agent",
+        lastAttempt: null,
+        retentionPolicy: "retain",
+        workspacePath: opts.workspacePath,
+        sourceKind: "worktree-git",
+        sourcePath: dir,
+        sourceUri: null,
+        sourceBare: null,
+        sourceMergeEligible: true,
+        suppliedPath: null,
+        sourceRef: "HEAD",
+        resolvedRef: null,
+        checkoutBranch: null,
+        worktreeCheckoutKind: "detached",
+        worktreeBranchOwned: false,
+        baseCommit: "base",
+        copyBaselinePath: null,
+        creationErrorJson: null,
+        workspaceIdentityJson: "{}",
+        workspaceIdentityHash: `${opts.runId}-agent`,
+        owned: true,
+        status: opts.status,
+        failureSeen: false,
+        lastTurnKey: opts.lastTurnKey ?? null,
+        lastTurnAttempt: opts.lastTurnAttempt ?? null,
+        activeHolderKind: null,
+        activeHolderKey: null,
+        activeHolderAttempt: null,
+        activeStartedAtMs: null,
+        lastDiffEventSeq: null,
+        lastErrorEventSeq: null,
+        cleanupErrorJson: null,
+        createdAtMs: 1,
+        updatedAtMs: 1,
+        mergedAtMs: null,
+        discardedAtMs: null,
+        removedAtMs: null,
+      });
     store.insertRun({
       runId: "r-creating",
       workflowName: "wf",
@@ -411,21 +470,10 @@ describe("daemon multi-client over the socket", () => {
       createdAtMs: 1,
       finishedAtMs: null,
     });
-    store.insertAgentSessionWorkspace({
+    insertSessionWorkspaceFixture({
       runId: "r-creating",
-      agentKey: "agent",
       workspacePath: join(workspaceStore, "r-creating", "agent"),
-      sourcePath: dir,
-      baseCommit: "base",
       status: "creating",
-      lastTurnKey: null,
-      lastTurnAttempt: null,
-      lastDiffEventSeq: null,
-      lastErrorEventSeq: null,
-      createdAtMs: 1,
-      updatedAtMs: 1,
-      mergedAtMs: null,
-      discardedAtMs: null,
     });
     store.insertRun({
       runId: "r-active",
@@ -444,21 +492,12 @@ describe("daemon multi-client over the socket", () => {
       createdAtMs: 1,
       finishedAtMs: 2,
     });
-    store.insertAgentSessionWorkspace({
+    insertSessionWorkspaceFixture({
       runId: "r-active",
-      agentKey: "agent",
       workspacePath: activePath,
-      sourcePath: dir,
-      baseCommit: "base",
       status: "active",
       lastTurnKey: "turn",
       lastTurnAttempt: 1,
-      lastDiffEventSeq: null,
-      lastErrorEventSeq: null,
-      createdAtMs: 1,
-      updatedAtMs: 1,
-      mergedAtMs: null,
-      discardedAtMs: null,
     });
     store.insertRun({
       runId: "r-terminal-missing",
@@ -477,21 +516,10 @@ describe("daemon multi-client over the socket", () => {
       createdAtMs: 1,
       finishedAtMs: 2,
     });
-    store.insertAgentSessionWorkspace({
+    insertSessionWorkspaceFixture({
       runId: "r-terminal-missing",
-      agentKey: "agent",
       workspacePath: join(workspaceStore, "missing", "agent"),
-      sourcePath: dir,
-      baseCommit: "base",
       status: "creating",
-      lastTurnKey: null,
-      lastTurnAttempt: null,
-      lastDiffEventSeq: null,
-      lastErrorEventSeq: null,
-      createdAtMs: 1,
-      updatedAtMs: 1,
-      mergedAtMs: null,
-      discardedAtMs: null,
     });
     store.close();
 
@@ -508,11 +536,13 @@ describe("daemon multi-client over the socket", () => {
 
     const reopened = JournalStore.open(dbPath);
     try {
-      expect(reopened.getAgentSessionWorkspace("r-creating", "agent")).toBeNull();
-      expect(reopened.getAgentSessionWorkspace("r-active", "agent")?.status).toBe("pending_review");
-      expect(reopened.getAgentSessionWorkspace("r-terminal-missing", "agent")?.status).toBe(
-        "abandoned",
+      expect(reopened.getAgentWorkspaceByKey("r-creating", "agent_session", "agent")).toBeNull();
+      expect(reopened.getAgentWorkspaceByKey("r-active", "agent_session", "agent")?.status).toBe(
+        "pending_review",
       );
+      expect(
+        reopened.getAgentWorkspaceByKey("r-terminal-missing", "agent_session", "agent")?.status,
+      ).toBe("abandoned");
     } finally {
       reopened.close();
     }
@@ -741,6 +771,18 @@ describe("daemon multi-client over the socket", () => {
       await admin.setSavedWorkflowDisabled("disabled-name", true);
       await expect(admin.launchSavedWorkflow({ ref: { name: "disabled-name" } })).rejects.toThrow(
         /disabled/,
+      );
+      await admin.saveWorkflow({
+        name: "no-target",
+        source: chainUrl.source,
+      });
+      const legacyTarget = await rawAdminRpc(socketPath, "launchSavedWorkflow", {
+        ref: { name: "no-target" },
+        clientDefaultTarget: dir,
+      });
+      expect(legacyTarget.error?.message).toMatch(/launchSavedWorkflow requires target/);
+      await expect(admin.launchSavedWorkflow({ ref: { name: "no-target" } })).rejects.toThrow(
+        /launchSavedWorkflow requires target/,
       );
       admin.close();
     } finally {

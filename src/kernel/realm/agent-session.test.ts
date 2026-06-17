@@ -37,6 +37,24 @@ const WORKFLOW = {
   name: "session",
 };
 
+const INVALID_TOOLS_WORKFLOW = {
+  source: `
+    import { type Ctx, jsonSchema } from "@kcosr/keel";
+    const Out = jsonSchema<{ value: number }>({
+      type: "object",
+      additionalProperties: false,
+      required: ["value"],
+      properties: { value: { type: "number" } },
+    });
+    export default async function wf(ctx: Ctx): Promise<number> {
+      const primary = ctx.agentSession({ key: "primary", provider: "pi", allowTools: ["run"] });
+      const result = await primary.turn({ key: "draft", prompt: "draft", schema: Out });
+      return result.value;
+    }
+  `,
+  name: "invalid-tools-session",
+};
+
 class RecordingSessionProvider implements AgentProvider {
   readonly name = "session";
   readonly supportsSessions = true;
@@ -180,6 +198,32 @@ describe("ctx.agentSession", () => {
     });
 
     await expect(k.run(WORKFLOW, { second: false })).rejects.toThrow(/requires target/);
+  });
+
+  test("known provider tool aliases reject before session provider invocation", async () => {
+    const store = JournalStore.memory();
+    const calls: AgentInvocation[] = [];
+    const provider: AgentProvider = {
+      name: "pi",
+      supportsSessions: true,
+      async generate(invocation: AgentInvocation): Promise<AgentResult> {
+        calls.push(invocation);
+        return { text: '{"value":1}', transcript: [], sessionToken: "sess" };
+      },
+    };
+    const k = new RealmKernel(store, {
+      idgen: () => "run-1",
+      agents: new AgentProviderRegistry().register(provider),
+    });
+
+    await expect(
+      k.run(INVALID_TOOLS_WORKFLOW, null, {
+        name: "invalid-tools-session",
+        target: process.cwd(),
+      }),
+    ).rejects.toThrow(/pi provider tool "run" is not canonical; use "bash"/);
+    expect(calls).toHaveLength(0);
+    expect(store.getRun("run-1")?.status).toBe("failed");
   });
 
   test("session turns use the run settings snapshot after current settings change", async () => {

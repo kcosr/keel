@@ -146,7 +146,11 @@ async function runWithTransport(
   tokens: string[];
 }> {
   const factory = new ScriptedFactory(transport);
-  const provider = new CodexProvider({ transportFactory: factory, timeoutMs: 1_000 });
+  const provider = new CodexProvider({
+    transportFactory: factory,
+    rpcTimeoutMs: 1_000,
+    turnTimeoutMs: 1_000,
+  });
   const events: TraceEvent[] = [];
   const tokens: string[] = [];
   const result = await provider.generate(codexInvocation(invocation), {
@@ -335,6 +339,7 @@ describe("Codex JSON-RPC flow", () => {
           break;
         case "turn/start":
           t.respond(message.id, { turn: { id: "turn-1" } });
+          t.notify("turn/started", { threadId: "thread-1", turn: { id: "turn-1" } });
           t.notify("item/agentMessage/delta", {
             threadId: "other",
             turnId: "turn-1",
@@ -348,12 +353,11 @@ describe("Codex JSON-RPC flow", () => {
           t.notify("item/completed", {
             threadId: "thread-1",
             turnId: "turn-1",
-            item: { id: "b", type: "agent_message", content: [{ type: "text", text: "second" }] },
+            item: { id: "b", type: "agentMessage", text: "second" },
           });
           t.notify("turn/completed", {
             threadId: "thread-1",
-            turnId: "turn-1",
-            status: "completed",
+            turn: { id: "turn-1", status: "completed" },
           });
           break;
         default:
@@ -386,6 +390,12 @@ describe("Codex JSON-RPC flow", () => {
           t.raw(JSON.stringify({ id: message.id, result: { turn: { id: "turn-1" } } }));
           t.raw(
             JSON.stringify({
+              method: "turn/started",
+              params: { threadId: "thread-1", turn: { id: "turn-1" } },
+            }),
+          );
+          t.raw(
+            JSON.stringify({
               method: "item/completed",
               params: {
                 threadId: "thread-1",
@@ -397,7 +407,7 @@ describe("Codex JSON-RPC flow", () => {
           t.raw(
             JSON.stringify({
               method: "turn/completed",
-              params: { threadId: "thread-1", turnId: "turn-1", status: "completed" },
+              params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } },
             }),
           );
           break;
@@ -409,6 +419,93 @@ describe("Codex JSON-RPC flow", () => {
     const { result } = await runWithTransport(transport);
     expect(result.text).toBe("desktop ok");
     expect(result.sessionToken).toBe("thread-1");
+  });
+
+  test("accepts protocol v2-shaped Codex notifications", async () => {
+    // Mirrors openai/codex d5b4b9837017 app-server protocol v2 structs:
+    // ThreadStartedNotification, TurnStartedNotification, TurnCompletedNotification,
+    // ItemCompletedNotification, AgentMessageDeltaNotification, and Turn.
+    const turn = {
+      id: "turn-1",
+      items: [],
+      itemsView: "notLoaded",
+      status: "inProgress",
+      error: null,
+      startedAt: 1_780_000_000,
+      completedAt: null,
+      durationMs: null,
+    };
+    const transport = new ScriptedTransport((message, t) => {
+      switch (message.method) {
+        case "initialize":
+          t.raw(JSON.stringify({ id: message.id, result: {} }));
+          break;
+        case "initialized":
+          break;
+        case "thread/start":
+          t.raw(JSON.stringify({ id: message.id, result: { thread: { id: "thread-1" } } }));
+          break;
+        case "turn/start":
+          t.raw(JSON.stringify({ id: message.id, result: { turn } }));
+          t.raw(
+            JSON.stringify({
+              method: "turn/started",
+              params: { threadId: "thread-1", turn },
+            }),
+          );
+          t.raw(
+            JSON.stringify({
+              method: "item/agentMessage/delta",
+              params: {
+                threadId: "thread-1",
+                turnId: "turn-1",
+                itemId: "msg-1",
+                delta: "fixture delta",
+              },
+            }),
+          );
+          t.raw(
+            JSON.stringify({
+              method: "item/completed",
+              params: {
+                threadId: "thread-1",
+                turnId: "turn-1",
+                completedAtMs: 1_780_000_000_500,
+                item: {
+                  id: "msg-1",
+                  type: "agentMessage",
+                  text: "fixture complete",
+                  phase: null,
+                  memoryCitation: null,
+                },
+              },
+            }),
+          );
+          t.raw(
+            JSON.stringify({
+              method: "turn/completed",
+              params: {
+                threadId: "thread-1",
+                turn: {
+                  ...turn,
+                  status: "completed",
+                  completedAt: 1_780_000_001,
+                  durationMs: 1_000,
+                },
+              },
+            }),
+          );
+          break;
+        default:
+          throw new Error(`unexpected ${String(message.method)}`);
+      }
+    });
+
+    const { result, events } = await runWithTransport(transport);
+    expect(result.text).toBe("fixture complete");
+    expect(events.filter((event) => event.type === "text").map((event) => event.data)).toEqual([
+      "fixture delta",
+    ]);
   });
 
   test("resume reads, validates, resumes, and starts the next turn", async () => {
@@ -429,6 +526,7 @@ describe("Codex JSON-RPC flow", () => {
           break;
         case "turn/start":
           t.respond(message.id, { turn: { id: "turn-2" } });
+          t.notify("turn/started", { threadId: "thread-1", turn: { id: "turn-2" } });
           t.notify("item/agentMessage/delta", {
             threadId: "thread-1",
             turnId: "turn-2",
@@ -436,8 +534,7 @@ describe("Codex JSON-RPC flow", () => {
           });
           t.notify("turn/completed", {
             threadId: "thread-1",
-            turnId: "turn-2",
-            status: "completed",
+            turn: { id: "turn-2", status: "completed" },
           });
           break;
         default:
@@ -500,6 +597,7 @@ describe("Codex JSON-RPC flow", () => {
           break;
         case "turn/start":
           t.respond(message.id, { turn: { id: "turn-2" } });
+          t.notify("turn/started", { threadId: "thread-1", turn: { id: "turn-2" } });
           t.notify("item/agentMessage/delta", {
             threadId: "thread-1",
             turnId: "turn-2",
@@ -507,8 +605,7 @@ describe("Codex JSON-RPC flow", () => {
           });
           t.notify("turn/completed", {
             threadId: "thread-1",
-            turnId: "turn-2",
-            status: "completed",
+            turn: { id: "turn-2", status: "completed" },
           });
           break;
         default:
@@ -565,8 +662,7 @@ describe("Codex JSON-RPC flow", () => {
           });
           t.notify("turn/completed", {
             threadId: "thread-1",
-            turnId: "stale-turn",
-            status: "interrupted",
+            turn: { id: "stale-turn", status: "interrupted" },
           });
           break;
         case "thread/resume":
@@ -574,13 +670,13 @@ describe("Codex JSON-RPC flow", () => {
           setTimeout(() => {
             t.notify("turn/completed", {
               threadId: "thread-1",
-              turnId: "stale-turn",
-              status: "interrupted",
+              turn: { id: "stale-turn", status: "interrupted" },
             });
           }, 0);
           break;
         case "turn/start":
           t.respond(message.id, { turn: { id: "turn-2" } });
+          t.notify("turn/started", { threadId: "thread-1", turn: { id: "turn-2" } });
           t.notify("item/agentMessage/delta", {
             threadId: "thread-1",
             turnId: "turn-2",
@@ -588,8 +684,7 @@ describe("Codex JSON-RPC flow", () => {
           });
           t.notify("turn/completed", {
             threadId: "thread-1",
-            turnId: "turn-2",
-            status: "completed",
+            turn: { id: "turn-2", status: "completed" },
           });
           break;
         default:
@@ -683,9 +778,13 @@ describe("Codex JSON-RPC flow", () => {
           break;
         case "turn/start":
           t.respond(message.id, { turn: { id: "turn-1" } });
+          t.notify("turn/started", { threadId: "thread-1", turn: { id: "turn-1" } });
           t.notify("error", { threadId: "other", turnId: "turn-1", message: "ignore me" });
           t.notify("error", { threadId: "thread-1", turnId: "turn-1", message: "tool exploded" });
-          t.notify("turn/completed", { threadId: "thread-1", turnId: "turn-1", status: "failed" });
+          t.notify("turn/completed", {
+            threadId: "thread-1",
+            turn: { id: "turn-1", status: "failed" },
+          });
           break;
         default:
           throw new Error(`unexpected ${String(message.method)}`);
@@ -778,8 +877,7 @@ describe("Codex JSON-RPC flow", () => {
           });
           t.notify("turn/completed", {
             threadId: "thread-1",
-            turnId: "turn-from-notification",
-            status: "completed",
+            turn: { id: "turn-from-notification", status: "completed" },
           });
           break;
         default:
@@ -814,6 +912,133 @@ describe("Codex JSON-RPC flow", () => {
     );
   });
 
+  test("turn/started ignores alternate id shapes when the RPC result is only an ack", async () => {
+    const transport = new ScriptedTransport((message, t) => {
+      switch (message.method) {
+        case "initialize":
+          t.respond(message.id, {});
+          break;
+        case "initialized":
+          break;
+        case "thread/start":
+          t.respond(message.id, { thread: { id: "thread-1" } });
+          break;
+        case "turn/start":
+          t.notify("turn/started", { threadId: "thread-1", turnId: "turn-1" });
+          t.notify("turn/started", { threadId: "thread-1", id: "turn-1" });
+          t.respond(message.id, { turn: {} });
+          break;
+        default:
+          throw new Error(`unexpected ${String(message.method)}`);
+      }
+    });
+
+    const provider = new CodexProvider({
+      transportFactory: new ScriptedFactory(transport),
+      rpcTimeoutMs: 20,
+      turnTimeoutMs: 20,
+    });
+    await expect(provider.generate(codexInvocation(), {})).rejects.toThrow(
+      /turn\/start did not return turn\.id/,
+    );
+  });
+
+  test("current turn ignores unscoped and alternate notification shapes", async () => {
+    const transport = new ScriptedTransport((message, t) => {
+      switch (message.method) {
+        case "initialize":
+          t.respond(message.id, {});
+          break;
+        case "initialized":
+          break;
+        case "thread/start":
+          t.respond(message.id, { thread: { id: "thread-1" } });
+          break;
+        case "turn/start":
+          t.respond(message.id, { turn: { id: "turn-1" } });
+          t.notify("turn/started", { threadId: "thread-1", turn: { id: "turn-1" } });
+          t.notify("error", { message: "unscoped error" });
+          t.notify("error", {
+            threadId: "thread-1",
+            turn: { id: "turn-1" },
+            message: "alternate error",
+          });
+          t.notify("item/agentMessage/delta", { delta: "unscoped" });
+          t.notify("item/agentMessage/delta", {
+            threadId: "thread-1",
+            turn: { id: "turn-1" },
+            delta: "alternate",
+          });
+          t.notify("item/completed", {
+            threadId: "thread-1",
+            turn: { id: "turn-1" },
+            item: { id: "bad", type: "agentMessage", text: "bad" },
+          });
+          t.notify("turn/completed", {
+            threadId: "thread-1",
+            turn: { id: "other-turn", status: "completed" },
+          });
+          t.notify("turn/completed", {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            status: "completed",
+          });
+          t.notify("item/agentMessage/delta", {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            delta: "good",
+          });
+          t.notify("turn/completed", {
+            threadId: "thread-1",
+            turn: { id: "turn-1", status: "completed" },
+          });
+          break;
+        default:
+          throw new Error(`unexpected ${String(message.method)}`);
+      }
+    });
+
+    const { result, events } = await runWithTransport(transport);
+    expect(result.text).toBe("good");
+    expect(events.filter((event) => event.type === "text").map((event) => event.data)).toEqual([
+      "good",
+    ]);
+    expect(
+      events
+        .filter((event) => event.type === "error")
+        .map((event) => event.data as Record<string, unknown>)
+        .map((data) => ({
+          message: data.message,
+          method: data.method,
+          reason: data.reason,
+          expectedTurnId: data.expectedTurnId,
+          observedTurnId: data.observedTurnId,
+        })),
+    ).toEqual([
+      {
+        message: "codex ignored error notification: missing-turn-id",
+        method: "error",
+        reason: "missing-turn-id",
+        expectedTurnId: "turn-1",
+        observedTurnId: undefined,
+      },
+      {
+        message: "codex ignored turn/completed notification: turn-id-mismatch",
+        method: "turn/completed",
+        reason: "turn-id-mismatch",
+        expectedTurnId: "turn-1",
+        observedTurnId: "other-turn",
+      },
+      {
+        message: "codex ignored turn/completed notification: missing-turn-id",
+        method: "turn/completed",
+        reason: "missing-turn-id",
+        expectedTurnId: "turn-1",
+        observedTurnId: undefined,
+      },
+    ]);
+  });
+
   test("transport close before terminal response rejects with the close diagnostic", async () => {
     const transport = new ScriptedTransport((message, t) => {
       switch (message.method) {
@@ -827,7 +1052,7 @@ describe("Codex JSON-RPC flow", () => {
           break;
         case "turn/start":
           t.respond(message.id, { turn: { id: "turn-1" } });
-          t.notify("turn/started", { threadId: "thread-1", turnId: "turn-1" });
+          t.notify("turn/started", { threadId: "thread-1", turn: { id: "turn-1" } });
           queueMicrotask(() =>
             t.fail(
               new Error(
@@ -857,7 +1082,7 @@ describe("Codex JSON-RPC flow", () => {
           break;
         case "turn/start":
           t.respond(message.id, { turn: { id: "turn-1" } });
-          t.notify("turn/started", { threadId: "thread-1", turnId: "turn-1" });
+          t.notify("turn/started", { threadId: "thread-1", turn: { id: "turn-1" } });
           t.raw("not json");
           break;
         default:
@@ -886,15 +1111,14 @@ describe("Codex JSON-RPC flow", () => {
           break;
         case "turn/start":
           t.respond(message.id, { turn: { id: "turn-1" } });
-          t.notify("turn/started", { threadId: "thread-1", turnId: "turn-1" });
+          t.notify("turn/started", { threadId: "thread-1", turn: { id: "turn-1" } });
           queueMicrotask(resolveTurnStart);
           break;
         case "turn/interrupt":
           t.respond(message.id, {});
           t.notify("turn/completed", {
             threadId: "thread-1",
-            turnId: "turn-1",
-            status: "interrupted",
+            turn: { id: "turn-1", status: "interrupted" },
           });
           break;
         default:
@@ -928,7 +1152,7 @@ describe("Codex JSON-RPC flow", () => {
           break;
         case "turn/start":
           t.respond(message.id, { turn: { id: "turn-1" } });
-          t.notify("turn/started", { threadId: "thread-1", turnId: "turn-1" });
+          t.notify("turn/started", { threadId: "thread-1", turn: { id: "turn-1" } });
           queueMicrotask(resolveTurnStart);
           break;
         case "turn/interrupt":
@@ -940,7 +1164,8 @@ describe("Codex JSON-RPC flow", () => {
     });
     const provider = new CodexProvider({
       transportFactory: new ScriptedFactory(transport),
-      timeoutMs: 5_000,
+      rpcTimeoutMs: 5_000,
+      turnTimeoutMs: 5_000,
     });
 
     const promise = provider.generate(codexInvocation({ abortSignal: controller.signal }), {});
@@ -957,7 +1182,8 @@ describe("Codex JSON-RPC flow", () => {
     await new CodexProvider({
       transportFactory: new ScriptedFactory(transport),
       rawLogPath,
-      timeoutMs: 1_000,
+      rpcTimeoutMs: 1_000,
+      turnTimeoutMs: 1_000,
     }).generate(codexInvocation(), {});
 
     const lines = readFileSync(rawLogPath, "utf8")
@@ -974,7 +1200,8 @@ describe("Codex JSON-RPC flow", () => {
     const factory = new ScriptedFactory(transport);
     await new CodexProvider({
       transportFactory: factory,
-      timeoutMs: 1_234,
+      rpcTimeoutMs: 1_234,
+      turnTimeoutMs: 1_234,
       connectTimeoutMs: 55,
     }).generate(codexInvocation(), {});
 
@@ -994,7 +1221,7 @@ describe("Codex JSON-RPC flow", () => {
           break;
         case "turn/start":
           t.respond(message.id, { turn: { id: "turn-1" } });
-          t.notify("turn/started", { threadId: "thread-1", turnId: "turn-1" });
+          t.notify("turn/started", { threadId: "thread-1", turn: { id: "turn-1" } });
           t.notify("item/agentMessage/delta", {
             threadId: "thread-1",
             turnId: "turn-1",
@@ -1003,8 +1230,7 @@ describe("Codex JSON-RPC flow", () => {
           setTimeout(() => {
             t.notify("turn/completed", {
               threadId: "thread-1",
-              turnId: "turn-1",
-              status: "completed",
+              turn: { id: "turn-1", status: "completed" },
             });
           }, 50);
           break;
@@ -1015,7 +1241,7 @@ describe("Codex JSON-RPC flow", () => {
 
     const result = await new CodexProvider({
       transportFactory: new ScriptedFactory(transport),
-      timeoutMs: 10,
+      rpcTimeoutMs: 10,
       turnTimeoutMs: 1_000,
     }).generate(codexInvocation(), {});
 
@@ -1044,8 +1270,7 @@ describe("Codex JSON-RPC flow", () => {
           setTimeout(() => {
             t.notify("turn/completed", {
               threadId: "thread-1",
-              turnId: "turn-1",
-              status: "completed",
+              turn: { id: "turn-1", status: "completed" },
             });
           }, 50);
           break;
@@ -1076,7 +1301,7 @@ describe("Codex JSON-RPC flow", () => {
           break;
         case "turn/start":
           t.respond(message.id, { turn: { id: "turn-1" } });
-          t.notify("turn/started", { threadId: "thread-1", turnId: "turn-1" });
+          t.notify("turn/started", { threadId: "thread-1", turn: { id: "turn-1" } });
           break;
         case "turn/interrupt":
           interrupted = true;
@@ -1084,8 +1309,7 @@ describe("Codex JSON-RPC flow", () => {
           t.respond(message.id, {});
           t.notify("turn/completed", {
             threadId: "thread-1",
-            turnId: "turn-1",
-            status: "interrupted",
+            turn: { id: "turn-1", status: "interrupted" },
           });
           break;
         default:
@@ -1096,7 +1320,7 @@ describe("Codex JSON-RPC flow", () => {
     await expect(
       new CodexProvider({
         transportFactory: new ScriptedFactory(transport),
-        timeoutMs: 1_000,
+        rpcTimeoutMs: 1_000,
         turnTimeoutMs: 20,
       }).generate(
         codexInvocation({ providerConfig: { transport: { type: "uds", path: "/x" } } }),
@@ -1116,11 +1340,15 @@ describe("Codex transports", () => {
     const logPath = join(dir, "stdio-log.jsonl");
     writeFileSync(
       bin,
-      `#!/usr/bin/env bun\nimport { appendFileSync } from "node:fs";\nconst log = process.env.FAKE_CODEX_LOG;\nfunction record(value) { appendFileSync(log, JSON.stringify(value) + "\\n"); }\nrecord({ argv: process.argv.slice(2), cwd: process.cwd(), secret: process.env.CODEX_TEST_SECRET });\nconst dec = new TextDecoder();\nlet buf = "";\nfunction send(value) { process.stdout.write(JSON.stringify(value) + "\\n"); }\nfunction handle(line) {\n  const msg = JSON.parse(line);\n  record({ method: msg.method, params: msg.params });\n  if (msg.method === "initialize") send({ jsonrpc: "2.0", id: msg.id, result: {} });\n  else if (msg.method === "thread/start") send({ jsonrpc: "2.0", id: msg.id, result: { thread: { id: "stdio-thread" } } });\n  else if (msg.method === "turn/start") {\n    send({ jsonrpc: "2.0", id: msg.id, result: { turn: { id: "stdio-turn" } } });\n    send({ jsonrpc: "2.0", method: "item/agentMessage/delta", params: { threadId: "stdio-thread", turnId: "stdio-turn", delta: "stdio ok" } });\n    send({ jsonrpc: "2.0", method: "turn/completed", params: { threadId: "stdio-thread", turnId: "stdio-turn", status: "completed" } });\n  }\n}\nfor await (const chunk of Bun.stdin.stream()) {\n  buf += dec.decode(chunk, { stream: true });\n  let nl = buf.indexOf("\\n");\n  while (nl >= 0) {\n    const line = buf.slice(0, nl).trim();\n    buf = buf.slice(nl + 1);\n    if (line) handle(line);\n    nl = buf.indexOf("\\n");\n  }\n}\n`,
+      `#!/usr/bin/env bun\nimport { appendFileSync } from "node:fs";\nconst log = process.env.FAKE_CODEX_LOG;\nfunction record(value) { appendFileSync(log, JSON.stringify(value) + "\\n"); }\nrecord({ argv: process.argv.slice(2), cwd: process.cwd(), secret: process.env.CODEX_TEST_SECRET });\nconst dec = new TextDecoder();\nlet buf = "";\nfunction send(value) { process.stdout.write(JSON.stringify(value) + "\\n"); }\nfunction handle(line) {\n  const msg = JSON.parse(line);\n  record({ method: msg.method, params: msg.params });\n  if (msg.method === "initialize") send({ jsonrpc: "2.0", id: msg.id, result: {} });\n  else if (msg.method === "thread/start") send({ jsonrpc: "2.0", id: msg.id, result: { thread: { id: "stdio-thread" } } });\n  else if (msg.method === "turn/start") {\n    send({ jsonrpc: "2.0", id: msg.id, result: { turn: { id: "stdio-turn" } } });\n    send({ jsonrpc: "2.0", method: "turn/started", params: { threadId: "stdio-thread", turn: { id: "stdio-turn" } } });\n    send({ jsonrpc: "2.0", method: "item/agentMessage/delta", params: { threadId: "stdio-thread", turnId: "stdio-turn", delta: "stdio ok" } });\n    send({ jsonrpc: "2.0", method: "turn/completed", params: { threadId: "stdio-thread", turn: { id: "stdio-turn", status: "completed" } } });\n  }\n}\nfor await (const chunk of Bun.stdin.stream()) {\n  buf += dec.decode(chunk, { stream: true });\n  let nl = buf.indexOf("\\n");\n  while (nl >= 0) {\n    const line = buf.slice(0, nl).trim();\n    buf = buf.slice(nl + 1);\n    if (line) handle(line);\n    nl = buf.indexOf("\\n");\n  }\n}\n`,
     );
     chmodSync(bin, 0o755);
 
-    const result = await new CodexProvider({ bin, timeoutMs: 1_000 }).generate(
+    const result = await new CodexProvider({
+      bin,
+      rpcTimeoutMs: 1_000,
+      turnTimeoutMs: 1_000,
+    }).generate(
       codexInvocation({ env: { FAKE_CODEX_LOG: logPath, CODEX_TEST_SECRET: "secret-value" } }),
       {},
     );
@@ -1162,7 +1390,8 @@ describe("Codex transports", () => {
       const url = new URL(server.url);
       url.protocol = "ws:";
       const result = await new CodexProvider({
-        timeoutMs: 1_000,
+        rpcTimeoutMs: 1_000,
+        turnTimeoutMs: 1_000,
         connectTimeoutMs: 1_000,
       }).generate(
         codexInvocation({ providerConfig: { transport: { type: "ws", url: url.toString() } } }),
@@ -1181,7 +1410,8 @@ describe("Codex transports", () => {
     const server = await startUdsWebSocketServer(socketPath);
     try {
       const result = await new CodexProvider({
-        timeoutMs: 1_000,
+        rpcTimeoutMs: 1_000,
+        turnTimeoutMs: 1_000,
         connectTimeoutMs: 1_000,
       }).generate(
         codexInvocation({ providerConfig: { transport: { type: "uds", path: socketPath } } }),
@@ -1201,7 +1431,8 @@ describe("Codex transports", () => {
     await expect(
       new CodexProvider({
         transportFactory: new ScriptedFactory(transport),
-        timeoutMs: 1_000,
+        rpcTimeoutMs: 1_000,
+        turnTimeoutMs: 1_000,
       }).generate(
         codexInvocation({
           providerConfig: { transport: { type: "ws", url: "ws://127.0.0.1:1" } },
@@ -1239,6 +1470,13 @@ function scriptedRpcReply(
       send(
         JSON.stringify({
           jsonrpc: "2.0",
+          method: "turn/started",
+          params: { threadId, turn: { id: `${threadId}-turn` } },
+        }),
+      );
+      send(
+        JSON.stringify({
+          jsonrpc: "2.0",
           method: "item/agentMessage/delta",
           params: { threadId, turnId: `${threadId}-turn`, delta: text },
         }),
@@ -1247,7 +1485,7 @@ function scriptedRpcReply(
         JSON.stringify({
           jsonrpc: "2.0",
           method: "turn/completed",
-          params: { threadId, turnId: `${threadId}-turn`, status: "completed" },
+          params: { threadId, turn: { id: `${threadId}-turn`, status: "completed" } },
         }),
       );
       break;
@@ -1388,7 +1626,7 @@ describe.if(LIVE)("LIVE codex smoke", () => {
   test("a real configured Codex agent produces structured output", async () => {
     const { executeAgent } = await import("./execute.ts");
     const dir = tempDir("keel-live-codex-agent-");
-    const provider = new CodexProvider({ timeoutMs: 120_000 });
+    const provider = new CodexProvider({ rpcTimeoutMs: 120_000, turnTimeoutMs: 120_000 });
     const tokens: string[] = [];
     const exec = await executeAgent(
       provider,
@@ -1428,7 +1666,7 @@ describe.if(LIVE)("LIVE codex smoke", () => {
     const target = join(dir, "target");
     writeFileSync(join(dir, "target-marker"), "");
     mkdirSync(target, { recursive: true });
-    const inner = new CodexProvider({ timeoutMs: 120_000 });
+    const inner = new CodexProvider({ rpcTimeoutMs: 120_000, turnTimeoutMs: 120_000 });
     let calls = 0;
     const provider: AgentProvider = {
       name: "codex",

@@ -695,6 +695,14 @@ export class InProcessKeel implements KeelApi {
       path: `profile.${req.name}`,
       providerRegistry: this.opts.agents,
     });
+    const check = checkAgentProfileConfig(config, {
+      path: `profile.${req.name}`,
+      providerRegistry: this.opts.agents,
+    });
+    const firstError = check.diagnostics.find((diagnostic) => diagnostic.level === "error");
+    if (firstError) {
+      throw new Error(firstError.message);
+    }
     const configJson = canonicalJson(config);
     const row = this.store.putAgentProfileCatalogRow({
       name: req.name,

@@ -12,6 +12,7 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { resolveInvocationToolPolicy, resolvedToolPolicyToPiArgs } from "./capabilities.ts";
 import { DEFAULT_AGENT_TIMEOUT_MS } from "./defaults.ts";
+import { requireInvocationCwd } from "./types.ts";
 import type {
   AgentHooks,
   AgentInvocation,
@@ -21,8 +22,6 @@ import type {
 } from "./types.ts";
 
 export interface PiProviderOptions {
-  /** Working directory (pi scopes sessions by cwd); defaults to process.cwd(). */
-  cwd?: string;
   /** Binary name/path (default KEEL_PI_BIN, then "pi"). */
   bin?: string;
   /** Per-call timeout in ms before abort (default 1 hour). */
@@ -47,14 +46,12 @@ interface PiMessage {
 export class PiProvider implements AgentProvider {
   readonly name = "pi";
   readonly supportsSessions = true;
-  private readonly cwd: string;
   private readonly bin: string;
   private readonly timeoutMs: number;
   private readonly extraEnv: Record<string, string>;
   private readonly rawLogPath?: string;
 
   constructor(opts: PiProviderOptions = {}) {
-    this.cwd = opts.cwd ?? process.cwd();
     this.bin = opts.bin ?? process.env.KEEL_PI_BIN ?? "pi";
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_AGENT_TIMEOUT_MS;
     this.extraEnv = opts.env ?? {};
@@ -65,12 +62,15 @@ export class PiProvider implements AgentProvider {
     const args = ["--mode", "rpc"];
     args.push(
       ...resolvedToolPolicyToPiArgs(
-        resolveInvocationToolPolicy({
-          ...(invocation.capabilities ? { capabilities: invocation.capabilities } : {}),
-          ...(invocation.toolPolicy ? { toolPolicy: invocation.toolPolicy } : {}),
-          ...(invocation.allowTools ? { allowTools: invocation.allowTools } : {}),
-          ...(invocation.denyTools ? { denyTools: invocation.denyTools } : {}),
-        }),
+        resolveInvocationToolPolicy(
+          {
+            ...(invocation.capabilities ? { capabilities: invocation.capabilities } : {}),
+            ...(invocation.toolPolicy ? { toolPolicy: invocation.toolPolicy } : {}),
+            ...(invocation.allowTools ? { allowTools: invocation.allowTools } : {}),
+            ...(invocation.denyTools ? { denyTools: invocation.denyTools } : {}),
+          },
+          { path: `${this.name} agent "${invocation.key}"` },
+        ),
       ),
     );
     if (invocation.model) args.push("--model", invocation.model);
@@ -78,7 +78,7 @@ export class PiProvider implements AgentProvider {
     // Reconnect to a prior session (mid-call crash recovery, §10.4).
     if (invocation.resumeToken) args.push("--session", invocation.resumeToken);
 
-    const cwd = invocation.cwd ?? this.cwd;
+    const cwd = requireInvocationCwd(invocation, this.name);
     this.rawLog(invocation.key, "spawn", { bin: this.bin, args, cwd });
     const proc = Bun.spawn([this.bin, ...args], {
       cwd,
@@ -149,9 +149,15 @@ export class PiProvider implements AgentProvider {
     const handleLine = (line: string): void => {
       let msg: PiOut;
       try {
-        msg = JSON.parse(line) as PiOut;
+        const parsed = JSON.parse(line) as unknown;
+        if (!isPiOut(parsed)) {
+          malformedRpcStdout(line);
+          return;
+        }
+        msg = parsed;
       } catch {
-        return; // ignore non-JSON noise
+        malformedRpcStdout(line);
+        return;
       }
       if (msg.type === "response" && typeof msg.id === "number") {
         pending.get(msg.id)?.(msg as PiResponse);
@@ -171,10 +177,22 @@ export class PiProvider implements AgentProvider {
         agentEnd = { messages: (msg.messages as PiMessage[]) ?? [] };
       }
     };
+    function malformedRpcStdout(line: string): void {
+      // Pi RPC stdout is a JSON-lines protocol. Non-empty non-JSON stdout is a
+      // provider protocol error, not ignorable diagnostic noise.
+      streamErr = `pi agent "${invocation.key}" emitted malformed RPC stdout: ${JSON.stringify(
+        excerpt(line, 400),
+      )}`;
+      proc.kill();
+    }
 
     const timeout = setTimeout(() => {
       streamErr = `pi agent "${invocation.key}" timed out after ${this.timeoutMs}ms`;
-      send({ type: "abort", id: nextId++ });
+      try {
+        send({ type: "abort", id: nextId++ });
+      } catch {
+        // The provider may already have exited; the timeout error is authoritative.
+      }
       proc.kill();
     }, this.timeoutMs);
 
@@ -187,7 +205,29 @@ export class PiProvider implements AgentProvider {
 
     try {
       // 1) session id (write-ahead capture) — available before any model work.
-      const state = await this.race(request({ type: "get_state" }), done, proc);
+      const startup = await Promise.race([
+        request({ type: "get_state" }).then(
+          (state) => ({ kind: "state", state }) as const,
+          (err: unknown) => ({ kind: "send-error", err }) as const,
+        ),
+        done.then(() => ({ kind: "done" }) as const),
+        proc.exited.then(() => ({ kind: "exited" }) as const),
+      ]);
+      if (startup.kind === "send-error") {
+        await Promise.race([done, Bun.sleep(100)]);
+        if (streamErr) throw new Error(streamErr);
+        throw startup.err;
+      }
+      if (startup.kind === "exited") {
+        await Promise.race([done, Bun.sleep(100)]);
+      }
+      if (streamErr) throw new Error(streamErr);
+      const state = startup.kind === "state" ? startup.state : null;
+      if (!state) {
+        await Promise.race([stderrDone, Bun.sleep(100)]);
+        const suffix = stderrTail ? `; stderr: ${stderrTail.trim()}` : "";
+        throw new Error(`pi agent "${invocation.key}" ended before get_state response${suffix}`);
+      }
       const sessionId =
         state && typeof state.data === "object" && state.data
           ? (state.data as { sessionId?: string }).sessionId
@@ -200,7 +240,13 @@ export class PiProvider implements AgentProvider {
       }
 
       // 2) prompt → stream → agent_end
-      send({ type: "prompt", id: nextId++, message: invocation.prompt });
+      try {
+        send({ type: "prompt", id: nextId++, message: invocation.prompt });
+      } catch (err) {
+        await Promise.race([done, Bun.sleep(100)]);
+        if (streamErr) throw new Error(streamErr);
+        throw err;
+      }
       await Promise.race([done, proc.exited.then(() => undefined)]);
       if (!agentEnd && !streamErr) {
         await Promise.race([done, Bun.sleep(100)]);
@@ -242,14 +288,6 @@ export class PiProvider implements AgentProvider {
     }
   }
 
-  private async race(
-    req: Promise<PiResponse>,
-    done: Promise<void>,
-    proc: { exited: Promise<number> },
-  ): Promise<PiResponse | null> {
-    return Promise.race([req, done.then(() => null), proc.exited.then(() => null)]);
-  }
-
   private rawLog(key: string, stream: "spawn" | "stdout" | "stderr", data: unknown): void {
     if (!this.rawLogPath) return;
     try {
@@ -273,6 +311,14 @@ interface PiResponse {
   error?: string;
 }
 type PiOut = (PiResponse | { type: string; [k: string]: unknown }) & { type: string; id?: number };
+
+function isPiOut(value: unknown): value is PiOut {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as { type?: unknown }).type === "string"
+  );
+}
 
 /** Concat assistant text parts of the last assistant message; skip thinking. */
 function lastAssistantText(messages: PiMessage[]): string {
@@ -299,6 +345,10 @@ function lastAssistantError(messages: PiMessage[]): string | null {
 
 function tail(text: string, max = 4000): string {
   return text.length > max ? text.slice(text.length - max) : text;
+}
+
+function excerpt(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max)}...` : text;
 }
 
 function piToolCallId(msg: PiOut): string | undefined {

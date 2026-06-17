@@ -26,7 +26,7 @@ describe("strict-by-default vs opt-in lenient", () => {
     await expect(
       executeAgent(
         fixedProvider('{"severity":"High"}'),
-        { key: "k", provider: "mock", prompt: "p" },
+        { key: "k", provider: "mock", prompt: "p", cwd: process.cwd() },
         {},
         {
           jsonSchema: schema,
@@ -39,7 +39,7 @@ describe("strict-by-default vs opt-in lenient", () => {
   test("lenient coerces the same output and validates", async () => {
     const r = await executeAgent(
       fixedProvider('{"severity":"High","extra":1}'),
-      { key: "k", provider: "mock", prompt: "p" },
+      { key: "k", provider: "mock", prompt: "p", cwd: process.cwd() },
       {},
       { jsonSchema: schema, maxRetries: 1, coerce: true },
     );
@@ -63,7 +63,7 @@ describe("schema retries preserve provider session", () => {
 
     const result = await executeAgent(
       provider,
-      { key: "k", provider: "mock", prompt: "p" },
+      { key: "k", provider: "mock", prompt: "p", cwd: process.cwd() },
       {},
       { jsonSchema: schema, maxRetries: 1 },
     );
@@ -95,7 +95,7 @@ describe("stall aborts the attempt (signal fires)", () => {
         (signal) =>
           executeAgent(
             provider,
-            { key: "k", provider: "mock", prompt: "p", abortSignal: signal },
+            { key: "k", provider: "mock", prompt: "p", cwd: process.cwd(), abortSignal: signal },
             {},
             {},
           ),

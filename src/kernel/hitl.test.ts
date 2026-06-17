@@ -19,7 +19,10 @@ describe("ctx.human approval gate", () => {
     const store = JournalStore.memory();
     const kernel = new RealmKernel(store, { idgen: () => "r" });
 
-    const handle = await kernel.run<string>(gateUrl, null, { name: "gate" });
+    const handle = await kernel.run<string>(gateUrl, null, {
+      name: "gate",
+      target: process.cwd(),
+    });
     expect(handle.status).toBe("waiting-human");
     expect(store.getJournalRow("r", "prepare", 1)?.status).toBe("completed");
     const appr = store.getApproval("r", "approve-deploy");
@@ -38,7 +41,10 @@ describe("ctx.human approval gate", () => {
 
   test("a denied decision flows through too, after a 'restart'", async () => {
     const store = JournalStore.memory();
-    await new RealmKernel(store, { idgen: () => "r2" }).run(gateUrl, null, { name: "gate" });
+    await new RealmKernel(store, { idgen: () => "r2" }).run(gateUrl, null, {
+      name: "gate",
+      target: process.cwd(),
+    });
     expect(store.getRun("r2")?.status).toBe("waiting-human");
 
     store.decideApproval("r2", "approve-deploy", { status: "denied" }, 1);
@@ -53,7 +59,10 @@ describe("ctx.signal", () => {
     const store = JournalStore.memory();
     const kernel = new RealmKernel(store, { idgen: () => "s" });
 
-    const handle = await kernel.run<{ go: boolean; by: string }>(sigUrl, null, { name: "sig" });
+    const handle = await kernel.run<{ go: boolean; by: string }>(sigUrl, null, {
+      name: "sig",
+      target: process.cwd(),
+    });
     expect(handle.status).toBe("waiting-signal");
 
     // a non-matching signal does not wake it

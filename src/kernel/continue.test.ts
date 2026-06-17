@@ -18,7 +18,7 @@ describe("continueAsNew", () => {
     const first = await kernel.run<{ continuedTo: string }>(
       loopUrl,
       { count: 0 },
-      { name: "loop" },
+      { name: "loop", target: process.cwd() },
     );
     expect(first.status).toBe("continued");
     expect(first.output?.continuedTo).toBe("loop-1");
@@ -45,7 +45,7 @@ describe("continueAsNew", () => {
     const store = JournalStore.memory();
     let n = 0;
     const kernel = new RealmKernel(store, { idgen: () => `c-${n++}` });
-    await kernel.run(loopUrl, { count: 1 }, { name: "loop" }); // c-0 continues to c-1 (count 2 finishes)
+    await kernel.run(loopUrl, { count: 1 }, { name: "loop", target: process.cwd() }); // c-0 continues to c-1 (count 2 finishes)
     await until(() => store.getRun("c-1")?.status === "finished", 4000);
     const before = store.listRuns().length;
     // c-0 is terminal 'continued'; resuming it must short-circuit, not re-launch

@@ -524,9 +524,11 @@ non-terminal older-ABI runs first unless Keel gains a real multi-ABI bridge.
 ### Targets And Run Workspaces
 
 Every CLI/client-created run records a `target`: for `keel launch` and `keel run`
-this is the client cwd, or `--target <dir>` when supplied. Raw low-level API
-callers must send a non-empty target; the daemon rejects missing or blank targets
-rather than substituting its own cwd.
+this is the client cwd, or `--target <dir>` when supplied. Saved workflow
+launches use `--target <dir>` when supplied, otherwise the saved workflow's
+persisted default target. Raw low-level API callers must send a non-empty target
+where required; the daemon rejects missing or blank targets rather than
+substituting its own cwd.
 
 Provider cwd always comes from a resolved run workspace, never daemon cwd. Agents
 and sessions resolve workspaces in this order: an explicit `workspace` handle,
@@ -1161,7 +1163,10 @@ Agents default to read-only provider tools. Use `toolPolicy: "none"` to disable
 tools, or declare broader access with `toolPolicy` or explicit `capabilities`.
 If both `toolPolicy` and `capabilities` are set, `toolPolicy` controls provider
 tools. `toolPolicy: "unrestricted"` cannot be combined with `allowTools` or
-`denyTools` until provider-native deny semantics are supported.
+`denyTools` until provider-native deny semantics are supported. `allowTools` and
+`denyTools` require exact provider-native names; Keel rejects generic aliases and
+case variants for known built-in tools instead of normalizing them. Unknown
+custom provider-native tool names pass through unchanged.
 
 ```ts
 toolPolicy: "read-only";
@@ -1171,8 +1176,8 @@ capabilities: {
   shell: false,
   secrets: ["DEPLOY_KEY"],
 };
-allowTools: ["Bash"];
-denyTools: ["LS"];
+allowTools: ["Bash"]; // Claude exact name; Pi uses "bash".
+denyTools: ["Glob"]; // Claude exact name; Pi uses "grep" or "ls".
 // For reviewable edits, pass a worktree WorkspaceHandle to the agent/session.
 ```
 
@@ -1281,9 +1286,11 @@ that durable input.
 
 Schedules pin the workflow definition hash and default target captured when the
 schedule is created, including any local helper modules captured from a workflow
-file. CLI schedule creation defaults the target to the creation cwd and supports
-a non-empty `--target <dir>`. Raw schedule API calls must also provide a
-non-empty target. Schedules do not reread a path or automatically adopt later
+file. CLI schedule creation from source defaults the target to the creation cwd
+and supports a non-empty `--target <dir>`. Saved-ref schedules use `--target
+<dir>` when supplied, otherwise the saved workflow's persisted default target.
+Raw schedule API calls must provide a non-empty target unless the saved workflow
+default supplies one. Schedules do not reread a path or automatically adopt later
 source/helper edits; replace the schedule to capture a new bundle. Existing
 path-based schedules from older databases are disabled by migration and should be
 recreated from current source. If a pinned definition requires an unsupported

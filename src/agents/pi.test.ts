@@ -143,6 +143,7 @@ done
           key: "pi-abort",
           provider: "pi",
           prompt: "hello",
+          cwd: dir,
           toolPolicy: "none",
           abortSignal: controller.signal,
         },
@@ -193,7 +194,7 @@ for await (const chunk of Bun.stdin.stream()) {
 
       const provider = new PiProvider();
       const result = await provider.generate(
-        { key: "pi-env", provider: "pi", prompt: "hello", toolPolicy: "none" },
+        { key: "pi-env", provider: "pi", prompt: "hello", cwd: dir, toolPolicy: "none" },
         {},
       );
 
@@ -244,6 +245,7 @@ for await (const chunk of Bun.stdin.stream()) {
           key: "raw",
           provider: "pi",
           prompt: "hello",
+          cwd: dir,
           model: "missing-model",
           toolPolicy: "none",
         },
@@ -260,6 +262,227 @@ for await (const chunk of Bun.stdin.stream()) {
       expect(rows.some((row) => row.stream === "stderr")).toBe(true);
       expect(JSON.stringify(rows)).toContain("missing-model");
       expect(JSON.stringify(rows)).toContain("model lookup failed on stderr");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("malformed RPC stdout fails closed with a bounded excerpt", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-pi-malformed-"));
+    try {
+      const bin = join(dir, "fake-pi");
+      const invalidLine = "not-json:".padEnd(600, "x");
+      await Bun.write(
+        bin,
+        `#!${process.execPath}
+const invalidLine = ${JSON.stringify(invalidLine)};
+const dec = new TextDecoder();
+let buf = "";
+for await (const chunk of Bun.stdin.stream()) {
+  buf += dec.decode(chunk);
+  let nl = buf.indexOf("\\n");
+  while (nl >= 0) {
+    const line = buf.slice(0, nl).trim();
+    buf = buf.slice(nl + 1);
+    if (line) {
+      const msg = JSON.parse(line);
+      if (msg.type === "get_state") {
+        console.log(JSON.stringify({ type: "response", id: msg.id, data: { sessionId: "sess-bad" } }));
+      }
+      if (msg.type === "prompt") {
+        console.log(invalidLine);
+        process.exit(0);
+      }
+    }
+    nl = buf.indexOf("\\n");
+  }
+}
+`,
+      );
+      chmodSync(bin, 0o755);
+
+      const provider = new PiProvider({ bin, timeoutMs: 5_000 });
+      try {
+        await provider.generate(
+          { key: "malformed", provider: "pi", prompt: "hello", cwd: dir, toolPolicy: "none" },
+          {},
+        );
+        throw new Error("expected malformed stdout to fail");
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        expect(message).toContain('pi agent "malformed" emitted malformed RPC stdout');
+        expect(message).toContain("not-json:");
+        expect(message).not.toContain(invalidLine);
+        expect(message.length).toBeLessThan(520);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("malformed RPC stdout during startup fails before prompting", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-pi-startup-malformed-"));
+    try {
+      const bin = join(dir, "fake-pi");
+      await Bun.write(
+        bin,
+        `#!${process.execPath}
+const dec = new TextDecoder();
+let buf = "";
+for await (const chunk of Bun.stdin.stream()) {
+  buf += dec.decode(chunk);
+  let nl = buf.indexOf("\\n");
+  while (nl >= 0) {
+    const line = buf.slice(0, nl).trim();
+    buf = buf.slice(nl + 1);
+    if (line) {
+      const msg = JSON.parse(line);
+      if (msg.type === "get_state") {
+        console.log("not-json-before-state");
+        process.exit(0);
+      }
+      if (msg.type === "prompt") {
+        console.log(JSON.stringify({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "should-not-run" }] }] }));
+      }
+    }
+    nl = buf.indexOf("\\n");
+  }
+}
+`,
+      );
+      chmodSync(bin, 0o755);
+
+      const tokens: string[] = [];
+      const provider = new PiProvider({ bin, timeoutMs: 5_000 });
+      await expect(
+        provider.generate(
+          {
+            key: "startup-malformed",
+            provider: "pi",
+            prompt: "hello",
+            cwd: dir,
+            toolPolicy: "none",
+          },
+          { onSessionToken: (token) => tokens.push(token) },
+        ),
+      ).rejects.toThrow(
+        'pi agent "startup-malformed" emitted malformed RPC stdout: "not-json-before-state"',
+      );
+      expect(tokens).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("malformed RPC stdout before startup request wins over send errors", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-pi-pre-startup-malformed-"));
+    try {
+      const bin = join(dir, "fake-pi");
+      await Bun.write(
+        bin,
+        `#!${process.execPath}
+console.log("not-json-before-request");
+process.exit(0);
+`,
+      );
+      chmodSync(bin, 0o755);
+
+      const tokens: string[] = [];
+      const provider = new PiProvider({ bin, timeoutMs: 5_000 });
+      await expect(
+        provider.generate(
+          {
+            key: "pre-startup-malformed",
+            provider: "pi",
+            prompt: "hello",
+            cwd: dir,
+            toolPolicy: "none",
+          },
+          { onSessionToken: (token) => tokens.push(token) },
+        ),
+      ).rejects.toThrow(
+        'pi agent "pre-startup-malformed" emitted malformed RPC stdout: "not-json-before-request"',
+      );
+      expect(tokens).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("wrong-shaped JSON RPC stdout fails closed during startup", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-pi-startup-shape-"));
+    try {
+      const bin = join(dir, "fake-pi");
+      await Bun.write(
+        bin,
+        `#!${process.execPath}
+const dec = new TextDecoder();
+let buf = "";
+for await (const chunk of Bun.stdin.stream()) {
+  buf += dec.decode(chunk);
+  let nl = buf.indexOf("\\n");
+  while (nl >= 0) {
+    const line = buf.slice(0, nl).trim();
+    buf = buf.slice(nl + 1);
+    if (line) {
+      const msg = JSON.parse(line);
+      if (msg.type === "get_state") {
+        console.log("null");
+        process.exit(0);
+      }
+      if (msg.type === "prompt") {
+        console.log(JSON.stringify({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "should-not-run" }] }] }));
+      }
+    }
+    nl = buf.indexOf("\\n");
+  }
+}
+`,
+      );
+      chmodSync(bin, 0o755);
+
+      const tokens: string[] = [];
+      const provider = new PiProvider({ bin, timeoutMs: 5_000 });
+      await expect(
+        provider.generate(
+          {
+            key: "startup-shape",
+            provider: "pi",
+            prompt: "hello",
+            cwd: dir,
+            toolPolicy: "none",
+          },
+          { onSessionToken: (token) => tokens.push(token) },
+        ),
+      ).rejects.toThrow('pi agent "startup-shape" emitted malformed RPC stdout: "null"');
+      expect(tokens).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("startup exit before get_state does not hang on inherited stdout", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-pi-startup-exit-"));
+    try {
+      const bin = join(dir, "fake-pi");
+      await Bun.write(
+        bin,
+        `#!/bin/sh
+(sleep 2) &
+exit 0
+`,
+      );
+      chmodSync(bin, 0o755);
+
+      const started = Date.now();
+      const provider = new PiProvider({ bin, timeoutMs: 5_000 });
+      await expect(
+        provider.generate(
+          { key: "startup-exit", provider: "pi", prompt: "hello", cwd: dir, toolPolicy: "none" },
+          {},
+        ),
+      ).rejects.toThrow('pi agent "startup-exit" ended before get_state response');
+      expect(Date.now() - started).toBeLessThan(1000);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -302,7 +525,7 @@ for await (const chunk of Bun.stdin.stream()) {
       const events: unknown[] = [];
       const provider = new PiProvider({ bin });
       const result = await provider.generate(
-        { key: "tool-id", provider: "pi", prompt: "hello", toolPolicy: "none" },
+        { key: "tool-id", provider: "pi", prompt: "hello", cwd: dir, toolPolicy: "none" },
         { onEvent: (event) => events.push(event) },
       );
 
@@ -363,7 +586,7 @@ for await (const chunk of Bun.stdin.stream()) {
       const started = Date.now();
       await expect(
         provider.generate(
-          { key: "event-hook", provider: "pi", prompt: "hello", toolPolicy: "none" },
+          { key: "event-hook", provider: "pi", prompt: "hello", cwd: dir, toolPolicy: "none" },
           {
             onEvent: (event) => {
               if (event.type === "tool_call") throw new Error("durable append failed");
@@ -417,6 +640,7 @@ for await (const chunk of Bun.stdin.stream()) {
           key: "resolved-caps",
           provider: "pi",
           prompt: "hello",
+          cwd: dir,
           toolPolicy: "workspace-write",
           capabilities: {
             fs: "read",
@@ -482,7 +706,7 @@ for await (const chunk of Bun.stdin.stream()) {
       const events: unknown[] = [];
       const provider = new PiProvider({ bin });
       const result = await provider.generate(
-        { key: "retry", provider: "pi", prompt: "hello", toolPolicy: "none" },
+        { key: "retry", provider: "pi", prompt: "hello", cwd: dir, toolPolicy: "none" },
         { onEvent: (event) => events.push(event) },
       );
 
@@ -544,7 +768,7 @@ for await (const chunk of Bun.stdin.stream()) {
       const provider = new PiProvider({ bin });
       await expect(
         provider.generate(
-          { key: "final-error", provider: "pi", prompt: "hello", toolPolicy: "none" },
+          { key: "final-error", provider: "pi", prompt: "hello", cwd: dir, toolPolicy: "none" },
           {},
         ),
       ).rejects.toThrow('pi agent "final-error" ended with error: Invalid model.');
@@ -569,6 +793,7 @@ describe.if(LIVE)("LIVE pi smoke", () => {
         key: "live-1",
         provider: "pi",
         prompt: 'Return ONLY this JSON and nothing else: {"value": 42}',
+        cwd: process.cwd(),
         toolPolicy: "read-only",
       },
       { onSessionToken: (t) => tokens.push(t) },

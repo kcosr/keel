@@ -129,6 +129,41 @@ describe("resolveProfile", () => {
     expect(unsupported.diagnostics[0]?.message).toMatch(/fs=workspace-write/);
   });
 
+  test("known provider profiles reject non-canonical native tool names", () => {
+    const provider = (name: string): AgentProvider => ({
+      name,
+      async generate(): Promise<AgentResult> {
+        return { text: "ok", transcript: [] };
+      },
+    });
+    const registry = new AgentProviderRegistry()
+      .register(provider("pi"))
+      .register(provider("claude"))
+      .register(provider("custom"));
+    const check = (config: Record<string, unknown>) =>
+      checkAgentProfileConfig(config, { providerRegistry: registry });
+
+    const piAlias = check({ provider: "pi", toolPolicy: "read-only", allowTools: ["run"] });
+    expect(piAlias.ok).toBe(false);
+    expect(piAlias.diagnostics[0]?.message).toMatch(
+      /profile provider "pi": pi provider tool "run" is not canonical; use "bash"/,
+    );
+
+    const claudeAlias = check({
+      provider: "claude",
+      toolPolicy: "read-only",
+      denyTools: ["search"],
+    });
+    expect(claudeAlias.ok).toBe(false);
+    expect(claudeAlias.diagnostics[0]?.message).toMatch(
+      /profile provider "claude": claude provider tool "search" is not canonical; use "WebSearch"/,
+    );
+
+    expect(check({ provider: "custom", toolPolicy: "read-only", allowTools: ["run"] }).ok).toBe(
+      true,
+    );
+  });
+
   test("profile normalization stores structurally valid codex configs without support checks", () => {
     const normalized = normalizeAgentProfileConfig({
       provider: "codex",

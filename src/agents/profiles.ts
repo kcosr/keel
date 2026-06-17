@@ -1,9 +1,11 @@
 import { type Json, canonicalJson, sha256Hex } from "../hash.ts";
 import {
   type ToolPolicy,
-  codexSandboxForCapabilities,
+  normalizeProviderToolList,
+  rejectArrayNonJsonKeys,
   resolveToolPolicy,
   validateCapabilitiesDeclaration,
+  validateProviderToolPolicy,
 } from "./capabilities.ts";
 import { normalizeCodexProviderConfig } from "./codex.ts";
 import { normalizeProviderConfigMap, normalizeProviderConfigValue } from "./provider-config.ts";
@@ -208,7 +210,7 @@ export function normalizeAgentProfileConfig(
         break;
       case "allowTools":
       case "denyTools":
-        out[key] = normalizeToolArray(value, `${path}.${key}`);
+        out[key] = normalizeProviderToolList(value, `${path}.${key}`);
         break;
       case "capabilities":
         if (!isPlainObject(value))
@@ -347,21 +349,18 @@ function assertProviderSupportsProfile(
   config: PersistentAgentProfileConfig,
   path: string,
 ): void {
-  if (provider !== "codex") return;
   const tools = resolveToolPolicy({
     ...(config.capabilities ? { capabilities: config.capabilities } : {}),
     ...(config.toolPolicy ? { toolPolicy: config.toolPolicy } : {}),
     ...(config.allowTools ? { allowTools: config.allowTools } : {}),
     ...(config.denyTools ? { denyTools: config.denyTools } : {}),
   });
-  if (tools.allowTools.length > 0 || tools.denyTools.length > 0) {
-    throw new Error(`${path} provider "codex" does not support allowTools or denyTools`);
-  }
   try {
-    codexSandboxForCapabilities(tools.capabilities);
+    validateProviderToolPolicy(provider, tools, path);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`${path} provider "codex": ${message}`);
+    if (message.startsWith(`${path} `)) throw new Error(message);
+    throw new Error(`${path} provider "${provider}": ${message}`);
   }
 }
 
@@ -371,26 +370,6 @@ function normalizeSelectedProviderConfig(provider: string, value: unknown): void
       normalizeProviderConfigValue("providerConfig.codex", value as never),
     );
   }
-}
-
-function normalizeToolArray(value: unknown, path: string): string[] {
-  if (!Array.isArray(value)) throw new Error(`${path} must be an array`);
-  rejectArrayNonJsonKeys(value, path);
-  const out: string[] = [];
-  const seen = new Set<string>();
-  for (let i = 0; i < value.length; i++) {
-    if (!(i in value)) throw new Error(`${path}[${i}] must not be a sparse array hole`);
-    const item = value[i];
-    if (typeof item !== "string" || item.trim().length === 0) {
-      throw new Error(`${path}[${i}] must be a non-empty string`);
-    }
-    const normalized = item.trim();
-    const key = normalized.toLowerCase();
-    if (seen.has(key)) throw new Error(`${path} contains duplicate tool "${normalized}"`);
-    seen.add(key);
-    out.push(normalized);
-  }
-  return out;
 }
 
 function normalizeJsonObject(value: unknown, path: string): Json {
@@ -443,26 +422,6 @@ function normalizeJsonValue(value: unknown, path: string, active: WeakSet<object
   } finally {
     active.delete(value);
   }
-}
-
-function rejectArrayNonJsonKeys(value: unknown[], path: string): void {
-  for (const key of Reflect.ownKeys(value)) {
-    if (key === "length") continue;
-    if (typeof key === "symbol") throw new Error(`${path} must be JSON-serializable (symbol key)`);
-    if (!isArrayIndexKey(key, value.length)) {
-      throw new Error(`${path}.${key} must be JSON-serializable (array extra property)`);
-    }
-    const desc = Object.getOwnPropertyDescriptor(value, key);
-    if (!desc?.enumerable) {
-      throw new Error(`${path}[${key}] must be JSON-serializable (non-enumerable property)`);
-    }
-  }
-}
-
-function isArrayIndexKey(key: string, length: number): boolean {
-  if (!/^(0|[1-9][0-9]*)$/.test(key)) return false;
-  const n = Number(key);
-  return Number.isSafeInteger(n) && n >= 0 && n < length;
 }
 
 function rejectSymbolOrNonEnumerableKeys(value: object, path: string): void {

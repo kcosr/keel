@@ -15,10 +15,11 @@
 //   KEEL_N      number of steps
 
 import { appendFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { JournalStore } from "../journal/store.ts";
+import { captureWorkflowFile } from "../workflow-definitions/capture.ts";
 import type { FaultPoint } from "./ctx.ts";
-import { Kernel, type Workflow } from "./kernel.ts";
-import { passthrough } from "./schema.ts";
+import { RealmKernel } from "./realm/realm-host.ts";
 
 function env(name: string): string {
   const v = process.env[name];
@@ -35,25 +36,13 @@ const n = Number(env("KEEL_N"));
 
 const [killPoint, killKey] = kill ? (kill.split(":") as [FaultPoint, string]) : [null, null];
 
-const num = passthrough<number>();
-
-const workflow: Workflow<null, number> = async (ctx) => {
-  let acc = 0;
-  for (let i = 0; i < n; i++) {
-    const key = `s${i}`;
-    acc = await ctx.step(key, num, { i }, () => {
-      appendFileSync(logPath, `${key}\n`);
-      return i + 1;
-    });
-  }
-  return acc;
-};
-
 const store = JournalStore.open(dbPath);
-const kernel = new Kernel(store, {
+const kernel = new RealmKernel(store, {
   idgen: () => runId,
   // Deterministic-ish clock; value is irrelevant to the crash assertions.
   clock: () => Date.now(),
+  definitionCacheRoot: join(dirname(dbPath), "definitions"),
+  onStepExecute: (key) => appendFileSync(logPath, `${key}\n`),
   fault: (point, key) => {
     if (point === killPoint && key === killKey) {
       // Hard process death — no cleanup, no catch blocks run. The pending row is
@@ -65,8 +54,12 @@ const kernel = new Kernel(store, {
 
 const handle =
   phase === "resume"
-    ? await kernel.resume(runId, workflow)
-    : await kernel.run(workflow, null, { name: "crash-chain" });
+    ? await kernel.resume<number>(runId)
+    : await kernel.run<number>(
+        captureWorkflowFile(new URL("realm/fixtures/chain.workflow.ts", import.meta.url).pathname),
+        { n },
+        { name: "crash-chain", target: process.cwd() },
+      );
 
 store.close();
 process.stdout.write(`${JSON.stringify({ status: handle.status, output: handle.output })}\n`);

@@ -203,10 +203,7 @@ export class KeelOperationGateway {
         );
         const saved = this.opts.store.resolveSavedWorkflowRef(ref);
         this.authorizeWorkflow(credential, ref.name, saved.version, "workflow:run");
-        const target =
-          (p.target as string | undefined) ??
-          saved.defaultTarget ??
-          (p.clientDefaultTarget as string | undefined);
+        const target = (p.target as string | undefined) ?? saved.defaultTarget ?? undefined;
         const res = await this.opts.api.launchSavedWorkflow({
           ref,
           input: p.input,
@@ -428,9 +425,7 @@ export class KeelOperationGateway {
           workflowRef = snapshot.hash;
         }
         const target = requireRunTarget(
-          (p.target as string | undefined) ??
-            defaultTarget ??
-            (p.clientDefaultTarget as string | undefined),
+          (p.target as string | undefined) ?? defaultTarget,
           "putSchedule",
         );
         this.opts.store.putSchedule({

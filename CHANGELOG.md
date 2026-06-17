@@ -104,6 +104,40 @@
   `run.interrupted` audit events and best-effort active worker/provider abort.
 
 ### Changed
+- Saved workflow launches and saved-ref schedules no longer accept the
+  undocumented daemon RPC `clientDefaultTarget` wrapper field. Use explicit
+  `target`/`--target`, or configure a saved workflow default target.
+- Pi RPC stdout is now treated as a strict JSON-lines protocol: non-empty
+  malformed stdout fails the agent attempt with a bounded excerpt instead of
+  being ignored as diagnostic noise.
+- RealmKernel launch boundaries now reject missing or blank run targets before
+  persisting a run; CLI/client layers remain responsible for cwd defaults.
+- Workflow definition schema v21 normalizes legacy code-only and empty-module
+  source rows during migration; runtime source display and materialization now
+  reject current rows that lack a manifest or persisted modules.
+- Codex app-server notification parsing now accepts only the current v2 scoped
+  event shapes: `thread/started` uses nested `thread.id`, turn lifecycle events
+  use `threadId` plus nested `turn.id`/status, item and error events use
+  top-level `threadId`/`turnId`, agent-message deltas use top-level `delta`,
+  completed agent messages use `type: "agentMessage"` with `text`, and unscoped
+  or alternate-shape notifications are ignored instead of being applied to the
+  active turn. Ignored current-thread turn lifecycle and error notifications now
+  emit a diagnostic error trace event before Keel waits for the eventual
+  terminal event.
+- The legacy in-process `Kernel` class has been removed. Durable workflow
+  launch/resume now uses `RealmKernel` exclusively, including crash-consistency
+  tests, so persisted runs always resume from immutable workflow definition
+  snapshots instead of caller-supplied `v0` functions.
+- Obsolete `AgentSessionWorkspace` store APIs/types have been removed; runtime
+  code and tests use unified `AgentWorkspaceRow` records outside migrations.
+- The current capability auth contract no longer exposes deferred
+  approval-scoped resources or saved-task actions; approval decisions remain
+  admin-only until scoped approvals or saved tasks ship.
+- `allowTools` and `denyTools` now require exact provider-native tool names for
+  known built-in tools. Generic aliases for the selected provider, such as
+  `shell`, `run`, `exec`, `list`, and Claude's `fetch`/`search`, plus
+  provider-specific case variants, reject instead of normalizing to a broader
+  backend tool; unknown custom provider-native tool names still pass through.
 - `keel signal`, `keel approve`, `keel deny`, and the matching daemon/execute
   APIs now acknowledge durable delivery and wake-start handling instead of
   waiting for the resumed workflow to finish, fail, or park again. Use

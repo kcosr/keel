@@ -337,7 +337,11 @@ describe("web transport", () => {
         headers: auth(ADMIN_TOKEN),
       });
       expect(workspaces.status).toBe(200);
-      expect(workspaces.body.workspaces).toEqual([]);
+      expect(workspaces.body).toMatchObject({
+        workspaces: [],
+        mutationAuthority: "admin",
+        mutationAuthorized: true,
+      });
 
       const system = await jsonFetch(`${web.url}/api/system`, { headers: auth(ADMIN_TOKEN) });
       expect(system.status).toBe(200);
@@ -693,6 +697,26 @@ describe("web transport", () => {
       expect(approvals.body.approvals[0]).toMatchObject({
         runId: launched.runId,
         gateId: "approve-deploy",
+        requiredAuthority: "admin",
+      });
+      expect(approvals.body).toMatchObject({
+        decisionAuthority: "admin",
+        decisionAuthorized: true,
+      });
+      const scopedDetail = await jsonFetch(`${web.url}/api/runs/${launched.runId}`, {
+        headers: auth(launched.capability as string),
+      });
+      expect(scopedDetail.status).toBe(200);
+      expect(
+        scopedDetail.body.availableCommands.map((command: { name: string }) => command.name),
+      ).not.toContain("decideApproval");
+
+      const adminDetail = await jsonFetch(`${web.url}/api/runs/${launched.runId}`, {
+        headers: auth(ADMIN_TOKEN),
+      });
+      expect(adminDetail.status).toBe(200);
+      expect(adminDetail.body.availableCommands).toContainEqual({
+        name: "decideApproval",
         requiredAuthority: "admin",
       });
 

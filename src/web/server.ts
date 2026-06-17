@@ -345,10 +345,10 @@ async function projectionRoute(
       });
     }
     if (kind === "approvals") {
-      const summaries =
-        await call<Array<{ runId: string; workflowName: string | null; status: string }>>(
-          "listRuns",
-        );
+      const [summaries, hasAdmin] = await Promise.all([
+        call<Array<{ runId: string; workflowName: string | null; status: string }>>("listRuns"),
+        hasAdminAuthorityOn(conn, credential),
+      ]);
       const approvals = [];
       for (const summary of summaries) {
         if (summary.status !== "waiting-human") continue;
@@ -375,11 +375,14 @@ async function projectionRoute(
       return projectionJson({
         approvals,
         decisionAuthority: "admin",
-        decisionAuthorized: true,
+        decisionAuthorized: hasAdmin,
       });
     }
     if (kind === "workspaces") {
-      const summaries = await call<Array<{ runId: string }>>("listRuns");
+      const [summaries, hasAdmin] = await Promise.all([
+        call<Array<{ runId: string }>>("listRuns"),
+        hasAdminAuthorityOn(conn, credential),
+      ]);
       const nested = await Promise.all(
         summaries.map((summary) =>
           call<unknown[]>("listRunWorkspaces", { runId: summary.runId, includeRemoved: true }),
@@ -388,7 +391,7 @@ async function projectionRoute(
       return projectionJson({
         workspaces: nested.flat(),
         mutationAuthority: "admin",
-        mutationAuthorized: true,
+        mutationAuthorized: hasAdmin,
       });
     }
     const [ping, profiles, settings] = await Promise.all([
@@ -624,7 +627,7 @@ async function hasAdminAuthorityOn(
   conn: GatewaySocket,
   credential: string | null,
 ): Promise<boolean> {
-  const response = await conn.request("listRuns", {}, credential);
+  const response = await conn.request("listSettings", {}, credential);
   return !response.error;
 }
 

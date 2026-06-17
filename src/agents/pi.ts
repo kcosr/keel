@@ -146,9 +146,15 @@ export class PiProvider implements AgentProvider {
     const handleLine = (line: string): void => {
       let msg: PiOut;
       try {
-        msg = JSON.parse(line) as PiOut;
+        const parsed = JSON.parse(line) as unknown;
+        if (!isPiOut(parsed)) {
+          malformedRpcStdout(line);
+          return;
+        }
+        msg = parsed;
       } catch {
-        return; // ignore non-JSON noise
+        malformedRpcStdout(line);
+        return;
       }
       if (msg.type === "response" && typeof msg.id === "number") {
         pending.get(msg.id)?.(msg as PiResponse);
@@ -168,10 +174,20 @@ export class PiProvider implements AgentProvider {
         agentEnd = { messages: (msg.messages as PiMessage[]) ?? [] };
       }
     };
+    function malformedRpcStdout(line: string): void {
+      streamErr = `pi agent "${invocation.key}" emitted malformed RPC stdout: ${JSON.stringify(
+        excerpt(line, 400),
+      )}`;
+      proc.kill();
+    }
 
     const timeout = setTimeout(() => {
       streamErr = `pi agent "${invocation.key}" timed out after ${this.timeoutMs}ms`;
-      send({ type: "abort", id: nextId++ });
+      try {
+        send({ type: "abort", id: nextId++ });
+      } catch {
+        // The provider may already have exited; the timeout error is authoritative.
+      }
       proc.kill();
     }, this.timeoutMs);
 
@@ -184,7 +200,29 @@ export class PiProvider implements AgentProvider {
 
     try {
       // 1) session id (write-ahead capture) — available before any model work.
-      const state = await this.race(request({ type: "get_state" }), done, proc);
+      const startup = await Promise.race([
+        request({ type: "get_state" }).then(
+          (state) => ({ kind: "state", state }) as const,
+          (err: unknown) => ({ kind: "send-error", err }) as const,
+        ),
+        done.then(() => ({ kind: "done" }) as const),
+        proc.exited.then(() => ({ kind: "exited" }) as const),
+      ]);
+      if (startup.kind === "send-error") {
+        await Promise.race([done, Bun.sleep(100)]);
+        if (streamErr) throw new Error(streamErr);
+        throw startup.err;
+      }
+      if (startup.kind === "exited") {
+        await Promise.race([done, Bun.sleep(100)]);
+      }
+      if (streamErr) throw new Error(streamErr);
+      const state = startup.kind === "state" ? startup.state : null;
+      if (!state) {
+        await Promise.race([stderrDone, Bun.sleep(100)]);
+        const suffix = stderrTail ? `; stderr: ${stderrTail.trim()}` : "";
+        throw new Error(`pi agent "${invocation.key}" ended before get_state response${suffix}`);
+      }
       const sessionId =
         state && typeof state.data === "object" && state.data
           ? (state.data as { sessionId?: string }).sessionId
@@ -197,7 +235,13 @@ export class PiProvider implements AgentProvider {
       }
 
       // 2) prompt → stream → agent_end
-      send({ type: "prompt", id: nextId++, message: invocation.prompt });
+      try {
+        send({ type: "prompt", id: nextId++, message: invocation.prompt });
+      } catch (err) {
+        await Promise.race([done, Bun.sleep(100)]);
+        if (streamErr) throw new Error(streamErr);
+        throw err;
+      }
       await Promise.race([done, proc.exited.then(() => undefined)]);
       if (!agentEnd && !streamErr) {
         await Promise.race([done, Bun.sleep(100)]);
@@ -239,14 +283,6 @@ export class PiProvider implements AgentProvider {
     }
   }
 
-  private async race(
-    req: Promise<PiResponse>,
-    done: Promise<void>,
-    proc: { exited: Promise<number> },
-  ): Promise<PiResponse | null> {
-    return Promise.race([req, done.then(() => null), proc.exited.then(() => null)]);
-  }
-
   private rawLog(key: string, stream: "spawn" | "stdout" | "stderr", data: unknown): void {
     if (!this.rawLogPath) return;
     try {
@@ -270,6 +306,14 @@ interface PiResponse {
   error?: string;
 }
 type PiOut = (PiResponse | { type: string; [k: string]: unknown }) & { type: string; id?: number };
+
+function isPiOut(value: unknown): value is PiOut {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as { type?: unknown }).type === "string"
+  );
+}
 
 /** Concat assistant text parts of the last assistant message; skip thinking. */
 function lastAssistantText(messages: PiMessage[]): string {
@@ -296,6 +340,10 @@ function lastAssistantError(messages: PiMessage[]): string | null {
 
 function tail(text: string, max = 4000): string {
   return text.length > max ? text.slice(text.length - max) : text;
+}
+
+function excerpt(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max)}...` : text;
 }
 
 function piToolCallId(msg: PiOut): string | undefined {

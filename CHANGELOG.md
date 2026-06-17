@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### Added
+- Run blockage diagnostics now reserve `stalled_no_heartbeat` for stale
+  daemon-owner heartbeats instead of long pending step age. Reports and web/TUI
+  projections hide diagnostic `running` as a visible blockage, while node views
+  expose durable `startedAtMs` for surfaces that want to derive pending age.
 - Local web API transport via `keel web`, with localhost-only default binding,
   `/health`, `/rpc`, projection routes, static asset serving, and SSE run event
   streams using the shared cursor/control-frame contract.

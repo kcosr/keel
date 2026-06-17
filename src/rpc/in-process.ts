@@ -16,6 +16,7 @@ import type { AgentProviderRegistry } from "../agents/types.ts";
 import { canonicalJson } from "../hash.ts";
 import type { JournalStore } from "../journal/store.ts";
 import type { AgentProfileCatalogRow, AgentWorkspaceRow, RunStatus } from "../journal/types.ts";
+import { ownerStaleWindowMs } from "../kernel/liveness.ts";
 import type { RealmKernel, RunHandle } from "../kernel/realm/realm-host.ts";
 import {
   assertValidSettingWrite,
@@ -84,7 +85,6 @@ import {
   listScheduleSummaries,
 } from "./projection.ts";
 
-const WORKSPACE_RECONCILE_STALE_MS = 30_000;
 const WORKSPACE_MERGEABLE_STATUSES = new Set<AgentWorkspaceRow["status"]>([
   "pending_review",
   "diff_error",
@@ -104,7 +104,11 @@ export class InProcessKeel implements KeelApi {
     private readonly kernel: RealmKernel,
     private readonly store: JournalStore,
     private readonly eventHub: EventHub = new EventHub(),
-    private readonly opts: { agents?: AgentProviderRegistry; clock?: () => number } = {},
+    private readonly opts: {
+      agents?: AgentProviderRegistry;
+      clock?: () => number;
+      ownerStaleWindowMs?: number;
+    } = {},
   ) {
     this.kernel.setLiveEventSink((runId, type, payload, atMs) =>
       this.eventHub.publishEphemeral(runId, type, payload, atMs),
@@ -395,11 +399,21 @@ export class InProcessKeel implements KeelApi {
   }
 
   getRunReport(runId: string): RunReport | null {
-    return buildRunReport(this.store, runId);
+    return buildRunReport(this.store, runId, {
+      nowMs: this.opts.clock?.() ?? Date.now(),
+      ...(this.opts.ownerStaleWindowMs !== undefined
+        ? { ownerStaleWindowMs: this.opts.ownerStaleWindowMs }
+        : {}),
+    });
   }
 
   getBlockage(runId: string): Blockage {
-    return getBlockage(this.store, runId, Date.now());
+    return getBlockage(
+      this.store,
+      runId,
+      this.opts.clock?.() ?? Date.now(),
+      this.opts.ownerStaleWindowMs,
+    );
   }
 
   listRuns(): RunSummary[] {
@@ -449,8 +463,8 @@ export class InProcessKeel implements KeelApi {
     updated: RunWorkspaceView[];
     deleted: RunWorkspaceView[];
   } {
-    const nowMs = opts.nowMs ?? Date.now();
-    const staleBeforeMs = opts.staleBeforeMs ?? nowMs - WORKSPACE_RECONCILE_STALE_MS;
+    const nowMs = opts.nowMs ?? this.opts.clock?.() ?? Date.now();
+    const staleBeforeMs = opts.staleBeforeMs ?? nowMs - this.ownerStaleWindowMs();
     const updated: RunWorkspaceView[] = [];
     const deleted: RunWorkspaceView[] = [];
     for (const row of this.store.listAllAgentWorkspaces()) {
@@ -589,7 +603,7 @@ export class InProcessKeel implements KeelApi {
   gcWorkspaces(
     opts: { olderThanMs?: number; includePending?: boolean; includeRemoved?: boolean } = {},
   ): WorkspaceGcResult {
-    const now = Date.now();
+    const now = this.opts.clock?.() ?? Date.now();
     this.reconcileWorkspaces({ nowMs: now });
     const cutoff = now - (opts.olderThanMs ?? 0);
     const statuses = opts.includePending
@@ -627,6 +641,10 @@ export class InProcessKeel implements KeelApi {
         workspaceView(row, this.store.getRun(row.runId)?.status ?? null),
       ),
     };
+  }
+
+  private ownerStaleWindowMs(): number {
+    return this.opts.ownerStaleWindowMs ?? ownerStaleWindowMs();
   }
 
   listAgentProfiles(

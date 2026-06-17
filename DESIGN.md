@@ -1080,13 +1080,12 @@ projections.
 
 ```ts
 type RunProjection = {
-  runId; status; definitionVersion; startedAt; completedAt?;
+  runId; status; definitionVersion; createdAtMs; finishedAtMs?;
   parentRunId?;
-  nodes: NodeView[];          // journaled effects + live execution
-  approvals: ApprovalView[];
-  blockage?: BlockageView;
+  nodes: NodeView[];          // journaled effects; includes durable startedAtMs
+  phase?;
   error?;
-  stats: { steps; agents; tokens?; artifactsBytes };
+  stats: { steps; agents; artifacts };
 };
 ```
 
@@ -1095,20 +1094,30 @@ edges the recorded `inputDependencies`. A pre-run **dry-run preview** (stubbed
 executors; under-counts dynamic fan-out *by construction* and says so) is a
 deferred authoring aid (§14).
 
-### 12.2 Liveness: heartbeats, timeouts, stall-retry (core, not polish)
+### 12.2 Liveness: owner heartbeats, timeouts, stall-retry (core, not polish)
 
-The original run survived because stall-retry fired (`lens:authz stalled after
-350s — retrying`). Therefore: **per-step heartbeats** (default 30 s), a
-**per-step timeout** (default 1 hour, configurable; auto-fails with
-`StepTimeoutError`), and **stall-detection-and-retry** are core scope with their
-own phase and acceptance criteria (Phase 13 — v1's criteria-less "P2.5" is
-retired). The as-built API method is **`getBlockage(runId)`** (KeelApi), returning
-`{ reason: 'none' | 'running' | 'waiting_human' | 'waiting_child' |
-'waiting_signal' | 'waiting_timer' | 'stalled_no_heartbeat' | 'interrupted',
-blockedOn, context }` (the `waiting_human` case surfaces the persisted approval
-prompt; `interrupted` includes the redacted reason, previous status, last phase,
-and last wait metadata) — stall
-debugging as one call instead of log archaeology.
+Daemon-owned running rows carry `runtime_owner_id` plus `heartbeat_at_ms`; daemon
+ownership recovery, workspace reconciliation, and blockage projection all use the
+same owner-stale window derived from the daemon heartbeat interval. The
+`stalled_no_heartbeat` blockage reason is reserved for a non-terminal run whose
+daemon owner heartbeat is stale or missing. It is not inferred from pending step
+age. Unowned in-process runs are reported as diagnostic `running`, not stale.
+
+Agent provider attempts still use per-attempt timeouts and stall-retry. A
+provider that exceeds its configured timeout fails with `StepTimeoutError` and
+can retry according to the agent policy; slow but healthy provider work remains
+visible through durable node `startedAtMs`, which renderers can use to derive
+pending age without treating it as a daemon-owner failure.
+
+The as-built API method is **`getBlockage(runId)`** (KeelApi), returning
+`{ reason, blockedOn, context }`. `running` is a diagnostic state and is not
+rendered as a visible blockage by reports, TUI detail, or web projections.
+Actionable/current blockage reasons include `waiting_human`, `waiting_signal`,
+`waiting_timer`, `stalled_no_heartbeat`, and `interrupted`; `waiting_human`
+surfaces the persisted approval prompt, and `interrupted` includes the redacted
+reason, previous status, last phase, and last wait metadata. This preserves
+stall debugging as one call instead of log archaeology while keeping healthy
+long-running work distinct from stale ownership.
 
 ### 12.3 Agent-facing surface (deferred tier)
 

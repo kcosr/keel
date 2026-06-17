@@ -14,7 +14,7 @@ import { StepTimeoutError, runAgentWithStall } from "../../agents/execute.ts";
 import { MockProvider } from "../../agents/mock.ts";
 import { AgentProviderRegistry } from "../../agents/types.ts";
 import { JournalStore } from "../../journal/store.ts";
-import { getBlockage } from "../../rpc/projection.ts";
+import { buildProjection, buildRunReport, getBlockage } from "../../rpc/projection.ts";
 import { captureWorkflowFile } from "../../workflow-definitions/capture.ts";
 import { RealmKernel } from "./realm-host.ts";
 
@@ -130,7 +130,11 @@ describe("ctx.agent stall-retry through the realm", () => {
 });
 
 describe("getBlockage", () => {
-  function seedRun(store: JournalStore, status: string) {
+  function seedRun(
+    store: JournalStore,
+    status: string,
+    opts: { heartbeatAtMs?: number | null; runtimeOwnerId?: string | null } = {},
+  ) {
     store.insertRun({
       runId: "r",
       workflowName: "w",
@@ -141,21 +145,13 @@ describe("getBlockage", () => {
       inputRef: "null",
       outputRef: null,
       errorJson: null,
-      heartbeatAtMs: null,
-      runtimeOwnerId: null,
+      heartbeatAtMs: opts.heartbeatAtMs ?? null,
+      runtimeOwnerId: opts.runtimeOwnerId ?? null,
       createdAtMs: 0,
     });
   }
 
-  test("running with no stalled step reads as running", () => {
-    const store = JournalStore.memory();
-    seedRun(store, "running");
-    expect(getBlockage(store, "r", 1000).reason).toBe("running");
-  });
-
-  test("a long-pending step reads as stalled_no_heartbeat with blockedOn", () => {
-    const store = JournalStore.memory();
-    seedRun(store, "running");
+  function seedPendingStep(store: JournalStore, startedAtMs: number) {
     store.putJournalRow({
       runId: "r",
       stableKey: "verify:x",
@@ -163,11 +159,78 @@ describe("getBlockage", () => {
       status: "pending",
       version: "v",
       inputHash: "h",
-      startedAtMs: 1000,
+      startedAtMs,
     });
-    const b = getBlockage(store, "r", 1000 + 40_000, 30_000);
+  }
+
+  test("fresh owner heartbeat plus an old pending step reads as running and report omits blockage", () => {
+    const store = JournalStore.memory();
+    seedRun(store, "running", { runtimeOwnerId: "daemon_a", heartbeatAtMs: 39_000 });
+    seedPendingStep(store, 1_000);
+
+    expect(getBlockage(store, "r", 41_000, 30_000)).toMatchObject({
+      reason: "running",
+      blockedOn: null,
+    });
+    expect(
+      buildRunReport(store, "r", { nowMs: 41_000, ownerStaleWindowMs: 30_000 })?.blockage,
+    ).toBe(undefined);
+    expect(buildProjection(store, "r")?.nodes[0]).toMatchObject({ startedAtMs: 1_000 });
+    expect(
+      buildRunReport(store, "r", { nowMs: 41_000, ownerStaleWindowMs: 30_000 })?.nodes[0],
+    ).toMatchObject({ startedAtMs: 1_000 });
+  });
+
+  test("unowned in-process running runs read as running even with old pending work", () => {
+    const store = JournalStore.memory();
+    seedRun(store, "running");
+    seedPendingStep(store, 1_000);
+
+    expect(getBlockage(store, "r", 41_000, 30_000)).toMatchObject({
+      reason: "running",
+      blockedOn: null,
+    });
+  });
+
+  test("stale owned heartbeat reports stalled_no_heartbeat without blaming a step", () => {
+    const store = JournalStore.memory();
+    seedRun(store, "running", { runtimeOwnerId: "daemon_a", heartbeatAtMs: 1_000 });
+    seedPendingStep(store, 1_000);
+
+    const b = getBlockage(store, "r", 41_000, 30_000);
     expect(b.reason).toBe("stalled_no_heartbeat");
-    expect(b.blockedOn).toEqual({ stableKey: "verify:x", since: 1000 });
+    expect(b.blockedOn).toBeNull();
+    expect(b.context).toContain("daemon_a");
+    expect(b.context).toContain("stale by 10000ms");
+  });
+
+  test("owned running run with null heartbeat is stale owner state", () => {
+    const store = JournalStore.memory();
+    seedRun(store, "running", { runtimeOwnerId: "daemon_a", heartbeatAtMs: null });
+
+    const b = getBlockage(store, "r", 1_000, 30_000);
+    expect(b.reason).toBe("stalled_no_heartbeat");
+    expect(b.blockedOn).toBeNull();
+    expect(b.context).toContain("has no heartbeat");
+  });
+
+  test("running owner heartbeat can be diagnosed without pending journal rows", () => {
+    const store = JournalStore.memory();
+    seedRun(store, "running", { runtimeOwnerId: "daemon_a", heartbeatAtMs: 39_000 });
+
+    expect(getBlockage(store, "r", 41_000, 30_000).reason).toBe("running");
+  });
+
+  test("report-embedded blockage uses the supplied owner stale window", () => {
+    const store = JournalStore.memory();
+    seedRun(store, "running", { runtimeOwnerId: "daemon_a", heartbeatAtMs: 1_000 });
+
+    const standalone = getBlockage(store, "r", 12_000, 10_000);
+    const report = buildRunReport(store, "r", { nowMs: 12_000, ownerStaleWindowMs: 10_000 });
+
+    expect(standalone.reason).toBe("stalled_no_heartbeat");
+    expect(report?.blockage?.reason).toBe(standalone.reason);
+    expect(report?.blockage?.context).toBe(standalone.context);
   });
 
   test("waiting-human maps to waiting_human; terminal maps to none", () => {

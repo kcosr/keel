@@ -15,6 +15,7 @@ import type {
   StreamControlFrame,
 } from "../rpc/contract.ts";
 import { normalizeEventCursorInput } from "../rpc/event-cursor.ts";
+import { type Blockage, isVisibleBlockage } from "../rpc/projection.ts";
 
 export const DEFAULT_WEB_HOST = "127.0.0.1";
 export const DEFAULT_WEB_PORT = 7879;
@@ -313,7 +314,7 @@ async function projectionRoute(
           return {
             ...summary,
             run,
-            blockage,
+            blockage: isVisibleBlockage(blockage as Blockage) ? blockage : null,
             workspaceSummary: { count: workspaces.length },
           };
         }),
@@ -334,7 +335,7 @@ async function projectionRoute(
       return projectionJson({
         run,
         report,
-        blockage,
+        blockage: isVisibleBlockage(blockage as Blockage) ? blockage : null,
         workspaces,
         source,
         events: eventTail.events,

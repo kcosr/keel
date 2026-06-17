@@ -321,6 +321,7 @@ describe("keel CLI", () => {
           status: "failed",
           effectType: "effectful",
           attempt: 1,
+          startedAtMs: 1,
           dependsOn: [],
           artifactBacked: false,
           result: "result\u0000value",

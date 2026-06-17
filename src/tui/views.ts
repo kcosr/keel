@@ -1,6 +1,11 @@
 import { displayName, formatDuration, formatUtcTimestamp } from "../cli/run-display.ts";
 import { sanitizeTerminalLineText } from "../cli/terminal-text.ts";
-import type { RunProjection, RunReport, RunSummary } from "../rpc/projection.ts";
+import {
+  type RunProjection,
+  type RunReport,
+  type RunSummary,
+  isVisibleBlockage,
+} from "../rpc/projection.ts";
 import type { TuiState, WatchLine } from "./state.ts";
 
 export interface TuiDimensions {
@@ -104,7 +109,7 @@ function renderDetailBody(state: TuiState, width: number, bodyHeight: number): s
     const error = projection?.error ?? report?.error;
     if (error) lines.push(`error: ${error.name}: ${error.message}`);
     const blockage = detail.blockage ?? report?.blockage ?? null;
-    if (blockage && blockage.reason !== "none") {
+    if (isVisibleBlockage(blockage)) {
       lines.push(`blockage: ${blockage.reason} ${blockage.context}`);
     }
     const nodes = projection?.nodes ?? report?.nodes ?? [];

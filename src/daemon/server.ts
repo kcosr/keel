@@ -11,6 +11,11 @@ import type { Socket } from "bun";
 import type { AgentProviderRegistry } from "../agents/types.ts";
 import { ensureAdminCapability } from "../auth/capabilities.ts";
 import { JournalStore } from "../journal/store.ts";
+import {
+  DEFAULT_HEARTBEAT_MS,
+  ownerStaleBeforeMs,
+  ownerStaleWindowMs,
+} from "../kernel/liveness.ts";
 import { RealmKernel } from "../kernel/realm/realm-host.ts";
 import { failRunWithError } from "../kernel/run-errors.ts";
 import { Supervisor } from "../kernel/supervisor.ts";
@@ -90,9 +95,7 @@ class SocketGatewaySession implements GatewaySession {
 
 type GatewaySocket = Socket<undefined> & { session?: SocketGatewaySession };
 
-const DEFAULT_HEARTBEAT_MS = 10_000;
 const DEFAULT_SUPERVISE_MS = 1000;
-const OWNER_STALE_HEARTBEATS = 3;
 
 export class KeelDaemon {
   readonly ownerId: string;
@@ -133,17 +136,19 @@ export class KeelDaemon {
     this.api = new InProcessKeel(this.kernel, this.store, this.eventHub, {
       ...(opts.agents ? { agents: opts.agents } : {}),
       clock: this.clock,
+      ownerStaleWindowMs: ownerStaleWindowMs(this.heartbeatMs),
     });
     this.supervisor = new Supervisor({
       store: this.store,
       kernel: this.kernel,
       clock: this.clock,
       claim: (runId) => {
+        const now = this.clock();
         const ok = this.store.claimRun(
           runId,
           this.ownerId,
-          this.clock() - OWNER_STALE_HEARTBEATS * this.heartbeatMs,
-          this.clock(),
+          ownerStaleBeforeMs(now, this.heartbeatMs),
+          now,
         );
         if (ok) this.owned.add(runId);
         return ok;
@@ -180,9 +185,10 @@ export class KeelDaemon {
     } catch {
       // best effort
     }
+    const now = this.clock();
     this.api.reconcileWorkspaces({
-      staleBeforeMs: this.clock() - OWNER_STALE_HEARTBEATS * this.heartbeatMs,
-      nowMs: this.clock(),
+      staleBeforeMs: ownerStaleBeforeMs(now, this.heartbeatMs),
+      nowMs: now,
     });
     this.recoverOrphans();
     this.heartbeatTimer = setInterval(() => {
@@ -222,8 +228,9 @@ export class KeelDaemon {
   /** CAS-claim a run before driving it; throw if another live daemon owns it. */
   private claimOrReject(runId: string): void {
     if (!this.store.getRun(runId)) throw new Error(`run ${runId} not found`);
-    const staleBefore = this.clock() - OWNER_STALE_HEARTBEATS * this.heartbeatMs;
-    if (!this.store.claimRun(runId, this.ownerId, staleBefore, this.clock())) {
+    const now = this.clock();
+    const staleBefore = ownerStaleBeforeMs(now, this.heartbeatMs);
+    if (!this.store.claimRun(runId, this.ownerId, staleBefore, now)) {
       throw new Error(`run ${runId} is owned by another live daemon (ownership fence)`);
     }
     this.owned.add(runId);
@@ -231,9 +238,10 @@ export class KeelDaemon {
 
   /** Reclaim runs left 'running' by a dead daemon and resume them. */
   private recoverOrphans(): void {
-    const staleBefore = this.clock() - OWNER_STALE_HEARTBEATS * this.heartbeatMs;
+    const now = this.clock();
+    const staleBefore = ownerStaleBeforeMs(now, this.heartbeatMs);
     for (const run of this.store.listRunsByStatus("running")) {
-      if (this.store.claimRun(run.runId, this.ownerId, staleBefore, this.clock())) {
+      if (this.store.claimRun(run.runId, this.ownerId, staleBefore, now)) {
         this.owned.add(run.runId);
         void this.api.resumeRun(run.runId).catch((err) => {
           if (isUnsupportedWorkflowSdkAbiError(err)) {

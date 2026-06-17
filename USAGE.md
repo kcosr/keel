@@ -375,6 +375,17 @@ compact per-node status/result summary. Interrupted runs include an `interrupted
 blockage with the redacted reason, previous status, last phase, and last known
 wait metadata when available. `--output ndjson` is invalid for `report`.
 
+`getBlockage`, `keel report`, TUI detail, and web projections distinguish
+diagnostic state from actionable blockage. `running` means the run is actively
+owned or otherwise executing normally and is not rendered as a visible blockage.
+`stalled_no_heartbeat` means a non-terminal run has a daemon owner whose
+heartbeat is stale or missing; it is based on `runtime_owner_id` and
+`heartbeat_at_ms`, not on how long a workflow step has been pending. Slow
+provider work remains inspectable through per-node `startedAtMs`, from which
+surfaces may derive pending age. Other current blockage reasons map to explicit
+waits or interruption: `waiting_human`, `waiting_signal`, `waiting_timer`, and
+`interrupted`; terminal runs report no blockage.
+
 ### List Output
 
 `keel list` defaults to `--output text` and prints an aligned, human-oriented

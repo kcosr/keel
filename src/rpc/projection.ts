@@ -6,6 +6,7 @@
 
 import type { JournalStore } from "../journal/store.ts";
 import type { EffectType, JournalStatus, RunStatus, ScheduleRow } from "../journal/types.ts";
+import { isRunOwnerStale, ownerStaleWindowMs } from "../kernel/liveness.ts";
 import { RUN_FINISHED_INLINE_OUTPUT_BYTES } from "../kernel/output.ts";
 import { workflowDefinitionSourceSelection } from "../workflow-definitions/source-view.ts";
 import type { WorkflowDefinitionSourceView } from "./contract.ts";
@@ -15,6 +16,8 @@ export interface NodeView {
   effectType: EffectType;
   status: JournalStatus;
   attempt: number;
+  /** Durable journal row start time. Surfaces derive pending age from their own clock. */
+  startedAtMs: number | null;
   /** Dependency edges (stepKey → this node) recorded during execution. */
   dependsOn: string[];
   /** True if the result is stored as an artifact rather than inline. */
@@ -112,6 +115,7 @@ export function buildProjection(store: JournalStore, runId: string): RunProjecti
       effectType: r.effectType,
       status: r.status,
       attempt: r.attempt,
+      startedAtMs: r.startedAtMs,
       dependsOn: (r.inputDeps ?? []).map((d) => d.stepKey).sort(),
       artifactBacked: r.resultArtifact !== null,
     }));
@@ -232,7 +236,11 @@ function scheduleErrorProjection(errorJson: string | null): ScheduleErrorProject
 }
 
 /** Build a post-run digest from journaled node results, not raw event transcripts. */
-export function buildRunReport(store: JournalStore, runId: string): RunReport | null {
+export function buildRunReport(
+  store: JournalStore,
+  runId: string,
+  opts: { nowMs?: number; ownerStaleWindowMs?: number } = {},
+): RunReport | null {
   const run = store.getRun(runId);
   if (!run) return null;
 
@@ -252,6 +260,7 @@ export function buildRunReport(store: JournalStore, runId: string): RunReport | 
         effectType: r.effectType,
         status: r.status,
         attempt: r.attempt,
+        startedAtMs: r.startedAtMs,
         dependsOn: (r.inputDeps ?? []).map((d) => d.stepKey).sort(),
         artifactBacked: r.resultArtifact !== null,
       };
@@ -265,7 +274,12 @@ export function buildRunReport(store: JournalStore, runId: string): RunReport | 
     });
 
   const output = outputJsonForReport(run.outputRef);
-  const blockage = getBlockage(store, runId, Date.now());
+  const blockage = getBlockage(
+    store,
+    runId,
+    opts.nowMs ?? Date.now(),
+    opts.ownerStaleWindowMs ?? ownerStaleWindowMs(),
+  );
   return {
     runId: run.runId,
     workflowName: run.workflowName,
@@ -277,7 +291,7 @@ export function buildRunReport(store: JournalStore, runId: string): RunReport | 
       ? { outputOmitted: true as const, outputByteLength: output.byteLength }
       : {}),
     error: run.errorJson ? (JSON.parse(run.errorJson) as { name: string; message: string }) : null,
-    ...(blockage.reason !== "none" ? { blockage } : {}),
+    ...(isVisibleBlockage(blockage) ? { blockage } : {}),
     nodes,
     stats: {
       steps: nodes.filter((n) => n.effectType === "pure").length,
@@ -339,6 +353,10 @@ export interface Blockage {
   interrupted?: InterruptionBlockageDetails;
 }
 
+export function isVisibleBlockage(blockage: Blockage | null | undefined): blockage is Blockage {
+  return Boolean(blockage && blockage.reason !== "none" && blockage.reason !== "running");
+}
+
 function latestInterruptionDetails(
   store: JournalStore,
   runId: string,
@@ -386,14 +404,14 @@ function interruptedContext(details: InterruptionBlockageDetails): string {
 
 /**
  * Agent-facing "why is this run stuck?" (DESIGN.md §12.2) — one call instead of
- * log archaeology. waiting_* map to run status (HITL/timers land in Phases 16/17);
- * a pending step older than `stallThresholdMs` reads as stalled_no_heartbeat.
+ * log archaeology. waiting_* map to run status (HITL/timers land in Phases 16/17).
+ * stalled_no_heartbeat is reserved for stale daemon-owner heartbeats.
  */
 export function getBlockage(
   store: JournalStore,
   runId: string,
   nowMs: number,
-  stallThresholdMs = 30_000,
+  staleWindowMs: number = ownerStaleWindowMs(),
 ): Blockage {
   const run = store.getRun(runId);
   if (!run) return { reason: "none", blockedOn: null, context: "run not found" };
@@ -437,17 +455,16 @@ export function getBlockage(
     default:
       break;
   }
-  // running: look for a long-pending step
-  const pending = store
-    .listJournalRows(runId)
-    .filter((r) => r.status === "pending" && !r.stableKey.startsWith("__"))
-    .sort((a, b) => (a.startedAtMs ?? 0) - (b.startedAtMs ?? 0));
-  const oldest = pending[0];
-  if (oldest && oldest.startedAtMs !== null && nowMs - oldest.startedAtMs > stallThresholdMs) {
+  if (isRunOwnerStale(run, nowMs, staleWindowMs)) {
+    const owner = run.runtimeOwnerId ?? "unknown";
+    const context =
+      run.heartbeatAtMs === null
+        ? `run owner ${owner} has no heartbeat`
+        : `run owner ${owner} heartbeat stale by ${nowMs - staleWindowMs - run.heartbeatAtMs}ms`;
     return {
       reason: "stalled_no_heartbeat",
-      blockedOn: { stableKey: oldest.stableKey, since: oldest.startedAtMs },
-      context: `step "${oldest.stableKey}" has been pending ${nowMs - oldest.startedAtMs}ms`,
+      blockedOn: null,
+      context,
     };
   }
   return { reason: "running", blockedOn: null, context: "executing normally" };

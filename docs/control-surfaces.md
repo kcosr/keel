@@ -112,7 +112,8 @@ daemon gateway, not a second operation dispatcher:
   frames with `snapshot`, raw `event`, adapter-level `caught-up`, `closed`,
   `authorization.failed`, and heartbeat frames.
 - Projection routes currently cover runs, run detail, approvals, workspaces, and
-  system status.
+  system status. Run projections hide diagnostic `running` blockage and only
+  surface actionable waits, interruptions, or stale owner-heartbeat stalls.
 - Captured-source `launchRun` is admin-only through the web surface even though
   it remains open on the trusted local Unix socket.
 

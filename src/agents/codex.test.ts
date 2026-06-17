@@ -146,7 +146,11 @@ async function runWithTransport(
   tokens: string[];
 }> {
   const factory = new ScriptedFactory(transport);
-  const provider = new CodexProvider({ transportFactory: factory, timeoutMs: 1_000 });
+  const provider = new CodexProvider({
+    transportFactory: factory,
+    rpcTimeoutMs: 1_000,
+    turnTimeoutMs: 1_000,
+  });
   const events: TraceEvent[] = [];
   const tokens: string[] = [];
   const result = await provider.generate(codexInvocation(invocation), {
@@ -940,7 +944,8 @@ describe("Codex JSON-RPC flow", () => {
     });
     const provider = new CodexProvider({
       transportFactory: new ScriptedFactory(transport),
-      timeoutMs: 5_000,
+      rpcTimeoutMs: 5_000,
+      turnTimeoutMs: 5_000,
     });
 
     const promise = provider.generate(codexInvocation({ abortSignal: controller.signal }), {});
@@ -957,7 +962,8 @@ describe("Codex JSON-RPC flow", () => {
     await new CodexProvider({
       transportFactory: new ScriptedFactory(transport),
       rawLogPath,
-      timeoutMs: 1_000,
+      rpcTimeoutMs: 1_000,
+      turnTimeoutMs: 1_000,
     }).generate(codexInvocation(), {});
 
     const lines = readFileSync(rawLogPath, "utf8")
@@ -974,7 +980,8 @@ describe("Codex JSON-RPC flow", () => {
     const factory = new ScriptedFactory(transport);
     await new CodexProvider({
       transportFactory: factory,
-      timeoutMs: 1_234,
+      rpcTimeoutMs: 1_234,
+      turnTimeoutMs: 1_234,
       connectTimeoutMs: 55,
     }).generate(codexInvocation(), {});
 
@@ -1015,7 +1022,7 @@ describe("Codex JSON-RPC flow", () => {
 
     const result = await new CodexProvider({
       transportFactory: new ScriptedFactory(transport),
-      timeoutMs: 10,
+      rpcTimeoutMs: 10,
       turnTimeoutMs: 1_000,
     }).generate(codexInvocation(), {});
 
@@ -1096,7 +1103,7 @@ describe("Codex JSON-RPC flow", () => {
     await expect(
       new CodexProvider({
         transportFactory: new ScriptedFactory(transport),
-        timeoutMs: 1_000,
+        rpcTimeoutMs: 1_000,
         turnTimeoutMs: 20,
       }).generate(
         codexInvocation({ providerConfig: { transport: { type: "uds", path: "/x" } } }),
@@ -1120,7 +1127,11 @@ describe("Codex transports", () => {
     );
     chmodSync(bin, 0o755);
 
-    const result = await new CodexProvider({ bin, timeoutMs: 1_000 }).generate(
+    const result = await new CodexProvider({
+      bin,
+      rpcTimeoutMs: 1_000,
+      turnTimeoutMs: 1_000,
+    }).generate(
       codexInvocation({ env: { FAKE_CODEX_LOG: logPath, CODEX_TEST_SECRET: "secret-value" } }),
       {},
     );
@@ -1162,7 +1173,8 @@ describe("Codex transports", () => {
       const url = new URL(server.url);
       url.protocol = "ws:";
       const result = await new CodexProvider({
-        timeoutMs: 1_000,
+        rpcTimeoutMs: 1_000,
+        turnTimeoutMs: 1_000,
         connectTimeoutMs: 1_000,
       }).generate(
         codexInvocation({ providerConfig: { transport: { type: "ws", url: url.toString() } } }),
@@ -1181,7 +1193,8 @@ describe("Codex transports", () => {
     const server = await startUdsWebSocketServer(socketPath);
     try {
       const result = await new CodexProvider({
-        timeoutMs: 1_000,
+        rpcTimeoutMs: 1_000,
+        turnTimeoutMs: 1_000,
         connectTimeoutMs: 1_000,
       }).generate(
         codexInvocation({ providerConfig: { transport: { type: "uds", path: socketPath } } }),
@@ -1201,7 +1214,8 @@ describe("Codex transports", () => {
     await expect(
       new CodexProvider({
         transportFactory: new ScriptedFactory(transport),
-        timeoutMs: 1_000,
+        rpcTimeoutMs: 1_000,
+        turnTimeoutMs: 1_000,
       }).generate(
         codexInvocation({
           providerConfig: { transport: { type: "ws", url: "ws://127.0.0.1:1" } },
@@ -1388,7 +1402,7 @@ describe.if(LIVE)("LIVE codex smoke", () => {
   test("a real configured Codex agent produces structured output", async () => {
     const { executeAgent } = await import("./execute.ts");
     const dir = tempDir("keel-live-codex-agent-");
-    const provider = new CodexProvider({ timeoutMs: 120_000 });
+    const provider = new CodexProvider({ rpcTimeoutMs: 120_000, turnTimeoutMs: 120_000 });
     const tokens: string[] = [];
     const exec = await executeAgent(
       provider,
@@ -1428,7 +1442,7 @@ describe.if(LIVE)("LIVE codex smoke", () => {
     const target = join(dir, "target");
     writeFileSync(join(dir, "target-marker"), "");
     mkdirSync(target, { recursive: true });
-    const inner = new CodexProvider({ timeoutMs: 120_000 });
+    const inner = new CodexProvider({ rpcTimeoutMs: 120_000, turnTimeoutMs: 120_000 });
     let calls = 0;
     const provider: AgentProvider = {
       name: "codex",

@@ -306,10 +306,13 @@ async function projectionRoute(
       gatewayResultOn<T>(conn, method, params, credential);
     if (kind === "runs") {
       const limit = parseRunsLimit(new URL(request.url));
-      const summaries = await call<Array<{ runId: string }>>("listRuns");
-      const page = runsPageMetadata(summaries.length, limit);
+      const summariesPage = await call<{ runs: Array<{ runId: string }>; total: number }>(
+        "listRunsPage",
+        { limit },
+      );
+      const page = runsPageMetadata(summariesPage.total, limit);
       const runs = await Promise.all(
-        summaries.slice(0, limit).map(async (summary) => {
+        summariesPage.runs.map(async (summary) => {
           const [run, blockage, workspaces] = await Promise.all([
             call("getRun", { runId: summary.runId }),
             call("getBlockage", { runId: summary.runId }),

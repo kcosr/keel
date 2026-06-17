@@ -223,10 +223,11 @@ the current browser session only, not `localStorage`, and sends it as
 readable stream parser so credentials stay in headers.
 
 The UI opens on the runs inbox, grouped by decision, active, and recently
-finished runs from `GET /api/runs?limit=100`. The runs projection applies that
-bound before per-run enrichment and returns `page` metadata with the requested
-limit, default limit, maximum limit, total known runs, returned rows, and a
-`truncated` flag. When the browser list is truncated, the UI says so and points
+finished runs from `GET /api/runs?limit=100`. The runs projection uses the
+bounded daemon `listRunsPage` RPC before per-run enrichment and returns `page`
+metadata with the requested limit, default limit, maximum limit, total known
+runs, returned rows, and a `truncated` flag. When the browser list is truncated,
+the UI says so and points
 operators to `keel list` or a bounded `GET /api/runs?limit=n` request up to the
 documented maximum. Run detail views use `GET /api/runs/:runId` for overview,
 timeline, transcript, report, source, workspaces, approvals, and events; live
@@ -269,8 +270,9 @@ Routes:
 - `GET /api/runs?limit=n`, `/api/runs/:runId`, `/api/approvals`,
   `/api/workspaces`, and `/api/system` return server-side projections layered on
   daemon RPC calls. The runs list defaults to `limit=100`, rejects limits above
-  `500`, applies the limit before expensive per-run enrichment, and includes
-  `page` metadata so clients can disclose truncation.
+  `500`, calls bounded `listRunsPage` instead of unbounded `listRuns`, enriches
+  only the returned page, and includes `page` metadata so clients can disclose
+  truncation.
 - The workspace browser projection currently aggregates per-run workspace RPCs
   across known runs. Very large journals may prefer `keel workspace ...`
   commands until a first-class aggregate workspace projection is added.
@@ -458,10 +460,18 @@ use `finishedAtMs - createdAtMs`; active or waiting runs use the command's
 current time minus `createdAtMs`. Empty lists still print the header row.
 
 Use `keel list --output json` for scripts. It returns a CLI envelope while the
-RPC method remains a bare `RunSummary[]`:
+unbounded `listRuns` RPC method remains a bare `RunSummary[]`. Browser run
+lists use the bounded `listRunsPage({ limit })` RPC, which returns
+`{ runs, total }` in the same newest-first order. CLI JSON:
 
 ```json
 {"runs":[{"runId":"run_...","status":"finished","workflowName":"review","createdAtMs":1781414349314,"finishedAtMs":1781415069314,"parentRunId":null}]}
+```
+
+Bounded RPC page:
+
+```json
+{"runs":[{"runId":"run_...","status":"finished","workflowName":"review","createdAtMs":1781414349314,"finishedAtMs":1781415069314,"parentRunId":null}],"total":1}
 ```
 
 `--output ndjson` is invalid for `list`.
@@ -1610,11 +1620,12 @@ returns a raw run capability on launch/fork so clients can establish authority
 for follow-up operations. The CLI writes that capability to a local cap file by
 default and only prints raw tokens with `--emit-capability`.
 
-The local web transport is a browser-facing adapter over the same gateway. It
-does not define new daemon operation names: `/rpc` preserves daemon method names
-and request/response shapes, projection routes compose existing daemon
-projections, and `/runs/:runId/events` translates the shared event cursor
-contract into SSE frames.
+The local web transport is a browser-facing adapter over the same gateway.
+`/rpc` preserves daemon method names and request/response shapes, projection
+routes compose existing daemon projections, and `/runs/:runId/events` translates
+the shared event cursor contract into SSE frames. The web runs inbox uses the
+bounded `listRunsPage` daemon method so large journals are not materialized just
+to render the browser page.
 
 ## Development And Operations
 

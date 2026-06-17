@@ -376,6 +376,9 @@ describe("web transport", () => {
         await client.waitForRun(run.runId);
         launched.push(run.runId);
       }
+      (daemon as unknown as { api: { listRuns: () => unknown } }).api.listRuns = () => {
+        throw new Error("web runs projection must not call unbounded listRuns");
+      };
 
       const limited = await jsonFetch(`${web.url}/api/runs?limit=2`, {
         headers: auth(ADMIN_TOKEN),

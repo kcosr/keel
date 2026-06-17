@@ -38,7 +38,7 @@ import type {
   WorkflowDefinitionSourceView,
   WorkspaceGcResult,
 } from "../rpc/contract.ts";
-import type { RunProjection, RunReport, RunSummary } from "../rpc/projection.ts";
+import type { RunProjection, RunReport, RunSummary, RunSummaryPage } from "../rpc/projection.ts";
 import { clientRunTargetOrCwd } from "../target.ts";
 import type { WorkflowSourceInput } from "../workflow-definitions/source.ts";
 
@@ -363,6 +363,9 @@ export class DaemonClient {
   }
   listRuns(): Promise<RunSummary[]> {
     return this.rpc("listRuns", {});
+  }
+  listRunsPage(req: { limit: number }): Promise<RunSummaryPage> {
+    return this.rpc("listRunsPage", req);
   }
   ping(): Promise<{ ok: boolean; ownerId: string }> {
     return this.rpc("ping", {});

@@ -871,6 +871,14 @@ describe("RPC contract drives a workflow end-to-end", () => {
           parentRunId: null,
         },
       ]);
+
+      expect(api.listRunsPage({ limit: 2 })).toEqual({
+        runs: runs.slice(0, 2),
+        total: 3,
+      });
+      expect(() => api.listRunsPage({ limit: 0 })).toThrow(
+        /listRunsPage limit must be a positive integer/,
+      );
     },
     WORKFLOW_TEST_TIMEOUT_MS,
   );

@@ -79,6 +79,7 @@ import {
   type RunProjection,
   type RunReport,
   type RunSummary,
+  type RunSummaryPage,
   type ScheduleSummary,
   type ScheduleView,
   buildProjection,
@@ -87,6 +88,7 @@ import {
   getBlockage,
   isVisibleBlockage,
   listRunSummaries,
+  listRunSummaryPage,
   listScheduleSummaries,
 } from "./projection.ts";
 
@@ -110,6 +112,13 @@ function agentConcurrencyBlockage(queued: AgentConcurrencyWaitSnapshot): Blockag
     context: `agent ${queued.stableKey} waiting ${queued.queuedForMs}ms for ${queued.provider} capacity (provider ${queued.providerScope.active}/${providerLimit}, total ${queued.total.active}/${totalLimit})`,
     agentConcurrency: queued,
   };
+}
+
+function requireRunPageLimit(limit: unknown): number {
+  if (typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1) {
+    throw new Error("listRunsPage limit must be a positive integer");
+  }
+  return limit;
 }
 
 function concurrencyLimitText(limit: AgentConcurrencyWaitSnapshot["total"]["limit"]): string {
@@ -451,6 +460,10 @@ export class InProcessKeel implements KeelApi {
 
   listRuns(): RunSummary[] {
     return listRunSummaries(this.store);
+  }
+
+  listRunsPage(req: { limit: number }): RunSummaryPage {
+    return listRunSummaryPage(this.store, requireRunPageLimit(req?.limit));
   }
 
   listRunWorkspaces(runId: string, opts: { includeRemoved?: boolean } = {}): RunWorkspaceView[] {

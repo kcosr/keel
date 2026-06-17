@@ -22,8 +22,9 @@
   run, and workspace actions, and a denser workspace review panel with explicit
   disabled-state explanations.
 - The web runs projection now defaults to a bounded latest-run page, accepts an
-  explicit `limit` up to the documented maximum, and returns page metadata so
-  the UI can disclose truncated browser history without enriching every
+  explicit `limit` up to the documented maximum, uses a bounded daemon
+  `listRunsPage` RPC before per-run enrichment, and returns page metadata so the
+  UI can disclose truncated browser history without materializing every
   historical run.
 - Agent specs and persistent profiles now support `environment: { vars, secrets }`.
   Literal `vars` are passed as provider environment variables and hashed by

@@ -155,7 +155,9 @@ describe("RealmKernel interruptRun", () => {
   test("interrupts active pure work without journaling a failure", async () => {
     const store = JournalStore.memory();
     const k = kernel(store);
-    const { runId, done } = k.launch<number>(SLOW_STEP_WORKFLOW, null);
+    const { runId, done } = k.launch<number>(SLOW_STEP_WORKFLOW, null, {
+      target: process.cwd(),
+    });
 
     await until(() => store.getLatestAttempt(runId, "slow")?.status === "pending");
     expect(k.interruptRun(runId)).toEqual({ runId, status: "interrupted" });

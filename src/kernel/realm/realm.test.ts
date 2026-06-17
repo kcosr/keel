@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { hashJson } from "../../hash.ts";
 import { JournalStore } from "../../journal/store.ts";
 import { captureWorkflowFile } from "../../workflow-definitions/capture.ts";
+import { snapshotWorkflowSource } from "../../workflow-definitions/snapshot.ts";
 import { RealmKernel } from "./realm-host.ts";
 
 const FIXTURES = new URL("./fixtures/", import.meta.url);
@@ -13,6 +14,7 @@ const chainUrl = captureWorkflowFile(new URL("chain.workflow.ts", FIXTURES).path
 const edgesUrl = captureWorkflowFile(new URL("edges.workflow.ts", FIXTURES).pathname);
 const ambientUrl = captureWorkflowFile(new URL("ambient.workflow.ts", FIXTURES).pathname);
 const forbiddenUrl = captureWorkflowFile(new URL("forbidden.workflow.ts", FIXTURES).pathname);
+const TARGET = process.cwd();
 
 function fixed(store: JournalStore, extra: Record<string, unknown> = {}): RealmKernel {
   let id = 0;
@@ -52,7 +54,9 @@ describe("realm — forbidden ambient globals throw guidance", () => {
       // lint:false so the call reaches the worker and the RUNTIME shim throws
       // (the static lint catching these is covered separately in Phase 5).
       const kernel = fixed(store, { lint: false });
-      await expect(kernel.run(forbiddenUrl, { what }, { name: "forbidden" })).rejects.toThrow(re);
+      await expect(
+        kernel.run(forbiddenUrl, { what }, { name: "forbidden", target: TARGET }),
+      ).rejects.toThrow(re);
       // and the run is recorded as failed
       expect(store.getRun("run_0")?.status).toBe("failed");
     });
@@ -62,6 +66,7 @@ describe("realm — forbidden ambient globals throw guidance", () => {
     const kernel = fixed(store);
     const handle = await kernel.run<{ t: number; r: number }>(ambientUrl, null, {
       name: "ambient",
+      target: TARGET,
     });
     expect(handle.status).toBe("finished");
     const rows = store.listJournalRows("run_0");
@@ -75,11 +80,43 @@ describe("realm — forbidden ambient globals throw guidance", () => {
   });
 });
 
+describe("realm — launch target validation", () => {
+  test("launch rejects missing or blank targets before persisting a run", () => {
+    const store = JournalStore.memory();
+    const kernel = fixed(store);
+
+    expect(() => kernel.launch(chainUrl, { n: 1 }, { name: "missing" })).toThrow(
+      /RealmKernel\.launch requires target/,
+    );
+    expect(() => kernel.launch(chainUrl, { n: 1 }, { name: "blank", target: "   " })).toThrow(
+      /requires a non-empty target/,
+    );
+    expect(store.listRuns()).toEqual([]);
+  });
+
+  test("launchDefinition rejects missing or blank targets before persisting a run", () => {
+    const store = JournalStore.memory();
+    const kernel = fixed(store);
+    const snapshot = snapshotWorkflowSource(store, chainUrl.source, {
+      name: "chain",
+      nowMs: 1,
+    }).snapshot;
+
+    expect(() => kernel.launchDefinition(snapshot.hash, { n: 1 }, { name: "missing" })).toThrow(
+      /RealmKernel\.launchDefinition requires target/,
+    );
+    expect(() =>
+      kernel.launchDefinition(snapshot.hash, { n: 1 }, { name: "blank", target: "   " }),
+    ).toThrow(/requires a non-empty target/);
+    expect(store.listRuns()).toEqual([]);
+  });
+});
+
 describe("realm — memoization and resume", () => {
   test("a chain runs to completion in the realm", async () => {
     const store = JournalStore.memory();
     const kernel = fixed(store);
-    const handle = await kernel.run<number>(chainUrl, { n: 5 }, { name: "chain" });
+    const handle = await kernel.run<number>(chainUrl, { n: 5 }, { name: "chain", target: TARGET });
     expect(handle.status).toBe("finished");
     expect(handle.output).toBe(5);
     const completed = store.listJournalRows("run_0").filter((r) => r.status === "completed");
@@ -100,7 +137,7 @@ describe("realm — crash consistency (write-ahead through the realm)", () => {
         if (point === "before-commit" && key === "s1") throw new Error("INJECTED CRASH");
       },
     });
-    await crashing.run(chainUrl, { n: 4 }, { name: "chain" }).catch(() => null);
+    await crashing.run(chainUrl, { n: 4 }, { name: "chain", target: TARGET }).catch(() => null);
     expect(store.getRun("run_0")?.status).toBe("running"); // resumable
 
     // Resume with no fault.
@@ -123,7 +160,7 @@ describe("realm — tagged-envelope edge detection across the JSON boundary", ()
   test("step b's inputDeps records the edge from step a", async () => {
     const store = JournalStore.memory();
     const kernel = fixed(store);
-    await kernel.run<number>(edgesUrl, null, { name: "edges" });
+    await kernel.run<number>(edgesUrl, null, { name: "edges", target: TARGET });
     const b = store.getJournalRow("run_0", "b", 1);
     expect(b?.inputDeps).not.toBeNull();
     expect(b?.inputDeps).toEqual([{ stepKey: "a", contentHash: hashJson({ items: [1, 2, 3] }) }]);
@@ -136,7 +173,7 @@ describe("realm — throughput benchmark (recorded, not gated)", () => {
     const kernel = fixed(store);
     const N = 300;
     const startNs = Bun.nanoseconds();
-    const handle = await kernel.run<number>(chainUrl, { n: N }, { name: "bench" });
+    const handle = await kernel.run<number>(chainUrl, { n: N }, { name: "bench", target: TARGET });
     const elapsedSec = (Bun.nanoseconds() - startNs) / 1e9;
     const perSec = N / elapsedSec;
     // Recorded to CI logs (the AST-rewrite fast path is cut; this is informational).

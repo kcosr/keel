@@ -25,7 +25,10 @@ describe("durable ctx.sleep park/wake", () => {
     const clock = () => t;
     const kernel = new RealmKernel(store, { idgen: () => "r", clock });
 
-    const handle = await kernel.run<number>(napUrl, null, { name: "nap" });
+    const handle = await kernel.run<number>(napUrl, null, {
+      name: "nap",
+      target: process.cwd(),
+    });
     expect(handle.status).toBe("waiting-timer"); // parked at sleep
     expect(store.getJournalRow("r", "before", 1)?.status).toBe("completed");
     expect(store.getJournalRow("r", "after", 1)).toBeNull(); // not reached yet
@@ -48,7 +51,10 @@ describe("durable ctx.sleep park/wake", () => {
     let t = 0;
     const clock = () => t;
     // park with one kernel…
-    await new RealmKernel(store, { idgen: () => "r2", clock }).run(napUrl, null, { name: "nap" });
+    await new RealmKernel(store, { idgen: () => "r2", clock }).run(napUrl, null, {
+      name: "nap",
+      target: process.cwd(),
+    });
     expect(store.getRun("r2")?.status).toBe("waiting-timer");
 
     // …a brand-new kernel + supervisor (simulating restart) reads the journaled
@@ -66,7 +72,7 @@ describe("durable ctx.sleep park/wake", () => {
     const clock = () => t;
     const kernel = new RealmKernel(store, { idgen: () => "r_abi", clock });
 
-    await kernel.run(napUrl, null, { name: "nap" });
+    await kernel.run(napUrl, null, { name: "nap", target: process.cwd() });
     expect(store.getRun("r_abi")?.status).toBe("waiting-timer");
     requireUnsupportedSdkAbi(store, store.getRun("r_abi")?.definitionVersion as string);
 

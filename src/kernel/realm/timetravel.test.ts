@@ -54,7 +54,10 @@ describe("rewind", () => {
       onStepExecute: (k) => executed.push(k),
     });
 
-    const done = await kernel.run<number>(tripleUrl, null, { name: "triple" });
+    const done = await kernel.run<number>(tripleUrl, null, {
+      name: "triple",
+      target: process.cwd(),
+    });
     expect(done.output).toBe(3);
     expect(executed).toEqual(["a", "b", "c"]);
     expect(store.getLatestAttempt("r", "c")).not.toBeNull();
@@ -74,7 +77,7 @@ describe("rewind clears unresolved durable-wait state", () => {
     let t = 0;
     const kernel = new RealmKernel(store, { idgen: () => "r", clock: () => t });
     // parks at the nap sleep (an unfired timer + a completed 'before' step)
-    const parked = await kernel.run(napUrl, null, { name: "nap" });
+    const parked = await kernel.run(napUrl, null, { name: "nap", target: process.cwd() });
     expect(parked.status).toBe("waiting-timer");
     expect(
       store.db.query("SELECT count(*) AS c FROM timers WHERE run_id='r' AND fired=0").get(),
@@ -95,7 +98,7 @@ describe("fork fencing + state copy", () => {
   test("forking a non-terminal (parked) run is rejected", async () => {
     const store = JournalStore.memory();
     const kernel = new RealmKernel(store, { idgen: () => "r", clock: () => 0 });
-    const parked = await kernel.run(napUrl, null, { name: "nap" });
+    const parked = await kernel.run(napUrl, null, { name: "nap", target: process.cwd() });
     expect(parked.status).toBe("waiting-timer");
     expect(() => kernel.fork("r")).toThrow(/non-terminal/);
   });
@@ -106,7 +109,7 @@ describe("fork fencing + state copy", () => {
     let n = 0;
     const kernel = new RealmKernel(store, { idgen: () => `run-${n++}`, clock: () => t });
     // run the nap to completion (timer fires)
-    await kernel.run(napUrl, null, { name: "nap" }); // run-0 parks
+    await kernel.run(napUrl, null, { name: "nap", target: process.cwd() }); // run-0 parks
     t = 5000;
     await kernel.resume("run-0"); // run-0 finishes; its timer is fired
     expect(store.getRun("run-0")?.status).toBe("finished");
@@ -127,7 +130,10 @@ describe("fork", () => {
     let n = 0;
     const kernel = new RealmKernel(store, { idgen: () => `run-${n++}` });
 
-    const src = await kernel.run<number>(tripleUrl, null, { name: "triple" });
+    const src = await kernel.run<number>(tripleUrl, null, {
+      name: "triple",
+      target: process.cwd(),
+    });
     const srcId = src.runId;
     expect(src.output).toBe(3);
 

@@ -21,7 +21,10 @@ describe("keyed durable sleeps", () => {
     const kernel = new RealmKernel(store, { idgen: () => "r", clock });
 
     // parks at first-nap
-    let h = await kernel.run<number>(multiSleepUrl, null, { name: "ms" });
+    let h = await kernel.run<number>(multiSleepUrl, null, {
+      name: "ms",
+      target: process.cwd(),
+    });
     expect(h.status).toBe("waiting-timer");
     let timers = store.db
       .query<{ stable_key: string }, []>("SELECT stable_key FROM timers WHERE run_id='r'")
@@ -47,7 +50,7 @@ describe("keyed durable sleeps", () => {
   test("the timer key folds in the duration (changing it is a new timer)", async () => {
     const store = JournalStore.memory();
     const kernel = new RealmKernel(store, { idgen: () => "r", clock: () => 0 });
-    await kernel.run(multiSleepUrl, null, { name: "ms" });
+    await kernel.run(multiSleepUrl, null, { name: "ms", target: process.cwd() });
     const key = store.db
       .query<{ stable_key: string }, []>("SELECT stable_key FROM timers WHERE run_id='r'")
       .get()?.stable_key;
@@ -60,7 +63,10 @@ describe("per-name signal occurrence keys", () => {
     const store = JournalStore.memory();
     const kernel = new RealmKernel(store, { idgen: () => "r" });
 
-    let h = await kernel.run<number[]>(multiSignalUrl, null, { name: "sig" });
+    let h = await kernel.run<number[]>(multiSignalUrl, null, {
+      name: "sig",
+      target: process.cwd(),
+    });
     expect(h.status).toBe("waiting-signal");
 
     store.putSignal("r", "event", 10, 1);

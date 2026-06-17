@@ -24,7 +24,7 @@ function fixed(store: JournalStore, extra: Record<string, unknown> = {}): RealmK
 
 async function versionsOf(file: typeof v1): Promise<{ a: string; b: string }> {
   const store = JournalStore.memory();
-  await fixed(store).run(file, { n: 4 }, { name: "v" });
+  await fixed(store).run(file, { n: 4 }, { name: "v", target: process.cwd() });
   const a = store.getJournalRow("r", "a", 1);
   const b = store.getJournalRow("r", "b", 1);
   return { a: a?.version ?? "", b: b?.version ?? "" };
@@ -50,7 +50,10 @@ describe("realm determinism lint gate", () => {
   test("a forbidden import fails the run before it starts (no run row)", async () => {
     const store = JournalStore.memory();
     await expect(
-      fixed(store).run({ source: badImportSource }, null, { name: "bad" }),
+      fixed(store).run({ source: badImportSource }, null, {
+        name: "bad",
+        target: process.cwd(),
+      }),
     ).rejects.toThrow(/workflow import "node:fs" from entry.ts is not allowed/);
     expect(store.listRuns()).toHaveLength(0);
   });
@@ -58,7 +61,10 @@ describe("realm determinism lint gate", () => {
   test("lint disabled still does not bypass the source import allowlist", async () => {
     const store = JournalStore.memory();
     await expect(
-      fixed(store, { lint: false }).run({ source: badImportSource }, null, { name: "bad" }),
+      fixed(store, { lint: false }).run({ source: badImportSource }, null, {
+        name: "bad",
+        target: process.cwd(),
+      }),
     ).rejects.toThrow(/workflow import "node:fs" from entry.ts is not allowed/);
     expect(store.listRuns()).toHaveLength(0);
   });

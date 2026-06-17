@@ -43,7 +43,7 @@ import {
   workflowVisibleSettingsFromSnapshot,
 } from "../../settings/catalog.ts";
 import type { WorkflowVisibleSettings } from "../../settings/catalog.ts";
-import { optionalRunTarget, requireRunTarget } from "../../target.ts";
+import { requireRunTarget } from "../../target.ts";
 import {
   WORKFLOW_SDK_ABI_VERSION,
   defaultDefinitionCacheRoot,
@@ -415,7 +415,7 @@ export class RealmKernel {
     meta: { name?: string | null; target?: string | null } = {},
   ): { runId: string; done: Promise<RunHandle<O>> } {
     const at = this.host.clock();
-    const target = optionalRunTarget(meta.target, "RealmKernel.launch");
+    const target = requireRunTarget(meta.target, "RealmKernel.launch");
     const name = meta.name !== undefined ? meta.name : (workflow.name ?? null);
     const { snapshot, entryPath } = snapshotWorkflowSource(this.store, workflow.source, {
       name,
@@ -432,7 +432,7 @@ export class RealmKernel {
         workflowName: name,
         definitionVersion: snapshot.hash,
         workflowRef: workflowRefFromProvenance(workflow.provenance),
-        runTarget: target ?? null,
+        runTarget: target,
         status: "running",
         parentRunId: null,
         tenantId: null,
@@ -448,7 +448,7 @@ export class RealmKernel {
       this.store.appendEvent(
         runId,
         "run.started",
-        { name, definitionHash: snapshot.hash, target: target ?? null },
+        { name, definitionHash: snapshot.hash, target },
         this.host.clock(),
       );
     });
@@ -468,6 +468,7 @@ export class RealmKernel {
     input: unknown,
     meta: { name?: string | null; workflowRef?: string | null; target?: string | null } = {},
   ): { runId: string; done: Promise<RunHandle<O>> } {
+    const target = requireRunTarget(meta.target, "RealmKernel.launchDefinition");
     assertWorkflowDefinitionHash(definitionHash);
     const entryPath = materializeWorkflowDefinition(
       this.store,
@@ -475,7 +476,6 @@ export class RealmKernel {
       this.definitionCacheRoot,
     );
     const at = this.host.clock();
-    const target = optionalRunTarget(meta.target, "RealmKernel.launchDefinition");
     const runId = this.idgen();
     const profileSnapshot = this.captureEffectiveProfileSnapshot(at);
     const settingSnapshot = this.captureEffectiveSettingSnapshot(at);

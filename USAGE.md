@@ -1161,7 +1161,10 @@ Agents default to read-only provider tools. Use `toolPolicy: "none"` to disable
 tools, or declare broader access with `toolPolicy` or explicit `capabilities`.
 If both `toolPolicy` and `capabilities` are set, `toolPolicy` controls provider
 tools. `toolPolicy: "unrestricted"` cannot be combined with `allowTools` or
-`denyTools` until provider-native deny semantics are supported.
+`denyTools` until provider-native deny semantics are supported. `allowTools` and
+`denyTools` require exact provider-native names; Keel rejects generic aliases and
+case variants for known built-in tools instead of normalizing them. Unknown
+custom provider-native tool names pass through unchanged.
 
 ```ts
 toolPolicy: "read-only";
@@ -1171,8 +1174,8 @@ capabilities: {
   shell: false,
   secrets: ["DEPLOY_KEY"],
 };
-allowTools: ["Bash"];
-denyTools: ["LS"];
+allowTools: ["Bash"]; // Claude exact name; Pi uses "bash".
+denyTools: ["Glob"]; // Claude exact name; Pi uses "grep" or "ls".
 // For reviewable edits, pass a worktree WorkspaceHandle to the agent/session.
 ```
 

@@ -104,6 +104,11 @@
   `run.interrupted` audit events and best-effort active worker/provider abort.
 
 ### Changed
+- `allowTools` and `denyTools` now require exact provider-native tool names for
+  known built-in tools. Generic aliases for the selected provider, such as
+  `shell`, `run`, `exec`, `list`, and Claude's `fetch`/`search`, plus
+  provider-specific case variants, reject instead of normalizing to a broader
+  backend tool; unknown custom provider-native tool names still pass through.
 - `keel signal`, `keel approve`, `keel deny`, and the matching daemon/execute
   APIs now acknowledge durable delivery and wake-start handling instead of
   waiting for the resumed workflow to finish, fail, or park again. Use

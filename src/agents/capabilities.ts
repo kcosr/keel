@@ -137,9 +137,8 @@ export function resolvedToolPolicyToPiArgs(resolved: ResolvedToolPolicy): string
   rejectUnrestrictedAdjustments(resolved);
 
   const tools = new Set(capabilitiesToPiTools(resolved.capabilities));
-  for (const tool of resolved.allowTools) tools.add(normalizePiToolName(tool));
-  for (const tool of resolved.denyTools)
-    deleteToolCaseInsensitive(tools, normalizePiToolName(tool));
+  for (const tool of resolved.allowTools) tools.add(requireExactPiToolName(tool));
+  for (const tool of resolved.denyTools) tools.delete(requireExactPiToolName(tool));
   if (tools.size === 0) return ["--no-tools"];
   return ["--tools", [...tools].join(",")];
 }
@@ -155,9 +154,9 @@ export function resolvedToolPolicyToClaudeArgs(resolved: ResolvedToolPolicy): st
   rejectUnrestrictedAdjustments(resolved);
 
   const tools = new Set(capabilitiesToClaudeTools(resolved.capabilities));
-  for (const tool of resolved.allowTools) tools.add(normalizeClaudeToolName(tool));
+  for (const tool of resolved.allowTools) tools.add(requireExactClaudeToolName(tool));
   for (const tool of resolved.denyTools) {
-    deleteToolCaseInsensitive(tools, normalizeClaudeToolName(tool));
+    tools.delete(requireExactClaudeToolName(tool));
   }
   if (tools.size === 0) return ["--allowed-tools", ""];
   return ["--allowed-tools", ...tools];
@@ -433,54 +432,60 @@ function isArrayIndexKey(key: string, length: number): boolean {
   return Number.isSafeInteger(n) && n >= 0 && n < length;
 }
 
-function normalizePiToolName(tool: string): string {
-  const trimmed = tool.trim();
-  const aliases: Record<string, string> = {
-    read: "read",
-    grep: "grep",
-    glob: "grep",
-    ls: "ls",
-    list: "ls",
-    edit: "edit",
-    write: "write",
-    bash: "bash",
-    shell: "bash",
-    run: "bash",
-    exec: "bash",
-  };
-  return aliases[trimmed.toLowerCase()] ?? trimmed;
-}
+const PI_EXACT_TOOLS = new Set(["read", "grep", "ls", "edit", "write", "bash"]);
+const PI_TOOL_ALIASES = new Map([
+  ["glob", "grep"],
+  ["list", "ls"],
+  ["shell", "bash"],
+  ["run", "bash"],
+  ["exec", "bash"],
+]);
 
-function normalizeClaudeToolName(tool: string): string {
-  const key = tool
-    .trim()
-    .toLowerCase()
-    .replace(/[-_\s]/g, "");
-  const aliases: Record<string, string> = {
-    read: "Read",
-    grep: "Grep",
-    glob: "Glob",
-    ls: "LS",
-    list: "LS",
-    edit: "Edit",
-    write: "Write",
-    multiedit: "MultiEdit",
-    notebookedit: "NotebookEdit",
-    bash: "Bash",
-    shell: "Bash",
-    run: "Bash",
-    exec: "Bash",
-    webfetch: "WebFetch",
-    fetch: "WebFetch",
-    websearch: "WebSearch",
-    search: "WebSearch",
-  };
-  return aliases[key] ?? tool.trim();
-}
-
-function deleteToolCaseInsensitive(tools: Set<string>, tool: string): void {
-  const target = tool.toLowerCase();
-  for (const existing of tools) {
-    if (existing.toLowerCase() === target) tools.delete(existing);
+function requireExactPiToolName(tool: string): string {
+  if (PI_EXACT_TOOLS.has(tool)) return tool;
+  const lower = tool.toLowerCase();
+  const canonical = PI_EXACT_TOOLS.has(lower) ? lower : PI_TOOL_ALIASES.get(lower);
+  if (canonical) {
+    throw new Error(`pi provider tool "${tool}" is not canonical; use "${canonical}"`);
   }
+  return tool;
+}
+
+const CLAUDE_EXACT_TOOLS = new Set([
+  "Read",
+  "Grep",
+  "Glob",
+  "LS",
+  "Edit",
+  "MultiEdit",
+  "Write",
+  "NotebookEdit",
+  "Bash",
+  "WebFetch",
+  "WebSearch",
+]);
+const CLAUDE_CANONICAL_BY_KEY = new Map(
+  [...CLAUDE_EXACT_TOOLS].map((tool) => [claudeToolKey(tool), tool]),
+);
+const CLAUDE_TOOL_ALIASES = new Map([
+  ["list", "LS"],
+  ["shell", "Bash"],
+  ["run", "Bash"],
+  ["exec", "Bash"],
+  ["fetch", "WebFetch"],
+  ["search", "WebSearch"],
+]);
+
+function requireExactClaudeToolName(tool: string): string {
+  if (CLAUDE_EXACT_TOOLS.has(tool)) return tool;
+  const key = claudeToolKey(tool);
+  const canonical = CLAUDE_CANONICAL_BY_KEY.get(key) ?? CLAUDE_TOOL_ALIASES.get(key);
+  if (canonical) {
+    throw new Error(`claude provider tool "${tool}" is not canonical; use "${canonical}"`);
+  }
+  return tool;
+}
+
+function claudeToolKey(tool: string): string {
+  return tool.toLowerCase().replace(/[-_\s]/g, "");
 }

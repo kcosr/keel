@@ -35,9 +35,9 @@ export interface AgentInvocation {
   model?: string;
   /** Normalized tool baseline; adapters map it to provider-native flags. */
   toolPolicy?: ToolPolicy;
-  /** Provider-native tools added on top of the policy. */
+  /** Exact provider-native tools added on top of the policy. */
   allowTools?: string[];
-  /** Provider-native tools removed from the final provider allowlist. */
+  /** Exact provider-native tools removed from the final provider allowlist. */
   denyTools?: string[];
   /** Vendor session/resume token for a mid-call reconnect (Phase 10). */
   resumeToken?: string;

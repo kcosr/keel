@@ -670,7 +670,10 @@ interface AgentSpec<T> {
 exactly three parameters); `ctx.agent` carries `key` in its option bag.
 `toolPolicy` is the public shorthand over the capability enum; `allowTools` and
 `denyTools` are provider-native adjustments when a workflow intentionally needs
-to add or remove a specific backend tool. Workspace selection is explicit via
+to add or remove a specific backend tool. Those adjustment lists use exact
+provider-native names; known built-in aliases and case variants reject instead of
+normalizing to a broader backend tool, while unknown custom provider-native names
+pass through unchanged. Workspace selection is explicit via
 `ctx.workspace` handles, scoped with `ctx.withWorkspace`, or defaults to the run
 `__default` direct workspace at `ctx.run.target`; the resolved workspace id
 participates in agent identity. `providerConfig` is provider-owned JSON config,

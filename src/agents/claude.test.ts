@@ -191,8 +191,8 @@ while true; do sleep 0.1; done
           model: "sonnet",
           reasoning: "high",
           toolPolicy: "read-only",
-          allowTools: ["bash"],
-          denyTools: ["glob"],
+          allowTools: ["Bash"],
+          denyTools: ["Glob"],
         },
         {
           onEvent: (event) => events.push(event),

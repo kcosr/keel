@@ -9,9 +9,12 @@ export function toneForStatus(status: string | null | undefined): Tone {
     case "completed":
     case "available":
     case "enabled":
+    case "merged":
+    case "discarded":
       return "success";
     case "running":
     case "continued":
+    case "creating":
       return "running";
     case "waiting-human":
     case "waiting-signal":
@@ -19,12 +22,16 @@ export function toneForStatus(status: string | null | undefined): Tone {
     case "waiting-approval":
     case "interrupted":
     case "agent_concurrency":
+    case "pending_review":
       return "waiting";
     case "failed":
     case "cancelled":
     case "missing":
     case "error":
     case "parse-error":
+    case "diff_error":
+    case "cleanup_error":
+    case "abandoned":
       return "failed";
     case "stalled_no_heartbeat":
       return "failed";

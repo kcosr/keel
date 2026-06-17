@@ -228,7 +228,11 @@ for overview, timeline, transcript, report, source, workspaces, approvals, and
 events; live watch reconnects from the latest event cursor and keeps raw live
 SSE frames available alongside the coalesced transcript. The initial event tail
 comes from the JSON detail projection and is shown as reconstructed event
-frames.
+frames. The approvals view lists current workflow-authored `ctx.human` gates and
+uses admin-authorized `decideApproval` calls for approve/deny decisions. The
+workspaces view lists retained run workspaces, loads detail/diff through daemon
+RPC, and requires admin authority plus browser confirmation for merge, discard,
+and workspace GC.
 
 Do not expose this server remotely by default. Binding a non-local host is an
 explicit local operator choice; TLS, CORS, browser sessions, and remote exposure
@@ -694,7 +698,7 @@ keel workspace gc [--older-than-ms ms] [--include-pending] [--include-removed]
 `RunWorkspaceView.workspaceId` is the canonical selector for show/diff/merge/
 discard. Views include `mode`, `sourceKind`, display `key`, provider
 `workspacePath`, source path/URI/ref/branch/base commit metadata, copy baseline
-path, ownership, retention, merge/diff support, latest attempt/turn and active
+path, ownership, retention, merge/discard/diff support, latest attempt/turn and active
 holder metadata, `failureSeen`, timestamps, and cleanup errors. Default list
 output hides idle direct workspaces such as `__default`; `--all` includes removed
 audit rows and direct workspace rows.

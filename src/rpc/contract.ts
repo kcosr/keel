@@ -209,6 +209,7 @@ export interface RunWorkspaceView {
   lastErrorEventSeq: number | null;
   cleanupError: unknown | null;
   mergeSupported: boolean;
+  discardSupported: boolean;
   diffSupported: boolean;
   createdAtMs: number;
   updatedAtMs: number;

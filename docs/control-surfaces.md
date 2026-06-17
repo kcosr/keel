@@ -120,10 +120,10 @@ daemon gateway, not a second operation dispatcher:
 
 The React UI foundation lives under `web/` and is served by `keel web` from the
 `web/dist` bundle when present. It is a browser client over this same API, not a
-new operation boundary. Current UI coverage is read-heavy: runs, run detail,
-approvals, workflows, workspaces, schedules, profiles, settings, and system
-views are present, while mutation controls remain disabled or deferred unless a
-screen explicitly wires the operation.
+new operation boundary. Current UI coverage includes runs, run detail, approval
+decisions, workspace diff/review controls, workflows, schedules, profiles,
+settings, and system views. Browser mutations remain disabled or deferred unless
+a screen explicitly wires the operation through bearer-authorized `/rpc` calls.
 
 ## Current Matrix
 

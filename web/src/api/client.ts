@@ -5,11 +5,14 @@ import type {
   EventCursorInput,
   HealthResponse,
   RunDetailResponse,
+  RunWorkspaceDiff,
+  RunWorkspaceView,
   RunsResponse,
   SavedWorkflowSummary,
   ScheduleSummary,
   SettingView,
   SystemProjection,
+  WorkspaceGcResult,
   WorkspacesResponse,
 } from "./types";
 
@@ -72,8 +75,42 @@ export class KeelWebClient {
     return this.getJson("/api/approvals");
   }
 
+  decideApproval(
+    runId: string,
+    key: string,
+    decision: { status: "approved" | "denied"; note?: string },
+  ): Promise<unknown> {
+    return this.rpc("decideApproval", { runId, key, decision });
+  }
+
   listWorkspaces(): Promise<WorkspacesResponse> {
     return this.getJson("/api/workspaces");
+  }
+
+  getRunWorkspace(runId: string, workspaceId: string): Promise<RunWorkspaceView | null> {
+    return this.rpc("getRunWorkspace", { runId, workspaceId });
+  }
+
+  getRunWorkspaceDiff(runId: string, workspaceId: string): Promise<RunWorkspaceDiff> {
+    return this.rpc("getRunWorkspaceDiff", { runId, workspaceId });
+  }
+
+  mergeRunWorkspace(runId: string, workspaceId: string): Promise<RunWorkspaceView> {
+    return this.rpc("mergeRunWorkspace", { runId, workspaceId });
+  }
+
+  discardRunWorkspace(runId: string, workspaceId: string): Promise<RunWorkspaceView> {
+    return this.rpc("discardRunWorkspace", { runId, workspaceId });
+  }
+
+  gcWorkspaces(
+    opts: {
+      olderThanMs?: number;
+      includePending?: boolean;
+      includeRemoved?: boolean;
+    } = {},
+  ): Promise<WorkspaceGcResult> {
+    return this.rpc("gcWorkspaces", opts);
   }
 
   system(): Promise<SystemProjection> {

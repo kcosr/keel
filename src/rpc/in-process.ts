@@ -996,13 +996,17 @@ function isTerminalRunStatus(status: RunStatus): boolean {
 }
 
 function workspaceView(row: AgentWorkspaceRow, runStatus: RunStatus | null): RunWorkspaceView {
-  const mergeSupported =
+  const operatorBaseSupported =
     runStatus !== null &&
     isTerminalRunStatus(runStatus) &&
     row.owned &&
-    row.sourceMergeEligible &&
-    WORKSPACE_MERGEABLE_STATUSES.has(row.status) &&
+    row.mode !== "direct" &&
     !row.activeHolderKind;
+  const mergeSupported =
+    operatorBaseSupported &&
+    row.sourceMergeEligible &&
+    WORKSPACE_MERGEABLE_STATUSES.has(row.status);
+  const discardSupported = operatorBaseSupported && WORKSPACE_DISCARDABLE_STATUSES.has(row.status);
   return {
     runId: row.runId,
     workspaceId: row.workspaceId,
@@ -1043,6 +1047,10 @@ function workspaceView(row: AgentWorkspaceRow, runStatus: RunStatus | null): Run
     discardedAtMs: row.discardedAtMs,
     removedAtMs: row.removedAtMs,
     mergeSupported,
-    diffSupported: row.owned && row.mode !== "direct" && row.status !== "removed",
+    discardSupported,
+    diffSupported:
+      row.owned &&
+      row.mode !== "direct" &&
+      !["abandoned", "discarded", "removed"].includes(row.status),
   };
 }

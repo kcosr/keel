@@ -1,4 +1,4 @@
-import { Pause, Radio, RefreshCw } from "lucide-react";
+import { Check, Pause, Radio, RefreshCw, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { KeelWebClient, WatchRunEventsStatus } from "../api/client";
 import type { SseMessage } from "../api/sse";
@@ -194,7 +194,9 @@ export function RunDetailScreen({
               active={tab}
               onChange={setTab}
             />
-            <div className="tab-panel">{renderTab(tab, detail, allEvents, rawFrames, setTab)}</div>
+            <div className="tab-panel">
+              {renderTab(tab, detail, allEvents, rawFrames, setTab, client, detailState.reload)}
+            </div>
           </>
         ) : null}
       </div>
@@ -214,6 +216,8 @@ function renderTab(
   events: EventStreamFrame[],
   rawFrames: RawEventFrame[],
   setTab: (tab: RunTab) => void,
+  client: KeelWebClient,
+  reload: () => void,
 ) {
   if (!detail.run) {
     return (
@@ -274,7 +278,7 @@ function renderTab(
     case "workspaces":
       return <WorkspacesTable detail={detail} />;
     case "approvals":
-      return <ApprovalPanel detail={detail} />;
+      return <ApprovalPanel detail={detail} client={client} onChanged={reload} />;
     case "events":
       return <RawEventList frames={rawFrames} />;
   }
@@ -313,7 +317,15 @@ function WorkspacesTable({ detail }: { detail: RunDetailResponse }) {
   );
 }
 
-function ApprovalPanel({ detail }: { detail: RunDetailResponse }) {
+function ApprovalPanel({
+  detail,
+  client,
+  onChanged,
+}: { detail: RunDetailResponse; client: KeelWebClient; onChanged: () => void }) {
+  const [note, setNote] = useState("");
+  const [pending, setPending] = useState<"approved" | "denied" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
   const run = detail.run;
   const blockage = detail.blockage;
   if (!run || blockage?.reason !== "waiting_human") {
@@ -329,6 +341,26 @@ function ApprovalPanel({ detail }: { detail: RunDetailResponse }) {
   const prompt = blockage.context.replace(/^awaiting decision: /, "");
   const approve = `keel approve ${run.runId} ${gate}`;
   const deny = `keel deny ${run.runId} ${gate}`;
+  const canDecide = detail.availableCommands.some((command) => command.name === "decideApproval");
+  const decide = async (status: "approved" | "denied") => {
+    if (!canDecide || gate === "<gate>" || pending) return;
+    setPending(status);
+    setError(null);
+    setMessage(null);
+    try {
+      await client.decideApproval(run.runId, gate, {
+        status,
+        ...(note.trim() ? { note: note.trim() } : {}),
+      });
+      setNote("");
+      setMessage(`${status === "approved" ? "Approved" : "Denied"} ${gate}`);
+      onChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPending(null);
+    }
+  };
   return (
     <div className="approval-panel">
       <section className="panel">
@@ -350,6 +382,37 @@ function ApprovalPanel({ detail }: { detail: RunDetailResponse }) {
             <span>Copy deny command</span>
             <code>{deny}</code>
           </button>
+        </div>
+        <textarea
+          className="field-textarea"
+          rows={3}
+          value={note}
+          onChange={(event) => setNote(event.target.value)}
+          placeholder="Decision note"
+          aria-label="Decision note"
+        />
+        {!canDecide ? (
+          <p className="muted">Approval decisions require admin authority for this run.</p>
+        ) : null}
+        {error ? <p className="form-error">{error}</p> : null}
+        {message ? <p className="form-success">{message}</p> : null}
+        <div className="btn-row">
+          <Button
+            icon={X}
+            variant="danger"
+            disabled={!canDecide || gate === "<gate>" || pending !== null}
+            onClick={() => void decide("denied")}
+          >
+            {pending === "denied" ? "Denying" : "Deny"}
+          </Button>
+          <Button
+            icon={Check}
+            variant="primary"
+            disabled={!canDecide || gate === "<gate>" || pending !== null}
+            onClick={() => void decide("approved")}
+          >
+            {pending === "approved" ? "Approving" : "Approve"}
+          </Button>
         </div>
       </section>
     </div>

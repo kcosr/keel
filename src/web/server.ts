@@ -372,7 +372,11 @@ async function projectionRoute(
           });
         }
       }
-      return projectionJson({ approvals });
+      return projectionJson({
+        approvals,
+        decisionAuthority: "admin",
+        decisionAuthorized: true,
+      });
     }
     if (kind === "workspaces") {
       const summaries = await call<Array<{ runId: string }>>("listRuns");
@@ -381,7 +385,11 @@ async function projectionRoute(
           call<unknown[]>("listRunWorkspaces", { runId: summary.runId, includeRemoved: true }),
         ),
       );
-      return projectionJson({ workspaces: nested.flat() });
+      return projectionJson({
+        workspaces: nested.flat(),
+        mutationAuthority: "admin",
+        mutationAuthorized: true,
+      });
     }
     const [ping, profiles, settings] = await Promise.all([
       call("ping"),

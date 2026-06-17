@@ -208,6 +208,8 @@ export interface ApprovalView {
 
 export interface ApprovalsResponse {
   approvals: ApprovalView[];
+  decisionAuthority: "admin";
+  decisionAuthorized: boolean;
 }
 
 export interface RunWorkspaceView {
@@ -222,6 +224,7 @@ export interface RunWorkspaceView {
   sourceUri: string | null;
   status: string;
   mergeSupported: boolean;
+  discardSupported: boolean;
   diffSupported: boolean;
   createdAtMs: number;
   updatedAtMs: number;
@@ -233,6 +236,40 @@ export interface RunWorkspaceView {
 
 export interface WorkspacesResponse {
   workspaces: RunWorkspaceView[];
+  mutationAuthority: "admin";
+  mutationAuthorized: boolean;
+}
+
+export interface RunWorkspaceDiff {
+  workspace: RunWorkspaceView;
+  modified: string[];
+  added: string[];
+  deleted: string[];
+  omittedPathCounts: {
+    modified: number;
+    added: number;
+    deleted: number;
+  };
+  pathLimit: number;
+  contentDiff: string;
+  mode: "worktree" | "copy" | "clone";
+  diffKind: "git-patch" | "recursive-copy";
+  baseLabel: string;
+  workspaceLabel: string;
+  fileChanges: Array<{
+    path: string;
+    status: "added" | "modified" | "deleted" | "type_changed";
+    oldMode?: string | null;
+    newMode?: string | null;
+    oldSymlinkTarget?: string | null;
+    newSymlinkTarget?: string | null;
+    binary?: boolean;
+    textDiffIncluded?: boolean;
+  }>;
+}
+
+export interface WorkspaceGcResult {
+  removed: RunWorkspaceView[];
 }
 
 export type ScheduleErrorProjection =

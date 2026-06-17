@@ -2066,6 +2066,8 @@ describe("workspace lifecycle operations", () => {
         workspaceStatus: "pending_review",
       });
       expect(api.discardRunWorkspace("r-discard", "ws_agent").status).toBe("discarded");
+      expect(api.getRunWorkspace("r-discard", "ws_agent")?.diffSupported).toBe(false);
+      expect(api.getRunWorkspace("r-discard", "ws_agent")?.discardSupported).toBe(false);
       expect(existsSync(discardPath)).toBe(false);
       expect(() => api.mergeRunWorkspace("r-discard", "ws_agent")).toThrow(/status discarded/);
       expect(() => api.discardRunWorkspace("r-discard", "ws_agent")).toThrow(/status discarded/);

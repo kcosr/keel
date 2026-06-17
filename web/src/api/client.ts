@@ -32,9 +32,18 @@ export interface KeelWebClientOptions {
 
 export interface WatchRunEventsOptions {
   cursor?: EventCursorInput;
+  reconnectDelayMs?: number;
   onFrame(frame: SseMessage): void;
   onError?(err: unknown): void;
+  onStatus?(status: WatchRunEventsStatus): void;
 }
+
+export type WatchRunEventsStatus =
+  | { state: "connecting"; cursor: EventCursorInput }
+  | { state: "open"; cursor: EventCursorInput }
+  | { state: "caught-up"; cursor: EventCursorInput }
+  | { state: "reconnecting"; cursor: EventCursorInput; error?: unknown }
+  | { state: "closed"; cursor: EventCursorInput; reason?: string };
 
 export class KeelWebClient {
   private readonly baseUrl: string;
@@ -100,25 +109,66 @@ export class KeelWebClient {
 
   watchRunEvents(runId: string, opts: WatchRunEventsOptions): () => void {
     const controller = new AbortController();
-    const url = new URL(`/runs/${encodeURIComponent(runId)}/events`, this.baseUrl);
-    applyCursor(url, opts.cursor ?? { kind: "tail", count: 100 });
-    void this.fetchImpl(url, {
-      headers: this.headers({ includeAuth: true }),
-      signal: controller.signal,
-    })
-      .then(async (response) => {
-        if (!response.ok) throw await toApiError(response);
-        if (!response.body) throw new ApiError("event stream did not include a body", 500, null);
-        await parseSseStream(response.body, {
-          onMessage: (frame) => {
-            if (frame.event !== "heartbeat") opts.onFrame(frame);
-          },
-        });
-      })
-      .catch((err) => {
-        if (controller.signal.aborted) return;
-        opts.onError?.(err);
+    const reconnectDelayMs = opts.reconnectDelayMs ?? 750;
+    let nextCursor = opts.cursor ?? ({ kind: "tail", count: 100 } satisfies EventCursorInput);
+
+    const waitForReconnect = () =>
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, reconnectDelayMs);
       });
+
+    const watch = async () => {
+      while (!controller.signal.aborted) {
+        let terminal = false;
+        try {
+          opts.onStatus?.({ state: "connecting", cursor: nextCursor });
+          const url = new URL(`/runs/${encodeURIComponent(runId)}/events`, this.baseUrl);
+          applyCursor(url, nextCursor);
+          const headers = this.headers({ includeAuth: true });
+          headers.set("accept", "text/event-stream");
+          const response = await this.fetchImpl(url, {
+            headers,
+            signal: controller.signal,
+          });
+          if (!response.ok) throw await toApiError(response);
+          if (!response.body) throw new ApiError("event stream did not include a body", 500, null);
+          opts.onStatus?.({ state: "open", cursor: nextCursor });
+          await parseSseStream(response.body, {
+            onMessage: (frame) => {
+              if (frame.event === "heartbeat") return;
+              opts.onFrame(frame);
+              const advanced = cursorFromFrame(frame);
+              if (advanced) nextCursor = advanced;
+              if (frame.event === "caught-up") {
+                opts.onStatus?.({ state: "caught-up", cursor: nextCursor });
+              }
+              if (frame.event === "closed" || frame.event === "authorization.failed") {
+                terminal = true;
+                opts.onStatus?.({
+                  state: "closed",
+                  cursor: nextCursor,
+                  reason: terminalReason(frame),
+                });
+              }
+            },
+          });
+          if (terminal || controller.signal.aborted) return;
+          opts.onStatus?.({ state: "reconnecting", cursor: nextCursor });
+          await waitForReconnect();
+        } catch (err) {
+          if (controller.signal.aborted) return;
+          opts.onError?.(err);
+          if (err instanceof ApiError && err.status < 500) {
+            opts.onStatus?.({ state: "closed", cursor: nextCursor, reason: err.message });
+            return;
+          }
+          opts.onStatus?.({ state: "reconnecting", cursor: nextCursor, error: err });
+          await waitForReconnect();
+        }
+      }
+    };
+
+    void watch();
     return () => controller.abort();
   }
 
@@ -159,6 +209,39 @@ export class KeelWebClient {
     }
     return headers;
   }
+}
+
+function cursorFromFrame(frame: SseMessage): EventCursorInput | null {
+  const data = frame.data;
+  if (data === null || typeof data !== "object") return null;
+  if ("kind" in data && data.kind === "durable" && "seq" in data && typeof data.seq === "number") {
+    return { kind: "after-seq", seq: data.seq };
+  }
+  if ("cursor" in data) {
+    const cursor = data.cursor;
+    if (cursor && typeof cursor === "object" && "seq" in cursor && typeof cursor.seq === "number") {
+      return { kind: "after-seq", seq: cursor.seq };
+    }
+  }
+  return null;
+}
+
+function terminalReason(frame: SseMessage): string | undefined {
+  const data = frame.data;
+  if (data === null || typeof data !== "object") return undefined;
+  if ("status" in data && typeof data.status === "string") return data.status;
+  if ("payload" in data) {
+    const payload = data.payload;
+    if (
+      payload &&
+      typeof payload === "object" &&
+      "message" in payload &&
+      typeof payload.message === "string"
+    ) {
+      return payload.message;
+    }
+  }
+  return undefined;
 }
 
 async function toApiError(response: Response): Promise<ApiError> {

@@ -1,7 +1,8 @@
-import { Radio, RefreshCw } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
-import type { KeelWebClient } from "../api/client";
-import type { EventStreamFrame, NodeView, RunDetailResponse } from "../api/types";
+import { Pause, Radio, RefreshCw } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { KeelWebClient, WatchRunEventsStatus } from "../api/client";
+import type { SseMessage } from "../api/sse";
+import type { EventCursorInput, EventStreamFrame, NodeView, RunDetailResponse } from "../api/types";
 import { CodeViewer } from "../components/code-viewer";
 import {
   Button,
@@ -10,15 +11,18 @@ import {
   JsonBlock,
   KeyValueList,
   LoadingState,
+  Select,
   StatusPill,
   Tabs,
+  type Tone,
+  formatDuration,
   formatTime,
   toneForStatus,
 } from "../components/controls";
 import { type Column, DenseTable } from "../components/dense-table";
-import { RunGraph } from "../components/graph";
+import { NodeTimeline, RunGraph } from "../components/graph";
 import { Inspector } from "../components/inspector";
-import { Transcript } from "../components/transcript";
+import { type RawEventFrame, RawEventList, Transcript } from "../components/transcript";
 import { useAsync } from "../hooks/use-async";
 
 type RunTab =
@@ -28,7 +32,16 @@ type RunTab =
   | "report"
   | "source"
   | "workspaces"
+  | "approvals"
   | "events";
+
+type CursorMode = "current" | "tail" | "beginning" | "now";
+
+interface StreamState {
+  state: "idle" | WatchRunEventsStatus["state"];
+  cursorSeq: number | null;
+  message?: string;
+}
 
 const TABS: Array<{ id: RunTab; label: string }> = [
   { id: "overview", label: "Overview" },
@@ -37,6 +50,7 @@ const TABS: Array<{ id: RunTab; label: string }> = [
   { id: "report", label: "Report" },
   { id: "source", label: "Source" },
   { id: "workspaces", label: "Workspaces" },
+  { id: "approvals", label: "Approvals" },
   { id: "events", label: "Events" },
 ];
 
@@ -52,47 +66,119 @@ export function RunDetailScreen({
   const detailState = useAsync(() => client.getRun(runId), [client, runId, refreshKey]);
   const [tab, setTab] = useState<RunTab>("overview");
   const [live, setLive] = useState(false);
-  const [liveFrames, setLiveFrames] = useState<Array<{ event: string; data: unknown }>>([]);
+  const [cursorMode, setCursorMode] = useState<CursorMode>("current");
+  const [liveEvents, setLiveEvents] = useState<EventStreamFrame[]>([]);
+  const [rawLiveFrames, setRawLiveFrames] = useState<RawEventFrame[]>([]);
+  const [streamState, setStreamState] = useState<StreamState>({
+    state: "idle",
+    cursorSeq: null,
+  });
+  const latestSeqRef = useRef<number | null>(null);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: runId must clear live buffers even when a new run has the same cursor sequence.
+  useEffect(() => {
+    latestSeqRef.current = null;
+    setLiveEvents([]);
+    setRawLiveFrames([]);
+    setStreamState({ state: "idle", cursorSeq: null });
+  }, [runId]);
+
+  useEffect(() => {
+    const seq = detailState.data?.eventCursor?.seq ?? null;
+    if (seq === null || latestSeqRef.current !== null) return;
+    latestSeqRef.current = seq;
+    setStreamState((state) => ({ ...state, cursorSeq: seq }));
+  }, [detailState.data?.eventCursor?.seq]);
 
   useEffect(() => {
     if (!live) return;
     const stop = client.watchRunEvents(runId, {
-      cursor: detailState.data?.eventCursor
-        ? { kind: "after-seq", seq: detailState.data.eventCursor.seq }
-        : { kind: "tail", count: 50 },
-      onFrame: (frame) => setLiveFrames((frames) => [...frames.slice(-49), frame]),
-      onError: (err) =>
-        setLiveFrames((frames) => [
-          ...frames.slice(-49),
-          { event: "error", data: err instanceof Error ? err.message : String(err) },
-        ]),
+      cursor: cursorInputForMode(cursorMode, detailState.data, latestSeqRef.current),
+      onFrame: (frame) => {
+        setRawLiveFrames((frames) => [
+          ...frames.slice(-499),
+          {
+            event: frame.event,
+            data: frame.data,
+            raw: frame.raw,
+            source: "live",
+            receivedAtMs: Date.now(),
+          },
+        ]);
+        const event = streamFrameFromSse(frame);
+        if (event) setLiveEvents((events) => [...events.slice(-499), event]);
+        if (shouldReloadProjection(frame)) detailState.reload();
+        const seq = cursorSeqFromSse(frame);
+        if (seq !== null) {
+          latestSeqRef.current = seq;
+          setStreamState((state) => ({ ...state, cursorSeq: seq }));
+        }
+      },
+      onStatus: (status) => {
+        const seq = seqFromCursorInput(status.cursor);
+        if (seq !== null) latestSeqRef.current = seq;
+        if (status.state === "closed") setLive(false);
+        setStreamState({
+          state: status.state,
+          cursorSeq: seq ?? latestSeqRef.current,
+          message: "reason" in status ? status.reason : undefined,
+        });
+      },
+      onError: (err) => {
+        setStreamState((state) => ({
+          ...state,
+          state: "reconnecting",
+          message: err instanceof Error ? err.message : String(err),
+        }));
+      },
     });
     return stop;
-  }, [client, runId, live, detailState.data?.eventCursor]);
+  }, [client, cursorMode, detailState.data, detailState.reload, live, runId]);
 
   const detail = detailState.data;
+  const allEvents = useMemo(
+    () => [...(detail?.events ?? []), ...liveEvents],
+    [detail?.events, liveEvents],
+  );
+  const rawFrames = useMemo(
+    () => [...tailRawFrames(detail?.events ?? []), ...rawLiveFrames],
+    [detail?.events, rawLiveFrames],
+  );
 
   return (
     <div className="content-split run-detail-screen">
       <div className="content-scroll">
-        <div className="toolbar">
+        <div className="toolbar run-detail-toolbar">
           <div className="toolbar-left">
             <a className="inline-link" href="#/runs">
               Runs
             </a>
             <span className="mono">{runId}</span>
+            <StatusPill tone={streamTone(streamState, live)} dot>
+              {streamLabel(streamState, live)}
+            </StatusPill>
           </div>
           <div className="toolbar-right">
+            <Select
+              value={cursorMode}
+              onChange={(event) => setCursorMode(event.target.value as CursorMode)}
+              aria-label="Watch cursor"
+            >
+              <option value="current">Current cursor</option>
+              <option value="tail">Tail 100</option>
+              <option value="beginning">Beginning</option>
+              <option value="now">Now</option>
+            </Select>
             <Button icon={RefreshCw} size="sm" onClick={detailState.reload}>
               Refresh
             </Button>
             <Button
-              icon={Radio}
+              icon={live ? Pause : Radio}
               size="sm"
               variant={live ? "primary" : "secondary"}
               onClick={() => setLive((value) => !value)}
             >
-              Live
+              {live ? "Pause live" : "Watch live"}
             </Button>
           </div>
         </div>
@@ -103,20 +189,31 @@ export function RunDetailScreen({
         {detail && !detailState.loading && !detailState.error ? (
           <>
             <Tabs<RunTab>
-              tabs={TABS.map((item) => ({ ...item, count: tabCount(item.id, detail) }))}
+              tabs={TABS.map((item) => ({ ...item, count: tabCount(item.id, detail, allEvents) }))}
               active={tab}
               onChange={setTab}
             />
-            <div className="tab-panel">{renderTab(tab, detail)}</div>
+            <div className="tab-panel">{renderTab(tab, detail, allEvents, rawFrames, setTab)}</div>
           </>
         ) : null}
       </div>
-      <RunDetailInspector detail={detail} liveFrames={liveFrames} />
+      <RunDetailInspector
+        detail={detail}
+        live={live}
+        streamState={streamState}
+        events={allEvents}
+      />
     </div>
   );
 }
 
-function renderTab(tab: RunTab, detail: RunDetailResponse) {
+function renderTab(
+  tab: RunTab,
+  detail: RunDetailResponse,
+  events: EventStreamFrame[],
+  rawFrames: RawEventFrame[],
+  setTab: (tab: RunTab) => void,
+) {
   if (!detail.run) {
     return (
       <EmptyState title="Run not found" detail="The daemon did not return a run projection." />
@@ -126,8 +223,11 @@ function renderTab(tab: RunTab, detail: RunDetailResponse) {
     case "overview":
       return (
         <div className="overview-grid">
-          <section className="panel">
-            <h2>Graph</h2>
+          <section className="panel panel-wide">
+            <div className="panel-heading">
+              <h2>Graph</h2>
+              <span className="muted">Projection nodes and dependency edges</span>
+            </div>
             <RunGraph nodes={detail.run.nodes} />
           </section>
           <section className="panel">
@@ -135,56 +235,124 @@ function renderTab(tab: RunTab, detail: RunDetailResponse) {
             <KeyValueList
               rows={[
                 { label: "Workflow", value: detail.run.workflowName ?? "unnamed" },
+                { label: "Status", value: detail.run.status },
                 { label: "Phase", value: detail.run.phase ?? "-" },
                 { label: "Definition", value: detail.run.definitionVersion, mono: true },
                 { label: "Created", value: formatTime(detail.run.createdAtMs) },
-                { label: "Finished", value: formatTime(detail.run.finishedAtMs) },
+                {
+                  label: "Duration",
+                  value: formatDuration(detail.run.createdAtMs, detail.run.finishedAtMs),
+                },
               ]}
             />
+          </section>
+          <section className="panel">
+            <div className="panel-heading">
+              <h2>Recent Transcript</h2>
+              <button className="inline-link" type="button" onClick={() => setTab("transcript")}>
+                Open transcript
+              </button>
+            </div>
+            <Transcript events={events.slice(-8)} />
           </section>
         </div>
       );
     case "timeline":
-      return <NodeTable nodes={detail.run.nodes} />;
+      return (
+        <div className="timeline-grid">
+          <NodeTimeline nodes={detail.run.nodes} />
+          <NodeTable nodes={detail.run.nodes} />
+        </div>
+      );
     case "transcript":
-    case "events":
-      return <Transcript events={detail.events} />;
+      return <Transcript events={events} />;
     case "report":
       return <JsonBlock value={detail.report ?? detail.run} />;
     case "source":
       return <CodeViewer source={detail.source} />;
     case "workspaces":
-      return (
-        <DenseTable
-          rows={detail.workspaces}
-          rowKey={(workspace) => workspace.workspaceId}
-          empty="No retained workspaces"
-          columns={[
-            {
-              key: "id",
-              header: "Workspace",
-              render: (workspace) => <span className="mono">{workspace.workspaceId}</span>,
-            },
-            { key: "mode", header: "Mode", width: "110px", render: (workspace) => workspace.mode },
-            {
-              key: "status",
-              header: "Status",
-              width: "120px",
-              render: (workspace) => (
-                <StatusPill tone={toneForStatus(workspace.status)}>{workspace.status}</StatusPill>
-              ),
-            },
-            {
-              key: "path",
-              header: "Path",
-              render: (workspace) => (
-                <span className="mono text-truncate">{workspace.workspacePath}</span>
-              ),
-            },
+      return <WorkspacesTable detail={detail} />;
+    case "approvals":
+      return <ApprovalPanel detail={detail} />;
+    case "events":
+      return <RawEventList frames={rawFrames} />;
+  }
+}
+
+function WorkspacesTable({ detail }: { detail: RunDetailResponse }) {
+  return (
+    <DenseTable
+      rows={detail.workspaces}
+      rowKey={(workspace) => workspace.workspaceId}
+      empty="No retained workspaces"
+      columns={[
+        {
+          key: "id",
+          header: "Workspace",
+          render: (workspace) => <span className="mono">{workspace.workspaceId}</span>,
+        },
+        { key: "mode", header: "Mode", width: "110px", render: (workspace) => workspace.mode },
+        {
+          key: "status",
+          header: "Status",
+          width: "120px",
+          render: (workspace) => (
+            <StatusPill tone={toneForStatus(workspace.status)}>{workspace.status}</StatusPill>
+          ),
+        },
+        {
+          key: "path",
+          header: "Path",
+          render: (workspace) => (
+            <span className="mono text-truncate">{workspace.workspacePath}</span>
+          ),
+        },
+      ]}
+    />
+  );
+}
+
+function ApprovalPanel({ detail }: { detail: RunDetailResponse }) {
+  const run = detail.run;
+  const blockage = detail.blockage;
+  if (!run || blockage?.reason !== "waiting_human") {
+    return (
+      <EmptyState
+        title="No run-local approval is waiting"
+        detail="The current projection does not expose a waiting ctx.human gate for this run."
+      />
+    );
+  }
+
+  const gate = blockage.blockedOn?.stableKey ?? "<gate>";
+  const prompt = blockage.context.replace(/^awaiting decision: /, "");
+  const approve = `keel approve ${run.runId} ${gate}`;
+  const deny = `keel deny ${run.runId} ${gate}`;
+  return (
+    <div className="approval-panel">
+      <section className="panel">
+        <h2>Waiting Human Gate</h2>
+        <KeyValueList
+          rows={[
+            { label: "Gate", value: gate, mono: true },
+            { label: "Prompt", value: prompt },
+            { label: "Since", value: formatTime(blockage.blockedOn?.since) },
+            { label: "Authority", value: "admin" },
           ]}
         />
-      );
-  }
+        <div className="command-copy-grid">
+          <button type="button" onClick={() => copyText(approve)}>
+            <span>Copy approve command</span>
+            <code>{approve}</code>
+          </button>
+          <button type="button" onClick={() => copyText(deny)}>
+            <span>Copy deny command</span>
+            <code>{deny}</code>
+          </button>
+        </div>
+      </section>
+    </div>
+  );
 }
 
 function NodeTable({ nodes }: { nodes: NodeView[] }) {
@@ -202,11 +370,23 @@ function NodeTable({ nodes }: { nodes: NodeView[] }) {
       render: (node) => <StatusPill tone={toneForStatus(node.status)}>{node.status}</StatusPill>,
     },
     {
+      key: "started",
+      header: "Started",
+      width: "180px",
+      render: (node) => <span className="mono">{formatTime(node.startedAtMs)}</span>,
+    },
+    {
       key: "attempt",
       header: "Attempt",
       width: "80px",
       align: "right",
       render: (node) => node.attempt,
+    },
+    {
+      key: "artifact",
+      header: "Artifact",
+      width: "90px",
+      render: (node) => (node.artifactBacked ? "yes" : "no"),
     },
     { key: "deps", header: "Depends on", render: (node) => node.dependsOn.join(", ") || "root" },
   ];
@@ -221,13 +401,18 @@ function NodeTable({ nodes }: { nodes: NodeView[] }) {
 
 function RunDetailInspector({
   detail,
-  liveFrames,
+  live,
+  streamState,
+  events,
 }: {
   detail: RunDetailResponse | null;
-  liveFrames: Array<{ event: string; data: unknown }>;
+  live: boolean;
+  streamState: StreamState;
+  events: EventStreamFrame[];
 }) {
   const run = detail?.run ?? null;
   const commands = detail?.availableCommands ?? [];
+  const latestEvents = events.slice(-6);
 
   return (
     <Inspector
@@ -246,6 +431,7 @@ function RunDetailInspector({
           <KeyValueList
             rows={[
               { label: "Created", value: formatTime(run.createdAtMs) },
+              { label: "Duration", value: formatDuration(run.createdAtMs, run.finishedAtMs) },
               { label: "Target", value: run.runTarget ?? "-", mono: true },
               { label: "Steps", value: run.stats.steps },
               { label: "Agents", value: run.stats.agents },
@@ -256,32 +442,40 @@ function RunDetailInspector({
             <section className="inspector-section">
               <h3>Blockage</h3>
               <p>{detail.blockage.context}</p>
+              <StatusPill tone={toneForStatus(detail.blockage.reason)}>
+                {detail.blockage.reason}
+              </StatusPill>
             </section>
           ) : null}
+          <section className="inspector-section">
+            <h3>Live Watch</h3>
+            <div className="live-watch-box">
+              <StatusPill tone={streamTone(streamState, live)} dot>
+                {streamLabel(streamState, live)}
+              </StatusPill>
+              <span className="mono">cursor {streamState.cursorSeq ?? "-"}</span>
+              {streamState.message ? <span className="muted">{streamState.message}</span> : null}
+            </div>
+          </section>
           <section className="inspector-section">
             <h3>Commands</h3>
             <div className="command-list">
               {commands.map((command) => (
-                <span className="command-row" key={command.name}>
+                <button
+                  className="command-row"
+                  key={command.name}
+                  type="button"
+                  onClick={() => copyText(cliForCommand(command.name, run.runId))}
+                >
                   <span>{command.name}</span>
                   <StatusPill tone="info">{command.requiredAuthority}</StatusPill>
-                </span>
+                </button>
               ))}
             </div>
           </section>
           <section className="inspector-section">
-            <h3>Live</h3>
-            <div className="live-strip">
-              {liveFrames.length === 0 ? (
-                <span className="muted">No live frames in this session.</span>
-              ) : null}
-              {liveFrames.map((frame, index) => (
-                <div className="live-frame" key={`${frame.event}:${index}`}>
-                  <strong>{frame.event}</strong>
-                  <pre>{JSON.stringify(frame.data, null, 2)}</pre>
-                </div>
-              ))}
-            </div>
+            <h3>Latest Transcript</h3>
+            <Transcript events={latestEvents} />
           </section>
         </>
       ) : (
@@ -291,9 +485,134 @@ function RunDetailInspector({
   );
 }
 
-function tabCount(tab: RunTab, detail: RunDetailResponse): number | undefined {
+function tabCount(
+  tab: RunTab,
+  detail: RunDetailResponse,
+  events: EventStreamFrame[],
+): number | undefined {
   if (tab === "timeline") return detail.run?.nodes.length ?? 0;
   if (tab === "workspaces") return detail.workspaces.length;
-  if (tab === "events" || tab === "transcript") return detail.events.length;
+  if (tab === "events" || tab === "transcript") return events.length;
+  if (tab === "approvals") return detail.blockage?.reason === "waiting_human" ? 1 : 0;
   return undefined;
+}
+
+function cursorInputForMode(
+  mode: CursorMode,
+  detail: RunDetailResponse | null,
+  latestSeq: number | null,
+): EventCursorInput {
+  if (mode === "beginning") return { kind: "beginning" };
+  if (mode === "now") return { kind: "now" };
+  if (mode === "tail") return { kind: "tail", count: 100 };
+  const seq = latestSeq ?? detail?.eventCursor?.seq;
+  return typeof seq === "number" ? { kind: "after-seq", seq } : { kind: "tail", count: 100 };
+}
+
+function streamFrameFromSse(frame: SseMessage): EventStreamFrame | null {
+  const data = frame.data;
+  if (isEventFrame(data)) return data;
+  if (frame.event === "error") {
+    return { kind: "ephemeral", type: "stream.error", payload: data, atMs: Date.now() };
+  }
+  return null;
+}
+
+function isEventFrame(value: unknown): value is EventStreamFrame {
+  if (!value || typeof value !== "object" || !("kind" in value)) return false;
+  const kind = value.kind;
+  if (kind === "durable") return "seq" in value && "type" in value;
+  if (kind === "ephemeral") return "type" in value;
+  if (kind === "control") return "type" in value && "cursor" in value;
+  return false;
+}
+
+function cursorSeqFromSse(frame: SseMessage): number | null {
+  const data = frame.data;
+  if (!data || typeof data !== "object") return null;
+  if ("kind" in data && data.kind === "durable" && "seq" in data && typeof data.seq === "number") {
+    return data.seq;
+  }
+  if ("cursor" in data) {
+    const cursor = data.cursor;
+    if (cursor && typeof cursor === "object" && "seq" in cursor && typeof cursor.seq === "number") {
+      return cursor.seq;
+    }
+  }
+  return null;
+}
+
+function seqFromCursorInput(cursor: EventCursorInput): number | null {
+  return cursor.kind === "after-seq" ? cursor.seq : null;
+}
+
+function tailRawFrames(events: EventStreamFrame[]): RawEventFrame[] {
+  return events.map((event) => ({
+    event: event.kind === "control" ? event.type : "event",
+    data: event,
+    source: "tail",
+    receivedAtMs: event.kind === "control" ? Date.now() : event.atMs,
+  }));
+}
+
+function streamTone(streamState: StreamState, live: boolean): Tone {
+  if (!live && streamState.state !== "closed") return "neutral";
+  switch (streamState.state) {
+    case "caught-up":
+    case "open":
+      return "running";
+    case "connecting":
+    case "reconnecting":
+      return "waiting";
+    case "closed":
+      return toneForClosedStream(streamState.message);
+    default:
+      return "neutral";
+  }
+}
+
+function streamLabel(streamState: StreamState, live: boolean): string {
+  if (!live && streamState.state !== "closed") return "not watching";
+  if (streamState.state === "caught-up") return "caught up";
+  if (streamState.state === "open") return "streaming";
+  if (streamState.state === "reconnecting") return "reconnecting";
+  if (streamState.state === "connecting") return "connecting";
+  if (streamState.state === "closed") return "closed";
+  return "idle";
+}
+
+function toneForClosedStream(reason: string | undefined): Tone {
+  if (!reason || reason === "finished" || reason === "continued") return "success";
+  if (reason === "interrupted" || reason === "parked" || reason.startsWith("waiting")) {
+    return "waiting";
+  }
+  return "failed";
+}
+
+function shouldReloadProjection(frame: SseMessage): boolean {
+  if (frame.event === "closed") return true;
+  const data = frame.data;
+  if (!data || typeof data !== "object" || !("kind" in data) || data.kind !== "durable") {
+    return false;
+  }
+  const type = "type" in data ? data.type : null;
+  return (
+    type === "run.finished" ||
+    type === "run.failed" ||
+    type === "run.aborted" ||
+    type === "run.interrupted" ||
+    type === "run.continued" ||
+    type === "run.parked"
+  );
+}
+
+function cliForCommand(command: string, runId: string): string {
+  if (command === "watchEvents") return `keel watch ${runId}`;
+  if (command === "viewSource") return `keel workflow source --run ${runId}`;
+  if (command === "decideApproval") return `keel approve ${runId} <gate>`;
+  return `keel ${command} ${runId}`;
+}
+
+function copyText(value: string): void {
+  void navigator.clipboard?.writeText(value).catch(() => undefined);
 }

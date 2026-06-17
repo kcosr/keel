@@ -7,6 +7,9 @@
   the shared operator shell, design primitives, typed browser API client,
   fetch-based SSE parser, frontend tests, root `web:*` scripts, and `web/dist`
   build output for `keel web`.
+- The production web UI now includes a grouped runs inbox, live run detail tabs,
+  fetch-based SSE watching with reconnect cursors, coalesced transcript display,
+  raw event inspection, and a RunProjection-backed graph/timeline view.
 - Agent specs and persistent profiles now support `environment: { vars, secrets }`.
   Literal `vars` are passed as provider environment variables and hashed by
   value; `environment.secrets` requests named run-secret values supplied through

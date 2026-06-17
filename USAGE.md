@@ -222,6 +222,14 @@ the current browser session only, not `localStorage`, and sends it as
 `Authorization: Bearer <capability>`. Event watching uses `fetch()` plus a
 readable stream parser so credentials stay in headers.
 
+The UI opens on the runs inbox, grouped by decision, active, and recently
+finished runs from `GET /api/runs`. Run detail views use `GET /api/runs/:runId`
+for overview, timeline, transcript, report, source, workspaces, approvals, and
+events; live watch reconnects from the latest event cursor and keeps raw live
+SSE frames available alongside the coalesced transcript. The initial event tail
+comes from the JSON detail projection and is shown as reconstructed event
+frames.
+
 Do not expose this server remotely by default. Binding a non-local host is an
 explicit local operator choice; TLS, CORS, browser sessions, and remote exposure
 policy are not part of this transport.

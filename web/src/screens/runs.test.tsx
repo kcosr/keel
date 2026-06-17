@@ -1,0 +1,82 @@
+import { render, screen, within } from "@testing-library/react";
+import { describe, expect, test } from "vitest";
+import type { KeelWebClient } from "../api/client";
+import type { RunListItem, RunStatus } from "../api/types";
+import { RunsScreen } from "./runs";
+
+describe("RunsScreen", () => {
+  test("groups live run projections and keeps each group newest first", async () => {
+    const client = {
+      listRuns: async () => ({
+        runs: [
+          run("run_old", "running", 10),
+          run("run_done", "finished", 30),
+          run("run_wait", "waiting-human", 20, "waiting_human"),
+          run("run_new", "running", 40),
+        ],
+      }),
+    } as KeelWebClient;
+
+    render(<RunsScreen client={client} globalSearch="" refreshKey={0} />);
+
+    await screen.findByText("Needs Decision");
+    expect(screen.getByText("Recently Finished")).toBeInTheDocument();
+
+    const active = screen.getByRole("heading", { name: "Active" }).closest("section");
+    expect(active).not.toBeNull();
+    expect(
+      within(active as HTMLElement)
+        .getAllByRole("link")
+        .map((link) => link.textContent),
+    ).toEqual(["run_new", "run_old"]);
+  });
+});
+
+function run(
+  runId: string,
+  status: RunStatus,
+  createdAtMs: number,
+  blockageReason?: "waiting_human",
+): RunListItem {
+  return {
+    runId,
+    workflowName: "workflow",
+    status,
+    runTarget: "target-a",
+    createdAtMs,
+    finishedAtMs: status === "running" || status.startsWith("waiting") ? null : createdAtMs + 10,
+    parentRunId: null,
+    run: {
+      runId,
+      workflowName: "workflow",
+      status,
+      definitionVersion: "wf_sha",
+      runTarget: "target-a",
+      parentRunId: null,
+      createdAtMs,
+      finishedAtMs: null,
+      nodes: [
+        {
+          stableKey: "step",
+          effectType: "pure",
+          status: status === "running" ? "pending" : "completed",
+          attempt: 1,
+          startedAtMs: createdAtMs,
+          dependsOn: [],
+          artifactBacked: false,
+        },
+      ],
+      phase: null,
+      error: null,
+      stats: { steps: 1, agents: 0, artifacts: 0 },
+    },
+    blockage: blockageReason
+      ? {
+          reason: blockageReason,
+          blockedOn: { stableKey: "gate", since: createdAtMs },
+          context: "awaiting decision: approve",
+        }
+      : null,
+    workspaceSummary: { count: 0 },
+  };
+}

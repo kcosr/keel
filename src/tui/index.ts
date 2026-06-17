@@ -1,6 +1,13 @@
 import { redactCapabilityTokens } from "../auth/redaction.ts";
 import type { DaemonClient } from "../daemon/client.ts";
-import type { EventEnvelope, RunOutcome, RunStart } from "../rpc/contract.ts";
+import type {
+  EventCursorInput,
+  EventEnvelope,
+  RunOutcome,
+  RunStart,
+  SubscribeEventsRequest,
+  SubscribeEventsResult,
+} from "../rpc/contract.ts";
 import type { Blockage, RunProjection, RunReport, RunSummary } from "../rpc/projection.ts";
 import { createTuiWatchFormatter } from "./events.ts";
 import {
@@ -47,15 +54,14 @@ export interface TuiClient {
     runId: string,
     key: string,
     decision: { status: "approved" | "denied"; note?: string },
-  ): Promise<{ status: string }>;
-  sendSignal(runId: string, name: string, payload: unknown): Promise<{ status: string }>;
+  ): Promise<RunStart>;
+  sendSignal(runId: string, name: string, payload: unknown): Promise<RunStart>;
   getRunOutput(runId: string): Promise<RunOutcome>;
   subscribeEvents(
-    runId: string,
-    afterSeq: number,
+    req: SubscribeEventsRequest,
     onEvent: (event: EventEnvelope) => void,
     onError?: (err: unknown) => void,
-    onCaughtUp?: () => void,
+    onCaughtUp?: (result: SubscribeEventsResult) => void,
   ): () => void;
 }
 
@@ -229,9 +235,11 @@ export async function runTui(options: RunTuiOptions): Promise<number> {
         render();
       };
 
-      const attachWatch = (runId: string) => {
+      const attachWatch = (runId: string, cursor?: EventCursorInput) => {
         detachWatch(null);
-        const afterSeq = lastSeqForRun(state, runId);
+        const seq = lastSeqForRun(state, runId);
+        const resolvedCursor =
+          cursor ?? (seq === 0 ? { kind: "beginning" } : { kind: "after-seq", seq });
         state = startWatchState(state, runId);
         render();
         const formatter = createTuiWatchFormatter();
@@ -241,8 +249,7 @@ export async function runTui(options: RunTuiOptions): Promise<number> {
           state.watch.attached &&
           state.watch.runId === runId;
         localUnsubscribe = client.subscribeEvents(
-          runId,
-          afterSeq,
+          { runId, cursor: resolvedCursor },
           (event) => {
             if (!isCurrentSubscription()) return;
             const formatted = formatter.push(event);
@@ -292,7 +299,7 @@ export async function runTui(options: RunTuiOptions): Promise<number> {
           if (openDetailOnSuccess) state = openDetailState(state, runId);
           await refreshDetail(runId);
           if (closed) return;
-          attachWatch(runId);
+          attachWatch(runId, out.attachCursor);
         } catch (err) {
           state = setStatusMessage(state, errorMessage(err));
           render();
@@ -306,7 +313,7 @@ export async function runTui(options: RunTuiOptions): Promise<number> {
           state = setStatusMessage(state, `rewind accepted: ${out.status}`);
           await refreshDetail(runId);
           if (closed) return;
-          attachWatch(runId);
+          attachWatch(runId, out.attachCursor);
         } catch (err) {
           state = setStatusMessage(state, errorMessage(err));
           render();
@@ -326,7 +333,7 @@ export async function runTui(options: RunTuiOptions): Promise<number> {
           if (openDetailOnSuccess) state = openDetailState(state, runId);
           await refreshDetail(runId);
           if (closed) return;
-          attachWatch(runId);
+          attachWatch(runId, out.attachCursor);
         } catch (err) {
           state = setStatusMessage(state, errorMessage(err));
           render();
@@ -353,7 +360,7 @@ export async function runTui(options: RunTuiOptions): Promise<number> {
           state = setStatusMessage(state, `approval ${decision}: ${out.status}`);
           await refreshDetail(runId);
           if (closed) return;
-          attachWatch(runId);
+          attachWatch(runId, out.attachCursor);
         } catch (err) {
           state = setStatusMessage(state, errorMessage(err));
           render();

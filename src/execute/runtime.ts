@@ -1,6 +1,8 @@
 import { resolve } from "node:path";
 import type { DaemonClient } from "../daemon/client.ts";
 import type {
+  EventCursor,
+  EventCursorInput,
   EventEnvelope,
   LaunchRequest,
   RunOutcome,
@@ -29,7 +31,7 @@ export interface ExecuteKeel {
   blockage(runId: string): Promise<Blockage>;
   wait(runId: string, opts?: { timeoutMs?: number }): Promise<RunOutcome | ExecuteRunning>;
   output(runId: string): Promise<unknown>;
-  events(runId: string, opts?: { afterSeq?: number }): AsyncIterable<EventEnvelope>;
+  events(req: ExecuteEventsRequest): AsyncIterable<EventEnvelope>;
   listRunWorkspaces(
     runId: string,
     opts?: { includeRemoved?: boolean },
@@ -45,13 +47,13 @@ export interface ExecuteKeel {
     includePending?: boolean;
     includeRemoved?: boolean;
   }): Promise<WorkspaceGcResult>;
-  signal(runId: string, name: string, payload?: unknown): Promise<{ status: string }>;
+  signal(runId: string, name: string, payload?: unknown): Promise<RunStart>;
   approve(
     runId: string,
     key: string,
     opts?: { note?: string; grantedCaps?: unknown },
-  ): Promise<{ status: string }>;
-  deny(runId: string, key: string, opts?: { note?: string }): Promise<{ status: string }>;
+  ): Promise<RunStart>;
+  deny(runId: string, key: string, opts?: { note?: string }): Promise<RunStart>;
 }
 
 export type ExecuteLaunchRequest =
@@ -66,6 +68,12 @@ export interface ExecuteRunHandle {
   runId: string;
   capabilityRef?: string;
   capability?: string;
+  attachCursor?: EventCursor;
+}
+
+export interface ExecuteEventsRequest {
+  runId: string;
+  cursor?: EventCursorInput;
 }
 
 export interface ExecuteRunning {
@@ -143,7 +151,10 @@ export function createExecuteKeel(opts: ExecuteRuntimeOptions): ExecuteKeel {
     async launch(req) {
       const normalized = normalizeLaunch(req, opts.cwd);
       const launched = await opts.client.launchRun(normalized);
-      return handle(launched.runId, launched.capability);
+      return {
+        ...(await handle(launched.runId, launched.capability)),
+        attachCursor: launched.attachCursor,
+      };
     },
     async resume(runId) {
       await authenticateKnownRun(runId);
@@ -164,7 +175,10 @@ export function createExecuteKeel(opts: ExecuteRuntimeOptions): ExecuteKeel {
     async fork(runId, forkOpts = {}) {
       await authenticateKnownRun(runId);
       const forked = await opts.client.forkRun(runId, forkOpts);
-      return handle(forked.runId, forked.capability);
+      return {
+        ...(await handle(forked.runId, forked.capability)),
+        attachCursor: forked.attachCursor,
+      };
     },
     async get(runId) {
       await authenticateKnownRun(runId);
@@ -196,9 +210,12 @@ export function createExecuteKeel(opts: ExecuteRuntimeOptions): ExecuteKeel {
       }
       return outcome.output;
     },
-    events(runId, eventOpts = {}) {
-      return eventIterable(opts.client, runId, eventOpts.afterSeq ?? 0, () =>
-        authenticateKnownRun(runId),
+    events(eventReq) {
+      return eventIterable(
+        opts.client,
+        eventReq.runId,
+        eventReq.cursor ?? { kind: "beginning" },
+        () => authenticateKnownRun(eventReq.runId),
       );
     },
     async listRunWorkspaces(runId, workspaceOpts = {}) {
@@ -287,17 +304,25 @@ function workflowName(workflowUrl: string): string {
 async function* eventIterable(
   client: DaemonClient,
   runId: string,
-  afterSeq: number,
+  cursor: EventCursorInput,
   authenticate: () => Promise<void>,
 ): AsyncIterable<EventEnvelope> {
   await authenticate();
-  const queue: EventEnvelope[] = [];
+  const queue: Array<EventEnvelope | null> = [];
   let notify: (() => void) | null = null;
-  const unsub = client.subscribeEvents(runId, afterSeq, (event) => {
-    queue.push(event);
+  const push = (item: EventEnvelope | null): void => {
+    queue.push(item);
     notify?.();
     notify = null;
-  });
+  };
+  const unsub = client.subscribeEvents(
+    { runId, cursor },
+    (event) => push(event),
+    undefined,
+    (result) => {
+      if (result.closedStatus) push(null);
+    },
+  );
   try {
     while (true) {
       if (queue.length === 0) {
@@ -306,12 +331,13 @@ async function* eventIterable(
         });
       }
       const event = queue.shift();
-      if (!event) continue;
+      if (!event) return;
       yield event;
       if (
         event.type === "run.finished" ||
         event.type === "run.failed" ||
         event.type === "run.continued" ||
+        event.type === "run.parked" ||
         event.type === "run.interrupted"
       ) {
         return;

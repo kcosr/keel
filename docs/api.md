@@ -85,12 +85,19 @@ See `docs/control-surfaces.md` for the cross-surface status matrix.
 
 - Durable events have `kind: "durable"` and a per-run monotonic `seq`.
 - Ephemeral events have `kind: "ephemeral"` and no durable sequence.
-- `subscribeEvents(runId, afterSeq, onEvent)` backfills durable events with
-  `seq > afterSeq`, then tails new durable events and live ephemeral frames.
+- `subscribeEvents({ runId, cursor }, onEvent)` accepts `beginning`,
+  `after-seq`, `tail`, and `now` cursors, then tails new durable events and live
+  ephemeral frames after catch-up.
 - Late subscribers do not receive past ephemeral frames.
 
 `keel watch --output text` and the TUI format event streams for humans; scripts
 should prefer JSON/NDJSON or direct API calls.
+
+See `docs/events.md` for the shared cursor and stream-boundary contract.
+
+Start and wake operations that can be followed by a stream return an
+`attachCursor`; callers can subscribe from that cursor to observe the accepted
+operation without replaying stale pre-operation history.
 
 ## Execute Wrapper
 

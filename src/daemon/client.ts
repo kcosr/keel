@@ -9,6 +9,7 @@ import type {
   DeleteAgentProfileRequest,
   DeleteSettingRequest,
   EventEnvelope,
+  EventStreamFrame,
   GetWorkflowDefinitionSourceRequest,
   LaunchRequest,
   LaunchSavedWorkflowRequest,
@@ -31,6 +32,9 @@ import type {
   ScheduleView,
   SettingView,
   SettingsDiagnostic,
+  StreamControlFrame,
+  SubscribeEventsRequest,
+  SubscribeEventsResult,
   WorkflowDefinitionSourceView,
   WorkspaceGcResult,
 } from "../rpc/contract.ts";
@@ -49,7 +53,8 @@ export class DaemonClient {
     { resolve: (v: unknown) => void; reject: (e: unknown) => void }
   >();
   private readonly subs = new Map<string, (event: EventEnvelope) => void>();
-  private readonly pendingSubEvents = new Map<string, EventEnvelope[]>();
+  private readonly controlSubs = new Map<string, (frame: StreamControlFrame) => void>();
+  private readonly pendingSubEvents = new Map<string, EventStreamFrame[]>();
   private readonly closedSubIds = new Set<string>();
 
   static async connect(socketPath: string): Promise<DaemonClient> {
@@ -92,13 +97,17 @@ export class DaemonClient {
       id?: number;
       result?: unknown;
       error?: { message: string; code?: string; action?: string; resource?: unknown };
-      event?: EventEnvelope & { subId: string };
+      event?: EventStreamFrame & { subId: string };
     };
     if (msg.event) {
-      const { subId, ...event } = msg.event;
-      const sub = this.subs.get(subId);
-      if (sub) {
-        sub(event);
+      const { subId, ...frame } = msg.event;
+      const event = frame as EventStreamFrame;
+      const eventSub = this.subs.get(subId);
+      const controlSub = this.controlSubs.get(subId);
+      if (event.kind === "control" && controlSub) {
+        controlSub(event);
+      } else if (event.kind !== "control" && eventSub) {
+        eventSub(event);
       } else if (this.closedSubIds.has(subId)) {
         return;
       } else {
@@ -120,6 +129,8 @@ export class DaemonClient {
   private failAll(err: unknown): void {
     for (const p of this.pending.values()) p.reject(err);
     this.pending.clear();
+    this.subs.clear();
+    this.controlSubs.clear();
     this.pendingSubEvents.clear();
     this.closedSubIds.clear();
   }
@@ -243,10 +254,10 @@ export class DaemonClient {
     runId: string,
     key: string,
     decision: { status: "approved" | "denied"; note?: string; grantedCaps?: unknown },
-  ): Promise<{ status: string }> {
+  ): Promise<RunStart> {
     return this.rpc("decideApproval", { runId, key, decision });
   }
-  sendSignal(runId: string, name: string, payload: unknown): Promise<{ status: string }> {
+  sendSignal(runId: string, name: string, payload: unknown): Promise<RunStart> {
     return this.rpc("sendSignal", { runId, name, payload });
   }
   putSchedule(req: {
@@ -352,15 +363,15 @@ export class DaemonClient {
     return this.rpc("getRunOutput", { runId });
   }
   subscribeEvents(
-    runId: string,
-    afterSeq: number,
+    req: SubscribeEventsRequest,
     onEvent: (e: EventEnvelope) => void,
     onError?: (err: unknown) => void,
-    onCaughtUp?: () => void,
+    onCaughtUp?: (result: SubscribeEventsResult) => void,
+    onControl?: (frame: StreamControlFrame) => void,
   ): () => void {
     let subId: string | null = null;
     let active = true;
-    void this.rpc<{ subId: string }>("subscribeEvents", { runId, afterSeq }).then(
+    void this.rpc<SubscribeEventsResult>("subscribeEvents", req).then(
       (r) => {
         subId = r.subId;
         if (!active) {
@@ -370,11 +381,15 @@ export class DaemonClient {
         }
         this.closedSubIds.delete(r.subId);
         this.subs.set(r.subId, onEvent);
+        if (onControl) this.controlSubs.set(r.subId, onControl);
         const buffered = this.pendingSubEvents.get(r.subId) ?? [];
         this.pendingSubEvents.delete(r.subId);
-        for (const event of buffered) onEvent(event);
+        for (const event of buffered) {
+          if (event.kind === "control") onControl?.(event);
+          else onEvent(event);
+        }
         // The daemon backfills before the subscribe RPC returns; after this flush, events are live.
-        onCaughtUp?.();
+        onCaughtUp?.(r);
       },
       (err) => {
         onError?.(err);
@@ -384,6 +399,7 @@ export class DaemonClient {
       active = false;
       if (subId) {
         this.subs.delete(subId);
+        this.controlSubs.delete(subId);
         this.pendingSubEvents.delete(subId);
         this.closedSubIds.add(subId);
       }

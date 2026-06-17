@@ -9,11 +9,22 @@ import { redactCapabilityTokensInValue } from "../auth/redaction.ts";
 import type { JournalStore } from "../journal/store.ts";
 import { failRunWithError } from "../kernel/run-errors.ts";
 import type {
+  EventCursor,
   EventEnvelope,
+  EventStreamFrame,
+  RunStart,
   SaveWorkflowRequest,
   SavedWorkflowRef,
+  StreamControlFrame,
+  SubscribeEventsRequest,
+  SubscribeEventsResult,
   WorkflowProvenance,
 } from "../rpc/contract.ts";
+import {
+  cursorAfterSeq,
+  normalizeEventCursorInput,
+  resolveEventCursor,
+} from "../rpc/event-cursor.ts";
 import type { InProcessKeel } from "../rpc/in-process.ts";
 import { effectiveOperationalSettings } from "../settings/catalog.ts";
 import { requireRunTarget } from "../target.ts";
@@ -61,7 +72,7 @@ export type GatewayErrorEnvelope =
 
 export type GatewayEventFrame = {
   subId: string;
-} & EventEnvelope;
+} & EventStreamFrame;
 
 export interface KeelOperationGatewayOptions {
   ownerId: string;
@@ -357,13 +368,14 @@ export class KeelOperationGateway {
       handle: (_session, p, credential) => {
         this.authorizeAdmin(credential);
         const runId = p.runId as string;
+        const attachAfterSeq = this.opts.store.eventHighWater(runId);
         this.opts.store.decideApproval(
           runId,
           p.key as string,
           p.decision as { status: "approved" | "denied"; note?: string; grantedCaps?: unknown },
           this.opts.clock(),
         );
-        return this.startWakeAfterDelivery(runId);
+        return this.startWakeAfterDelivery(runId, attachAfterSeq);
       },
     },
     sendSignal: {
@@ -371,8 +383,9 @@ export class KeelOperationGateway {
       handle: (_session, p, credential) => {
         const runId = p.runId as string;
         this.authorizeRunCredential(credential, runId, "run:signal");
+        const attachAfterSeq = this.opts.store.eventHighWater(runId);
         this.opts.store.putSignal(runId, p.name as string, p.payload, this.opts.clock());
-        return this.startWakeAfterDelivery(runId);
+        return this.startWakeAfterDelivery(runId, attachAfterSeq);
       },
     },
     putSchedule: {
@@ -699,14 +712,26 @@ export class KeelOperationGateway {
     session: GatewaySession,
     p: Record<string, unknown>,
     credential: string | null,
-  ): { subId: string } {
+  ): SubscribeEventsResult {
     const runId = p.runId as string;
+    if ("afterSeq" in p) {
+      throw new Error("subscribeEvents uses cursor; numeric afterSeq is not supported");
+    }
+    const req: SubscribeEventsRequest = {
+      runId,
+      ...(p.cursor !== undefined ? { cursor: p.cursor as SubscribeEventsRequest["cursor"] } : {}),
+      ...(p.includeControlFrames === true ? { includeControlFrames: true } : {}),
+    };
+    normalizeEventCursorInput(req.cursor);
+    const includeControlFrames = req.includeControlFrames === true;
+    const initialCursor = resolveEventCursor(this.opts.store, runId, req.cursor).initialCursor;
     const subId = randomUUID();
     let unsub = () => {};
     let stopped = false;
     let unsubAssigned = false;
     let authFailureSent = false;
     let recheck: ReturnType<typeof setInterval> | null = null;
+    let lastCursor: EventCursor = initialCursor;
     const stop = () => {
       if (stopped) return;
       stopped = true;
@@ -718,15 +743,28 @@ export class KeelOperationGateway {
     const sendAuthFailure = (err: unknown) => {
       if (authFailureSent) return;
       authFailureSent = true;
-      session.sendEvent({
-        subId,
-        kind: "ephemeral",
-        type: "authorization.failed",
-        payload: {
-          message: redactCapabilityTokensInValue(err instanceof Error ? err.message : String(err)),
-        },
-        atMs: this.opts.clock(),
-      });
+      const payload = {
+        message: redactCapabilityTokensInValue(err instanceof Error ? err.message : String(err)),
+      };
+      if (includeControlFrames) {
+        session.sendEvent(
+          redactCapabilityTokensInValue({
+            subId,
+            kind: "control",
+            type: "authorization.failed",
+            cursor: lastCursor,
+            payload,
+          }) as GatewayEventFrame,
+        );
+      } else {
+        session.sendEvent({
+          subId,
+          kind: "ephemeral",
+          type: "authorization.failed",
+          payload,
+          atMs: this.opts.clock(),
+        });
+      }
     };
     recheck = setInterval(() => {
       try {
@@ -736,46 +774,66 @@ export class KeelOperationGateway {
         stop();
       }
     }, AUTH_RECHECK_MS);
-    const subscribed = this.opts.api.subscribeEvents(
-      runId,
-      (p.afterSeq as number) ?? 0,
-      (event: EventEnvelope) => {
-        try {
-          if (stopped) return;
-          this.authorizeRunCredential(credential, runId, "run:events");
-          session.sendEvent({ subId, ...redactCapabilityTokensInValue(event) });
-        } catch (err) {
-          sendAuthFailure(err);
-          stop();
-        }
-      },
-    );
+    const sendFrame = (frame: EventStreamFrame): void => {
+      try {
+        if (stopped) return;
+        this.authorizeRunCredential(credential, runId, "run:events");
+        if (frame.kind === "durable") lastCursor = { kind: "after-seq", runId, seq: frame.seq };
+        if (frame.kind === "control") lastCursor = frame.cursor;
+        session.sendEvent({ subId, ...redactCapabilityTokensInValue(frame) });
+      } catch (err) {
+        sendAuthFailure(err);
+        stop();
+      }
+    };
+    let subscribed: (() => void) & Pick<SubscribeEventsResult, "cursor" | "closedStatus">;
+    try {
+      subscribed = this.opts.api.subscribeEvents(
+        req,
+        (event: EventEnvelope) => sendFrame(event),
+        (frame: StreamControlFrame) => {
+          if (includeControlFrames) sendFrame(frame);
+          else lastCursor = frame.cursor;
+        },
+      ) as (() => void) & Pick<SubscribeEventsResult, "cursor" | "closedStatus">;
+    } catch (err) {
+      stop();
+      throw err;
+    }
+    lastCursor = subscribed.cursor;
     unsub = subscribed;
     unsubAssigned = true;
     if (stopped) {
       unsub();
       session.removeCleanup(stop);
     }
-    return { subId };
+    return {
+      subId,
+      cursor: subscribed.cursor,
+      closedStatus: subscribed.closedStatus,
+    };
   }
 
   /** Start, but do not await, a wake made eligible by a delivered decision/signal. */
-  private async startWakeAfterDelivery(runId: string): Promise<{ status: string }> {
+  private async startWakeAfterDelivery(runId: string, attachAfterSeq: number): Promise<RunStart> {
     const run = this.opts.store.getRun(runId);
     if (!run) throw new Error(`run ${runId} not found`);
+    const attachCursor = cursorAfterSeq(runId, attachAfterSeq);
     if (run.status.startsWith("waiting-")) {
       const active = this.activeDeliveryWakes.get(runId);
-      if (active) return active.ack;
+      if (active)
+        return { runId, status: (await active.ack).status as RunStart["status"], attachCursor };
       const wake: ActiveDeliveryWake = { ack: this.startDeliveryWake(runId) };
       this.activeDeliveryWakes.set(runId, wake);
       try {
-        return await wake.ack;
+        const started = await wake.ack;
+        return { runId, status: started.status as RunStart["status"], attachCursor };
       } catch (err) {
         if (this.activeDeliveryWakes.get(runId) === wake) this.activeDeliveryWakes.delete(runId);
         throw err;
       }
     }
-    return { status: run.status };
+    return { runId, status: run.status, attachCursor };
   }
 
   private async startDeliveryWake(runId: string): Promise<{ status: string }> {

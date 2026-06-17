@@ -15,6 +15,7 @@ changes.
 | `USAGE.md` | Human/operator reference: install, daemon operation, CLI syntax, API notes, paths, workspaces, providers, limits. | Historical rationale or spec-only future plans. |
 | `SKILL.md` | Workflow authoring guide for agents and humans, including deterministic workflow rules and compact examples. | Daemon operations, exhaustive CLI/API reference. |
 | `docs/api.md` | Source-backed daemon API orientation, operation families, authority notes, and event-delivery contract. | Exact copied TypeScript contract definitions that can drift from source. |
+| `docs/events.md` | Event stream envelope, cursor, catch-up, closed-state, and authorization semantics shared by daemon, CLI, TUI, execute, and future web transports. | Transport-specific web exposure rules or human-rendering implementation details. |
 | `workflows/README.md` | Catalog and conventions for reusable workflow files. | Per-workflow runbooks beyond catalog-level notes. |
 | `workflows/*/README.md` | One workflow's inputs, launch examples, safety notes, signals, outputs, and retention/cleanup behavior. | Global workflow SDK reference. |
 | `docs/documentation.md` | Documentation ownership map, update checklist, and durable documentation debt categories. | Product behavior, API syntax, or implementation plans that belong in other docs or `.specs/`. |

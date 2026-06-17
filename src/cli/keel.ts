@@ -42,6 +42,7 @@ import { JournalStore } from "../journal/store.ts";
 import type {
   AgentProfileCheckResult,
   AgentProfileView,
+  EventCursorInput,
   RunOutcome,
   ScheduleSummary,
   ScheduleView,
@@ -119,7 +120,11 @@ const COMMANDS: [string, string, string][] = [
     "[workflow.ts] [--name n] [--input json] [--target dir] [--output json|text|ndjson] [--tools]",
     "launch and print the result",
   ],
-  ["watch", "<runId> [--output ndjson|text] [--tools]", "stream a run's events until it finishes"],
+  [
+    "watch",
+    "<runId> [--output ndjson|text] [--from beginning|now | --after-seq n | --tail n] [--tools]",
+    "stream a run's events until it finishes",
+  ],
   ["get", "<runId>", "print a run's projection as JSON"],
   ["output", "<runId> [--output json|text]", "print a run's terminal output"],
   ["report", "<runId> [--output json|text]", "print a run's per-node result digest"],
@@ -310,7 +315,11 @@ async function dispatch(argv: string[]): Promise<number> {
           })}\n`,
         );
       }
-      const terminal = await watchRun(client, runId, { output, tools: launchOpts.tools });
+      const terminal = await watchRun(client, runId, {
+        output,
+        tools: launchOpts.tools,
+        cursor: launched.attachCursor,
+      });
       return statusExitCode(terminal);
     }
     case "run": {
@@ -339,7 +348,11 @@ async function dispatch(argv: string[]): Promise<number> {
       if (output === "text") {
         process.stdout.write(`run ${launched.runId}\n`);
       }
-      const terminal = await watchRun(client, launched.runId, { output, tools: runOpts.tools });
+      const terminal = await watchRun(client, launched.runId, {
+        output,
+        tools: runOpts.tools,
+        cursor: launched.attachCursor,
+      });
       return statusExitCode(terminal);
     }
     case "watch": {
@@ -350,6 +363,7 @@ async function dispatch(argv: string[]): Promise<number> {
       const terminal = await watchRun(client, runId, {
         output: parsed.output ?? "ndjson",
         tools: parsed.tools,
+        cursor: parsed.cursor,
       });
       return statusExitCode(terminal);
     }
@@ -401,7 +415,11 @@ async function dispatch(argv: string[]): Promise<number> {
       if (!parsed.detach) process.stdout.write(formatRunHeader(out.runId));
       const terminal = parsed.detach
         ? null
-        : await watchRun(client, out.runId, { output: "text", tools: parsed.tools });
+        : await watchRun(client, out.runId, {
+            output: "text",
+            tools: parsed.tools,
+            cursor: out.attachCursor,
+          });
       if (parsed.detach) process.stdout.write(`${out.runId}\t${out.status}\n`);
       return parsed.detach ? 0 : statusExitCode(terminal ?? out.status);
     }
@@ -561,7 +579,11 @@ async function dispatch(argv: string[]): Promise<number> {
       if (!parsed.detach) process.stdout.write(formatRunHeader(out.runId));
       const terminal = parsed.detach
         ? null
-        : await watchRun(client, out.runId, { output: "text", tools: parsed.tools });
+        : await watchRun(client, out.runId, {
+            output: "text",
+            tools: parsed.tools,
+            cursor: out.attachCursor,
+          });
       if (parsed.detach) process.stdout.write(`${out.runId}\t${out.status}\n`);
       return parsed.detach ? 0 : statusExitCode(terminal ?? out.status);
     }
@@ -574,7 +596,11 @@ async function dispatch(argv: string[]): Promise<number> {
       if (!parsed.detach) process.stdout.write(formatRunHeader(out.runId));
       const terminal = parsed.detach
         ? null
-        : await watchRun(client, out.runId, { output: "text", tools: parsed.tools });
+        : await watchRun(client, out.runId, {
+            output: "text",
+            tools: parsed.tools,
+            cursor: out.attachCursor,
+          });
       if (parsed.detach) process.stdout.write(`${out.runId}\t${out.status}\n`);
       return parsed.detach ? 0 : statusExitCode(terminal ?? out.status);
     }
@@ -1250,15 +1276,42 @@ export function parseWatchArgs(args: string[]): {
   runId?: string;
   output: OutputFormat;
   tools: boolean;
+  cursor: EventCursorInput;
 } {
   let output: OutputFormat = "ndjson";
   let tools = false;
+  let cursor: EventCursorInput = { kind: "beginning" };
+  let cursorFlag: string | null = null;
   const positional: string[] = [];
+  const setCursor = (flag: string, next: EventCursorInput): void => {
+    if (cursorFlag) throw new Error(`${flag} cannot be combined with ${cursorFlag}`);
+    cursorFlag = flag;
+    cursor = next;
+  };
   let i = 0;
   while (i < args.length) {
     const arg = args[i] as string;
     if (arg === "--output") {
       output = parseOutputFormat(requireFlagValue(args, i, "--output"));
+      i += 2;
+    } else if (arg === "--from") {
+      const value = requireFlagValue(args, i, "--from");
+      if (value !== "beginning" && value !== "now") {
+        throw new Error("--from must be beginning or now");
+      }
+      setCursor("--from", { kind: value });
+      i += 2;
+    } else if (arg === "--after-seq") {
+      setCursor("--after-seq", {
+        kind: "after-seq",
+        seq: parseNonnegativeInteger(requireFlagValue(args, i, "--after-seq"), "--after-seq"),
+      });
+      i += 2;
+    } else if (arg === "--tail") {
+      setCursor("--tail", {
+        kind: "tail",
+        count: parseNonnegativeInteger(requireFlagValue(args, i, "--tail"), "--tail"),
+      });
       i += 2;
     } else if (arg === "--tools") {
       tools = true;
@@ -1277,7 +1330,7 @@ export function parseWatchArgs(args: string[]): {
   if (positional.length > 1) {
     throw new Error(`unexpected argument ${positional[1]} for watch`);
   }
-  return { runId: positional[0], output, tools };
+  return { runId: positional[0], output, tools, cursor };
 }
 
 type WatchStatus = RunOutcome["status"];
@@ -1702,7 +1755,11 @@ async function handleWorkflow(args: string[]): Promise<number> {
         return statusExitCode(outcome.status);
       }
       if (output === "text") process.stdout.write(`run ${launched.runId}\n`);
-      const terminal = await watchRun(client, launched.runId, { output, tools: parsed.tools });
+      const terminal = await watchRun(client, launched.runId, {
+        output,
+        tools: parsed.tools,
+        cursor: launched.attachCursor,
+      });
       return statusExitCode(terminal);
     }
     case "disable":
@@ -2381,7 +2438,7 @@ async function workspaceCommand(args: string[]): Promise<number> {
 export async function watchRun(
   client: DaemonClient,
   runId: string,
-  opts: WatchFormatOptions,
+  opts: WatchFormatOptions & { cursor?: EventCursorInput },
 ): Promise<WatchStatus> {
   return new Promise<WatchStatus>((resolve) => {
     let caughtUp = false;
@@ -2409,8 +2466,7 @@ export async function watchRun(
       if (caughtUp && status) finish(status);
     };
     unsubscribe = client.subscribeEvents(
-      runId,
-      0,
+      { runId, cursor: opts.cursor ?? { kind: "beginning" } },
       (e) => {
         if (textFormatter) {
           for (const chunk of textFormatter.push(e)) process.stdout.write(chunk);
@@ -2438,8 +2494,9 @@ export async function watchRun(
         process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
         finish("failed");
       },
-      () => {
+      (result) => {
         caughtUp = true;
+        if (!pendingStatus && result.closedStatus) noteStatus(result.closedStatus as WatchStatus);
         if (pendingStatus) finish(pendingStatus);
       },
     );

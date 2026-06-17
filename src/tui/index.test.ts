@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import type { EventEnvelope, RunOutcome, RunStart } from "../rpc/contract.ts";
+import type {
+  EventEnvelope,
+  RunOutcome,
+  RunStart,
+  SubscribeEventsRequest,
+  SubscribeEventsResult,
+} from "../rpc/contract.ts";
 import type { Blockage, RunProjection, RunReport, RunSummary } from "../rpc/projection.ts";
 import { type TuiClient, runTui } from "./index.ts";
 import type { TuiProcessEvent, TuiReadable, TuiWritable } from "./terminal.ts";
@@ -73,10 +79,10 @@ class FakeProcess {
 
 interface FakeSubscription {
   runId: string;
-  afterSeq: number;
+  cursor: unknown;
   onEvent: (event: EventEnvelope) => void;
   onError?: (err: unknown) => void;
-  onCaughtUp?: () => void;
+  onCaughtUp?: (result: SubscribeEventsResult) => void;
   unsubscribed: boolean;
   unsubscribeCalls: number;
 }
@@ -110,25 +116,25 @@ class FakeTuiClient implements TuiClient {
 
   async resumeRun(runId: string): Promise<RunStart> {
     this.resumeCalls.push(runId);
-    return { runId, status: "running" };
+    return runStart(runId);
   }
 
   async retryRun(runId: string): Promise<RunStart> {
     this.retryCalls.push(runId);
     if (this.retryError) throw this.retryError;
-    return { runId, status: "running" };
+    return runStart(runId);
   }
 
   async rewindRun(runId: string): Promise<RunStart> {
-    return { runId, status: "running" };
+    return runStart(runId);
   }
 
-  async decideApproval(_runId: string): Promise<{ status: string }> {
-    return { status: "running" };
+  async decideApproval(runId: string): Promise<RunStart> {
+    return runStart(runId);
   }
 
-  async sendSignal(_runId: string): Promise<{ status: string }> {
-    return { status: "running" };
+  async sendSignal(runId: string): Promise<RunStart> {
+    return runStart(runId);
   }
 
   async getRunOutput(runId: string): Promise<RunOutcome> {
@@ -136,15 +142,14 @@ class FakeTuiClient implements TuiClient {
   }
 
   subscribeEvents(
-    runId: string,
-    afterSeq: number,
+    req: SubscribeEventsRequest,
     onEvent: (event: EventEnvelope) => void,
     onError?: (err: unknown) => void,
-    onCaughtUp?: () => void,
+    onCaughtUp?: (result: SubscribeEventsResult) => void,
   ): () => void {
     const subscription: FakeSubscription = {
-      runId,
-      afterSeq,
+      runId: req.runId,
+      cursor: req.cursor,
       onEvent,
       onError,
       onCaughtUp,
@@ -157,6 +162,10 @@ class FakeTuiClient implements TuiClient {
       subscription.unsubscribeCalls += 1;
     };
   }
+}
+
+function runStart(runId: string): RunStart {
+  return { runId, status: "running", attachCursor: { kind: "after-seq", runId, seq: 9 } };
 }
 
 describe("runTui orchestration", () => {
@@ -172,9 +181,13 @@ describe("runTui orchestration", () => {
       await waitFor(() => client.subscriptions.length === 1, "first watch subscription");
       const first = client.subscriptions[0] as FakeSubscription;
       expect(first.runId).toBe("run_a");
-      expect(first.afterSeq).toBe(0);
+      expect(first.cursor).toEqual({ kind: "beginning" });
 
-      first.onCaughtUp?.();
+      first.onCaughtUp?.({
+        subId: "sub_1",
+        cursor: { kind: "after-seq", runId: "run_a", seq: 0 },
+        closedStatus: null,
+      });
       await waitFor(() => io.stdout.text().includes("watch: attached run_a (live)"), "watch live");
       first.onEvent({
         kind: "durable",
@@ -202,7 +215,7 @@ describe("runTui orchestration", () => {
       io.stdin.emit("w");
       await waitFor(() => client.subscriptions.length === 2, "reattach after auth failure");
       const second = client.subscriptions[1] as FakeSubscription;
-      expect(second.afterSeq).toBe(4);
+      expect(second.cursor).toEqual({ kind: "after-seq", seq: 4 });
       second.onError?.(new Error("socket down"));
       await waitFor(
         () =>
@@ -268,7 +281,7 @@ describe("runTui orchestration", () => {
       const second = client.subscriptions[1] as FakeSubscription;
       expect(first.unsubscribed).toBe(true);
       expect(second.runId).toBe("run_a");
-      expect(second.afterSeq).toBe(5);
+      expect(second.cursor).toEqual({ kind: "after-seq", runId: "run_a", seq: 9 });
       expect(client.getRunCalls.length).toBeGreaterThanOrEqual(2);
 
       client.retryError = new Error("owned elsewhere");

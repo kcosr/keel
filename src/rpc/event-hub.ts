@@ -1,23 +1,41 @@
 import type { JournalStore } from "../journal/store.ts";
 import type { EventRow } from "../journal/types.ts";
-import type { EventEnvelope } from "./contract.ts";
+import type { EventEnvelope, StreamControlFrame, SubscribeEventsRequest } from "./contract.ts";
+import { closedWatchStatus, cursorAfterSeq, resolveEventCursor } from "./event-cursor.ts";
 
 type Subscriber = (event: EventEnvelope) => void;
+type ControlSubscriber = (frame: StreamControlFrame) => void;
+
+export interface EventHubSubscription {
+  unsubscribe: () => void;
+  cursor: { kind: "after-seq"; runId: string; seq: number };
+  closedStatus: string | null;
+}
 
 export class EventHub {
   private readonly subscribers = new Map<string, Set<Subscriber>>();
 
-  subscribe(store: JournalStore, runId: string, afterSeq: number, onEvent: Subscriber): () => void {
+  subscribe(
+    store: JournalStore,
+    req: SubscribeEventsRequest,
+    onEvent: Subscriber,
+    onControl?: ControlSubscriber,
+  ): EventHubSubscription {
+    const { runId } = req;
+    const resolved = resolveEventCursor(store, runId, req.cursor);
+    const afterSeq = resolved.afterSeq;
     const deliveredDurableSeqs = new Set<number>();
     const buffered: EventEnvelope[] = [];
     let backfilling = true;
     let flushing = false;
     let stopped = false;
+    let highestDurableSeq = afterSeq;
     const deliver = (event: EventEnvelope): void => {
       if (stopped) return;
       if (event.kind === "durable") {
         if (event.seq <= afterSeq || deliveredDurableSeqs.has(event.seq)) return;
         deliveredDurableSeqs.add(event.seq);
+        highestDurableSeq = Math.max(highestDurableSeq, event.seq);
       }
       if (backfilling || flushing) buffered.push(event);
       else onEvent(event);
@@ -39,11 +57,19 @@ export class EventHub {
       if (event) onEvent(event);
     }
     flushing = false;
-    return () => {
+    const cursor = cursorAfterSeq(runId, Math.max(afterSeq, highestDurableSeq));
+    const run = store.getRun(runId);
+    const closedStatus = run ? closedWatchStatus(run.status) : null;
+    onControl?.({ kind: "control", type: "caught-up", cursor });
+    if (closedStatus) {
+      onControl?.({ kind: "control", type: "closed", cursor, status: closedStatus });
+    }
+    const unsubscribe = () => {
       stopped = true;
       set?.delete(deliver);
       if (set?.size === 0) this.subscribers.delete(runId);
     };
+    return { unsubscribe, cursor, closedStatus };
   }
 
   publishDurable(event: EventRow): void {

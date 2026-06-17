@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { KeelWebClient, WatchRunEventsOptions } from "../api/client";
 import type { EventStreamFrame, RunDetailResponse } from "../api/types";
@@ -123,6 +123,38 @@ describe("RunDetailScreen", () => {
     await waitFor(() => expect(client.watchRunEvents).toHaveBeenCalledTimes(1));
     expect(watched[0]?.cursor).toEqual({ kind: "after-seq", seq: 9 });
   });
+
+  test("projects human approval parks from live events without refetching detail", async () => {
+    const watched: WatchRunEventsOptions[] = [];
+    const client = {
+      getRun: vi.fn(async () => detail()),
+      watchRunEvents: vi.fn((_runId: string, opts: WatchRunEventsOptions) => {
+        watched.push(opts);
+        return vi.fn();
+      }),
+      decideApproval: vi.fn(),
+    } as unknown as KeelWebClient;
+
+    render(<RunDetailScreen client={client} runId="run_1" refreshKey={0} />);
+
+    await screen.findByText("cursor 5");
+    fireEvent.click(screen.getByRole("button", { name: "Watch live" }));
+    await waitFor(() => expect(client.watchRunEvents).toHaveBeenCalledTimes(1));
+
+    act(() => {
+      watched[0]?.onFrame({
+        event: "event",
+        data: durable(6, "run.parked", { kind: "human", key: "approve-review" }),
+        raw: "event: event",
+      });
+    });
+
+    await waitFor(() => expect(client.getRun).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: /approvals/i }));
+
+    expect((await screen.findAllByText("approve-review")).length).toBeGreaterThan(0);
+    expect(screen.getByText("keel approve run_1 approve-review")).toBeInTheDocument();
+  });
 });
 
 function detail(seq = 5): RunDetailResponse {
@@ -172,8 +204,8 @@ function detail(seq = 5): RunDetailResponse {
   };
 }
 
-function durable(seq: number, type: string): EventStreamFrame {
-  return { kind: "durable", seq, type, payload: {}, atMs: seq };
+function durable(seq: number, type: string, payload: unknown = {}): EventStreamFrame {
+  return { kind: "durable", seq, type, payload, atMs: seq };
 }
 
 function ephemeral(type: string): EventStreamFrame {

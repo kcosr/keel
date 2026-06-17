@@ -164,6 +164,10 @@
   server so the browser bundle is unaffected.
 
 ### Changed
+- The web run-detail Flow tab now preserves deterministic lanes for literal
+  `Promise.all([...])` fan-outs, so sequential work inside each array element
+  stacks vertically before the fan-in join instead of flattening every operation
+  into one wide sibling row.
 - The web run-detail Graph tab now renders projection nodes as an interactive
   flowchart — node boxes laid out in dependency columns, connected by SVG edges,
   with status colouring, dashed pending nodes, click-to-select node detail, and

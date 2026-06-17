@@ -62,6 +62,7 @@ class SocketGatewaySession implements GatewaySession {
   buf: string;
   private credential: string | null;
   private readonly cleanups = new Set<() => void>();
+  private writeChain: Promise<void> = Promise.resolve();
 
   constructor(private readonly socket: Socket<undefined>) {
     this.buf = "";
@@ -77,11 +78,11 @@ class SocketGatewaySession implements GatewaySession {
   }
 
   sendEvent(event: GatewayEventFrame): void {
-    this.socket.write(`${JSON.stringify({ event })}\n`);
+    this.writeFrame({ event });
   }
 
   sendResponse(response: GatewayResponse): void {
-    this.socket.write(`${JSON.stringify(response)}\n`);
+    this.writeFrame(response);
   }
 
   addCleanup(cleanup: () => void): void {
@@ -95,6 +96,16 @@ class SocketGatewaySession implements GatewaySession {
   close(): void {
     for (const cleanup of [...this.cleanups]) cleanup();
     this.cleanups.clear();
+  }
+
+  private writeFrame(frame: unknown): void {
+    const line = `${JSON.stringify(frame)}\n`;
+    this.writeChain = this.writeChain
+      .catch(() => {})
+      .then(() => {
+        this.socket.write(line);
+      });
+    void this.writeChain;
   }
 }
 
@@ -303,7 +314,26 @@ export class KeelDaemon {
     } catch {
       return;
     }
-    session.sendResponse(await this.gateway.handle(session, req));
+    const debug = shouldDebugGatewayRequest(req);
+    const startedAt = Date.now();
+    if (debug) {
+      daemonDebug(
+        `[keel daemon] gateway recv session=${session.id.slice(0, 8)} id=${gatewayRequestId(
+          req.id,
+        )} method=${req.method} ${gatewayDebugLabel(req.params)}`,
+      );
+    }
+    const response = await this.gateway.handle(session, req);
+    if (debug) {
+      daemonDebug(
+        `[keel daemon] gateway send session=${session.id.slice(0, 8)} id=${gatewayRequestId(
+          req.id,
+        )} method=${req.method} ${response.error ? "error" : "result"} ${
+          Date.now() - startedAt
+        }ms ${gatewayDebugLabel(req.params)}`,
+      );
+    }
+    session.sendResponse(response);
   }
 
   private assertNoDuplicateProfileSources(): void {
@@ -316,4 +346,37 @@ export class KeelDaemon {
       }
     }
   }
+}
+
+function daemonDebug(message: string): void {
+  console.error(`${new Date().toISOString()} ${message}`);
+}
+
+function shouldDebugGatewayRequest(request: GatewayRequest): boolean {
+  return (
+    request.surface === "web" &&
+    (request.method === "listRunsPage" ||
+      request.method === "getRun" ||
+      request.method === "getBlockage" ||
+      request.method === "listRunWorkspaces")
+  );
+}
+
+function gatewayRequestId(id: unknown): string {
+  if (id === undefined) return "<none>";
+  if (typeof id === "string" || typeof id === "number" || typeof id === "boolean") {
+    return String(id);
+  }
+  try {
+    return JSON.stringify(id);
+  } catch {
+    return String(id);
+  }
+}
+
+function gatewayDebugLabel(params: unknown): string {
+  if (!params || typeof params !== "object") return "";
+  if ("runId" in params && typeof params.runId === "string") return `runId=${params.runId}`;
+  if ("limit" in params && typeof params.limit === "number") return `limit=${params.limit}`;
+  return "";
 }

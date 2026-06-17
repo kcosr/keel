@@ -63,7 +63,7 @@ export function parseWorkflowSource(sourceFile: string, source: string): Workflo
         id,
         kind: "return",
         ...readReturnStatement(sf, node),
-        containers: containersFor(node),
+        ...operationContext(node),
         location: loc(sf, node),
       });
       return;
@@ -76,7 +76,7 @@ export function parseWorkflowSource(sourceFile: string, source: string): Workflo
         id,
         kind: "agentSession",
         ...sessionDecl.spec,
-        containers: containersFor(node),
+        ...operationContext(node),
         location: loc(sf, sessionDecl.call),
       });
       sessionVars.set(sessionDecl.name, id);
@@ -89,7 +89,7 @@ export function parseWorkflowSource(sourceFile: string, source: string): Workflo
         operations.push({
           id,
           ...ctxCall,
-          containers: containersFor(node),
+          ...operationContext(node),
           location: loc(sf, node),
         });
       } else {
@@ -101,7 +101,7 @@ export function parseWorkflowSource(sourceFile: string, source: string): Workflo
             kind: "agentTurn",
             ...turn.spec,
             sessionRef: turn.sessionRef,
-            containers: containersFor(node),
+            ...operationContext(node),
             location: loc(sf, node),
           });
         }
@@ -365,7 +365,7 @@ function readAgentSessionDeclaration(
 function readCtxCall(
   sf: ts.SourceFile,
   node: ts.CallExpression,
-): Omit<WorkflowOperation, "id" | "location" | "containers"> | null {
+): Omit<WorkflowOperation, "id" | "location" | "containers" | "parallelLane"> | null {
   const access = propertyAccess(node.expression);
   if (!access || access.owner !== "ctx" || !CTX_METHODS.has(access.name)) return null;
 
@@ -531,6 +531,28 @@ function containersFor(node: ts.Node): string[] {
     }
   }
   return out.reverse();
+}
+
+function operationContext(
+  node: ts.Node,
+): Pick<WorkflowOperation, "containers"> & Pick<Partial<WorkflowOperation>, "parallelLane"> {
+  const containers = containersFor(node);
+  const parallelLane = containers.includes("parallel") ? parallelLaneFor(node) : undefined;
+  return parallelLane === undefined ? { containers } : { containers, parallelLane };
+}
+
+function parallelLaneFor(node: ts.Node): number | undefined {
+  for (let cur = node.parent; cur; cur = cur.parent) {
+    if (!ts.isCallExpression(cur)) continue;
+    const access = propertyAccess(cur.expression);
+    if (access?.owner !== "Promise" || access.name !== "all") continue;
+    const firstArg = cur.arguments[0];
+    const array = firstArg ? unwrapParens(firstArg) : undefined;
+    if (!array || !ts.isArrayLiteralExpression(array)) return undefined;
+    const index = array.elements.findIndex((element) => isWithin(node, element));
+    return index >= 0 ? index : undefined;
+  }
+  return undefined;
 }
 
 function addDiagnostics(operations: WorkflowOperation[], diagnostics: Diagnostic[]): void {

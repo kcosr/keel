@@ -2,7 +2,13 @@ import { Check, Pause, Radio, RefreshCw, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { KeelWebClient, WatchRunEventsStatus } from "../api/client";
 import type { SseMessage } from "../api/sse";
-import type { EventCursorInput, EventStreamFrame, NodeView, RunDetailResponse } from "../api/types";
+import type {
+  EventCursorInput,
+  EventStreamFrame,
+  NodeView,
+  RunDetailResponse,
+  RunStatus,
+} from "../api/types";
 import { CodeViewer } from "../components/code-viewer";
 import {
   Button,
@@ -142,6 +148,11 @@ export function RunDetailScreen({
   }, [client, cursorMode, detailState.data, detailState.reload, live, runId]);
 
   const detail = detailState.data;
+  const displayDetail = useMemo(
+    () => applyLiveProjection(detail, liveEvents),
+    [detail, liveEvents],
+  );
+  const renderedDetail = displayDetail ?? detail;
   const allEvents = useMemo(
     () => mergeEventFrames(detail?.events ?? [], liveEvents),
     [detail?.events, liveEvents],
@@ -192,21 +203,32 @@ export function RunDetailScreen({
         {detailState.error ? (
           <ErrorState error={detailState.error} onRetry={detailState.reload} />
         ) : null}
-        {detail && !detailState.loading && !detailState.error ? (
+        {renderedDetail && !detailState.loading && !detailState.error ? (
           <>
             <Tabs<RunTab>
-              tabs={TABS.map((item) => ({ ...item, count: tabCount(item.id, detail, allEvents) }))}
+              tabs={TABS.map((item) => ({
+                ...item,
+                count: tabCount(item.id, renderedDetail, allEvents),
+              }))}
               active={tab}
               onChange={setTab}
             />
             <div className="tab-panel">
-              {renderTab(tab, detail, allEvents, rawFrames, setTab, client, detailState.reload)}
+              {renderTab(
+                tab,
+                renderedDetail,
+                allEvents,
+                rawFrames,
+                setTab,
+                client,
+                detailState.reload,
+              )}
             </div>
           </>
         ) : null}
       </div>
       <RunDetailInspector
-        detail={detail}
+        detail={displayDetail}
         live={live}
         streamState={streamState}
         events={allEvents}
@@ -589,6 +611,99 @@ function tabCount(
   return undefined;
 }
 
+function applyLiveProjection(
+  detail: RunDetailResponse | null,
+  liveEvents: EventStreamFrame[],
+): RunDetailResponse | null {
+  if (!detail?.run || liveEvents.length === 0) return detail;
+  let next: RunDetailResponse | null = null;
+  const current = () => next ?? detail;
+  const mutable = () => {
+    if (!next) next = { ...detail, run: detail.run ? { ...detail.run } : detail.run };
+    return next;
+  };
+
+  for (const event of liveEvents) {
+    if (event.kind !== "durable") continue;
+    if (event.type === "run.parked") {
+      const parked = parkedPayload(event.payload);
+      if (!parked) continue;
+      const projected = mutable();
+      if (projected.run) {
+        projected.run = {
+          ...projected.run,
+          status: parkedStatus(parked.kind),
+        };
+      }
+      if (parked.kind === "human") {
+        const key = parked.key ?? null;
+        projected.blockage = {
+          reason: "waiting_human",
+          blockedOn: key ? { stableKey: key, since: event.atMs } : null,
+          context: `awaiting decision: ${key ?? "human approval"}`,
+        };
+        if (!projected.availableCommands.some((command) => command.name === "decideApproval")) {
+          projected.availableCommands = [
+            ...projected.availableCommands,
+            { name: "decideApproval", requiredAuthority: "admin" },
+          ];
+        }
+      }
+      continue;
+    }
+    if (
+      event.type === "run.resumed" ||
+      event.type === "run.finished" ||
+      event.type === "run.failed" ||
+      event.type === "run.aborted" ||
+      event.type === "run.interrupted" ||
+      event.type === "run.continued"
+    ) {
+      const projected = mutable();
+      projected.blockage = null;
+      if (projected.run) {
+        projected.run = {
+          ...projected.run,
+          status: statusForLifecycleEvent(event.type, current().run?.status ?? "running"),
+          ...(event.type === "run.finished" ||
+          event.type === "run.failed" ||
+          event.type === "run.aborted" ||
+          event.type === "run.continued"
+            ? { finishedAtMs: event.atMs }
+            : {}),
+        };
+      }
+    }
+  }
+  return next ?? detail;
+}
+
+function parkedPayload(
+  payload: unknown,
+): { kind: "human" | "signal" | "timer"; key?: string } | null {
+  if (!payload || typeof payload !== "object") return null;
+  const kind = "kind" in payload ? payload.kind : null;
+  if (kind !== "human" && kind !== "signal" && kind !== "timer") return null;
+  const key = "key" in payload && typeof payload.key === "string" ? payload.key : undefined;
+  return key ? { kind, key } : { kind };
+}
+
+function parkedStatus(kind: "human" | "signal" | "timer"): RunStatus {
+  if (kind === "human") return "waiting-human";
+  if (kind === "signal") return "waiting-signal";
+  return "waiting-timer";
+}
+
+function statusForLifecycleEvent(type: string, fallback: RunStatus): RunStatus {
+  if (type === "run.resumed") return "running";
+  if (type === "run.finished") return "finished";
+  if (type === "run.failed") return "failed";
+  if (type === "run.aborted") return "cancelled";
+  if (type === "run.interrupted") return "interrupted";
+  if (type === "run.continued") return "continued";
+  return fallback;
+}
+
 function cursorInputForMode(
   mode: CursorMode,
   detail: RunDetailResponse | null,
@@ -799,13 +914,21 @@ function shouldReloadProjection(frame: SseMessage): boolean {
     return false;
   }
   const type = "type" in data ? data.type : null;
+  if (type === "run.parked") return !isHumanParkFrame(data);
   return (
     type === "run.finished" ||
     type === "run.failed" ||
     type === "run.aborted" ||
     type === "run.interrupted" ||
-    type === "run.continued" ||
-    type === "run.parked"
+    type === "run.continued"
+  );
+}
+
+function isHumanParkFrame(data: unknown): boolean {
+  if (!data || typeof data !== "object" || !("payload" in data)) return false;
+  const payload = data.payload;
+  return Boolean(
+    payload && typeof payload === "object" && "kind" in payload && payload.kind === "human",
   );
 }
 

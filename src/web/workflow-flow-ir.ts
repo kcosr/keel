@@ -79,6 +79,7 @@ export interface WorkflowOperation {
   condition?: ExprSummary;
   sessionRef?: string;
   containers: string[];
+  parallelLane?: number;
   location: SourceLoc;
 }
 

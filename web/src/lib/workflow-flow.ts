@@ -66,7 +66,7 @@ export function layoutFlow(flow: WorkflowFlowView, runtime: Runtime): FlowLayout
   const phaseOrder = ops.filter((op) => op.kind === "phase").map((op) => phaseTitle(op));
   const currentPhaseIdx = runtime.phase ? phaseOrder.indexOf(runtime.phase) : -1;
 
-  const maxSiblings = Math.max(1, ...parallel.map((seg) => seg.end - seg.start + 1));
+  const maxSiblings = Math.max(1, ...parallel.map((seg) => parallelBreadth(ops, seg)));
   const width = PAD * 2 + maxSiblings * NODE_W + (maxSiblings - 1) * H_GAP;
   const centerX = width / 2;
 
@@ -99,20 +99,45 @@ export function layoutFlow(flow: WorkflowFlowView, runtime: Runtime): FlowLayout
       settlePrev(fanId);
       y += FAN_H + V_GAP;
       const segOps = ops.slice(pseg.start, pseg.end + 1);
-      const totalW = segOps.length * NODE_W + (segOps.length - 1) * H_GAP;
-      let x = centerX - totalW / 2;
-      const segIds: string[] = [];
-      for (const op of segOps) {
-        const node = opNode(op, x, y, runtime, phaseOrder, currentPhaseIdx);
-        nodes.push(node);
-        segIds.push(node.id);
-        link(fanId, node.id, "fan");
-        x += NODE_W + H_GAP;
+      const lanes = deterministicParallelLanes(segOps);
+      const tails: string[] = [];
+      if (lanes) {
+        const totalW = lanes.length * NODE_W + (lanes.length - 1) * H_GAP;
+        let x = centerX - totalW / 2;
+        let maxLaneH = 0;
+        for (const lane of lanes) {
+          let laneY = y;
+          let first: string | null = null;
+          let last: string | null = null;
+          for (const op of lane) {
+            const node = opNode(op, x, laneY, runtime, phaseOrder, currentPhaseIdx);
+            nodes.push(node);
+            if (!first) first = node.id;
+            if (last) link(last, node.id, "seq");
+            last = node.id;
+            laneY += NODE_H + V_GAP;
+          }
+          if (first) link(fanId, first, "fan");
+          if (last) tails.push(last);
+          maxLaneH = Math.max(maxLaneH, laneStackHeight(lane));
+          x += NODE_W + H_GAP;
+        }
+        y += maxLaneH + V_GAP;
+      } else {
+        const totalW = segOps.length * NODE_W + (segOps.length - 1) * H_GAP;
+        let x = centerX - totalW / 2;
+        for (const op of segOps) {
+          const node = opNode(op, x, y, runtime, phaseOrder, currentPhaseIdx);
+          nodes.push(node);
+          tails.push(node.id);
+          link(fanId, node.id, "fan");
+          x += NODE_W + H_GAP;
+        }
+        y += NODE_H + V_GAP;
       }
-      y += NODE_H + V_GAP;
       const joinId = `join_${i}`;
       nodes.push(fanNode(joinId, "join", "join", cx, y));
-      for (const id of segIds) link(id, joinId, "fan");
+      for (const id of tails) link(id, joinId, "fan");
       y += FAN_H + V_GAP;
       prevId = joinId;
       i = pseg.end + 1;
@@ -339,6 +364,31 @@ function isLoopOp(op: WorkflowFlowOperation): boolean {
   return op.containers.some(
     (c) => c === "loop" || c.includes("map loop") || c.includes("forEach loop"),
   );
+}
+
+function deterministicParallelLanes(
+  ops: WorkflowFlowOperation[],
+): WorkflowFlowOperation[][] | null {
+  const groups = new Map<number, WorkflowFlowOperation[]>();
+  for (const op of ops) {
+    const lane = op.parallelLane;
+    if (typeof lane !== "number" || !Number.isInteger(lane) || lane < 0) return null;
+    const group = groups.get(lane);
+    if (group) group.push(op);
+    else groups.set(lane, [op]);
+  }
+  if (groups.size === 0) return null;
+  return [...groups.entries()].sort(([a], [b]) => a - b).map(([, laneOps]) => laneOps);
+}
+
+function parallelBreadth(ops: WorkflowFlowOperation[], seg: Segment): number {
+  const segOps = ops.slice(seg.start, seg.end + 1);
+  return deterministicParallelLanes(segOps)?.length ?? segOps.length;
+}
+
+function laneStackHeight(ops: WorkflowFlowOperation[]): number {
+  if (ops.length === 0) return 0;
+  return ops.length * NODE_H + (ops.length - 1) * V_GAP;
 }
 
 function segments(

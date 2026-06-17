@@ -239,6 +239,7 @@ export interface WorkflowFlowOperation {
   condition?: WorkflowExprSummary;
   sessionRef?: string;
   containers: string[];
+  parallelLane?: number;
 }
 
 export interface WorkflowFlowView {

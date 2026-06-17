@@ -53,7 +53,9 @@ class GatewaySocket {
   private buf = "";
   private nextId = 1;
   private readonly pending = new Map<string, PendingRequest>();
+  private disconnected = false;
   onEvent: ((event: GatewayEventFrame) => void) | null = null;
+  onClose: ((err: unknown) => void) | null = null;
 
   private constructor(private readonly socket: Socket) {}
 
@@ -66,9 +68,9 @@ class GatewaySocket {
       };
       socket.once("connect", () => {
         socket.off("error", failOpen);
-        socket.on("error", (err) => client.failAll(err));
+        socket.on("error", (err) => client.failAll(err, true));
         socket.on("data", (chunk) => client.onData(chunk));
-        socket.on("close", () => client.failAll(new Error("daemon connection closed")));
+        socket.on("close", () => client.failAll(new Error("daemon connection closed"), true));
         resolve(client);
       });
       socket.once("error", failOpen);
@@ -97,6 +99,7 @@ class GatewaySocket {
   }
 
   close(): void {
+    this.onClose = null;
     this.socket.end();
     this.socket.destroy();
     this.failAll(new Error("daemon connection closed"));
@@ -129,9 +132,13 @@ class GatewaySocket {
     });
   }
 
-  private failAll(err: unknown): void {
+  private failAll(err: unknown, notify = false): void {
     for (const pending of this.pending.values()) pending.reject(err);
     this.pending.clear();
+    if (notify && !this.disconnected) {
+      this.disconnected = true;
+      this.onClose?.(err);
+    }
   }
 }
 
@@ -446,8 +453,15 @@ async function eventsRoute(
       cleanup = close;
       request.signal.addEventListener("abort", close, { once: true });
       heartbeat = setInterval(() => write(`: heartbeat ${Date.now()}\n\n`), heartbeatMs);
-      void connectGatewaySocket(socketPath).then(
-        async (conn) => {
+      const failStream = (err: unknown) => {
+        if (closed) return;
+        if (!snapshotSent) sendSnapshot(null);
+        const error = errorPayload(err);
+        write(sseFrame("error", redactCapabilityTokensInValue(error)));
+        scheduleClose();
+      };
+      void connectGatewaySocket(socketPath)
+        .then(async (conn) => {
           if (closed) {
             conn.close();
             return;
@@ -455,6 +469,7 @@ async function eventsRoute(
           gateway = conn;
           let closedControlSent = false;
           let caughtUpSeen = false;
+          conn.onClose = () => failStream({ message: "daemon connection closed" });
           conn.onEvent = (frame) => {
             write(sseForGatewayFrame(frame));
             if (frame.kind === "control" && frame.type === "caught-up") caughtUpSeen = true;
@@ -504,17 +519,8 @@ async function eventsRoute(
             write(sseFrame("error", redactCapabilityTokensInValue(response.error)));
             scheduleClose();
           }
-        },
-        (err) => {
-          if (!snapshotSent) sendSnapshot(null);
-          const error =
-            err instanceof HttpError
-              ? err.error
-              : { message: err instanceof Error ? err.message : String(err) };
-          write(sseFrame("error", redactCapabilityTokensInValue(error)));
-          scheduleClose();
-        },
-      );
+        })
+        .catch(failStream);
     },
     cancel() {
       cleanup();
@@ -580,6 +586,14 @@ async function gatewayResultOn<T>(
 function resultOrHttpError<T>(response: GatewayResponse): T {
   if (response.error) throw new HttpError(statusForGatewayError(response.error), response.error);
   return response.result as T;
+}
+
+function errorPayload(err: unknown): { message: string } | GatewayErrorEnvelope {
+  if (err instanceof HttpError) return err.error;
+  if (err && typeof err === "object" && "message" in err && typeof err.message === "string") {
+    return { message: err.message };
+  }
+  return { message: err instanceof Error ? err.message : String(err) };
 }
 
 async function unary(

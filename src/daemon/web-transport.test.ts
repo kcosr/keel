@@ -491,6 +491,35 @@ describe("web transport", () => {
     }
   });
 
+  test("ends SSE streams when the daemon gateway connection closes", async () => {
+    const { daemon, socketPath } = startDaemon({ providerDelayMs: 2000 });
+    await daemon.start();
+    let daemonRunning = true;
+    const web = startWebServer({ socketPath, port: 0, apiOnly: true, heartbeatMs: 20 });
+    const client = await DaemonClient.connect(socketPath);
+    try {
+      const launched = await client.launchRun({ ...onceUrl, input: null, target: dir });
+      const response = await fetch(`${web.url}/runs/${launched.runId}/events?from=beginning`, {
+        headers: auth(launched.capability as string),
+      });
+      expect(response.status).toBe(200);
+      const reader = new SseReader(response);
+      await reader.waitFor((frame) => frame.event === "caught-up");
+
+      daemon.stop();
+      daemonRunning = false;
+      const frames = await reader.waitFor((frame) => frame.event === "error", { cancel: true });
+      expect(frames.at(-1)).toMatchObject({
+        event: "error",
+        data: { message: "daemon connection closed" },
+      });
+    } finally {
+      client.close();
+      web.stop(true);
+      if (daemonRunning) daemon.stop();
+    }
+  });
+
   test("projects approvals and serves static assets with SPA fallback", async () => {
     const { daemon, socketPath } = startDaemon();
     await daemon.start();

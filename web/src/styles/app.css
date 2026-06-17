@@ -35,6 +35,8 @@
 
 * {
   box-sizing: border-box;
+  scrollbar-color: #cfd6df transparent;
+  scrollbar-width: thin;
 }
 
 html,

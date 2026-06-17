@@ -21,6 +21,8 @@ describe("DenseTable", () => {
 
     const first = screen.getByText("First").closest("tr");
     expect(first).not.toBeNull();
+    expect(first).toHaveClass("is-selected");
+    expect(first).not.toHaveAttribute("aria-selected");
 
     fireEvent.keyDown(first as HTMLTableRowElement, { key: "ArrowDown" });
     expect(onRowClick).toHaveBeenLastCalledWith({ id: "second", label: "Second" });

@@ -64,7 +64,6 @@ export function DenseTable<T>({
             };
             return (
               <tr
-                aria-selected={selected}
                 className={`${selected ? "is-selected" : ""} ${onRowClick ? "is-clickable" : ""}`}
                 key={key}
                 onClick={onRowClick ? activate : undefined}

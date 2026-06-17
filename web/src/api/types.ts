@@ -111,6 +111,14 @@ export interface RunListItem extends RunSummary {
 
 export interface RunsResponse {
   runs: RunListItem[];
+  page: {
+    limit: number;
+    defaultLimit: number;
+    maxLimit: number;
+    returned: number;
+    total: number;
+    truncated: boolean;
+  };
 }
 
 export interface ReportNodeView extends NodeView {

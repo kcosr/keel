@@ -89,6 +89,7 @@ export function RunsScreen({
   const selected = rows.find((run) => run.runId === selectedId) ?? null;
   const counts = summarizeRuns(runsState.data?.runs ?? []);
   const groups = groupRuns(rows);
+  const page = runsState.data?.page ?? null;
 
   return (
     <div className="content-split runs-screen">
@@ -129,12 +130,21 @@ export function RunsScreen({
           <div className="toolbar-right">
             <StatusPill tone="running">{counts.active} active</StatusPill>
             <StatusPill tone="waiting">{counts.blocked} blocked</StatusPill>
-            <StatusPill tone="neutral">{counts.total} total</StatusPill>
+            <StatusPill tone={page?.truncated ? "waiting" : "neutral"}>
+              {page?.truncated ? `${page.returned} shown` : `${counts.total} total`}
+            </StatusPill>
             <Button icon={RefreshCw} size="sm" onClick={runsState.reload}>
               Refresh
             </Button>
           </div>
         </div>
+        {page?.truncated ? (
+          <div className="notice-panel">
+            Showing the latest {page.returned} of {page.total} runs. Older runs are not enriched in
+            this browser list; use <code>keel list</code> or <code>GET /api/runs?limit=n</code> up
+            to {page.maxLimit} when you need a deeper history.
+          </div>
+        ) : null}
         {runsState.loading ? <LoadingState label="Loading runs" /> : null}
         {runsState.error ? <ErrorState error={runsState.error} onRetry={runsState.reload} /> : null}
         {!runsState.loading && !runsState.error ? (

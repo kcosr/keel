@@ -22,6 +22,8 @@ import type {
   WorkspacesResponse,
 } from "./types";
 
+export const WEB_RUNS_DEFAULT_LIMIT = 100;
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -69,8 +71,9 @@ export class KeelWebClient {
     return this.getJson("/health", { includeAuth: false });
   }
 
-  listRuns(): Promise<RunsResponse> {
-    return this.getJson("/api/runs");
+  listRuns(opts: { limit?: number } = {}): Promise<RunsResponse> {
+    const limit = opts.limit ?? WEB_RUNS_DEFAULT_LIMIT;
+    return this.getJson(`/api/runs?limit=${encodeURIComponent(String(limit))}`);
   }
 
   getRun(runId: string): Promise<RunDetailResponse> {

@@ -223,13 +223,18 @@ the current browser session only, not `localStorage`, and sends it as
 readable stream parser so credentials stay in headers.
 
 The UI opens on the runs inbox, grouped by decision, active, and recently
-finished runs from `GET /api/runs`. Run detail views use `GET /api/runs/:runId`
-for overview, timeline, transcript, report, source, workspaces, approvals, and
-events; live watch reconnects from the latest event cursor and keeps raw live
-SSE frames available alongside the coalesced transcript. The initial event tail
-comes from the JSON detail projection and is shown as reconstructed event
-frames. The approvals view lists current workflow-authored `ctx.human` gates and
-uses admin-authorized `decideApproval` calls for approve/deny decisions. The
+finished runs from `GET /api/runs?limit=100`. The runs projection applies that
+bound before per-run enrichment and returns `page` metadata with the requested
+limit, default limit, maximum limit, total known runs, returned rows, and a
+`truncated` flag. When the browser list is truncated, the UI says so and points
+operators to `keel list` or a bounded `GET /api/runs?limit=n` request up to the
+documented maximum. Run detail views use `GET /api/runs/:runId` for overview,
+timeline, transcript, report, source, workspaces, approvals, and events; live
+watch reconnects from the latest event cursor and keeps raw live SSE frames
+available alongside the coalesced transcript. The initial event tail comes from
+the JSON detail projection and is shown as reconstructed event frames. The
+approvals view lists current workflow-authored `ctx.human` gates and uses
+admin-authorized `decideApproval` calls for approve/deny decisions. The
 workspaces view lists retained run workspaces, loads detail/diff through daemon
 RPC, and requires admin authority plus browser confirmation for merge, discard,
 and workspace GC. Mutating browser controls expose the required authority and
@@ -261,8 +266,11 @@ Routes:
   frame after backfill, optional `closed` or `authorization.failed` control
   frames, and heartbeat comments. Cursor query parameters are `from=beginning`,
   `from=now`, `afterSeq=<n>`, `tail=<n>`, or `cursor=<json>`.
-- `GET /api/runs`, `/api/runs/:runId`, `/api/approvals`, `/api/workspaces`, and
-  `/api/system` return server-side projections layered on daemon RPC calls.
+- `GET /api/runs?limit=n`, `/api/runs/:runId`, `/api/approvals`,
+  `/api/workspaces`, and `/api/system` return server-side projections layered on
+  daemon RPC calls. The runs list defaults to `limit=100`, rejects limits above
+  `500`, applies the limit before expensive per-run enrichment, and includes
+  `page` metadata so clients can disclose truncation.
 - The workspace browser projection currently aggregates per-run workspace RPCs
   across known runs. Very large journals may prefer `keel workspace ...`
   commands until a first-class aggregate workspace projection is added.

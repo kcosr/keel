@@ -1,5 +1,5 @@
 import { describe, expect, test, vi } from "vitest";
-import { ApiError, KeelWebClient } from "./client";
+import { ApiError, KeelWebClient, WEB_RUNS_DEFAULT_LIMIT } from "./client";
 
 describe("KeelWebClient", () => {
   test("sends bearer credentials on protected projection requests", async () => {
@@ -16,9 +16,31 @@ describe("KeelWebClient", () => {
 
     await client.listRuns();
 
-    const [, init] = fetchImpl.mock.calls[0] ?? [];
+    const [input, init] = fetchImpl.mock.calls[0] ?? [];
+    expect(String(input)).toBe(`http://keel.test/api/runs?limit=${WEB_RUNS_DEFAULT_LIMIT}`);
     expect(new Headers(init?.headers).get("authorization")).toBe("Bearer kc_test_token");
     expect(new Headers(init?.headers).get("accept")).toBe("application/json");
+  });
+
+  test("can request an explicit bounded runs list", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () =>
+      jsonResponse({
+        runs: [],
+        page: {
+          limit: 25,
+          defaultLimit: WEB_RUNS_DEFAULT_LIMIT,
+          maxLimit: 500,
+          returned: 0,
+          total: 0,
+          truncated: false,
+        },
+      }),
+    );
+    const client = new KeelWebClient({ baseUrl: "http://keel.test", fetchImpl });
+
+    await client.listRuns({ limit: 25 });
+
+    expect(String(fetchImpl.mock.calls[0]?.[0])).toBe("http://keel.test/api/runs?limit=25");
   });
 
   test("omits bearer credentials for health", async () => {

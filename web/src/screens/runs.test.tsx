@@ -14,6 +14,7 @@ describe("RunsScreen", () => {
           run("run_wait", "waiting-human", 20, "waiting_human"),
           run("run_new", "running", 40),
         ],
+        page: page(4),
       }),
     } as KeelWebClient;
 
@@ -36,7 +37,43 @@ describe("RunsScreen", () => {
         .map((link) => link.textContent),
     ).toEqual(["run_new", "run_old"]);
   });
+
+  test("discloses when the browser run list is truncated", async () => {
+    const client = {
+      listRuns: async () => ({
+        runs: [run("run_new", "running", 40)],
+        page: page(150, { returned: 100, truncated: true }),
+      }),
+    } as KeelWebClient;
+
+    render(<RunsScreen client={client} globalSearch="" refreshKey={0} />);
+
+    expect(await screen.findByText(/Showing the latest 100 of 150 runs/i)).toBeInTheDocument();
+    expect(screen.getByText("100 shown")).toBeInTheDocument();
+    expect(screen.getByText("keel list")).toBeInTheDocument();
+  });
 });
+
+function page(
+  total: number,
+  overrides: Partial<{
+    limit: number;
+    defaultLimit: number;
+    maxLimit: number;
+    returned: number;
+    truncated: boolean;
+  }> = {},
+) {
+  return {
+    limit: 100,
+    defaultLimit: 100,
+    maxLimit: 500,
+    returned: total,
+    total,
+    truncated: false,
+    ...overrides,
+  };
+}
 
 function run(
   runId: string,

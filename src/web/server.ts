@@ -21,6 +21,8 @@ export const DEFAULT_WEB_HOST = "127.0.0.1";
 export const DEFAULT_WEB_PORT = 7879;
 export const DEFAULT_WEB_HEARTBEAT_MS = 15_000;
 export const DEFAULT_WEB_ASSETS_DIR = resolve(import.meta.dir, "..", "..", "web", "dist");
+export const DEFAULT_WEB_RUNS_LIMIT = 100;
+export const MAX_WEB_RUNS_LIMIT = 500;
 
 export interface KeelWebServerOptions {
   socketPath: string;
@@ -303,9 +305,11 @@ async function projectionRoute(
     const call = <T>(method: string, params: unknown = {}) =>
       gatewayResultOn<T>(conn, method, params, credential);
     if (kind === "runs") {
+      const limit = parseRunsLimit(new URL(request.url));
       const summaries = await call<Array<{ runId: string }>>("listRuns");
+      const page = runsPageMetadata(summaries.length, limit);
       const runs = await Promise.all(
-        summaries.map(async (summary) => {
+        summaries.slice(0, limit).map(async (summary) => {
           const [run, blockage, workspaces] = await Promise.all([
             call("getRun", { runId: summary.runId }),
             call("getBlockage", { runId: summary.runId }),
@@ -319,7 +323,7 @@ async function projectionRoute(
           };
         }),
       );
-      return projectionJson({ runs });
+      return projectionJson({ runs, page: { ...page, returned: runs.length } });
     }
     if (kind === "run") {
       if (!runId) throw new HttpError(400, { message: "run id is required" });
@@ -410,6 +414,43 @@ async function projectionRoute(
   } finally {
     conn.close();
   }
+}
+
+export function runsPageMetadata(
+  total: number,
+  limit: number,
+): {
+  limit: number;
+  defaultLimit: number;
+  maxLimit: number;
+  returned: number;
+  total: number;
+  truncated: boolean;
+} {
+  return {
+    limit,
+    defaultLimit: DEFAULT_WEB_RUNS_LIMIT,
+    maxLimit: MAX_WEB_RUNS_LIMIT,
+    returned: Math.min(total, limit),
+    total,
+    truncated: total > limit,
+  };
+}
+
+function parseRunsLimit(url: URL): number {
+  const raw = url.searchParams.get("limit");
+  if (raw === null) return DEFAULT_WEB_RUNS_LIMIT;
+  if (!/^[0-9]+$/.test(raw)) {
+    throw new HttpError(400, { message: "limit must be a positive integer" });
+  }
+  const limit = Number(raw);
+  if (!Number.isSafeInteger(limit) || limit < 1) {
+    throw new HttpError(400, { message: "limit must be a positive integer" });
+  }
+  if (limit > MAX_WEB_RUNS_LIMIT) {
+    throw new HttpError(400, { message: `limit must be <= ${MAX_WEB_RUNS_LIMIT}` });
+  }
+  return limit;
 }
 
 async function eventsRoute(

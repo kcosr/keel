@@ -47,6 +47,27 @@ describe("SettingsScreen", () => {
     expect(screen.getAllByText("Default per-attempt stall timeout").length).toBeGreaterThan(0);
     expect(screen.getByText("No diagnostics")).toBeInTheDocument();
   });
+
+  test("skips write validation for read-only settings", async () => {
+    const readOnlySetting = setting({ key: "daemon.configPath", readOnly: true });
+    const client = {
+      listSettings: vi.fn(async () => [readOnlySetting]),
+      getSetting: vi.fn(async () => readOnlySetting),
+      checkSetting: vi.fn(async () => ({
+        ok: false,
+        diagnostics: [{ level: "error" as const, path: "daemon.configPath", message: "read-only" }],
+      })),
+    } as unknown as KeelWebClient;
+
+    render(<SettingsScreen client={client} refreshKey={0} />);
+
+    await waitFor(() => expect(client.getSetting).toHaveBeenCalledWith("daemon.configPath"));
+    expect(client.checkSetting).not.toHaveBeenCalled();
+    expect(
+      screen.getByText(/Runtime write validation is skipped because writes are not available/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("failed")).not.toBeInTheDocument();
+  });
 });
 
 function profile(): AgentProfileView {
@@ -61,7 +82,7 @@ function profile(): AgentProfileView {
   };
 }
 
-function setting(): SettingView {
+function setting(overrides: Partial<SettingView> = {}): SettingView {
   return {
     key: "agent.defaultTimeoutMs",
     class: "workflow-visible",
@@ -72,5 +93,6 @@ function setting(): SettingView {
     generation: null,
     updatedAtMs: null,
     description: "Default per-attempt stall timeout",
+    ...overrides,
   };
 }

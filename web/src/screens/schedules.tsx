@@ -56,7 +56,10 @@ export function SchedulesScreen({
             selectedKey={selectedName}
             onRowClick={(schedule) => setSelectedName(schedule.name)}
             empty={
-              <EmptyState title="No schedules" detail="Schedule reads require admin authority." />
+              <EmptyState
+                title="No schedules"
+                detail="No saved schedules are currently registered with the daemon."
+              />
             }
             columns={scheduleColumns()}
           />

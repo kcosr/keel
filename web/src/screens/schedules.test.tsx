@@ -1,10 +1,30 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { describe, expect, test, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import type { KeelWebClient } from "../api/client";
 import type { ScheduleSummary, ScheduleView } from "../api/types";
 import { SchedulesScreen } from "./schedules";
 
+afterEach(() => {
+  cleanup();
+});
+
 describe("SchedulesScreen", () => {
+  test("renders a neutral empty state when no schedules are registered", async () => {
+    const client = {
+      listSchedules: vi.fn(async () => []),
+      getSchedule: vi.fn(),
+    } as unknown as KeelWebClient;
+
+    render(<SchedulesScreen client={client} refreshKey={0} />);
+
+    await screen.findByText("No schedules");
+    expect(
+      screen.getByText("No saved schedules are currently registered with the daemon."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/admin authority/i)).not.toBeInTheDocument();
+    expect(client.getSchedule).not.toHaveBeenCalled();
+  });
+
   test("lists schedules and loads read-only detail/source through getSchedule", async () => {
     const client = {
       listSchedules: vi.fn(async () => [scheduleSummary()]),

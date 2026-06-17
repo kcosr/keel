@@ -45,8 +45,11 @@ export function SettingsScreen({
   );
   const detail = detailState.data ?? selectedSummary;
   const checkState = useAsync(
-    () => (detail ? client.checkSetting(detail.key, detail.value) : Promise.resolve(null)),
-    [client, detail?.key, detail?.value, refreshKey],
+    () =>
+      detail && !detail.readOnly
+        ? client.checkSetting(detail.key, detail.value)
+        : Promise.resolve(null),
+    [client, detail?.key, detail?.value, detail?.readOnly, refreshKey],
   );
   const counts = useMemo(() => settingCounts(settings), [settings]);
 
@@ -197,18 +200,28 @@ function SettingCheckPanel({
     <section className="panel panel-wide">
       <div className="panel-heading">
         <h2>Write Check</h2>
-        {check ? (
+        {readOnly ? (
+          <StatusPill tone="neutral">read-only</StatusPill>
+        ) : check ? (
           <StatusPill tone={check.ok ? "success" : "failed"}>
             {check.ok ? "ok" : "failed"}
           </StatusPill>
         ) : null}
       </div>
       {readOnly ? (
-        <div className="notice-panel">Read-only settings intentionally fail write checks.</div>
-      ) : null}
-      {loading ? <LoadingState label="Checking setting" /> : null}
-      {error ? <ErrorState error={error} onRetry={onRetry} /> : null}
-      {!loading && !error && check ? <SettingsDiagnostics diagnostics={check.diagnostics} /> : null}
+        <div className="notice-panel">
+          This setting is read-only. Runtime write validation is skipped because writes are not
+          available for this setting.
+        </div>
+      ) : (
+        <>
+          {loading ? <LoadingState label="Checking setting" /> : null}
+          {error ? <ErrorState error={error} onRetry={onRetry} /> : null}
+          {!loading && !error && check ? (
+            <SettingsDiagnostics diagnostics={check.diagnostics} />
+          ) : null}
+        </>
+      )}
     </section>
   );
 }

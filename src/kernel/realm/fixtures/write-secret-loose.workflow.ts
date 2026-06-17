@@ -6,7 +6,7 @@ export default async function writeSecretLoose(ctx: Ctx, _input: null): Promise<
     key: "edit",
     prompt: "write the config",
     provider: "writer",
-    capabilities: { fs: "workspace-write" },
-    secrets: ["TOKEN"],
+    capabilities: { fs: "workspace-write", secrets: ["TOKEN"] },
+    environment: { secrets: ["TOKEN"] },
   });
 }

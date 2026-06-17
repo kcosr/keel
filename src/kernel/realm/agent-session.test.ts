@@ -417,7 +417,7 @@ describe("ctx.agentSession", () => {
       denyTools: [],
       workspaceId: "__default",
       capabilities: { fs: "read", shell: false, network: "none", secrets: [] },
-      secrets: [],
+      environment: { vars: {}, secrets: [] },
     });
   });
 

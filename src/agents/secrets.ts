@@ -26,13 +26,22 @@ export class SecretStore {
     m.set(name, value);
   }
 
+  putMany(runId: string, secrets: Record<string, string>): void {
+    for (const [name, value] of Object.entries(secrets)) this.put(runId, name, value);
+  }
+
   /** Resolve named secret refs for env injection at invocation. */
-  resolve(runId: string, names: string[]): SecretRef[] {
+  resolveOrThrow(runId: string, names: readonly string[]): SecretRef[] {
     const m = this.byRun.get(runId);
-    if (!m) return [];
-    return names
-      .map((name) => ({ name, value: m.get(name) }))
-      .filter((r): r is SecretRef => r.value !== undefined);
+    const refs: SecretRef[] = [];
+    for (const name of names) {
+      const value = m?.get(name);
+      if (value === undefined) {
+        throw new Error(`run ${runId} is missing secret value for ${name}`);
+      }
+      refs.push({ name, value });
+    }
+    return refs;
   }
 
   /** Wipe a run's secrets on terminal cleanup. */

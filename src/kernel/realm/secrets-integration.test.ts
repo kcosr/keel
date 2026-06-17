@@ -28,6 +28,22 @@ const echoProvider: AgentProvider = {
   },
 };
 
+const AGENT_ENV_MERGE_WORKFLOW = {
+  source: `
+    import { type Ctx } from "@kcosr/keel";
+    export default async function wf(ctx: Ctx): Promise<string> {
+      return await ctx.agent({
+        key: "env",
+        provider: "mock",
+        prompt: "env",
+        capabilities: { secrets: ["TOKEN"] },
+        environment: { vars: { MODE: "literal-mode" }, secrets: ["TOKEN"] },
+      });
+    }
+  `,
+  name: "agent-env-merge",
+};
+
 const SESSION_SECRET_WORKFLOW = {
   source: `
     import { type Ctx } from "@kcosr/keel";
@@ -35,9 +51,9 @@ const SESSION_SECRET_WORKFLOW = {
       const primary = ctx.agentSession({
         key: "primary",
         provider: "session",
-        capabilities: { fs: "workspace-write", shell: true },
+        capabilities: { fs: "workspace-write", shell: true, secrets: ["TOKEN"] },
         allowTools: ["mcp__local__edit"],
-        secrets: ["TOKEN"],
+        environment: { vars: { MODE: "session-mode" }, secrets: ["TOKEN"] },
       });
       return await primary.turn({ key: "draft", prompt: "draft" });
     }
@@ -53,7 +69,8 @@ const TOLERATED_FAILURE_WORKFLOW = {
         key: "maybe",
         prompt: "p",
         provider: "mock",
-        secrets: ["TOKEN"],
+        capabilities: { secrets: ["TOKEN"] },
+        environment: { secrets: ["TOKEN"] },
         onFailure: "null",
         maxRetries: 0,
       });
@@ -72,13 +89,28 @@ const ISOLATED_SESSION_SECRET_WORKFLOW = {
         key: "primary",
         provider: "session",
         workspace,
-        capabilities: { fs: "workspace-write" },
-        secrets: ["TOKEN"],
+        capabilities: { fs: "workspace-write", secrets: ["TOKEN"] },
+        environment: { secrets: ["TOKEN"] },
       });
       return await primary.turn({ key: "draft", prompt: "draft" });
     }
   `,
   name: "isolated-session-secret",
+};
+
+const UNGRANTED_SECRET_WORKFLOW = {
+  source: `
+    import { type Ctx } from "@kcosr/keel";
+    export default async function wf(ctx: Ctx): Promise<string> {
+      return await ctx.agent({
+        key: "leak",
+        provider: "mock",
+        prompt: "p",
+        environment: { secrets: ["TOKEN"] },
+      });
+    }
+  `,
+  name: "ungranted-secret",
 };
 
 function initGitRepo(repo: string): void {
@@ -95,14 +127,17 @@ describe("trusted-local secrets side-channel", () => {
   test("an injected secret can appear in output and journal rows without exact-value redaction", async () => {
     const store = JournalStore.memory();
     const secrets = new SecretStore();
-    secrets.put("r", "TOKEN", "sup3r-s3cret-value");
 
     const kernel = new RealmKernel(store, {
       idgen: () => "r",
       agents: new AgentProviderRegistry().register(echoProvider),
       secrets,
     });
-    const handle = await kernel.run<string>(url, null, { name: "leak", target: process.cwd() });
+    const handle = await kernel.run<string>(url, null, {
+      name: "leak",
+      target: process.cwd(),
+      runSecrets: { TOKEN: "sup3r-s3cret-value" },
+    });
 
     expect(handle.status).toBe("finished");
     expect(handle.output).toBe("the token is sup3r-s3cret-value");
@@ -115,7 +150,31 @@ describe("trusted-local secrets side-channel", () => {
     expect(store.listEvents("r").some((e) => e.type === "agent.redacted")).toBe(false);
   });
 
-  test("ctx.agentSession with secrets and write/shell/native tools receives secret env", async () => {
+  test("ctx.agent receives literal vars and secrets in one provider env", async () => {
+    const store = JournalStore.memory();
+    const secrets = new SecretStore();
+    const provider: AgentProvider = {
+      name: "mock",
+      async generate(inv: AgentInvocation): Promise<AgentResult> {
+        return { text: `agent saw ${inv.env?.MODE}:${inv.env?.TOKEN}`, transcript: [] };
+      },
+    };
+
+    const kernel = new RealmKernel(store, {
+      idgen: () => "r",
+      agents: new AgentProviderRegistry().register(provider),
+      secrets,
+    });
+    const handle = await kernel.run<string>(AGENT_ENV_MERGE_WORKFLOW, null, {
+      target: process.cwd(),
+      runSecrets: { TOKEN: "merged-secret-value" },
+    });
+
+    expect(handle.status).toBe("finished");
+    expect(handle.output).toBe("agent saw literal-mode:merged-secret-value");
+  });
+
+  test("ctx.agentSession with vars, secrets, and write/shell/native tools receives one env", async () => {
     const store = JournalStore.memory();
     const secrets = new SecretStore();
     secrets.put("r", "TOKEN", "session-secret-value");
@@ -127,7 +186,11 @@ describe("trusted-local secrets side-channel", () => {
         invocation = inv;
         const token = inv.resumeToken ?? "sess-1";
         hooks.onSessionToken?.(token);
-        return { text: `session saw ${inv.env?.TOKEN}`, transcript: [], sessionToken: token };
+        return {
+          text: `session saw ${inv.env?.MODE}:${inv.env?.TOKEN}`,
+          transcript: [],
+          sessionToken: token,
+        };
       },
     };
 
@@ -141,11 +204,63 @@ describe("trusted-local secrets side-channel", () => {
     });
 
     expect(handle.status).toBe("finished");
-    expect(handle.output).toBe("session saw session-secret-value");
+    expect(handle.output).toBe("session saw session-mode:session-secret-value");
+    expect(invocation?.env?.MODE).toBe("session-mode");
     expect(invocation?.env?.TOKEN).toBe("session-secret-value");
     expect(invocation?.capabilities?.fs).toBe("workspace-write");
     expect(invocation?.capabilities?.shell).toBe(true);
     expect(invocation?.allowTools).toContain("mcp__local__edit");
+  });
+
+  test("missing run secret values fail before provider invocation", async () => {
+    const store = JournalStore.memory();
+    const secrets = new SecretStore();
+    let called = false;
+    const provider: AgentProvider = {
+      name: "mock",
+      async generate(): Promise<AgentResult> {
+        called = true;
+        return { text: "unexpected", transcript: [] };
+      },
+    };
+    const kernel = new RealmKernel(store, {
+      idgen: () => "r",
+      agents: new AgentProviderRegistry().register(provider),
+      secrets,
+    });
+
+    await expect(kernel.run<string>(url, null, { target: process.cwd() })).rejects.toThrow(
+      /missing secret value for TOKEN/,
+    );
+    expect(called).toBe(false);
+    expect(store.getRun("r")?.status).toBe("failed");
+  });
+
+  test("ungranted environment secrets fail before provider invocation", async () => {
+    const store = JournalStore.memory();
+    const secrets = new SecretStore();
+    let called = false;
+    const provider: AgentProvider = {
+      name: "mock",
+      async generate(): Promise<AgentResult> {
+        called = true;
+        return { text: "unexpected", transcript: [] };
+      },
+    };
+    const kernel = new RealmKernel(store, {
+      idgen: () => "r",
+      agents: new AgentProviderRegistry().register(provider),
+      secrets,
+    });
+
+    await expect(
+      kernel.run<string>(UNGRANTED_SECRET_WORKFLOW, null, {
+        target: process.cwd(),
+        runSecrets: { TOKEN: "value" },
+      }),
+    ).rejects.toThrow(/capabilities\.secrets/);
+    expect(called).toBe(false);
+    expect(store.getRun("r")?.status).toBe("failed");
   });
 
   test("worktree agent sessions receive secrets and retain secret-bearing diffs", async () => {
@@ -193,7 +308,7 @@ describe("trusted-local secrets side-channel", () => {
       const diffEvent = store.listEvents("r").find((event) => event.type === "agent.diff");
       expect(diffEvent?.payloadJson).toContain("isolated-secret-value");
       expect(diffEvent?.payloadJson).not.toContain("«redacted»");
-      expect(secrets.resolve("r", ["TOKEN"])).toEqual([]);
+      expect(() => secrets.resolveOrThrow("r", ["TOKEN"])).toThrow(/missing secret value/);
     } finally {
       store.close();
       rmSync(repo, { recursive: true, force: true });

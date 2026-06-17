@@ -126,6 +126,7 @@ export class KeelOperationGateway {
           target,
           name: (p.name as string | null | undefined) ?? null,
           provenance: p.provenance as WorkflowProvenance | undefined,
+          runSecrets: p.runSecrets as Record<string, string> | undefined,
         });
         this.opts.claimLaunchedRun(res.runId);
         const cap = issueRunCapability(this.opts.store, res.runId, this.opts.clock());
@@ -209,6 +210,7 @@ export class KeelOperationGateway {
           input: p.input,
           target,
           name: (p.name as string | null | undefined) ?? null,
+          runSecrets: p.runSecrets as Record<string, string> | undefined,
         });
         this.opts.claimLaunchedRun(res.runId);
         const cap = issueRunCapability(this.opts.store, res.runId, this.opts.clock());
@@ -282,6 +284,7 @@ export class KeelOperationGateway {
             input?: unknown;
             name?: string | null;
             provenance?: WorkflowProvenance;
+            runSecrets?: Record<string, string>;
           },
         );
       },
@@ -340,7 +343,9 @@ export class KeelOperationGateway {
       handle: (_session, p, credential) => {
         this.authorizeRunCredential(credential, p.runId as string, "run:retry");
         this.opts.claimOrReject(p.runId as string);
-        return this.opts.api.retryRun(p.runId as string);
+        return this.opts.api.retryRun(p.runId as string, {
+          runSecrets: p.runSecrets as Record<string, string> | undefined,
+        });
       },
     },
     rewindRun: {
@@ -348,7 +353,9 @@ export class KeelOperationGateway {
       handle: (_session, p, credential) => {
         this.authorizeRunCredential(credential, p.runId as string, "run:rewind");
         this.opts.claimOrReject(p.runId as string);
-        return this.opts.api.rewindRun(p.runId as string, p.toStableKey as string);
+        return this.opts.api.rewindRun(p.runId as string, p.toStableKey as string, {
+          runSecrets: p.runSecrets as Record<string, string> | undefined,
+        });
       },
     },
     forkRun: {
@@ -615,6 +622,9 @@ export class KeelOperationGateway {
       const params = paramsObject(request.params);
       const credential =
         request.credential !== undefined ? request.credential : session.getCredential();
+      if (request.surface === "web" && hasRunSecretsParam(params)) {
+        throw new Error("runSecrets are not accepted from the web surface");
+      }
       if (request.surface === "web" && method.webRequiresAdmin) {
         this.authorizeAdmin(credential);
       }
@@ -856,6 +866,16 @@ export class KeelOperationGateway {
       });
     return { status: "running" };
   }
+}
+
+function hasRunSecretsParam(params: Record<string, unknown>): boolean {
+  if (Object.prototype.hasOwnProperty.call(params, "runSecrets")) return true;
+  const opts = params.opts;
+  return (
+    opts !== null &&
+    typeof opts === "object" &&
+    Object.prototype.hasOwnProperty.call(opts, "runSecrets")
+  );
 }
 
 function paramsObject(params: unknown): Record<string, unknown> {

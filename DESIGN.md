@@ -77,9 +77,8 @@ Postgres-dialect discipline).
   File launches capture the static local `.ts`/`.tsx` import graph client-side,
   and resume/retry/rewind/fork use the stored bundle. Rerun with a source
   override snapshots new source intentionally.
-- **Secret injection remains programmatic-only on the bundled daemon**, while
-  agent profiles now support both constructor-supplied programmatic profiles and
-  an admin-managed persistent catalog. Durable runs freeze the complete effective
+- Agent profiles support both constructor-supplied programmatic profiles and an
+  admin-managed persistent catalog. Durable runs freeze the complete effective
   profile catalog in `run_profile_snapshot_sets`/`run_profile_snapshots` so
   replay/resume never reads mutable catalog state. Profile catalog RPC/CLI
   operations require daemon admin authorization.
@@ -90,11 +89,11 @@ Postgres-dialect discipline).
   is `workflow spec > named profile > run settings snapshot`; a missing or
   partial run settings snapshot is corrupt durable state and fails closed rather
   than falling back to live code defaults.
-- **One surface is programmatic-only on the bundled daemon:** secret injection
-  (`SecretStore`) requires constructing the
-  daemon/kernel in code; the CLI wires capability credentials
-  (`KEEL_ADMIN_TOKEN`, `KEEL_RUN_CAP`, `KEEL_CAP_FILE`) and the retained
-  workspace store (`KEEL_WORKSPACE_STORE`).
+- The bundled daemon constructs the trusted-local in-memory `SecretStore`.
+  Clients can supply run secret values on launch/retry/rewind/rerun; workflows
+  request those names through `environment.secrets`. The CLI also wires
+  capability credentials (`KEEL_ADMIN_TOKEN`, `KEEL_RUN_CAP`, `KEEL_CAP_FILE`)
+  and the retained workspace store (`KEEL_WORKSPACE_STORE`).
 
 ---
 
@@ -262,7 +261,7 @@ step<T, I extends Json>(key: string, schema: Schema<T>, inputs: I,
   contributes its ref hash — never raw blobs.
 - For `ctx.agent`, the inputs are the spec itself: the **resolved prompt
   string**, schema structural hash, capabilities, provider, model, workspace id,
-  secret names, and selected provider config when present. Unselected provider
+  normalized environment, and selected provider config when present. Unselected provider
   config is validated but omitted from identity and invocation; no
   `providerConfig` key is added when no selected config exists. Whatever
   upstream data matters is already interpolated into the prompt — so the hash
@@ -661,6 +660,10 @@ interface AgentSpec<T> {
   denyTools?: string[];             // provider-native removals from the final allowlist
   workspace?: WorkspaceHandle;      // explicit cwd/lifecycle handle; defaults scoped/direct
   capabilities?: Capabilities;      // §11.1; used when toolPolicy is omitted
+  environment?: {
+    vars?: Record<string, string>;  // literal non-secret provider env
+    secrets?: string[];             // secret names resolved from run side channel
+  };
   // note: no memo mode — agents are always memoized (L18); re-think is
   // expressed via retry(stableKey), rerun with a source override, or iteration loops
 }
@@ -910,7 +913,7 @@ __session.<agentKey>.<turnKey>
 Participant and turn key components are limited to `[A-Za-z0-9_-]+`; ordinary
 author keys may not use the `__session.` prefix. The worker resolves profiles,
 selected provider config, tool policy, provider-native tool lists, capabilities,
-resolved workspace id, and secret names before hashing participant identity. The
+resolved workspace id, and normalized environment before hashing participant identity. The
 realm host stores that
 hash in `agent_sessions` and rejects drift. Turn identity reuses the journal
 row's `(version, input_hash)` for the derived key and is append-only within a
@@ -974,7 +977,7 @@ a standalone threat-model document is not yet written.
 > worktree workspaces are explicit handles and fail closed without a run target
 > inside a git repository; the diff gate journals review metadata; secrets are resolved
 > from the side channel and injected as provider env without requiring workspace
-> isolation or redacting agent-visible output; and **capabilities + secrets fold
+> isolation or redacting agent-visible output; and **capabilities + environment fold
 > into both the agent version AND the input hash, identically on the realm and
 > in-process paths**. The one remaining hardening is the **OS-sandbox backstop**
 > (still unimplemented).
@@ -1008,12 +1011,15 @@ in one place.
 
 The journal is forever, so raw secret values do not belong in workflow source,
 step inputs, or agent configuration. Secrets travel via a side channel keyed by
-run id, are resolved by name, injected as provider environment variables at
-agent invocation, and wiped on terminal cleanup. Agent outputs, streamed events,
-tool events, diffs, and tolerated-failure errors are trusted-local workflow data:
-if an agent emits a secret value, Keel records it as-is. The side channel keeps
-secret values out of workflow source and agent options; it is not an output
-redaction system.
+run id, are resolved by name from `environment.secrets`, injected as provider
+environment variables at agent invocation, and wiped on terminal cleanup. A
+requested secret name must also be granted in `capabilities.secrets`; missing
+values fail the agent step instead of silently injecting an empty environment.
+Literal non-secret `environment.vars` participate in replay identity by value.
+Agent outputs, streamed events, tool events, diffs, and tolerated-failure errors
+are trusted-local workflow data: if an agent emits a secret value, Keel records
+it as-is. The side channel keeps secret values out of workflow source and agent
+options; it is not an output redaction system.
 
 ### 11.3 Run workspaces & the diff gate (plain git — jj dropped)
 

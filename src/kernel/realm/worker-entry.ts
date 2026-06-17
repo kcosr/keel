@@ -21,6 +21,11 @@ import {
   validateProviderToolPolicy,
 } from "../../agents/capabilities.ts";
 import { DEFAULT_AGENT_PROVIDER } from "../../agents/defaults.ts";
+import {
+  type AgentEnvironmentSpec,
+  assertEnvironmentSecretsGranted,
+  normalizeAgentEnvironment,
+} from "../../agents/environment.ts";
 import { type AgentProfiles, resolveProfile } from "../../agents/profiles.ts";
 import { resolveSelectedProviderConfig } from "../../agents/provider-config.ts";
 import type { ProviderConfigMap } from "../../agents/types.ts";
@@ -550,7 +555,7 @@ const ctx = Object.freeze({
     denyTools?: string[];
     workspace?: WorkspaceHandle;
     capabilities?: Record<string, unknown>;
-    secrets?: string[];
+    environment?: AgentEnvironmentSpec;
     onFailure?: "throw" | "null";
     maxRetries?: number;
     lenient?: boolean;
@@ -587,6 +592,10 @@ const ctx = Object.freeze({
     );
     validateProviderToolPolicy(provider, tools, `ctx.agent("${spec.key}")`);
     const caps = tools.capabilities;
+    const environment = normalizeAgentEnvironment(spec.environment, {
+      path: `ctx.agent("${spec.key}").environment`,
+    });
+    assertEnvironmentSecretsGranted(environment, caps, `ctx.agent("${spec.key}")`);
     rejectRemovedWorkspaceFields(rawSpec, `ctx.agent("${spec.key}")`);
     const workspaceId = resolveWorkspaceId(spec.workspace);
     const workspaceIdentityHash = resolveWorkspaceIdentityHash(spec.workspace);
@@ -602,7 +611,7 @@ const ctx = Object.freeze({
       workspaceId,
       ...(workspaceIdentityHash !== null ? { workspaceIdentityHash } : {}),
       capabilities: caps,
-      secrets: spec.secrets ?? [],
+      environment,
     };
     const version =
       spec.version ??
@@ -633,7 +642,7 @@ const ctx = Object.freeze({
       denyTools: tools.denyTools,
       workspaceId,
       capabilities: caps,
-      secrets: spec.secrets ?? [],
+      environment,
       version,
       inputs,
       jsonSchema: schema?.structural?.() ?? null,
@@ -666,7 +675,7 @@ const ctx = Object.freeze({
     denyTools?: string[];
     workspace?: WorkspaceHandle;
     capabilities?: Record<string, unknown>;
-    secrets?: string[];
+    environment?: AgentEnvironmentSpec;
   }): {
     turn<T>(spec: {
       key: string;
@@ -709,6 +718,10 @@ const ctx = Object.freeze({
     );
     validateProviderToolPolicy(provider, tools, `ctx.agentSession("${sessionSpec.key}")`);
     const caps = tools.capabilities;
+    const environment = normalizeAgentEnvironment(sessionSpec.environment, {
+      path: `ctx.agentSession("${sessionSpec.key}").environment`,
+    });
+    assertEnvironmentSecretsGranted(environment, caps, `ctx.agentSession("${sessionSpec.key}")`);
     rejectRemovedWorkspaceFields(rawSessionSpec, `ctx.agentSession("${sessionSpec.key}")`);
     const workspaceId = resolveWorkspaceId(sessionSpec.workspace);
     const workspaceIdentityHash = resolveWorkspaceIdentityHash(sessionSpec.workspace);
@@ -724,7 +737,7 @@ const ctx = Object.freeze({
       workspaceId,
       ...(workspaceIdentityHash !== null ? { workspaceIdentityHash } : {}),
       capabilities: caps,
-      secrets: sessionSpec.secrets ?? [],
+      environment,
     };
     const identityHash = hashJson(identity as unknown as Json);
     const identityJson = JSON.stringify(identity);
@@ -768,7 +781,7 @@ const ctx = Object.freeze({
               workspaceId,
               ...(workspaceIdentityHash !== null ? { workspaceIdentityHash } : {}),
               capabilities: caps,
-              secrets: sessionSpec.secrets ?? [],
+              environment,
               participantIdentityHash: identityHash,
               controls,
             },
@@ -789,7 +802,7 @@ const ctx = Object.freeze({
           workspaceId,
           ...(workspaceIdentityHash !== null ? { workspaceIdentityHash } : {}),
           capabilities: caps,
-          secrets: sessionSpec.secrets ?? [],
+          environment,
           participantIdentityHash: identityHash,
           controls,
         };
@@ -816,7 +829,7 @@ const ctx = Object.freeze({
           denyTools: tools.denyTools,
           workspaceId,
           capabilities: caps,
-          secrets: sessionSpec.secrets ?? [],
+          environment,
           version,
           inputs,
           jsonSchema: schema?.structural?.() ?? null,

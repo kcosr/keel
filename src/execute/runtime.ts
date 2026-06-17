@@ -6,6 +6,7 @@ import type {
   EventEnvelope,
   LaunchRequest,
   RunOutcome,
+  RunSecrets,
   RunStart,
   RunWorkspaceDiff,
   RunWorkspaceView,
@@ -20,8 +21,8 @@ export interface ExecuteKeel {
   launch(req: ExecuteLaunchRequest): Promise<ExecuteRunHandle>;
   resume(runId: string): Promise<RunStart>;
   interrupt(runId: string, reason?: string): Promise<{ runId: string; status: "interrupted" }>;
-  retry(runId: string): Promise<RunStart>;
-  rewind(runId: string, toStableKey: string): Promise<RunStart>;
+  retry(runId: string, opts?: { runSecrets?: RunSecrets }): Promise<RunStart>;
+  rewind(runId: string, toStableKey: string, opts?: { runSecrets?: RunSecrets }): Promise<RunStart>;
   fork(
     runId: string,
     opts?: { atStableKey?: string; newRunId?: string },
@@ -62,6 +63,7 @@ export type ExecuteLaunchRequest =
       workflow: string | { kind: "source"; name?: string | null; source: string };
       input?: unknown;
       name?: string | null;
+      runSecrets?: RunSecrets;
     };
 
 export interface ExecuteRunHandle {
@@ -164,13 +166,13 @@ export function createExecuteKeel(opts: ExecuteRuntimeOptions): ExecuteKeel {
       await authenticateKnownRun(runId);
       return opts.client.interruptRun(runId, reason);
     },
-    async retry(runId) {
+    async retry(runId, retryOpts = {}) {
       await authenticateKnownRun(runId);
-      return opts.client.retryRun(runId);
+      return opts.client.retryRun(runId, retryOpts);
     },
-    async rewind(runId, toStableKey) {
+    async rewind(runId, toStableKey, rewindOpts = {}) {
       await authenticateKnownRun(runId);
-      return opts.client.rewindRun(runId, toStableKey);
+      return opts.client.rewindRun(runId, toStableKey, rewindOpts);
     },
     async fork(runId, forkOpts = {}) {
       await authenticateKnownRun(runId);
@@ -286,6 +288,7 @@ function normalizeLaunch(req: ExecuteLaunchRequest, cwd: string): LaunchRequest 
       target: cwd,
       name: req.name ?? captured.name ?? workflowName(path),
       provenance: captured.provenance,
+      ...(req.runSecrets !== undefined ? { runSecrets: req.runSecrets } : {}),
     };
   }
   return {
@@ -294,6 +297,7 @@ function normalizeLaunch(req: ExecuteLaunchRequest, cwd: string): LaunchRequest 
     target: cwd,
     name: req.name ?? req.workflow.name ?? null,
     provenance: { kind: "stdin" },
+    ...(req.runSecrets !== undefined ? { runSecrets: req.runSecrets } : {}),
   };
 }
 

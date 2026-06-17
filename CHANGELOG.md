@@ -3,6 +3,15 @@
 ## [Unreleased]
 
 ### Added
+- Agent specs and persistent profiles now support `environment: { vars, secrets }`.
+  Literal `vars` are passed as provider environment variables and hashed by
+  value; `environment.secrets` requests named run-secret values supplied through
+  the side channel. Secret requests must be granted by `capabilities.secrets`.
+- `runSecrets` are accepted on daemon launch/restart APIs and exposed in the CLI
+  through repeatable `--secret NAME=VALUE` and `--secret-env NAME[=ENV]` flags
+  on `launch`, `run`, `workflow run`, `retry`, and `rewind`.
+- Programmatic embedders can import `SecretStore` from `@kcosr/keel/secrets`;
+  the workflow authoring SDK exports the `AgentEnvironmentSpec` type.
 - Codex `providerConfig.codex.serviceTier` now lets workflows and agent
   profiles request `"fast"` priority service or force `"normal"` standard
   routing as replay-visible agent identity.
@@ -57,6 +66,9 @@
 - Managed workspace `copy` and `clone` modes. `copy` snapshots dirty local directories without `.git` metadata and supports baseline diff/merge back to unchanged sources; `clone` creates explicit local or remote git clones, supports local non-bare clone merge, and reports remote/local-bare clone merge as unsupported. Workspace RPC/CLI views now expose source kind, source URI/ref/branch/base commit, copy baseline path, merge/diff support, and mode-aware diff metadata.
 - Branch-backed worktree workspaces via `ctx.workspace({ mode: "worktree", branch: true })`. Keel generates and records a valid `keel/...` branch name, attaches the managed worktree to it, reattaches removed workspaces to the persisted branch, and leaves generated branch refs for manual cleanup while retention/discard/GC remove filesystem state only.
 - Journal schema v19 adds worktree checkout kind and branch ownership metadata. Workflow SDK ABI bumped to 7 and `WORKTREE_WORKSPACE_RULES_VERSION` to 2 for the `branch` workspace option and branch-policy workspace identity input; drain non-terminal older-ABI runs before upgrade or accept the existing unsupported-ABI resume failure.
+- Workflow SDK ABI bumped to 8 for the workflow-facing agent environment shape.
+  Re-register workflow definitions after upgrade and drain suspended or
+  non-terminal older-ABI runs first unless Keel gains a real multi-ABI bridge.
 - Workflow SDK ABI bumped to 6 and journal schema to v17 for copy/clone workspace modes and canonical workspace identity hashes. Non-terminal runs captured with older SDK ABIs must be drained before upgrade or will fail resume with the existing unsupported-ABI error.
 - Workspace lifecycle metadata now distinguishes `mode`, `ownerKind`, source path, provider cwd, ownership, retention, and active worktree holders in RPC/CLI/execute views.
 - `keel execute` control scripts can list/get/diff/merge/discard/GC run workspaces through the daemon client.
@@ -111,6 +123,12 @@
   `run.interrupted` audit events and best-effort active worker/provider abort.
 
 ### Changed
+- Workflow-facing top-level agent `secrets` was replaced by
+  `environment.secrets`; the bundled daemon now constructs the in-memory
+  `SecretStore` by default, and missing run secret values fail the agent step
+  instead of being silently omitted.
+- The web transport rejects `runSecrets` on launch/restart requests until a
+  browser-specific local secret authorization model exists.
 - Saved workflow launches and saved-ref schedules no longer accept the
   undocumented daemon RPC `clientDefaultTarget` wrapper field. Use explicit
   `target`/`--target`, or configure a saved workflow default target.

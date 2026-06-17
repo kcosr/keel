@@ -389,8 +389,8 @@ describe("secrets side-channel env injection", () => {
   test("store resolves and wipes; secrets are never returned after wipe", () => {
     const store = new SecretStore();
     store.put("r", "DB_PASS", "s3cr3t");
-    expect(store.resolve("r", ["DB_PASS"])).toEqual([{ name: "DB_PASS", value: "s3cr3t" }]);
+    expect(store.resolveOrThrow("r", ["DB_PASS"])).toEqual([{ name: "DB_PASS", value: "s3cr3t" }]);
     store.wipe("r");
-    expect(store.resolve("r", ["DB_PASS"])).toEqual([]);
+    expect(() => store.resolveOrThrow("r", ["DB_PASS"])).toThrow(/missing secret value/);
   });
 });

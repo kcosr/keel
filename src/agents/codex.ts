@@ -116,7 +116,7 @@ export class CodexProvider implements AgentProvider {
     const codexCaps = resolvedToolPolicyToCodexParams(resolved, cwd);
     if (transportConfig.type !== "stdio" && Object.keys(invocation.env ?? {}).length > 0) {
       throw new Error(
-        `codex ${transportDescriptor(transportConfig)} transport cannot receive secret env values; first-cut Codex env injection is supported only for stdio`,
+        `codex ${transportDescriptor(transportConfig)} transport cannot receive environment variables; Codex env injection is supported only for stdio`,
       );
     }
 

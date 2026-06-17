@@ -1,7 +1,8 @@
-// Agent step identity includes capabilities, secrets, and resolved workspace id.
+// Agent step identity includes capabilities, environment, and resolved workspace id.
 
 import { describe, expect, test } from "bun:test";
 import { type ToolPolicy, resolveToolPolicy } from "../agents/capabilities.ts";
+import { type AgentEnvironmentSpec, normalizeAgentEnvironment } from "../agents/environment.ts";
 import type { ProviderConfigValue } from "../agents/types.ts";
 import { DEFAULT_WORKSPACE_ID } from "../workspace/identity.ts";
 import { computeVersion } from "./version.ts";
@@ -17,7 +18,7 @@ function agentVersion(spec: {
   allowTools?: string[];
   denyTools?: string[];
   workspaceId?: string;
-  secrets?: string[];
+  environment?: AgentEnvironmentSpec;
 }): string {
   const tools = resolveToolPolicy({
     ...(spec.capabilities ? { capabilities: spec.capabilities } : {}),
@@ -26,6 +27,7 @@ function agentVersion(spec: {
     ...(spec.denyTools ? { denyTools: spec.denyTools } : {}),
   });
   const caps = tools.capabilities;
+  const environment = normalizeAgentEnvironment(spec.environment);
   return computeVersion({
     spec: {
       prompt: spec.prompt,
@@ -38,12 +40,12 @@ function agentVersion(spec: {
       denyTools: tools.denyTools,
       workspaceId: spec.workspaceId ?? DEFAULT_WORKSPACE_ID,
       capabilities: caps,
-      secrets: spec.secrets ?? [],
+      environment,
     },
   });
 }
 
-describe("agent identity includes capabilities, secrets, and workspace", () => {
+describe("agent identity includes capabilities, environment, and workspace", () => {
   test("omitted tool policy is identical to read-only", () => {
     const base = { prompt: "p", provider: "pi" };
     expect(agentVersion(base)).toBe(agentVersion({ ...base, toolPolicy: "read-only" }));
@@ -67,10 +69,17 @@ describe("agent identity includes capabilities, secrets, and workspace", () => {
     expect(agentVersion(base)).not.toBe(agentVersion({ ...base, workspaceId: "implementation" }));
   });
 
-  test("changing the secrets set changes the version", () => {
+  test("changing the secret environment set changes the version", () => {
     const base = { prompt: "p", provider: "pi" };
-    const a = agentVersion({ ...base, secrets: ["A"] });
-    const b = agentVersion({ ...base, secrets: ["A", "B"] });
+    const a = agentVersion({ ...base, environment: { secrets: ["A"] } });
+    const b = agentVersion({ ...base, environment: { secrets: ["A", "B"] } });
+    expect(a).not.toBe(b);
+  });
+
+  test("changing literal environment vars changes the version", () => {
+    const base = { prompt: "p", provider: "pi" };
+    const a = agentVersion({ ...base, environment: { vars: { MODE: "a" } } });
+    const b = agentVersion({ ...base, environment: { vars: { MODE: "b" } } });
     expect(a).not.toBe(b);
   });
 

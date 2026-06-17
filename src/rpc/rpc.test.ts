@@ -8,6 +8,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MockProvider } from "../agents/mock.ts";
+import { SecretStore } from "../agents/secrets.ts";
 import {
   type AgentHooks,
   type AgentInvocation,
@@ -70,6 +71,45 @@ function keel(store: JournalStore, mock?: MockProvider): InProcessKeel {
     clock: () => 1,
     rng: () => 0.5,
     ...(mock ? { agents: new AgentProviderRegistry().register(mock) } : {}),
+  });
+  return new TestInProcessKeel(kernel, store);
+}
+
+const SECRET_ECHO_WORKFLOW = {
+  source: `
+    import { type Ctx, passthrough } from "@kcosr/keel";
+    export default async function wf(ctx: Ctx, input: { label?: string } | null): Promise<string> {
+      const label = input?.label ?? "default";
+      await ctx.step("prefix", passthrough<string>(), label, (value) => value);
+      return await ctx.agent({
+        key: "secret",
+        provider: "secret-echo",
+        prompt: "echo " + label,
+        capabilities: { secrets: ["TOKEN"] },
+        environment: { secrets: ["TOKEN"] },
+      });
+    }
+  `,
+  name: "secret-echo",
+};
+
+function secretEchoApi(store: JournalStore): InProcessKeel {
+  let id = 0;
+  const provider: AgentProvider = {
+    name: "secret-echo",
+    async generate(invocation: AgentInvocation): Promise<AgentResult> {
+      return {
+        text: `${invocation.prompt}:${invocation.env?.TOKEN ?? "<missing>"}`,
+        transcript: [],
+      };
+    },
+  };
+  const kernel = new RealmKernel(store, {
+    idgen: () => `run_secret_${id++}`,
+    clock: () => 1,
+    rng: () => 0.5,
+    agents: new AgentProviderRegistry().register(provider),
+    secrets: new SecretStore(),
   });
   return new TestInProcessKeel(kernel, store);
 }
@@ -2269,6 +2309,86 @@ describe("lifecycle start methods", () => {
     },
     WORKFLOW_TEST_TIMEOUT_MS,
   );
+
+  test("saved workflow launch and lifecycle restarts accept fresh runSecrets", async () => {
+    {
+      const store = JournalStore.memory();
+      const api = secretEchoApi(store);
+      api.saveWorkflow({
+        name: "secret-echo",
+        source: SECRET_ECHO_WORKFLOW.source,
+        defaultTarget: process.cwd(),
+      });
+      const launched = await api.launchSavedWorkflow({
+        ref: { name: "secret-echo" },
+        input: { label: "saved" },
+        runSecrets: { TOKEN: "saved-secret" },
+      });
+      expect(await api.waitForRun(launched.runId)).toMatchObject({
+        status: "finished",
+        output: "echo saved:saved-secret",
+      });
+    }
+
+    {
+      const store = JournalStore.memory();
+      const api = secretEchoApi(store);
+      const launched = await api.launchRun({
+        source: SECRET_ECHO_WORKFLOW.source,
+        input: { label: "retry" },
+        target: process.cwd(),
+      });
+      expect((await api.waitForRun(launched.runId)).status).toBe("failed");
+      await api.retryRun(launched.runId, { runSecrets: { TOKEN: "retry-secret" } });
+      expect(await api.waitForRun(launched.runId)).toMatchObject({
+        status: "finished",
+        output: "echo retry:retry-secret",
+      });
+    }
+
+    {
+      const store = JournalStore.memory();
+      const api = secretEchoApi(store);
+      const launched = await api.launchRun({
+        source: SECRET_ECHO_WORKFLOW.source,
+        input: { label: "rewind" },
+        target: process.cwd(),
+        runSecrets: { TOKEN: "old-secret" },
+      });
+      expect(await api.waitForRun(launched.runId)).toMatchObject({
+        status: "finished",
+        output: "echo rewind:old-secret",
+      });
+      await api.rewindRun(launched.runId, "prefix", { runSecrets: { TOKEN: "rewind-secret" } });
+      expect(await api.waitForRun(launched.runId)).toMatchObject({
+        status: "finished",
+        output: "echo rewind:rewind-secret",
+      });
+    }
+
+    {
+      const store = JournalStore.memory();
+      const api = secretEchoApi(store);
+      const launched = await api.launchRun({
+        source: SECRET_ECHO_WORKFLOW.source,
+        input: { label: "rerun-old" },
+        target: process.cwd(),
+        runSecrets: { TOKEN: "old-secret" },
+      });
+      expect(await api.waitForRun(launched.runId)).toMatchObject({
+        status: "finished",
+        output: "echo rerun-old:old-secret",
+      });
+      await api.rerunRun(launched.runId, {
+        input: { label: "rerun-new" },
+        runSecrets: { TOKEN: "rerun-secret" },
+      });
+      expect(await api.waitForRun(launched.runId)).toMatchObject({
+        status: "finished",
+        output: "echo rerun-new:rerun-secret",
+      });
+    }
+  });
 
   test(
     "retryRun precondition errors reject without fake failed outcome",

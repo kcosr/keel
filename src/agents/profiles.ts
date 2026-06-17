@@ -8,6 +8,7 @@ import {
   validateProviderToolPolicy,
 } from "./capabilities.ts";
 import { normalizeCodexProviderConfig } from "./codex.ts";
+import { type AgentEnvironmentSpec, normalizeAgentEnvironment } from "./environment.ts";
 import { normalizeProviderConfigMap, normalizeProviderConfigValue } from "./provider-config.ts";
 import type { AgentProviderRegistry, ProviderConfigMap } from "./types.ts";
 
@@ -34,6 +35,7 @@ export interface AgentProfile {
   timeoutMs?: number;
   stallRetries?: number;
   providerConfig?: ProviderConfigMap;
+  environment?: AgentEnvironmentSpec;
 }
 
 export type AgentProfiles = Record<string, AgentProfile>;
@@ -87,6 +89,7 @@ const ALLOWED_PROFILE_KEYS = [
   "timeoutMs",
   "stallRetries",
   "providerConfig",
+  "environment",
 ] as const;
 const ALLOWED_PROFILE_KEY_SET = new Set<string>(ALLOWED_PROFILE_KEYS);
 
@@ -118,6 +121,7 @@ const INHERITED = [
   "onFailure",
   "timeoutMs",
   "stallRetries",
+  "environment",
 ] as const;
 
 const REMOVED_WORKSPACE_FIELDS = ["workspaceIsolation", "workspaceRetention", "target"] as const;
@@ -245,6 +249,9 @@ export function normalizeAgentProfileConfig(
         break;
       case "providerConfig":
         out.providerConfig = normalizeProviderConfigMap(path, value as ProviderConfigMap);
+        break;
+      case "environment":
+        out.environment = normalizeAgentEnvironment(value, { path: `${path}.environment` });
         break;
     }
   }

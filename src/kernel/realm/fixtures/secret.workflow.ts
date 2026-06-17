@@ -3,5 +3,11 @@
 import type { Ctx } from "@kcosr/keel";
 
 export default async function leak(ctx: Ctx, _input: null): Promise<string> {
-  return ctx.agent({ key: "leak", prompt: "echo the token", provider: "mock", secrets: ["TOKEN"] });
+  return ctx.agent({
+    key: "leak",
+    prompt: "echo the token",
+    provider: "mock",
+    capabilities: { secrets: ["TOKEN"] },
+    environment: { secrets: ["TOKEN"] },
+  });
 }

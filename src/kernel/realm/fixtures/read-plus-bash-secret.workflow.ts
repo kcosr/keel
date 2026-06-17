@@ -5,8 +5,8 @@ export default async function readPlusBashSecret(ctx: Ctx, _input: null): Promis
     key: "inspect",
     prompt: "inspect with shell and secret",
     provider: "writer",
-    toolPolicy: "read-only",
+    capabilities: { fs: "read", secrets: ["TOKEN"] },
     allowTools: ["bash"],
-    secrets: ["TOKEN"],
+    environment: { secrets: ["TOKEN"] },
   });
 }

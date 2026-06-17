@@ -329,6 +329,9 @@
   `KEEL_CAP_DIR`.
 
 ### Fixed
+- Codex agent resume now calls app-server `thread/resume` directly so cold
+  persisted threads can be loaded after app-server or daemon restart instead of
+  failing on a pre-resume `notLoaded` `thread/read` view.
 - Web UI layout and usability pass: transcript/event status pills no longer
   stretch into oversized circles when a row grows tall (pills are pinned to
   their intrinsic size), the run-detail tab bar scrolls horizontally instead of

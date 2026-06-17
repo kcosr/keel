@@ -121,6 +121,10 @@
   active turn. Ignored current-thread turn lifecycle and error notifications now
   emit a diagnostic error trace event before Keel waits for the eventual
   terminal event.
+- The legacy in-process `Kernel` class has been removed. Durable workflow
+  launch/resume now uses `RealmKernel` exclusively, including crash-consistency
+  tests, so persisted runs always resume from immutable workflow definition
+  snapshots instead of caller-supplied `v0` functions.
 - Obsolete `AgentSessionWorkspace` store APIs/types have been removed; runtime
   code and tests use unified `AgentWorkspaceRow` records outside migrations.
 - The current capability auth contract no longer exposes deferred

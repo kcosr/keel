@@ -137,7 +137,7 @@ export type WorkerRequest =
       key: string;
       until: number | null;
     }
-  | { type: "error"; error: { name: string; message: string }; aborted: boolean }
+  | { type: "error"; error: { name: string; message: string } }
   | { type: "ready" };
 
 /** park-check reply payload. */

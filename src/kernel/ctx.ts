@@ -1,9 +1,8 @@
-// The `ctx` authoring surface (DESIGN.md §9.1) — Phase 2–4 subset.
+// The `ctx` authoring surface (DESIGN.md §9.1).
 //
-// WorkflowCtx is the IN-PROCESS implementation: it runs step fns locally and
-// journals through the shared StepEngine. The realm host (Phase 4) is a second
-// front-end over the same StepEngine that runs fns in a Worker. agent/human/
-// signal/sleep/spawn land in later phases.
+// WorkflowCtx is the host-local implementation used by focused tests and
+// adapter-level helpers. Production workflow execution goes through RealmKernel,
+// which runs workflow modules in a Worker while sharing the same StepEngine.
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { type Capabilities, type ToolPolicy, resolveToolPolicy } from "../agents/capabilities.ts";
@@ -384,7 +383,6 @@ export class WorkflowCtx implements Ctx {
       );
       return result;
     } catch (err) {
-      if (isAbort(err)) throw err; // leave the row pending → resume re-executes
       this.engine.failStep(key, begun.attempt, version, begun.inputHash, begun.startedAtMs, err);
       throw err;
     }
@@ -517,7 +515,6 @@ export class WorkflowCtx implements Ctx {
       );
       return execution.output as T;
     } catch (err) {
-      if (isAbort(err)) throw err;
       // onFailure:'null' (D7): journal a completed null so resume replays it.
       if (spec.onFailure === "null" && err instanceof AgentFailure) {
         this.engine.emit("agent.tolerated_failure", {
@@ -632,7 +629,7 @@ export class WorkflowCtx implements Ctx {
   }
 
   // Durable park/wake (sleep/signal/human) requires the realm host's suspend
-  // machinery; the in-process ctx is the legacy single-shot path.
+  // machinery.
   async sleep(_key: string, _ms: number): Promise<void> {
     throw new Error("ctx.sleep requires the realm kernel (durable park/wake)");
   }
@@ -660,11 +657,6 @@ export class WorkflowCtx implements Ctx {
   phase(title: string): void {
     this.engine.emit("phase", { title });
   }
-}
-
-/** Detect the cooperative abort signal by name (avoids importing kernel.ts). */
-function isAbort(err: unknown): boolean {
-  return err instanceof Error && err.name === "KeelAbort";
 }
 
 function isWorkspaceHandle(value: WorkspaceSpec | WorkspaceHandle): value is WorkspaceHandle {

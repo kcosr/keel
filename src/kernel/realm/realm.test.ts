@@ -13,6 +13,9 @@ const FIXTURES = new URL("./fixtures/", import.meta.url);
 const chainUrl = captureWorkflowFile(new URL("chain.workflow.ts", FIXTURES).pathname);
 const edgesUrl = captureWorkflowFile(new URL("edges.workflow.ts", FIXTURES).pathname);
 const ambientUrl = captureWorkflowFile(new URL("ambient.workflow.ts", FIXTURES).pathname);
+const ambientResumeUrl = captureWorkflowFile(
+  new URL("ambient-resume.workflow.ts", FIXTURES).pathname,
+);
 const forbiddenUrl = captureWorkflowFile(new URL("forbidden.workflow.ts", FIXTURES).pathname);
 const TARGET = process.cwd();
 
@@ -78,6 +81,46 @@ describe("realm — forbidden ambient globals throw guidance", () => {
     expect(handle.output?.t).toBe(JSON.parse(nowRow?.resultInline ?? "null"));
     expect(handle.output?.r).toBe(JSON.parse(randRow?.resultInline ?? "null"));
   });
+
+  test("ctx.now()/ctx.random() replay verbatim across resume", async () => {
+    const store = JournalStore.memory();
+    let crashingClock = 1000;
+    const crashing = new RealmKernel(store, {
+      idgen: () => "run_0",
+      clock: () => crashingClock++,
+      rng: () => 0.123,
+      fault: (point: string, key: string) => {
+        if (point === "before-commit" && key === "after-ambient") {
+          throw new Error("INJECTED CRASH");
+        }
+      },
+    });
+    await crashing
+      .run<{ t: number; r: number }>(ambientResumeUrl, null, {
+        name: "ambient-resume",
+        target: TARGET,
+      })
+      .catch(() => null);
+    expect(store.getRun("run_0")?.status).toBe("running");
+
+    const expected = {
+      t: JSON.parse(store.getJournalRow("run_0", "__now#0", 1)?.resultInline ?? "null") as number,
+      r: JSON.parse(
+        store.getJournalRow("run_0", "__random#0", 1)?.resultInline ?? "null",
+      ) as number,
+    };
+    let resumeClock = 9000;
+    const resumed = new RealmKernel(store, {
+      clock: () => resumeClock++,
+      rng: () => 0.987,
+    });
+    const handle = await resumed.resume<{ t: number; r: number }>("run_0");
+
+    expect(handle.output).toEqual(expected);
+    expect(store.listJournalRows("run_0").filter((row) => row.status === "pending")).toHaveLength(
+      0,
+    );
+  });
 });
 
 describe("realm — launch target validation", () => {
@@ -121,6 +164,24 @@ describe("realm — memoization and resume", () => {
     expect(handle.output).toBe(5);
     const completed = store.listJournalRows("run_0").filter((r) => r.status === "completed");
     expect(completed).toHaveLength(5);
+  });
+
+  test("a deterministic workflow journals the same key sequence every run", async () => {
+    const sequences: string[][] = [];
+    for (let i = 0; i < 4; i++) {
+      const store = JournalStore.memory();
+      const kernel = fixed(store);
+      const handle = await kernel.run<number>(
+        chainUrl,
+        { n: 3 },
+        { name: "chain", target: TARGET },
+      );
+      expect(handle.output).toBe(3);
+      sequences.push(
+        store.listJournalRows(handle.runId).map((row) => `${row.effectType}:${row.stableKey}`),
+      );
+    }
+    for (const sequence of sequences.slice(1)) expect(sequence).toEqual(sequences[0] as string[]);
   });
 });
 

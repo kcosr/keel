@@ -2797,22 +2797,17 @@ export class RealmKernel {
               break;
             }
             case "error": {
-              if (m.aborted) {
-                // resumable: leave run 'running'
-                this.store.appendEvent(runId, "run.aborted", m.error, this.host.clock());
-              } else {
-                const at = this.host.clock();
-                this.store.transaction(() => {
-                  this.store.updateRun(runId, {
-                    status: "failed",
-                    errorJson: JSON.stringify(m.error),
-                    finishedAtMs: at,
-                  });
-                  this.store.appendEvent(runId, "run.failed", m.error, at);
+              const at = this.host.clock();
+              this.store.transaction(() => {
+                this.store.updateRun(runId, {
+                  status: "failed",
+                  errorJson: JSON.stringify(m.error),
+                  finishedAtMs: at,
                 });
-                cleanupTerminalRunWorkspaces(this.store, runId, "failed", at);
-                this.secrets?.wipe(runId); // terminal failure: wipe secrets
-              }
+                this.store.appendEvent(runId, "run.failed", m.error, at);
+              });
+              cleanupTerminalRunWorkspaces(this.store, runId, "failed", at);
+              this.secrets?.wipe(runId); // terminal failure: wipe secrets
               finish(() => reject(rebuildError(m.error)));
               break;
             }

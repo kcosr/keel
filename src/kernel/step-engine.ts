@@ -1,10 +1,10 @@
 // StepEngine — the host-side journaling state machine (DESIGN.md §5.5–5.6).
 //
 // One source of truth for memoization, the write-ahead protocol, and ambient
-// recording. Both execution modes use it: the in-process WorkflowCtx (which runs
-// step fns locally) and the realm host (which runs them in a Worker). Splitting
-// "begin" from "complete" is what lets the realm run the fn between the two
-// commits while the journaling stays here.
+// recording. RealmKernel uses it for Worker-backed workflow execution, and
+// host-local WorkflowCtx tests use the same machinery for focused coverage.
+// Splitting "begin" from "complete" is what lets the realm run the fn between
+// the two commits while the journaling stays here.
 
 import type { TraceEvent } from "../agents/types.ts";
 import { type Json, hashJson, sha256Hex } from "../hash.ts";

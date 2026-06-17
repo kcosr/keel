@@ -520,7 +520,6 @@ const ctx = Object.freeze({
       });
       return tag(result, key, reply.contentHash);
     } catch (err) {
-      if (err instanceof Error && err.name === "KeelAbort") throw err;
       await rpc({
         type: "step-fail",
         key,
@@ -945,8 +944,7 @@ async function start(workflowUrl: string, input: unknown): Promise<void> {
       post({ type: "parked", kind: err.parkKind, key: err.key, until: err.until });
       return;
     }
-    const aborted = err instanceof Error && err.name === "KeelAbort";
-    post({ type: "error", error: serializeError(err), aborted });
+    post({ type: "error", error: serializeError(err) });
   }
 }
 

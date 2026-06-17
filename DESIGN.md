@@ -1204,7 +1204,7 @@ live gate (Phase 14). Every phase ends green and is one reviewable commit.
 | # | Phase | Exit criteria (gates the commit) |
 |---|---|---|
 | 1 | Scaffold + journal store + hashing | CI green; transactional journal rows survive restart and reload identically; failed transaction leaves zero partial rows. |
-| 2 | Memoized re-execution core (in-process) | Linear pure-step workflow aborted at every boundary resumes re-running only incomplete steps; property test: identical `ctx.*` sequence across N re-runs. |
+| 2 | Memoized re-execution core | Crash/resume re-runs only incomplete steps; property tests cover identical `ctx.*` sequence across N re-runs and ambient replay across resume. |
 | 3 | Write-ahead crash protocol | Kill-at-every-boundary matrix: `completed` replays exactly-once, `pending` re-executes at-least-once, zero corrupt/dangling journal state. |
 | 4 | Deterministic realm + boundary hashing | Phases 2–3 suites pass unchanged inside the Bun Worker realm; forbidden-globals acceptance passes; explicit-input hashing and tagged-envelope edge detection proven across the JSON boundary; steps/sec benchmark recorded. |
 | 5 | Structural step identity + determinism lint | Comment/whitespace/rename edits re-execute zero steps; schema or prompt edit re-executes exactly that step; lint trio + capture-rule tests pass. |

@@ -36,6 +36,9 @@ import {
   KeelOperationGateway,
 } from "./gateway.ts";
 
+const GATEWAY_DEBUG =
+  process.env.KEEL_GATEWAY_DEBUG === "1" || process.env.KEEL_DAEMON_GATEWAY_DEBUG === "1";
+
 export interface DaemonOptions {
   socketPath: string;
   dbPath: string;
@@ -396,6 +399,7 @@ function daemonDebug(message: string): void {
 
 function shouldDebugGatewayRequest(request: GatewayRequest): boolean {
   return (
+    GATEWAY_DEBUG &&
     request.surface === "web" &&
     (request.method === "listRunsPage" ||
       request.method === "getRun" ||

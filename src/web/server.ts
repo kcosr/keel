@@ -25,6 +25,8 @@ export const DEFAULT_WEB_ASSETS_DIR = resolve(import.meta.dir, "..", "..", "web"
 export const DEFAULT_WEB_RUNS_LIMIT = 100;
 export const MAX_WEB_RUNS_LIMIT = MAX_RUN_SUMMARY_PAGE_LIMIT;
 
+const GATEWAY_DEBUG =
+  process.env.KEEL_GATEWAY_DEBUG === "1" || process.env.KEEL_WEB_GATEWAY_DEBUG === "1";
 let nextProjectionDebugId = 1;
 
 export interface KeelWebServerOptions {
@@ -171,7 +173,7 @@ export class GatewaySocket {
         try {
           this.onMessage(JSON.parse(line) as GatewayMessage);
         } catch (err) {
-          webDebug(
+          webWarn(
             `[keel web] gateway invalid json line length=${line.length}: ${
               err instanceof Error ? err.message : String(err)
             }`,
@@ -417,7 +419,8 @@ async function projectionRoute(
   const credential = bearerCredential(request);
   const conn = await connectGatewaySocket(socketPath);
   const routeStartedAt = Date.now();
-  const debugLabel = kind === "runs" ? `api/runs#${nextProjectionDebugId++}` : undefined;
+  const debugLabel =
+    GATEWAY_DEBUG && kind === "runs" ? `api/runs#${nextProjectionDebugId++}` : undefined;
   if (debugLabel) {
     webDebug(`[keel web] ${debugLabel} start ${new URL(request.url).search}`);
   }
@@ -455,41 +458,38 @@ async function projectionRoute(
         `[keel web] ${debugLabel} page total=${summariesPage.total} returned=${summariesPage.runs.length}`,
       );
       const page = runsPageMetadata(summariesPage.total, limit);
-      const runs = [];
-      for (const summary of summariesPage.runs) {
-        const run = await call("getRun", { runId: summary.runId });
-        const blockage = await call("getBlockage", { runId: summary.runId });
-        const workspaces = await call<unknown[]>("listRunWorkspaces", {
-          runId: summary.runId,
-          includeRemoved: true,
-        });
-        runs.push({
-          ...summary,
-          run,
-          blockage: isVisibleBlockage(blockage as Blockage) ? blockage : null,
-          workspaceSummary: { count: workspaces.length },
-        });
-      }
+      const runs = await Promise.all(
+        summariesPage.runs.map(async (summary) => {
+          const [run, blockage, workspaces] = await Promise.all([
+            call("getRun", { runId: summary.runId }),
+            call("getBlockage", { runId: summary.runId }),
+            call<unknown[]>("listRunWorkspaces", {
+              runId: summary.runId,
+              includeRemoved: true,
+            }),
+          ]);
+          return {
+            ...summary,
+            run,
+            blockage: isVisibleBlockage(blockage as Blockage) ? blockage : null,
+            workspaceSummary: { count: workspaces.length },
+          };
+        }),
+      );
       webDebug(`[keel web] ${debugLabel} done ${Date.now() - routeStartedAt}ms`);
       return projectionJson({ runs, page: { ...page, returned: runs.length } });
     }
     if (kind === "run") {
       if (!runId) throw new HttpError(400, { message: "run id is required" });
-      const run = await call("getRun", { runId });
-      const report = await call("getRunReport", { runId });
-      const blockage = await call("getBlockage", { runId });
-      const workspaces = await call("listRunWorkspaces", { runId, includeRemoved: true });
-      const source = await call("getWorkflowDefinitionSource", {
-        lookup: { kind: "run", runId },
-        all: true,
-      });
-      const eventTail = await collectEventsOn(
-        conn,
-        runId,
-        { kind: "tail", count: 100 },
-        credential,
-      );
-      const hasAdmin = await hasAdminAuthorityOn(conn, credential);
+      const [run, report, blockage, workspaces, source, eventTail, hasAdmin] = await Promise.all([
+        call("getRun", { runId }),
+        call("getRunReport", { runId }),
+        call("getBlockage", { runId }),
+        call("listRunWorkspaces", { runId, includeRemoved: true }),
+        call("getWorkflowDefinitionSource", { lookup: { kind: "run", runId }, all: true }),
+        collectEventsOn(conn, runId, { kind: "tail", count: 100 }, credential),
+        hasAdminAuthorityOn(conn, credential),
+      ]);
       return projectionJson({
         run,
         report,
@@ -504,11 +504,10 @@ async function projectionRoute(
       });
     }
     if (kind === "approvals") {
-      const summaries =
-        await call<Array<{ runId: string; workflowName: string | null; status: string }>>(
-          "listRuns",
-        );
-      const hasAdmin = await hasAdminAuthorityOn(conn, credential);
+      const [summaries, hasAdmin] = await Promise.all([
+        call<Array<{ runId: string; workflowName: string | null; status: string }>>("listRuns"),
+        hasAdminAuthorityOn(conn, credential),
+      ]);
       const approvals = [];
       for (const summary of summaries) {
         if (summary.status !== "waiting-human") continue;
@@ -539,26 +538,26 @@ async function projectionRoute(
       });
     }
     if (kind === "workspaces") {
-      const summaries = await call<Array<{ runId: string }>>("listRuns");
-      const hasAdmin = await hasAdminAuthorityOn(conn, credential);
-      const nested = [];
-      for (const summary of summaries) {
-        nested.push(
-          await call<unknown[]>("listRunWorkspaces", {
-            runId: summary.runId,
-            includeRemoved: true,
-          }),
-        );
-      }
+      const [summaries, hasAdmin] = await Promise.all([
+        call<Array<{ runId: string }>>("listRuns"),
+        hasAdminAuthorityOn(conn, credential),
+      ]);
+      const nested = await Promise.all(
+        summaries.map((summary) =>
+          call<unknown[]>("listRunWorkspaces", { runId: summary.runId, includeRemoved: true }),
+        ),
+      );
       return projectionJson({
         workspaces: nested.flat(),
         mutationAuthority: "admin",
         mutationAuthorized: hasAdmin,
       });
     }
-    const ping = await call("ping");
-    const profiles = await call("listAgentProfiles", { source: "all" });
-    const settings = await call("listSettings");
+    const [ping, profiles, settings] = await Promise.all([
+      call("ping"),
+      call("listAgentProfiles", { source: "all" }),
+      call("listSettings"),
+    ]);
     return projectionJson({
       daemon: ping,
       profiles,
@@ -576,6 +575,11 @@ async function projectionRoute(
 }
 
 function webDebug(message: string): void {
+  if (!GATEWAY_DEBUG) return;
+  console.error(`${new Date().toISOString()} ${message}`);
+}
+
+function webWarn(message: string): void {
   console.error(`${new Date().toISOString()} ${message}`);
 }
 

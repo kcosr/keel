@@ -230,10 +230,13 @@ runs, returned rows, and a `truncated` flag. When the browser list is truncated,
 the UI says so and points
 operators to `keel list` or a bounded `GET /api/runs?limit=n` request up to the
 documented maximum. Run detail views use `GET /api/runs/:runId` for overview,
-timeline, transcript, report, source, workspaces, approvals, and events; live
-watch reconnects from the latest event cursor and keeps raw live SSE frames
-available alongside the coalesced transcript. The initial event tail comes from
-the JSON detail projection and is shown as reconstructed event frames. The
+workflow flow, timeline, transcript, report, source, workspaces, approvals, and
+events. The detail projection includes a `flow` object when retained workflow
+source can be parsed into a static operation IR; the browser overlays that IR
+with runtime node and event state. Live watch reconnects from the latest event
+cursor and keeps raw live SSE frames available alongside the coalesced
+transcript. The initial event tail comes from the JSON detail projection and is
+shown as reconstructed event frames. The
 approvals view lists current workflow-authored `ctx.human` gates and uses
 admin-authorized `decideApproval` calls for approve/deny decisions. The
 workspaces view lists retained run workspaces, loads detail/diff through daemon
@@ -272,7 +275,10 @@ Routes:
   daemon RPC calls. The runs list defaults to `limit=100`, rejects limits above
   `500`, calls bounded `listRunsPage` instead of unbounded `listRuns`, enriches
   only the returned page, and includes `page` metadata so clients can disclose
-  truncation.
+  truncation. Run detail includes `flow` when the captured workflow source has a
+  parseable entry file with recognized `ctx.*` operations; `flow` contains entry
+  metadata, input field summaries, operation summaries, and non-fatal static
+  extraction diagnostics.
 - The workspace browser projection currently aggregates per-run workspace RPCs
   across known runs. Very large journals may prefer `keel workspace ...`
   commands until a first-class aggregate workspace projection is added.
@@ -735,8 +741,8 @@ discard. Views include `mode`, `sourceKind`, display `key`, provider
 `workspacePath`, source path/URI/ref/branch/base commit metadata, copy baseline
 path, ownership, retention, merge/discard/diff support, latest attempt/turn and active
 holder metadata, `failureSeen`, timestamps, and cleanup errors. Default list
-output hides idle direct workspaces such as `__default`; `--all` includes removed
-audit rows and direct workspace rows.
+output hides the reserved direct workspace `__default`; `--all` includes removed
+audit rows and direct workspace rows, including `__default`.
 
 Merge/discard are explicit operator actions and refuse while the run is
 non-terminal, a Keel-owned provider invocation is active, the workspace is
@@ -876,13 +882,26 @@ workflow spawning (`ctx.spawn`) are deferred.
 
 ### Diagnostics
 
-Set `KEEL_PI_RAW_LOG` to capture raw Pi stdout/stderr diagnostics:
+Provider raw protocol logs are opt-in. Set the provider-specific raw log
+environment variable on the daemon process to append JSONL diagnostics:
 
 ```bash
 KEEL_PI_RAW_LOG=/tmp/pi.jsonl keel daemon
+KEEL_CLAUDE_RAW_LOG=/tmp/claude.jsonl keel daemon
+KEEL_CODEX_RAW_LOG=/tmp/codex.jsonl keel daemon
 ```
 
-Treat this file as secret-bearing and delete it after debugging.
+These files can contain prompts, outputs, cwd paths, provider stderr, and secret
+values. Treat them as secret-bearing and delete them after debugging.
+
+The web-to-daemon gateway also has opt-in timing diagnostics for browser run
+projection debugging. Set `KEEL_GATEWAY_DEBUG=1` on both `keel web` and
+`keel daemon` to log the supported web projection RPC flow on both sides. Use
+`KEEL_WEB_GATEWAY_DEBUG=1` to enable only web-process logs, or
+`KEEL_DAEMON_GATEWAY_DEBUG=1` to enable only daemon-side web gateway logs.
+Gateway debug logs are written to stderr/systemd journal and include route/RPC
+names, run ids or page limits, elapsed timings, and success/error status; they
+do not log bearer credentials or full RPC payloads.
 
 ## Workflow Authoring
 

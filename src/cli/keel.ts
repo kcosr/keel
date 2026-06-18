@@ -66,6 +66,7 @@ import {
 import { captureWorkflowFile } from "../workflow-definitions/capture.ts";
 import { keelPackageRoot } from "../workflow-definitions/snapshot.ts";
 import type { WorkflowSourceInput } from "../workflow-definitions/source.ts";
+import { DEFAULT_WORKSPACE_ID } from "../workspace/identity.ts";
 import { displayName, formatDuration, formatListRuns, formatUtcTimestamp } from "./run-display.ts";
 import { formatTable, tableCell } from "./table.ts";
 import { compactTerminalText } from "./terminal-text.ts";
@@ -2543,7 +2544,9 @@ async function workspaceCommand(args: string[]): Promise<number> {
     case "list": {
       if (!runId) return usage("workspace needs list <runId> [--all]");
       const all = rest.includes("--all") || args.slice(2).includes("--all");
-      const workspaces = await client.listRunWorkspaces(runId, { includeRemoved: all });
+      const workspaces = (await client.listRunWorkspaces(runId, { includeRemoved: all })).filter(
+        (workspace) => all || workspace.workspaceId !== DEFAULT_WORKSPACE_ID,
+      );
       process.stdout.write(`${JSON.stringify({ workspaces })}\n`);
       return 0;
     }

@@ -323,9 +323,16 @@ describe("web transport", () => {
       expect(detail.status).toBe(200);
       expect(detail.body).toMatchObject({
         run: { runId, phase: "«redacted-capability»" },
+        flow: {
+          input: { fields: [{ name: "n", type: "number", optional: false, used: true }] },
+        },
         rawEvents: { href: `/runs/${runId}/events` },
         eventCursor: { kind: "after-seq", runId },
       });
+      expect(detail.body.flow.operations.map((op: { kind: string }) => op.kind)).toEqual([
+        "step",
+        "return",
+      ]);
       expect(JSON.stringify(detail.body)).not.toContain("kc_run_projection_secret");
       expect(Array.isArray(detail.body.availableCommands)).toBe(true);
 
@@ -654,6 +661,62 @@ describe("web transport", () => {
     }
   });
 
+  test("keeps event streams open across human approval parks", async () => {
+    const { daemon, socketPath } = startDaemon();
+    await daemon.start();
+    const web = startWebServer({ socketPath, port: 0, apiOnly: true, heartbeatMs: 20 });
+    const client = await DaemonClient.connect(socketPath);
+    try {
+      const launched = await client.launchRun({ ...gateUrl, input: null, target: dir });
+      await client.authenticate(launched.capability as string);
+      await client.waitForRun(launched.runId);
+      expect((await client.getRun(launched.runId))?.status).toBe("waiting-human");
+
+      const response = await fetch(`${web.url}/runs/${launched.runId}/events?from=beginning`, {
+        headers: auth(launched.capability as string),
+      });
+      expect(response.status).toBe(200);
+      const reader = new SseReader(response);
+      const parkedFrames = await reader.waitFor(
+        (frame, frames) =>
+          frame.event === "caught-up" &&
+          frames.some(
+            (candidate) =>
+              candidate.event === "event" &&
+              (candidate.data as { type?: string; payload?: { kind?: string } }).type ===
+                "run.parked" &&
+              (candidate.data as { type?: string; payload?: { kind?: string } }).payload?.kind ===
+                "human",
+          ),
+      );
+      expect(parkedFrames.map((frame) => frame.event)).not.toContain("closed");
+
+      await client.authenticate(ADMIN_TOKEN);
+      await client.decideApproval(launched.runId, "approve-deploy", { status: "approved" });
+      const finishedFrames = await reader.waitFor(
+        (frame, frames) =>
+          frame.event === "closed" &&
+          (frame.data as { status?: string }).status === "finished" &&
+          frames.some(
+            (candidate) =>
+              candidate.event === "event" &&
+              (candidate.data as { type?: string }).type === "run.resumed",
+          ) &&
+          frames.some(
+            (candidate) =>
+              candidate.event === "event" &&
+              (candidate.data as { type?: string }).type === "run.finished",
+          ),
+        { cancel: true },
+      );
+      expect(finishedFrames.map((frame) => frame.event)).toContain("closed");
+    } finally {
+      client.close();
+      web.stop(true);
+      await daemon.stop();
+    }
+  });
+
   test("sends heartbeat frames, surfaces auth revocation, and cleans up on stream cancel", async () => {
     const { daemon, socketPath, dbPath } = startDaemon({ providerDelayMs: 1000 });
     await daemon.start();
@@ -779,6 +842,7 @@ describe("web transport", () => {
         gateId: "approve-deploy",
         requiredAuthority: "admin",
       });
+      expect(approvals.body.approvals[0].createdAtMs).toBeGreaterThan(0);
       expect(approvals.body).toMatchObject({
         decisionAuthority: "admin",
         decisionAuthorized: true,

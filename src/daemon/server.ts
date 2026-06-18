@@ -36,6 +36,9 @@ import {
   KeelOperationGateway,
 } from "./gateway.ts";
 
+const GATEWAY_DEBUG =
+  process.env.KEEL_GATEWAY_DEBUG === "1" || process.env.KEEL_DAEMON_GATEWAY_DEBUG === "1";
+
 export interface DaemonOptions {
   socketPath: string;
   dbPath: string;
@@ -57,11 +60,16 @@ export interface DaemonOptions {
   clock?: () => number;
 }
 
-class SocketGatewaySession implements GatewaySession {
+export class SocketGatewaySession implements GatewaySession {
   readonly id = randomUUID();
   buf: string;
   private credential: string | null;
   private readonly cleanups = new Set<() => void>();
+  private readonly decoder = new TextDecoder();
+  private readonly encoder = new TextEncoder();
+  private readonly writeQueue: Array<{ data: Uint8Array; offset: number }> = [];
+  private drainingWrites = false;
+  private closed = false;
 
   constructor(private readonly socket: Socket<undefined>) {
     this.buf = "";
@@ -77,11 +85,11 @@ class SocketGatewaySession implements GatewaySession {
   }
 
   sendEvent(event: GatewayEventFrame): void {
-    this.socket.write(`${JSON.stringify({ event })}\n`);
+    this.writeFrame({ event });
   }
 
   sendResponse(response: GatewayResponse): void {
-    this.socket.write(`${JSON.stringify(response)}\n`);
+    this.writeFrame(response);
   }
 
   addCleanup(cleanup: () => void): void {
@@ -93,8 +101,53 @@ class SocketGatewaySession implements GatewaySession {
   }
 
   close(): void {
+    this.closed = true;
+    this.buf = "";
+    this.writeQueue.length = 0;
     for (const cleanup of [...this.cleanups]) cleanup();
     this.cleanups.clear();
+  }
+
+  appendData(data: Buffer): void {
+    if (this.closed) return;
+    this.buf += this.decoder.decode(data, { stream: true });
+  }
+
+  private writeFrame(frame: unknown): void {
+    if (this.closed) return;
+    this.writeQueue.push({
+      data: this.encoder.encode(`${JSON.stringify(frame)}\n`),
+      offset: 0,
+    });
+    this.drainWrites();
+  }
+
+  drainWrites(): void {
+    if (this.drainingWrites) return;
+    this.drainingWrites = true;
+    queueMicrotask(() => {
+      try {
+        this.flushWrites();
+      } finally {
+        this.drainingWrites = false;
+      }
+    });
+  }
+
+  private flushWrites(): void {
+    while (!this.closed && this.writeQueue.length > 0) {
+      const next = this.writeQueue[0];
+      if (!next) return;
+      const remaining = next.data.byteLength - next.offset;
+      const written = this.socket.write(next.data, next.offset, remaining);
+      if (written < 0) {
+        this.close();
+        return;
+      }
+      if (written === 0) return;
+      next.offset += written;
+      if (next.offset >= next.data.byteLength) this.writeQueue.shift();
+    }
   }
 }
 
@@ -220,6 +273,9 @@ export class KeelDaemon {
           (socket as GatewaySocket).session = new SocketGatewaySession(socket);
         },
         data: (socket, data) => this.onData(socket as GatewaySocket, data),
+        drain: (socket) => {
+          (socket as GatewaySocket).session?.drainWrites();
+        },
         close: (socket) => {
           (socket as GatewaySocket).session?.close();
         },
@@ -271,7 +327,7 @@ export class KeelDaemon {
   private onData(socket: GatewaySocket, data: Buffer): void {
     const session = socket.session;
     if (!session) return;
-    session.buf += data.toString("utf8");
+    session.appendData(data);
     let nl = session.buf.indexOf("\n");
     while (nl >= 0) {
       const line = session.buf.slice(0, nl);
@@ -303,7 +359,26 @@ export class KeelDaemon {
     } catch {
       return;
     }
-    session.sendResponse(await this.gateway.handle(session, req));
+    const debug = shouldDebugGatewayRequest(req);
+    const startedAt = Date.now();
+    if (debug) {
+      daemonDebug(
+        `[keel daemon] gateway recv session=${session.id.slice(0, 8)} id=${gatewayRequestId(
+          req.id,
+        )} method=${req.method} ${gatewayDebugLabel(req.params)}`,
+      );
+    }
+    const response = await this.gateway.handle(session, req);
+    if (debug) {
+      daemonDebug(
+        `[keel daemon] gateway send session=${session.id.slice(0, 8)} id=${gatewayRequestId(
+          req.id,
+        )} method=${req.method} ${response.error ? "error" : "result"} ${
+          Date.now() - startedAt
+        }ms ${gatewayDebugLabel(req.params)}`,
+      );
+    }
+    session.sendResponse(response);
   }
 
   private assertNoDuplicateProfileSources(): void {
@@ -316,4 +391,38 @@ export class KeelDaemon {
       }
     }
   }
+}
+
+function daemonDebug(message: string): void {
+  console.error(`${new Date().toISOString()} ${message}`);
+}
+
+function shouldDebugGatewayRequest(request: GatewayRequest): boolean {
+  return (
+    GATEWAY_DEBUG &&
+    request.surface === "web" &&
+    (request.method === "listRunsPage" ||
+      request.method === "getRun" ||
+      request.method === "getBlockage" ||
+      request.method === "listRunWorkspaces")
+  );
+}
+
+function gatewayRequestId(id: unknown): string {
+  if (id === undefined) return "<none>";
+  if (typeof id === "string" || typeof id === "number" || typeof id === "boolean") {
+    return String(id);
+  }
+  try {
+    return JSON.stringify(id);
+  } catch {
+    return String(id);
+  }
+}
+
+function gatewayDebugLabel(params: unknown): string {
+  if (!params || typeof params !== "object") return "";
+  if ("runId" in params && typeof params.runId === "string") return `runId=${params.runId}`;
+  if ("limit" in params && typeof params.limit === "number") return `limit=${params.limit}`;
+  return "";
 }

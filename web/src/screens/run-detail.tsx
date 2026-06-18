@@ -2,7 +2,13 @@ import { Check, Pause, Radio, RefreshCw, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { KeelWebClient, WatchRunEventsStatus } from "../api/client";
 import type { SseMessage } from "../api/sse";
-import type { EventCursorInput, EventStreamFrame, NodeView, RunDetailResponse } from "../api/types";
+import type {
+  EventCursorInput,
+  EventStreamFrame,
+  NodeView,
+  RunDetailResponse,
+  RunStatus,
+} from "../api/types";
 import { CodeViewer } from "../components/code-viewer";
 import {
   Button,
@@ -25,10 +31,13 @@ import { type Column, DenseTable } from "../components/dense-table";
 import { NodeTimeline, RunGraph } from "../components/graph";
 import { Inspector } from "../components/inspector";
 import { type RawEventFrame, RawEventList, Transcript } from "../components/transcript";
+import { WorkflowFlow } from "../components/workflow-flow";
 import { useAsync } from "../hooks/use-async";
+import { flowPhaseFromEvents, flowRuntimeFromEvents } from "../lib/workflow-flow-live";
 
 type RunTab =
   | "overview"
+  | "flow"
   | "timeline"
   | "transcript"
   | "report"
@@ -47,6 +56,7 @@ interface StreamState {
 
 const TABS: Array<{ id: RunTab; label: string }> = [
   { id: "overview", label: "Overview" },
+  { id: "flow", label: "Flow" },
   { id: "timeline", label: "Timeline" },
   { id: "transcript", label: "Transcript" },
   { id: "report", label: "Report" },
@@ -139,6 +149,11 @@ export function RunDetailScreen({
   }, [client, cursorMode, detailState.data, detailState.reload, live, runId]);
 
   const detail = detailState.data;
+  const displayDetail = useMemo(
+    () => applyLiveProjection(detail, liveEvents),
+    [detail, liveEvents],
+  );
+  const renderedDetail = displayDetail ?? detail;
   const allEvents = useMemo(
     () => mergeEventFrames(detail?.events ?? [], liveEvents),
     [detail?.events, liveEvents],
@@ -189,21 +204,32 @@ export function RunDetailScreen({
         {detailState.error ? (
           <ErrorState error={detailState.error} onRetry={detailState.reload} />
         ) : null}
-        {detail && !detailState.loading && !detailState.error ? (
+        {renderedDetail && !detailState.loading && !detailState.error ? (
           <>
             <Tabs<RunTab>
-              tabs={TABS.map((item) => ({ ...item, count: tabCount(item.id, detail, allEvents) }))}
+              tabs={TABS.map((item) => ({
+                ...item,
+                count: tabCount(item.id, renderedDetail, allEvents),
+              }))}
               active={tab}
               onChange={setTab}
             />
             <div className="tab-panel">
-              {renderTab(tab, detail, allEvents, rawFrames, setTab, client, detailState.reload)}
+              {renderTab(
+                tab,
+                renderedDetail,
+                allEvents,
+                rawFrames,
+                setTab,
+                client,
+                detailState.reload,
+              )}
             </div>
           </>
         ) : null}
       </div>
       <RunDetailInspector
-        detail={detail}
+        detail={displayDetail}
         live={live}
         streamState={streamState}
         events={allEvents}
@@ -260,9 +286,24 @@ function renderTab(
                 Open transcript
               </button>
             </div>
-            <Transcript events={events.slice(-8)} />
+            <Transcript events={events.slice(-8)} compact />
           </section>
         </div>
+      );
+    case "flow":
+      return detail.flow ? (
+        <WorkflowFlow
+          flow={detail.flow}
+          nodes={detail.run.nodes}
+          phase={flowPhaseFromEvents(events) ?? detail.run.phase}
+          runStatus={detail.run.status}
+          runtime={flowRuntimeFromEvents(events)}
+        />
+      ) : (
+        <EmptyState
+          title="No workflow flow"
+          detail="The run did not capture parseable workflow source for a structural view."
+        />
       );
     case "timeline":
       return (
@@ -291,12 +332,19 @@ function WorkspacesTable({ detail }: { detail: RunDetailResponse }) {
     <DenseTable
       rows={detail.workspaces}
       rowKey={(workspace) => workspace.workspaceId}
-      empty="No retained workspaces"
+      empty="No workspaces"
       columns={[
         {
           key: "id",
           header: "Workspace",
-          render: (workspace) => <span className="mono">{workspace.workspaceId}</span>,
+          render: (workspace) =>
+            isDefaultWorkspace(workspace) ? (
+              <span className="default-target-cell">
+                <StatusPill tone="info">default</StatusPill>
+              </span>
+            ) : (
+              <span className="mono">{workspace.workspaceId}</span>
+            ),
         },
         { key: "mode", header: "Mode", width: "110px", render: (workspace) => workspace.mode },
         {
@@ -304,7 +352,11 @@ function WorkspacesTable({ detail }: { detail: RunDetailResponse }) {
           header: "Status",
           width: "120px",
           render: (workspace) => (
-            <StatusPill tone={toneForStatus(workspace.status)}>{workspace.status}</StatusPill>
+            <StatusPill
+              tone={isDefaultWorkspace(workspace) ? "neutral" : toneForStatus(workspace.status)}
+            >
+              {isDefaultWorkspace(workspace) ? "target" : workspace.status}
+            </StatusPill>
           ),
         },
         {
@@ -317,6 +369,10 @@ function WorkspacesTable({ detail }: { detail: RunDetailResponse }) {
       ]}
     />
   );
+}
+
+function isDefaultWorkspace(workspace: { workspaceId: string }): boolean {
+  return workspace.workspaceId === "__default";
 }
 
 function ApprovalPanel({
@@ -398,7 +454,9 @@ function ApprovalPanel({
           aria-label="Decision note"
         />
         {!canDecide ? (
-          <p className="muted">Approval decisions require admin authority for this run.</p>
+          <p className="muted">
+            Approval decisions require admin authority and a refreshed run projection.
+          </p>
         ) : null}
         {error ? <p className="form-error">{error}</p> : null}
         {message ? <p className="form-success">{message}</p> : null}
@@ -549,7 +607,7 @@ function RunDetailInspector({
           </section>
           <section className="inspector-section">
             <h3>Latest Transcript</h3>
-            <Transcript events={latestEvents} />
+            <Transcript events={latestEvents} compact />
           </section>
         </>
       ) : (
@@ -564,11 +622,117 @@ function tabCount(
   detail: RunDetailResponse,
   events: EventStreamFrame[],
 ): number | undefined {
+  if (tab === "flow") return detail.flow?.operations.length ?? 0;
   if (tab === "timeline") return detail.run?.nodes.length ?? 0;
   if (tab === "workspaces") return detail.workspaces.length;
   if (tab === "events" || tab === "transcript") return events.length;
   if (tab === "approvals") return detail.blockage?.reason === "waiting_human" ? 1 : 0;
   return undefined;
+}
+
+function applyLiveProjection(
+  detail: RunDetailResponse | null,
+  liveEvents: EventStreamFrame[],
+): RunDetailResponse | null {
+  if (!detail?.run || liveEvents.length === 0) return detail;
+  let next: RunDetailResponse | null = null;
+  const current = () => next ?? detail;
+  const mutable = () => {
+    if (!next) next = { ...detail, run: detail.run ? { ...detail.run } : detail.run };
+    return next;
+  };
+
+  for (const event of liveEvents) {
+    if (event.kind !== "durable") continue;
+    if (event.type === "phase") {
+      const title = eventPayloadString(event.payload, "title");
+      if (!title) continue;
+      const projected = mutable();
+      if (projected.run) {
+        projected.run = {
+          ...projected.run,
+          phase: title,
+        };
+      }
+      continue;
+    }
+    if (event.type === "run.parked") {
+      const parked = parkedPayload(event.payload);
+      if (!parked) continue;
+      const projected = mutable();
+      if (projected.run) {
+        projected.run = {
+          ...projected.run,
+          status: parkedStatus(parked.kind),
+        };
+      }
+      if (parked.kind === "human") {
+        const key = parked.key ?? null;
+        projected.blockage = {
+          reason: "waiting_human",
+          blockedOn: key ? { stableKey: key, since: event.atMs } : null,
+          context: `awaiting decision: ${key ?? "human approval"}`,
+        };
+      }
+      continue;
+    }
+    if (
+      event.type === "run.resumed" ||
+      event.type === "run.finished" ||
+      event.type === "run.failed" ||
+      event.type === "run.aborted" ||
+      event.type === "run.interrupted" ||
+      event.type === "run.continued"
+    ) {
+      const projected = mutable();
+      projected.blockage = null;
+      if (projected.run) {
+        projected.run = {
+          ...projected.run,
+          status: statusForLifecycleEvent(event.type, current().run?.status ?? "running"),
+          ...(event.type === "run.finished" ||
+          event.type === "run.failed" ||
+          event.type === "run.aborted" ||
+          event.type === "run.continued"
+            ? { finishedAtMs: event.atMs }
+            : {}),
+        };
+      }
+    }
+  }
+  return next ?? detail;
+}
+
+function eventPayloadString(payload: unknown, property: string): string | null {
+  if (!payload || typeof payload !== "object" || !(property in payload)) return null;
+  const value = (payload as Record<string, unknown>)[property];
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function parkedPayload(
+  payload: unknown,
+): { kind: "human" | "signal" | "timer"; key?: string } | null {
+  if (!payload || typeof payload !== "object") return null;
+  const kind = "kind" in payload ? payload.kind : null;
+  if (kind !== "human" && kind !== "signal" && kind !== "timer") return null;
+  const key = "key" in payload && typeof payload.key === "string" ? payload.key : undefined;
+  return key ? { kind, key } : { kind };
+}
+
+function parkedStatus(kind: "human" | "signal" | "timer"): RunStatus {
+  if (kind === "human") return "waiting-human";
+  if (kind === "signal") return "waiting-signal";
+  return "waiting-timer";
+}
+
+function statusForLifecycleEvent(type: string, fallback: RunStatus): RunStatus {
+  if (type === "run.resumed") return "running";
+  if (type === "run.finished") return "finished";
+  if (type === "run.failed") return "failed";
+  if (type === "run.aborted") return "cancelled";
+  if (type === "run.interrupted") return "interrupted";
+  if (type === "run.continued") return "continued";
+  return fallback;
 }
 
 function cursorInputForMode(
@@ -781,13 +945,21 @@ function shouldReloadProjection(frame: SseMessage): boolean {
     return false;
   }
   const type = "type" in data ? data.type : null;
+  if (type === "run.parked") return !isHumanParkFrame(data);
   return (
     type === "run.finished" ||
     type === "run.failed" ||
     type === "run.aborted" ||
     type === "run.interrupted" ||
-    type === "run.continued" ||
-    type === "run.parked"
+    type === "run.continued"
+  );
+}
+
+function isHumanParkFrame(data: unknown): boolean {
+  if (!data || typeof data !== "object" || !("payload" in data)) return false;
+  const payload = data.payload;
+  return Boolean(
+    payload && typeof payload === "object" && "kind" in payload && payload.kind === "human",
   );
 }
 

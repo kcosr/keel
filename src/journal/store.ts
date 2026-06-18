@@ -2106,21 +2106,30 @@ export class JournalStore {
   }
 
   /** All pending approvals for a run (for projection / UI). */
-  listPendingApprovals(
-    runId: string,
-  ): Array<{ stableKey: string; prompt: string | null; requestedCaps: unknown }> {
+  listPendingApprovals(runId: string): Array<{
+    stableKey: string;
+    prompt: string | null;
+    requestedCaps: unknown;
+    requestedAtMs: number;
+  }> {
     return this.db
       .query<
-        { stable_key: string; prompt: string | null; requested_caps_json: string | null },
+        {
+          stable_key: string;
+          prompt: string | null;
+          requested_caps_json: string | null;
+          requested_at_ms: number;
+        },
         [string]
       >(
-        "SELECT stable_key, prompt, requested_caps_json FROM approvals WHERE run_id = ? AND status = 'pending'",
+        "SELECT stable_key, prompt, requested_caps_json, requested_at_ms FROM approvals WHERE run_id = ? AND status = 'pending'",
       )
       .all(runId)
       .map((r) => ({
         stableKey: r.stable_key,
         prompt: r.prompt,
         requestedCaps: r.requested_caps_json ? JSON.parse(r.requested_caps_json) : null,
+        requestedAtMs: r.requested_at_ms,
       }));
   }
 

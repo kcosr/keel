@@ -96,6 +96,7 @@ export function App() {
       health={healthState.data}
       credential={credential}
       search={search}
+      searchEnabled={route.kind === "runs"}
       onCredentialChange={updateCredential}
       onSearchChange={setSearch}
       onRefresh={() => setRefreshKey((value) => value + 1)}

@@ -586,7 +586,7 @@ describe("Codex JSON-RPC flow", () => {
     ]);
   });
 
-  test("resume reads, validates, resumes, and starts the next turn", async () => {
+  test("resume loads, validates, and starts the next turn", async () => {
     const transport = new ScriptedTransport((message, t) => {
       switch (message.method) {
         case "initialize":
@@ -594,13 +594,10 @@ describe("Codex JSON-RPC flow", () => {
           break;
         case "initialized":
           break;
-        case "thread/read":
+        case "thread/resume":
           t.respond(message.id, {
             thread: { id: "thread-1", cwd: process.cwd(), status: { type: "idle" } },
           });
-          break;
-        case "thread/resume":
-          t.respond(message.id, { thread: { id: "thread-1" } });
           break;
         case "turn/start":
           t.respond(message.id, { turn: { id: "turn-2" } });
@@ -627,11 +624,10 @@ describe("Codex JSON-RPC flow", () => {
     expect(transport.sent.map((m) => m.method)).toEqual([
       "initialize",
       "initialized",
-      "thread/read",
       "thread/resume",
       "turn/start",
     ]);
-    expect(transport.sent[3]?.params).toMatchObject({
+    expect(transport.sent[2]?.params).toMatchObject({
       threadId: "thread-1",
       cwd: process.cwd(),
       approvalPolicy: "never",
@@ -639,6 +635,49 @@ describe("Codex JSON-RPC flow", () => {
     });
     expect(result.sessionToken).toBe("thread-1");
     expect(result.text).toBe("again");
+  });
+
+  test("cold resume does not require a preloaded thread/read view", async () => {
+    const transport = new ScriptedTransport((message, t) => {
+      switch (message.method) {
+        case "initialize":
+          t.respond(message.id, {});
+          break;
+        case "initialized":
+          break;
+        case "thread/read":
+          throw new Error("thread/read should not be called before cold resume");
+        case "thread/resume":
+          t.respond(message.id, {
+            thread: { id: "thread-1", cwd: process.cwd(), status: { type: "idle" } },
+          });
+          break;
+        case "turn/start":
+          t.respond(message.id, { turn: { id: "turn-2" } });
+          t.notify("turn/started", { threadId: "thread-1", turn: { id: "turn-2" } });
+          t.notify("item/agentMessage/delta", {
+            threadId: "thread-1",
+            turnId: "turn-2",
+            delta: "cold resume ok",
+          });
+          t.notify("turn/completed", {
+            threadId: "thread-1",
+            turn: { id: "turn-2", status: "completed" },
+          });
+          break;
+        default:
+          throw new Error(`unexpected ${String(message.method)}`);
+      }
+    });
+
+    const { result } = await runWithTransport(transport, { resumeToken: "thread-1" });
+    expect(result.text).toBe("cold resume ok");
+    expect(transport.sent.map((m) => m.method)).toEqual([
+      "initialize",
+      "initialized",
+      "thread/resume",
+      "turn/start",
+    ]);
   });
 
   test("resumed turns keep the configured serviceTier", async () => {
@@ -649,13 +688,10 @@ describe("Codex JSON-RPC flow", () => {
           break;
         case "initialized":
           break;
-        case "thread/read":
+        case "thread/resume":
           t.respond(message.id, {
             thread: { id: "thread-1", cwd: process.cwd(), status: { type: "idle" } },
           });
-          break;
-        case "thread/resume":
-          t.respond(message.id, { thread: { id: "thread-1" } });
           break;
         case "turn/start":
           expect((message.params as Record<string, unknown>).serviceTier).toBe(
@@ -706,15 +742,11 @@ describe("Codex JSON-RPC flow", () => {
               expect(attempt).toBe(1);
               t.respond(message.id, { thread: { id: "thread-1" } });
               break;
-            case "thread/read":
+            case "thread/resume":
               expect(attempt).toBe(2);
               t.respond(message.id, {
                 thread: { id: "thread-1", cwd: context.cwd, status: { type: "idle" } },
               });
-              break;
-            case "thread/resume":
-              expect(attempt).toBe(2);
-              t.respond(message.id, { thread: { id: "thread-1" } });
               break;
             case "turn/start": {
               const params = message.params as Record<string, unknown>;
@@ -788,7 +820,6 @@ describe("Codex JSON-RPC flow", () => {
     expect(transports[1]?.sent.map((message) => message.method)).toEqual([
       "initialize",
       "initialized",
-      "thread/read",
       "thread/resume",
       "turn/start",
     ]);
@@ -803,7 +834,7 @@ describe("Codex JSON-RPC flow", () => {
           break;
         case "initialized":
           break;
-        case "thread/read":
+        case "thread/resume":
           t.respond(message.id, {
             thread: { id: "thread-1", cwd: process.cwd(), status: { type: "active" } },
           });
@@ -822,9 +853,6 @@ describe("Codex JSON-RPC flow", () => {
         case "turn/interrupt":
           expect(message.params).toEqual({ threadId: "thread-1", turnId: "stale-turn" });
           t.respond(message.id, {});
-          break;
-        case "thread/resume":
-          t.respond(message.id, { thread: { id: "thread-1" } });
           break;
         case "turn/start":
           t.respond(message.id, { turn: { id: "turn-2" } });
@@ -849,11 +877,10 @@ describe("Codex JSON-RPC flow", () => {
     expect(transport.sent.map((m) => m.method)).toEqual([
       "initialize",
       "initialized",
-      "thread/read",
+      "thread/resume",
       "thread/turns/list",
       "turn/interrupt",
       "thread/turns/list",
-      "thread/resume",
       "turn/start",
     ]);
   });
@@ -867,7 +894,7 @@ describe("Codex JSON-RPC flow", () => {
           break;
         case "initialized":
           break;
-        case "thread/read":
+        case "thread/resume":
           t.respond(message.id, {
             thread: { id: "thread-1", cwd: process.cwd(), status: { type: "active" } },
           });
@@ -895,15 +922,6 @@ describe("Codex JSON-RPC flow", () => {
             threadId: "thread-1",
             turn: { id: "stale-turn", status: "interrupted" },
           });
-          break;
-        case "thread/resume":
-          t.respond(message.id, { thread: { id: "thread-1" } });
-          setTimeout(() => {
-            t.notify("turn/completed", {
-              threadId: "thread-1",
-              turn: { id: "stale-turn", status: "interrupted" },
-            });
-          }, 0);
           break;
         case "turn/start":
           t.respond(message.id, { turn: { id: "turn-2" } });
@@ -938,7 +956,7 @@ describe("Codex JSON-RPC flow", () => {
           break;
         case "initialized":
           break;
-        case "thread/read":
+        case "thread/resume":
           t.respond(message.id, {
             thread: { id: "thread-1", cwd: process.cwd(), status: { type: "active" } },
           });
@@ -966,7 +984,7 @@ describe("Codex JSON-RPC flow", () => {
           break;
         case "initialized":
           break;
-        case "thread/read":
+        case "thread/resume":
           t.respond(message.id, {
             thread: { id: "thread-1", cwd: process.cwd(), status: { type: "active" } },
           });

@@ -245,7 +245,7 @@ export function KeyValueList({
 }
 
 export function JsonBlock({ value }: { value: unknown }) {
-  return <pre className="code-block">{JSON.stringify(value, null, 2)}</pre>;
+  return <pre className="code-block json-block">{JSON.stringify(value, null, 2)}</pre>;
 }
 
 export function formatTime(value: number | null | undefined): string {

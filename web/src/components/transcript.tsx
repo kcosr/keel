@@ -1,6 +1,16 @@
 import type { EventStreamFrame } from "../api/types";
 import { StatusPill, formatTime, toneForStatus } from "./controls";
 
+function formatClock(value: number | null): string {
+  if (value === null) return "-";
+  return new Date(value).toLocaleTimeString();
+}
+
+// Display truncation happens at render so the full text stays available as a
+// hover tooltip; MESSAGE_TITLE_MAX bounds the tooltip for very large payloads.
+const MESSAGE_DISPLAY_MAX = 600;
+const MESSAGE_TITLE_MAX = 4000;
+
 export interface RawEventFrame {
   event: string;
   data: unknown;
@@ -25,30 +35,47 @@ interface ActiveStream {
   type: "text" | "reasoning";
 }
 
-export function Transcript({ events }: { events: EventStreamFrame[] }) {
+export function Transcript({
+  events,
+  compact = false,
+}: { events: EventStreamFrame[]; compact?: boolean }) {
   const rows = coalesceTranscript(events);
   if (rows.length === 0) {
     return <div className="table-empty">No transcript events in the current tail.</div>;
   }
 
   return (
-    <div className="transcript-table" aria-label="Coalesced transcript">
+    <div
+      className={`transcript-table ${compact ? "is-compact" : ""}`}
+      aria-label="Coalesced transcript"
+    >
       <div className="transcript-head">
         <span>Time</span>
-        <span>Actor</span>
+        {compact ? null : <span>Actor</span>}
         <span>Event</span>
         <span>Message</span>
-        <span>Seq</span>
+        {compact ? null : <span>Seq</span>}
       </div>
-      {rows.map((row) => (
-        <div className="transcript-row" key={row.id}>
-          <span className="mono muted">{formatTime(row.time)}</span>
-          <span className="transcript-actor">{row.actor}</span>
-          <StatusPill tone={row.tone}>{row.event}</StatusPill>
-          <span className="transcript-message">{row.message}</span>
-          <span className="mono muted">{row.seq}</span>
-        </div>
-      ))}
+      {rows.map((row) => {
+        const truncated = row.message.length > MESSAGE_DISPLAY_MAX;
+        const shown = truncated ? `${row.message.slice(0, MESSAGE_DISPLAY_MAX - 1)}…` : row.message;
+        return (
+          <div className="transcript-row" key={row.id}>
+            <span className="mono muted" title={formatTime(row.time)}>
+              {formatClock(row.time)}
+            </span>
+            {compact ? null : <span className="transcript-actor">{row.actor}</span>}
+            <StatusPill tone={row.tone}>{row.event}</StatusPill>
+            <span
+              className={`transcript-message${truncated ? " is-truncated" : ""}`}
+              title={truncated ? row.message.slice(0, MESSAGE_TITLE_MAX) : undefined}
+            >
+              {shown}
+            </span>
+            {compact ? null : <span className="mono muted">{row.seq}</span>}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -170,7 +197,9 @@ function eventRow(event: EventStreamFrame, index: number): TranscriptRow | null 
         index,
         "system",
         "log",
-        compact([prop(payload, "message"), prop(payload, "data")].filter(Boolean).join(" ")),
+        [compact(prop(payload, "message")), compact(prop(payload, "data"))]
+          .filter(Boolean)
+          .join(" "),
       );
     case "step.completed":
       return basicRow(
@@ -267,12 +296,20 @@ function prop(value: unknown, key: string): unknown {
   return (value as Record<string, unknown>)[key];
 }
 
-function compact(value: unknown, max = 420): string {
+function compact(value: unknown, max = MESSAGE_TITLE_MAX): string {
   if (value === undefined || value === null) return "";
-  const text = typeof value === "string" ? value : JSON.stringify(value);
+  const text = typeof value === "string" ? value : safeStringify(value);
   if (!text) return "";
   const normalized = sanitizeInline(text).replace(/\s+/g, " ").trim();
-  return normalized.length <= max ? normalized : `${normalized.slice(0, max - 1)}...`;
+  return normalized.length <= max ? normalized : `${normalized.slice(0, max - 1)}…`;
+}
+
+function safeStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? String(value);
+  } catch {
+    return String(value);
+  }
 }
 
 function sanitizeInline(value: string): string {

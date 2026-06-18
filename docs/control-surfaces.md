@@ -115,16 +115,20 @@ daemon gateway, not a second operation dispatcher:
   system status. The runs list projection is intentionally bounded before
   per-run enrichment through the daemon `listRunsPage` RPC, defaults to the
   latest 100 runs, rejects limits above the shared 500-run RPC maximum, and
-  returns page metadata for honest truncation copy. Run projections hide
-  diagnostic `running` blockage and only surface actionable waits, agent
-  concurrency queues, interruptions, or stale owner-heartbeat stalls.
+  returns page metadata for honest truncation copy. Run detail projections also
+  include a server-extracted workflow `flow` IR when retained source is
+  parseable, keeping TypeScript parsing out of the browser bundle. Run
+  projections hide diagnostic `running` blockage and only surface actionable
+  waits, agent concurrency queues, interruptions, or stale owner-heartbeat
+  stalls.
 - Captured-source `launchRun` is admin-only through the web surface even though
   it remains open on the trusted local Unix socket.
 
 The React UI foundation lives under `web/` and is served by `keel web` from the
 `web/dist` bundle when present. It is a browser client over this same API, not a
-new operation boundary. Current UI coverage includes runs, run detail, approval
-decisions, workspace diff/review controls, saved workflow list/detail/source/run,
+new operation boundary. Current UI coverage includes runs, run detail with
+static workflow flow, approval decisions, workspace diff/review controls, saved
+workflow list/detail/source/run,
 read-only schedule list/detail/source, profile and setting list/get/check
 inspection, and system views. Browser mutations remain disabled or deferred
 unless a screen explicitly wires the operation through bearer-authorized `/rpc`

@@ -16,6 +16,8 @@ import type {
 } from "../rpc/contract.ts";
 import { normalizeEventCursorInput } from "../rpc/event-cursor.ts";
 import { type Blockage, MAX_RUN_SUMMARY_PAGE_LIMIT, isVisibleBlockage } from "../rpc/projection.ts";
+import { DEFAULT_WORKSPACE_ID } from "../workspace/identity.ts";
+import { buildWorkflowFlow } from "./workflow-flow.ts";
 
 export const DEFAULT_WEB_HOST = "127.0.0.1";
 export const DEFAULT_WEB_PORT = 7879;
@@ -23,6 +25,10 @@ export const DEFAULT_WEB_HEARTBEAT_MS = 15_000;
 export const DEFAULT_WEB_ASSETS_DIR = resolve(import.meta.dir, "..", "..", "web", "dist");
 export const DEFAULT_WEB_RUNS_LIMIT = 100;
 export const MAX_WEB_RUNS_LIMIT = MAX_RUN_SUMMARY_PAGE_LIMIT;
+
+const GATEWAY_DEBUG =
+  process.env.KEEL_GATEWAY_DEBUG === "1" || process.env.KEEL_WEB_GATEWAY_DEBUG === "1";
+let nextProjectionDebugId = 1;
 
 export interface KeelWebServerOptions {
   socketPath: string;
@@ -50,17 +56,29 @@ interface GatewayMessage {
 interface PendingRequest {
   resolve: (response: GatewayResponse) => void;
   reject: (err: unknown) => void;
+  debugContext?: string;
+  method: string;
+  params: unknown;
+  startedAtMs: number;
+  timer?: ReturnType<typeof setTimeout>;
 }
 
-class GatewaySocket {
+export class GatewaySocket {
   private buf = "";
   private nextId = 1;
   private readonly pending = new Map<string, PendingRequest>();
+  private readonly decoder = new TextDecoder();
+  private readonly writeQueue: string[] = [];
+  private drainingWrites = false;
   private disconnected = false;
   onEvent: ((event: GatewayEventFrame) => void) | null = null;
   onClose: ((err: unknown) => void) | null = null;
 
   private constructor(private readonly socket: Socket) {}
+
+  static fromConnectedSocketForTest(socket: Socket): GatewaySocket {
+    return new GatewaySocket(socket);
+  }
 
   static connect(socketPath: string): Promise<GatewaySocket> {
     return new Promise((resolve, reject) => {
@@ -86,9 +104,15 @@ class GatewaySocket {
     params: unknown,
     credential: string | null,
     requestId?: unknown,
+    debugContext?: string,
   ): Promise<GatewayResponse> {
     return new Promise((resolve, reject) => {
+      if (this.disconnected || this.socket.destroyed) {
+        reject(new Error("daemon connection closed"));
+        return;
+      }
       const id = requestId ?? this.nextId++;
+      const key = requestKey(id);
       const request: GatewayRequest = {
         id,
         method,
@@ -96,26 +120,98 @@ class GatewaySocket {
         credential,
         surface: "web",
       };
-      this.pending.set(requestKey(id), { resolve, reject });
-      this.socket.write(`${JSON.stringify(request)}\n`);
+      const startedAtMs = Date.now();
+      const pending: PendingRequest = {
+        resolve,
+        reject,
+        debugContext,
+        method,
+        params,
+        startedAtMs,
+      };
+      if (debugContext) {
+        webDebug(
+          `[keel web] gateway send ${debugContext} id=${key} method=${method} ${rpcDebugLabel(
+            params,
+          )}`,
+        );
+        pending.timer = setTimeout(() => {
+          if (!this.pending.has(key)) return;
+          webDebug(
+            `[keel web] gateway pending ${debugContext} id=${key} method=${method} ${Date.now() - startedAtMs}ms ${rpcDebugLabel(
+              params,
+            )}`,
+          );
+        }, 2_000);
+      }
+      this.pending.set(key, pending);
+      this.enqueueWrite(`${JSON.stringify(request)}\n`);
     });
   }
 
   close(): void {
     this.onClose = null;
+    this.disconnected = true;
+    this.buf = "";
+    this.writeQueue.length = 0;
     this.socket.end();
     this.socket.destroy();
     this.failAll(new Error("daemon connection closed"));
   }
 
+  receiveForTest(chunk: Buffer | string): void {
+    this.onData(chunk);
+  }
+
   private onData(chunk: Buffer | string): void {
-    this.buf += chunk.toString();
+    if (this.disconnected) return;
+    this.buf += typeof chunk === "string" ? chunk : this.decoder.decode(chunk, { stream: true });
     let nl = this.buf.indexOf("\n");
     while (nl >= 0) {
       const line = this.buf.slice(0, nl);
       this.buf = this.buf.slice(nl + 1);
-      if (line.trim()) this.onMessage(JSON.parse(line) as GatewayMessage);
+      if (line.trim()) {
+        try {
+          this.onMessage(JSON.parse(line) as GatewayMessage);
+        } catch (err) {
+          webWarn(
+            `[keel web] gateway invalid json line length=${line.length}: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
+      }
       nl = this.buf.indexOf("\n");
+    }
+  }
+
+  private enqueueWrite(line: string): void {
+    this.writeQueue.push(line);
+    this.drainWrites();
+  }
+
+  private drainWrites(): void {
+    if (this.drainingWrites) return;
+    this.drainingWrites = true;
+    void this.drainWritesAsync();
+  }
+
+  private async drainWritesAsync(): Promise<void> {
+    try {
+      while (!this.disconnected && this.writeQueue.length > 0) {
+        const batch = this.writeQueue.splice(0).join("");
+        await new Promise<void>((resolve, reject) => {
+          this.socket.write(batch, (err?: Error | null) => {
+            if (err) reject(err);
+            else resolve();
+          });
+        });
+      }
+    } catch (err) {
+      this.failAll(err, true);
+    } finally {
+      this.drainingWrites = false;
+      if (!this.disconnected && this.writeQueue.length > 0) this.drainWrites();
     }
   }
 
@@ -127,8 +223,20 @@ class GatewaySocket {
     if (message.id === undefined) return;
     const key = requestKey(message.id);
     const pending = this.pending.get(key);
-    if (!pending) return;
+    if (!pending) {
+      webDebug(`[keel web] gateway response without pending id=${key}`);
+      return;
+    }
     this.pending.delete(key);
+    if (pending.timer) clearTimeout(pending.timer);
+    if (pending.debugContext) {
+      const status = message.error ? "error" : "result";
+      webDebug(
+        `[keel web] gateway recv ${pending.debugContext} id=${key} method=${pending.method} ${status} ${Date.now() - pending.startedAtMs}ms ${rpcDebugLabel(
+          pending.params,
+        )}`,
+      );
+    }
     pending.resolve({
       id: message.id,
       ...(message.error ? { error: message.error } : { result: message.result }),
@@ -136,7 +244,17 @@ class GatewaySocket {
   }
 
   private failAll(err: unknown, notify = false): void {
-    for (const pending of this.pending.values()) pending.reject(err);
+    for (const [key, pending] of this.pending.entries()) {
+      if (pending.timer) clearTimeout(pending.timer);
+      if (pending.debugContext) {
+        webDebug(
+          `[keel web] gateway fail ${pending.debugContext} id=${key} method=${pending.method} ${Date.now() - pending.startedAtMs}ms ${rpcDebugLabel(
+            pending.params,
+          )}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      pending.reject(err);
+    }
     this.pending.clear();
     if (notify && !this.disconnected) {
       this.disconnected = true;
@@ -301,14 +419,44 @@ async function projectionRoute(
 ): Promise<Response> {
   const credential = bearerCredential(request);
   const conn = await connectGatewaySocket(socketPath);
+  const routeStartedAt = Date.now();
+  const debugLabel =
+    GATEWAY_DEBUG && kind === "runs" ? `api/runs#${nextProjectionDebugId++}` : undefined;
+  if (debugLabel) {
+    webDebug(`[keel web] ${debugLabel} start ${new URL(request.url).search}`);
+  }
   try {
-    const call = <T>(method: string, params: unknown = {}) =>
-      gatewayResultOn<T>(conn, method, params, credential);
+    const call = async <T>(method: string, params: unknown = {}) => {
+      const startedAt = Date.now();
+      try {
+        const result = await gatewayResultOn<T>(conn, method, params, credential, debugLabel);
+        if (debugLabel) {
+          webDebug(
+            `[keel web] ${debugLabel} rpc ${method} ok ${Date.now() - startedAt}ms ${rpcDebugLabel(
+              params,
+            )}`,
+          );
+        }
+        return result;
+      } catch (err) {
+        if (debugLabel) {
+          webDebug(
+            `[keel web] ${debugLabel} rpc ${method} failed ${Date.now() - startedAt}ms ${rpcDebugLabel(
+              params,
+            )}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+        throw err;
+      }
+    };
     if (kind === "runs") {
       const limit = parseRunsLimit(new URL(request.url));
       const summariesPage = await call<{ runs: Array<{ runId: string }>; total: number }>(
         "listRunsPage",
         { limit },
+      );
+      webDebug(
+        `[keel web] ${debugLabel} page total=${summariesPage.total} returned=${summariesPage.runs.length}`,
       );
       const page = runsPageMetadata(summariesPage.total, limit);
       const runs = await Promise.all(
@@ -316,16 +464,20 @@ async function projectionRoute(
           const [run, blockage, workspaces] = await Promise.all([
             call("getRun", { runId: summary.runId }),
             call("getBlockage", { runId: summary.runId }),
-            call<unknown[]>("listRunWorkspaces", { runId: summary.runId, includeRemoved: true }),
+            call<unknown[]>("listRunWorkspaces", {
+              runId: summary.runId,
+              includeRemoved: true,
+            }),
           ]);
           return {
             ...summary,
             run,
             blockage: isVisibleBlockage(blockage as Blockage) ? blockage : null,
-            workspaceSummary: { count: workspaces.length },
+            workspaceSummary: { count: visibleWorkspaceCount(workspaces) },
           };
         }),
       );
+      webDebug(`[keel web] ${debugLabel} done ${Date.now() - routeStartedAt}ms`);
       return projectionJson({ runs, page: { ...page, returned: runs.length } });
     }
     if (kind === "run") {
@@ -345,6 +497,7 @@ async function projectionRoute(
         blockage: isVisibleBlockage(blockage as Blockage) ? blockage : null,
         workspaces,
         source,
+        flow: buildWorkflowFlow(source as Parameters<typeof buildWorkflowFlow>[0]),
         events: eventTail.events,
         eventCursor: eventTail.cursor,
         rawEvents: { href: `/runs/${encodeURIComponent(runId)}/events` },
@@ -396,7 +549,7 @@ async function projectionRoute(
         ),
       );
       return projectionJson({
-        workspaces: nested.flat(),
+        workspaces: visibleWorkspaces(nested.flat()),
         mutationAuthority: "admin",
         mutationAuthorized: hasAdmin,
       });
@@ -415,8 +568,40 @@ async function projectionRoute(
       ],
     });
   } finally {
+    if (debugLabel) {
+      webDebug(`[keel web] ${debugLabel} closing gateway ${Date.now() - routeStartedAt}ms`);
+    }
     conn.close();
   }
+}
+
+function webDebug(message: string): void {
+  if (!GATEWAY_DEBUG) return;
+  console.error(`${new Date().toISOString()} ${message}`);
+}
+
+function webWarn(message: string): void {
+  console.error(`${new Date().toISOString()} ${message}`);
+}
+
+function rpcDebugLabel(params: unknown): string {
+  if (!params || typeof params !== "object") return "";
+  if ("runId" in params && typeof params.runId === "string") return `runId=${params.runId}`;
+  if ("limit" in params && typeof params.limit === "number") return `limit=${params.limit}`;
+  return "";
+}
+
+function visibleWorkspaceCount(workspaces: unknown[]): number {
+  return visibleWorkspaces(workspaces).length;
+}
+
+function visibleWorkspaces<T>(workspaces: T[]): T[] {
+  return workspaces.filter((workspace) => !isDefaultWorkspaceView(workspace));
+}
+
+function isDefaultWorkspaceView(workspace: unknown): boolean {
+  if (!workspace || typeof workspace !== "object" || !("workspaceId" in workspace)) return false;
+  return workspace.workspaceId === DEFAULT_WORKSPACE_ID;
 }
 
 export function runsPageMetadata(
@@ -527,7 +712,7 @@ async function eventsRoute(
           let caughtUpSeen = false;
           conn.onClose = () => failStream({ message: "daemon connection closed" });
           conn.onEvent = (frame) => {
-            write(sseForGatewayFrame(frame));
+            if (!suppressGatewayFrame(frame)) write(sseForGatewayFrame(frame));
             if (frame.kind === "control" && frame.type === "caught-up") caughtUpSeen = true;
             const closedStatus = closedStatusForFrame(frame);
             if (closedStatus && !closedControlSent && (frame.kind === "control" || caughtUpSeen)) {
@@ -546,7 +731,8 @@ async function eventsRoute(
             }
             if (
               frame.kind === "control" &&
-              (frame.type === "authorization.failed" || frame.type === "closed")
+              (frame.type === "authorization.failed" ||
+                (frame.type === "closed" && !keepStreamOpenForStatus(frame.status)))
             ) {
               scheduleClose();
             }
@@ -557,18 +743,7 @@ async function eventsRoute(
               if (closed) return null;
               throw err;
             });
-          const snapshot = await conn.request("getRun", { runId }, credential).catch((err) => {
-            if (closed) return null;
-            throw err;
-          });
-          if (!snapshot) return;
-          if (snapshot.error) {
-            sendSnapshot(null);
-            write(sseFrame("error", redactCapabilityTokensInValue(snapshot.error)));
-            scheduleClose();
-            return;
-          }
-          sendSnapshot(snapshot.result);
+          sendSnapshot(preflight.result);
           const response = await subscribed;
           if (!response) return;
           if (response.error) {
@@ -634,8 +809,9 @@ async function gatewayResultOn<T>(
   method: string,
   params: unknown,
   credential: string | null,
+  debugContext?: string,
 ): Promise<T> {
-  const response = await conn.request(method, params, credential);
+  const response = await conn.request(method, params, credential, undefined, debugContext);
   return resultOrHttpError<T>(response);
 }
 
@@ -713,8 +889,20 @@ function sseForGatewayFrame(frame: GatewayEventFrame): string {
   return sseFrame("event", payload);
 }
 
+function suppressGatewayFrame(frame: GatewayEventFrame): boolean {
+  return (
+    frame.kind === "control" && frame.type === "closed" && keepStreamOpenForStatus(frame.status)
+  );
+}
+
+function keepStreamOpenForStatus(status: string): boolean {
+  return status === "waiting-human";
+}
+
 function closedStatusForFrame(frame: GatewayEventFrame): string | null {
-  if (frame.kind === "control" && frame.type === "closed") return frame.status;
+  if (frame.kind === "control" && frame.type === "closed") {
+    return keepStreamOpenForStatus(frame.status) ? null : frame.status;
+  }
   if (frame.kind !== "durable") return null;
   switch (frame.type) {
     case "run.finished":
@@ -731,6 +919,7 @@ function closedStatusForFrame(frame: GatewayEventFrame): string | null {
         frame.payload && typeof frame.payload === "object"
           ? (frame.payload as { kind?: unknown }).kind
           : null;
+      if (kind === "human") return null;
       return typeof kind === "string" ? `waiting-${kind}` : "parked";
     }
     default:

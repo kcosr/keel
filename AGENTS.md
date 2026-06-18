@@ -2,8 +2,9 @@
 
 For normal agent use, assume the Keel daemon is already running and the `keel`
 CLI is configured to reach it through the environment (`KEEL_SOCKET` or
-`KEEL_DIR`). Do not start, restart, or inspect the systemd service unless the
-user explicitly asks for daemon operations.
+`KEEL_DIR`). Do not start, restart, or inspect the `keel-daemon`/`keel-web`
+systemd services unless the user explicitly asks for daemon or web-console
+operations.
 
 ## Project Rules
 
@@ -177,26 +178,43 @@ not the primary regression suite.
 
 ## Systemd
 
-These commands are for explicit human-requested daemon operations only. Agents
-running workflows should use the configured `keel` CLI and should not touch
-systemd by default.
+These commands are for explicit human-requested daemon or web-console
+operations only. Agents running workflows should use the configured `keel` CLI
+and should not touch systemd by default.
 
-Check the daemon status:
+Two `--user` units run the compiled binary (`~/.bun/bin/keel` → `dist/keel`):
+
+- `keel-daemon.service` runs `keel daemon` — owns the journal and runs
+  workflows.
+- `keel-web.service` runs `keel web` — serves the local HTTP/SSE API and the
+  built `web/dist` console on `0.0.0.0:4000`. The web unit connects to the
+  daemon socket at request time; do not add default-target ordering that creates
+  a cycle with the daemon unit.
+
+Check status:
 
 ```bash
 systemctl --user status keel-daemon.service
+systemctl --user status keel-web.service
 ```
 
-Restart the daemon after local changes:
+Restart after local changes. Both units run the compiled `dist/keel`, so a code
+change needs a rebuild before the restart takes effect:
 
 ```bash
-systemctl --user restart keel-daemon.service
+# Daemon or shared code changed:
+bun run build && systemctl --user restart keel-daemon.service
+# Web-transport (`keel web`) code changed:
+bun run build && systemctl --user restart keel-web.service
+# Only the React frontend changed (rebuild the bundle the web console serves):
+bun run web:build && systemctl --user restart keel-web.service
 ```
 
-View recent daemon logs:
+View recent logs:
 
 ```bash
 journalctl --user -u keel-daemon.service --no-pager --lines=80
+journalctl --user -u keel-web.service --no-pager --lines=80
 ```
 
 ## Usage

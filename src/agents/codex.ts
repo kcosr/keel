@@ -1093,19 +1093,30 @@ async function resumeThread(
   const token = invocation.resumeToken;
   if (!token) throw new Error("codex resume requires a thread id");
   state.threadId = token;
-  const readResult = await client.request("thread/read", { threadId: token });
-  const readThreadId = requiredThreadIdFromResult(readResult);
-  if (readThreadId && readThreadId !== token) {
-    throw new Error(`codex resumed thread id mismatch: expected ${token}, got ${readThreadId}`);
+
+  const resumeResult = await client.request("thread/resume", {
+    threadId: token,
+    cwd: invocation.cwd,
+    ...(invocation.model ? { model: invocation.model } : {}),
+    ...(invocation.reasoning ? { reasoning: invocation.reasoning } : {}),
+    ...threadParams,
+  });
+  const resumedThreadId = requiredThreadIdFromResult(resumeResult);
+  if (!resumedThreadId) throw new Error("codex: thread/resume did not return thread.id");
+  if (resumedThreadId !== token) {
+    throw new Error(
+      `codex thread/resume returned different thread id: expected ${token}, got ${resumedThreadId}`,
+    );
   }
-  const thread = recordAt(readResult, ["thread"]);
-  const observedCwd = thread ? stringAt(thread, ["cwd"]) : stringAt(readResult, ["cwd"]);
+
+  const thread = recordAt(resumeResult, ["thread"]);
+  const observedCwd = thread ? stringAt(thread, ["cwd"]) : stringAt(resumeResult, ["cwd"]);
   if (observedCwd && observedCwd !== invocation.cwd) {
     throw new Error(
       `codex resumed thread cwd mismatch: expected ${invocation.cwd}, got ${observedCwd}`,
     );
   }
-  let statusType = threadStatusType(readResult);
+  let statusType = threadStatusType(resumeResult);
   if (statusType === "active") {
     const activeTurnId = await discoverActiveTurnId(client, token);
     if (!activeTurnId) {
@@ -1133,7 +1144,7 @@ async function resumeThread(
   }
   if (statusType === "systemError") {
     throw new Error(
-      `codex resumed thread is in systemError state: ${bestErrorMessage(readResult) ?? "unknown Codex system error"}`,
+      `codex resumed thread is in systemError state: ${bestErrorMessage(resumeResult) ?? "unknown Codex system error"}`,
     );
   }
   if (statusType === "notLoaded") {
@@ -1144,21 +1155,6 @@ async function resumeThread(
   }
   if (!statusType) {
     throw new Error("codex resumed thread has unknown status");
-  }
-
-  const resumeResult = await client.request("thread/resume", {
-    threadId: token,
-    cwd: invocation.cwd,
-    ...(invocation.model ? { model: invocation.model } : {}),
-    ...(invocation.reasoning ? { reasoning: invocation.reasoning } : {}),
-    ...threadParams,
-  });
-  const resumedThreadId = requiredThreadIdFromResult(resumeResult);
-  if (!resumedThreadId) throw new Error("codex: thread/resume did not return thread.id");
-  if (resumedThreadId !== token) {
-    throw new Error(
-      `codex thread/resume returned different thread id: expected ${token}, got ${resumedThreadId}`,
-    );
   }
 }
 

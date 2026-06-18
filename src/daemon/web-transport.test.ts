@@ -835,6 +835,7 @@ describe("web transport", () => {
         gateId: "approve-deploy",
         requiredAuthority: "admin",
       });
+      expect(approvals.body.approvals[0].createdAtMs).toBeGreaterThan(0);
       expect(approvals.body).toMatchObject({
         decisionAuthority: "admin",
         decisionAuthorized: true,

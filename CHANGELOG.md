@@ -329,6 +329,9 @@
   `KEEL_CAP_DIR`.
 
 ### Fixed
+- Approval blockage and web approval projections now use the persisted
+  `requested_at_ms` timestamp instead of rendering pending human gates as the
+  Unix epoch.
 - Codex agent resume now calls app-server `thread/resume` directly so cold
   persisted threads can be loaded after app-server or daemon restart instead of
   failing on a pre-resume `notLoaded` `thread/read` view.

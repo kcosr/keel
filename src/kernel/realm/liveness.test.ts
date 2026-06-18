@@ -236,7 +236,11 @@ describe("getBlockage", () => {
   test("waiting-human maps to waiting_human; terminal maps to none", () => {
     const s1 = JournalStore.memory();
     seedRun(s1, "waiting-human");
-    expect(getBlockage(s1, "r", 1).reason).toBe("waiting_human");
+    s1.requestApproval("r", "approve-deploy", { prompt: "Deploy?" }, 1_234);
+    expect(getBlockage(s1, "r", 1)).toMatchObject({
+      reason: "waiting_human",
+      blockedOn: { stableKey: "approve-deploy", since: 1_234 },
+    });
     const s2 = JournalStore.memory();
     seedRun(s2, "finished");
     expect(getBlockage(s2, "r", 1).reason).toBe("none");

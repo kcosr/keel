@@ -448,7 +448,7 @@ export function getBlockage(
       const pending = store.listPendingApprovals(runId)[0];
       return {
         reason: "waiting_human",
-        blockedOn: pending ? { stableKey: pending.stableKey, since: 0 } : null,
+        blockedOn: pending ? { stableKey: pending.stableKey, since: pending.requestedAtMs } : null,
         context: pending?.prompt
           ? `awaiting decision: ${pending.prompt}`
           : "awaiting a human decision",

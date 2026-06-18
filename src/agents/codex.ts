@@ -28,6 +28,7 @@ export const CODEX_FAST_SERVICE_TIER_WIRE_VALUE = "priority";
 export const CODEX_NORMAL_SERVICE_TIER_WIRE_VALUE: null = null;
 
 const CODEX_CLIENT_INFO = Object.freeze({ name: "keel", title: "Keel", version: "0.0.0" });
+const CODEX_OPT_OUT_NOTIFICATION_METHODS = Object.freeze(["thread/started"]);
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const STDERR_TAIL_BYTES = 4_000;
 
@@ -261,7 +262,10 @@ export class CodexProvider implements AgentProvider {
       await raceAbort(
         client.request("initialize", {
           clientInfo: CODEX_CLIENT_INFO,
-          capabilities: { experimentalApi: true },
+          capabilities: {
+            experimentalApi: true,
+            optOutNotificationMethods: CODEX_OPT_OUT_NOTIFICATION_METHODS,
+          },
         }),
       );
       await raceAbort(client.notify("initialized"));
@@ -282,11 +286,6 @@ export class CodexProvider implements AgentProvider {
         );
         const threadId = requiredThreadIdFromResult(startResult);
         if (!threadId) throw new Error("codex: thread/start did not return thread.id");
-        if (state.threadId && state.threadId !== threadId) {
-          throw new Error(
-            `codex thread/start notification id mismatch: expected ${threadId}, got ${state.threadId}`,
-          );
-        }
         noteSessionToken(threadId);
       }
 
@@ -994,8 +993,10 @@ function handleCodexNotification(
 ): void {
   switch (method) {
     case "thread/started": {
-      const threadId = threadStartedNotificationThreadId(params);
-      if (threadId && !state.threadId) state.threadId = threadId;
+      // thread/started is connection-level noise for Keel's use case. The
+      // thread/start RPC response is the authoritative source for this call's
+      // thread id, and shared app-server transports can broadcast other
+      // clients' thread starts before our response arrives.
       break;
     }
     case "turn/started": {
@@ -1378,10 +1379,6 @@ function requiredThreadIdFromResult(value: unknown): string | undefined {
 
 function requiredTurnIdFromResult(value: unknown): string | undefined {
   return stringAt(value, ["turn", "id"]);
-}
-
-function threadStartedNotificationThreadId(value: unknown): string | undefined {
-  return stringAt(value, ["thread", "id"]);
 }
 
 function notificationThreadId(value: unknown): string | undefined {

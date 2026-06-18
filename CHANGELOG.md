@@ -358,6 +358,10 @@
 - Codex remote app-server transports now accept Desktop app-server response and
   notification frames that omit the optional `jsonrpc: "2.0"` marker while still
   rejecting malformed frames.
+- Codex app-server launches now opt out of `thread/started` notifications and
+  ignore any that still arrive, avoiding false thread-id mismatches when a
+  shared app-server broadcasts another client's thread start during concurrent
+  Keel agent launches.
 - `keel watch` and attached lifecycle commands no longer exit on stale
   historical parked/terminal events when replaying a run that later resumed.
 - The live review workload fixture now uses a valid repository target when

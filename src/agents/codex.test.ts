@@ -1102,6 +1102,52 @@ describe("Codex JSON-RPC flow", () => {
     );
   });
 
+  test("thread/start ignores unrelated thread/started notifications from shared app-server", async () => {
+    const transport = new ScriptedTransport((message, t) => {
+      switch (message.method) {
+        case "initialize":
+          t.respond(message.id, {});
+          break;
+        case "initialized":
+          break;
+        case "thread/start":
+          t.notify("thread/started", { thread: { id: "other-thread" } });
+          t.respond(message.id, { thread: { id: "thread-1" } });
+          break;
+        case "turn/start":
+          t.respond(message.id, { turn: { id: "turn-1" } });
+          t.notify("turn/started", { threadId: "thread-1", turn: { id: "turn-1" } });
+          t.notify("item/agentMessage/delta", {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            delta: "ok",
+          });
+          t.notify("turn/completed", {
+            threadId: "thread-1",
+            turn: { id: "turn-1", status: "completed" },
+          });
+          break;
+        default:
+          throw new Error(`unexpected ${String(message.method)}`);
+      }
+    });
+
+    const { result, tokens, factory } = await runWithTransport(transport);
+    const initialize = transport.sent.find((message) => message.method === "initialize");
+
+    expect(result.text).toBe("ok");
+    expect(tokens).toEqual(["thread-1"]);
+    expect(initialize).toMatchObject({
+      params: {
+        capabilities: {
+          experimentalApi: true,
+          optOutNotificationMethods: ["thread/started"],
+        },
+      },
+    });
+    expect(factory.context?.cwd).toBe(process.cwd());
+  });
+
   test("turn/start can use turn/started notification id when the RPC result is only an ack", async () => {
     const transport = new ScriptedTransport((message, t) => {
       switch (message.method) {

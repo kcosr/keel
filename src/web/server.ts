@@ -60,7 +60,7 @@ interface PendingRequest {
   timer?: ReturnType<typeof setTimeout>;
 }
 
-class GatewaySocket {
+export class GatewaySocket {
   private buf = "";
   private nextId = 1;
   private readonly pending = new Map<string, PendingRequest>();
@@ -72,6 +72,10 @@ class GatewaySocket {
   onClose: ((err: unknown) => void) | null = null;
 
   private constructor(private readonly socket: Socket) {}
+
+  static fromConnectedSocketForTest(socket: Socket): GatewaySocket {
+    return new GatewaySocket(socket);
+  }
 
   static connect(socketPath: string): Promise<GatewaySocket> {
     return new Promise((resolve, reject) => {
@@ -145,12 +149,19 @@ class GatewaySocket {
   close(): void {
     this.onClose = null;
     this.disconnected = true;
+    this.buf = "";
+    this.writeQueue.length = 0;
     this.socket.end();
     this.socket.destroy();
     this.failAll(new Error("daemon connection closed"));
   }
 
+  receiveForTest(chunk: Buffer | string): void {
+    this.onData(chunk);
+  }
+
   private onData(chunk: Buffer | string): void {
+    if (this.disconnected) return;
     this.buf += typeof chunk === "string" ? chunk : this.decoder.decode(chunk, { stream: true });
     let nl = this.buf.indexOf("\n");
     while (nl >= 0) {

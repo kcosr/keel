@@ -65,6 +65,7 @@ class SocketGatewaySession implements GatewaySession {
   private readonly decoder = new TextDecoder();
   private readonly writeQueue: string[] = [];
   private drainingWrites = false;
+  private closed = false;
 
   constructor(private readonly socket: Socket<undefined>) {
     this.buf = "";
@@ -96,15 +97,20 @@ class SocketGatewaySession implements GatewaySession {
   }
 
   close(): void {
+    this.closed = true;
+    this.buf = "";
+    this.writeQueue.length = 0;
     for (const cleanup of [...this.cleanups]) cleanup();
     this.cleanups.clear();
   }
 
   appendData(data: Buffer): void {
+    if (this.closed) return;
     this.buf += this.decoder.decode(data, { stream: true });
   }
 
   private writeFrame(frame: unknown): void {
+    if (this.closed) return;
     this.writeQueue.push(`${JSON.stringify(frame)}\n`);
     this.drainWrites();
   }
@@ -114,13 +120,13 @@ class SocketGatewaySession implements GatewaySession {
     this.drainingWrites = true;
     queueMicrotask(() => {
       try {
-        while (this.writeQueue.length > 0) {
+        while (!this.closed && this.writeQueue.length > 0) {
           const batch = this.writeQueue.splice(0).join("");
           this.socket.write(batch);
         }
       } finally {
         this.drainingWrites = false;
-        if (this.writeQueue.length > 0) this.drainWrites();
+        if (!this.closed && this.writeQueue.length > 0) this.drainWrites();
       }
     });
   }

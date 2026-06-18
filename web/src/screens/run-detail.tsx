@@ -332,12 +332,19 @@ function WorkspacesTable({ detail }: { detail: RunDetailResponse }) {
     <DenseTable
       rows={detail.workspaces}
       rowKey={(workspace) => workspace.workspaceId}
-      empty="No retained workspaces"
+      empty="No workspaces"
       columns={[
         {
           key: "id",
           header: "Workspace",
-          render: (workspace) => <span className="mono">{workspace.workspaceId}</span>,
+          render: (workspace) =>
+            isDefaultWorkspace(workspace) ? (
+              <span className="default-target-cell">
+                <StatusPill tone="info">default</StatusPill>
+              </span>
+            ) : (
+              <span className="mono">{workspace.workspaceId}</span>
+            ),
         },
         { key: "mode", header: "Mode", width: "110px", render: (workspace) => workspace.mode },
         {
@@ -345,7 +352,11 @@ function WorkspacesTable({ detail }: { detail: RunDetailResponse }) {
           header: "Status",
           width: "120px",
           render: (workspace) => (
-            <StatusPill tone={toneForStatus(workspace.status)}>{workspace.status}</StatusPill>
+            <StatusPill
+              tone={isDefaultWorkspace(workspace) ? "neutral" : toneForStatus(workspace.status)}
+            >
+              {isDefaultWorkspace(workspace) ? "target" : workspace.status}
+            </StatusPill>
           ),
         },
         {
@@ -358,6 +369,10 @@ function WorkspacesTable({ detail }: { detail: RunDetailResponse }) {
       ]}
     />
   );
+}
+
+function isDefaultWorkspace(workspace: { workspaceId: string }): boolean {
+  return workspace.workspaceId === "__default";
 }
 
 function ApprovalPanel({

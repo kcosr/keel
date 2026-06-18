@@ -16,6 +16,7 @@ import type {
 } from "../rpc/contract.ts";
 import { normalizeEventCursorInput } from "../rpc/event-cursor.ts";
 import { type Blockage, MAX_RUN_SUMMARY_PAGE_LIMIT, isVisibleBlockage } from "../rpc/projection.ts";
+import { DEFAULT_WORKSPACE_ID } from "../workspace/identity.ts";
 import { buildWorkflowFlow } from "./workflow-flow.ts";
 
 export const DEFAULT_WEB_HOST = "127.0.0.1";
@@ -472,7 +473,7 @@ async function projectionRoute(
             ...summary,
             run,
             blockage: isVisibleBlockage(blockage as Blockage) ? blockage : null,
-            workspaceSummary: { count: workspaces.length },
+            workspaceSummary: { count: visibleWorkspaceCount(workspaces) },
           };
         }),
       );
@@ -548,7 +549,7 @@ async function projectionRoute(
         ),
       );
       return projectionJson({
-        workspaces: nested.flat(),
+        workspaces: visibleWorkspaces(nested.flat()),
         mutationAuthority: "admin",
         mutationAuthorized: hasAdmin,
       });
@@ -588,6 +589,19 @@ function rpcDebugLabel(params: unknown): string {
   if ("runId" in params && typeof params.runId === "string") return `runId=${params.runId}`;
   if ("limit" in params && typeof params.limit === "number") return `limit=${params.limit}`;
   return "";
+}
+
+function visibleWorkspaceCount(workspaces: unknown[]): number {
+  return visibleWorkspaces(workspaces).length;
+}
+
+function visibleWorkspaces<T>(workspaces: T[]): T[] {
+  return workspaces.filter((workspace) => !isDefaultWorkspaceView(workspace));
+}
+
+function isDefaultWorkspaceView(workspace: unknown): boolean {
+  if (!workspace || typeof workspace !== "object" || !("workspaceId" in workspace)) return false;
+  return workspace.workspaceId === DEFAULT_WORKSPACE_ID;
 }
 
 export function runsPageMetadata(

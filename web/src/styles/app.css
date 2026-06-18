@@ -718,6 +718,11 @@ h3 {
   white-space: nowrap;
 }
 
+.default-target-cell .pill {
+  align-self: flex-start;
+  color: var(--info);
+}
+
 .table-empty,
 .state {
   align-items: center;

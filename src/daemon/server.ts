@@ -57,13 +57,14 @@ export interface DaemonOptions {
   clock?: () => number;
 }
 
-class SocketGatewaySession implements GatewaySession {
+export class SocketGatewaySession implements GatewaySession {
   readonly id = randomUUID();
   buf: string;
   private credential: string | null;
   private readonly cleanups = new Set<() => void>();
   private readonly decoder = new TextDecoder();
-  private readonly writeQueue: string[] = [];
+  private readonly encoder = new TextEncoder();
+  private readonly writeQueue: Array<{ data: Uint8Array; offset: number }> = [];
   private drainingWrites = false;
   private closed = false;
 
@@ -111,24 +112,39 @@ class SocketGatewaySession implements GatewaySession {
 
   private writeFrame(frame: unknown): void {
     if (this.closed) return;
-    this.writeQueue.push(`${JSON.stringify(frame)}\n`);
+    this.writeQueue.push({
+      data: this.encoder.encode(`${JSON.stringify(frame)}\n`),
+      offset: 0,
+    });
     this.drainWrites();
   }
 
-  private drainWrites(): void {
+  drainWrites(): void {
     if (this.drainingWrites) return;
     this.drainingWrites = true;
     queueMicrotask(() => {
       try {
-        while (!this.closed && this.writeQueue.length > 0) {
-          const batch = this.writeQueue.splice(0).join("");
-          this.socket.write(batch);
-        }
+        this.flushWrites();
       } finally {
         this.drainingWrites = false;
-        if (!this.closed && this.writeQueue.length > 0) this.drainWrites();
       }
     });
+  }
+
+  private flushWrites(): void {
+    while (!this.closed && this.writeQueue.length > 0) {
+      const next = this.writeQueue[0];
+      if (!next) return;
+      const remaining = next.data.byteLength - next.offset;
+      const written = this.socket.write(next.data, next.offset, remaining);
+      if (written < 0) {
+        this.close();
+        return;
+      }
+      if (written === 0) return;
+      next.offset += written;
+      if (next.offset >= next.data.byteLength) this.writeQueue.shift();
+    }
   }
 }
 
@@ -254,6 +270,9 @@ export class KeelDaemon {
           (socket as GatewaySocket).session = new SocketGatewaySession(socket);
         },
         data: (socket, data) => this.onData(socket as GatewaySocket, data),
+        drain: (socket) => {
+          (socket as GatewaySocket).session?.drainWrites();
+        },
         close: (socket) => {
           (socket as GatewaySocket).session?.close();
         },

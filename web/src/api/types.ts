@@ -244,6 +244,17 @@ export interface WorkflowFlowOperation {
 
 export interface WorkflowFlowView {
   entry: { name: string | null; async: boolean; params: string[] };
+  input: {
+    paramName: string;
+    type: string | null;
+    fields: Array<{
+      name: string;
+      type: string;
+      optional: boolean;
+      default?: WorkflowExprSummary;
+      used: boolean;
+    }>;
+  } | null;
   operations: WorkflowFlowOperation[];
   diagnostics: Array<{ severity: "info" | "warning"; message: string }>;
 }

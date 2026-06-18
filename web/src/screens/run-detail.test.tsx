@@ -154,6 +154,13 @@ describe("RunDetailScreen", () => {
 
     expect((await screen.findAllByText("approve-review")).length).toBeGreaterThan(0);
     expect(screen.getByText("keel approve run_1 approve-review")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Approval decisions require admin authority and a refreshed run projection.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Approve" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Deny" })).toBeDisabled();
   });
 
   test("projects live phase events without refetching detail", async () => {

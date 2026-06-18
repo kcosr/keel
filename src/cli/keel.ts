@@ -2545,7 +2545,7 @@ async function workspaceCommand(args: string[]): Promise<number> {
       if (!runId) return usage("workspace needs list <runId> [--all]");
       const all = rest.includes("--all") || args.slice(2).includes("--all");
       const workspaces = (await client.listRunWorkspaces(runId, { includeRemoved: all })).filter(
-        (workspace) => workspace.workspaceId !== DEFAULT_WORKSPACE_ID,
+        (workspace) => all || workspace.workspaceId !== DEFAULT_WORKSPACE_ID,
       );
       process.stdout.write(`${JSON.stringify({ workspaces })}\n`);
       return 0;

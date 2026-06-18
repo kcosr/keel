@@ -34,7 +34,7 @@ const ZOOM_STEP = 0.15;
 const ZOOM_MIN = 0.5;
 const ZOOM_MAX = 1.6;
 
-const TERMINAL = new Set<RunStatus>(["finished", "failed", "cancelled", "continued"]);
+const COMPLETED_TERMINAL = new Set<RunStatus>(["finished", "continued"]);
 
 export function WorkflowFlow({
   flow,
@@ -49,10 +49,10 @@ export function WorkflowFlow({
   runStatus: RunStatus;
   runtime?: FlowRuntimeOverrides;
 }) {
-  const finished = TERMINAL.has(runStatus);
+  const completed = COMPLETED_TERMINAL.has(runStatus);
   const layout = useMemo(
-    () => layoutFlow(flow, { nodes, phase, finished, overrides: runtime }),
-    [flow, nodes, phase, finished, runtime],
+    () => layoutFlow(flow, { nodes, phase, finished: completed, overrides: runtime }),
+    [flow, nodes, phase, completed, runtime],
   );
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [zoom, setZoom] = useState(1);

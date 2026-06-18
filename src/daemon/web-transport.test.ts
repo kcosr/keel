@@ -323,9 +323,16 @@ describe("web transport", () => {
       expect(detail.status).toBe(200);
       expect(detail.body).toMatchObject({
         run: { runId, phase: "«redacted-capability»" },
+        flow: {
+          input: { fields: [{ name: "n", type: "number", optional: false, used: true }] },
+        },
         rawEvents: { href: `/runs/${runId}/events` },
         eventCursor: { kind: "after-seq", runId },
       });
+      expect(detail.body.flow.operations.map((op: { kind: string }) => op.kind)).toEqual([
+        "step",
+        "return",
+      ]);
       expect(JSON.stringify(detail.body)).not.toContain("kc_run_projection_secret");
       expect(Array.isArray(detail.body.availableCommands)).toBe(true);
 

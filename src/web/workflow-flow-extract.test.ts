@@ -2,6 +2,23 @@ import { describe, expect, test } from "bun:test";
 import { parseWorkflowSource } from "./workflow-flow-extract.ts";
 
 describe("workflow flow extraction", () => {
+  test("ignores ctx calls in helpers outside the default workflow entry", () => {
+    const source = `
+      function helper(ctx, input) {
+        ctx.step("dead-helper", async () => input.dead ?? true);
+      }
+
+      export default async function workflow(ctx, input: { live: string }) {
+        await ctx.step("live-step", async () => input.live);
+      }
+    `;
+
+    const ir = parseWorkflowSource("entry-only.workflow.ts", source);
+
+    expect(ir.operations.map((op) => op.key?.value)).toEqual(["live-step"]);
+    expect(ir.input?.fields.map((field) => field.name)).toEqual(["live"]);
+  });
+
   test("annotates literal Promise.all array elements as deterministic parallel lanes", () => {
     const source = `
       export default async function workflow(ctx) {

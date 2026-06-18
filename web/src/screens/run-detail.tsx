@@ -454,7 +454,9 @@ function ApprovalPanel({
           aria-label="Decision note"
         />
         {!canDecide ? (
-          <p className="muted">Approval decisions require admin authority for this run.</p>
+          <p className="muted">
+            Approval decisions require admin authority and a refreshed run projection.
+          </p>
         ) : null}
         {error ? <p className="form-error">{error}</p> : null}
         {message ? <p className="form-success">{message}</p> : null}
@@ -671,12 +673,6 @@ function applyLiveProjection(
           blockedOn: key ? { stableKey: key, since: event.atMs } : null,
           context: `awaiting decision: ${key ?? "human approval"}`,
         };
-        if (!projected.availableCommands.some((command) => command.name === "decideApproval")) {
-          projected.availableCommands = [
-            ...projected.availableCommands,
-            { name: "decideApproval", requiredAuthority: "admin" },
-          ];
-        }
       }
       continue;
     }

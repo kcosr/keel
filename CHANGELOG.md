@@ -10,6 +10,9 @@
 - The production web UI now includes a grouped runs inbox, live run detail tabs,
   fetch-based SSE watching with reconnect cursors, coalesced transcript display,
   raw event inspection, and a RunProjection-backed graph/timeline view.
+- Run detail now includes a workflow Flow view backed by a server-extracted
+  `flow` operation IR from retained workflow source, with browser live-state
+  overlays for node progress and events.
 - The production web UI now includes current `ctx.human` approval decisions and
   retained workspace list/detail/diff views with admin-confirmed merge, discard,
   and workspace GC controls.
@@ -49,6 +52,8 @@
 - Local web API transport via `keel web`, with localhost-only default binding,
   `/health`, `/rpc`, projection routes, static asset serving, and SSE run event
   streams using the shared cursor/control-frame contract.
+- Documented opt-in diagnostics for provider raw JSONL logs and web/daemon
+  gateway projection timing logs.
 - Shared event stream cursor contract for daemon, CLI, TUI, execute, and
   in-process subscriptions, plus `keel watch --from`, `--after-seq`, and
   `--tail` cursor controls.

@@ -16,7 +16,7 @@
   },
   "scripts": {
     "build": "bun build src/cli/keel.ts --compile --outfile dist/keel",
-    "test": "bun test",
+    "test": "bun test --isolate ./src ./workflows ./fixtures",
     "typecheck": "tsc --noEmit && bun run web:typecheck",
     "lint": "biome check src web",
     "lint:fix": "biome check --write src web",

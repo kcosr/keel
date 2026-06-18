@@ -21,6 +21,7 @@ describe("layoutFlow", () => {
   test("stacks deterministic Promise.all lanes before joining", () => {
     const flow: WorkflowFlowView = {
       entry: { name: null, async: true, params: [] },
+      input: null,
       diagnostics: [],
       operations: [
         op("proposal", 0),
@@ -53,6 +54,7 @@ describe("layoutFlow", () => {
   test("uses live runtime overrides before projection nodes are refreshed", () => {
     const flow: WorkflowFlowView = {
       entry: { name: null, async: true, params: [] },
+      input: null,
       diagnostics: [],
       operations: [op("proposal", 0, "agent"), op("approve-proposal", 0, "human")],
     };
@@ -79,6 +81,7 @@ describe("layoutFlow", () => {
   test("marks current phase running and prior phases completed from live phase", () => {
     const flow: WorkflowFlowView = {
       entry: { name: null, async: true, params: [] },
+      input: null,
       diagnostics: [],
       operations: [
         phase("parallel inputs"),
@@ -109,6 +112,7 @@ describe("layoutFlow", () => {
   test("treats pending projection nodes as running when keyed to an operation", () => {
     const flow: WorkflowFlowView = {
       entry: { name: null, async: true, params: [] },
+      input: null,
       diagnostics: [],
       operations: [op("proposal")],
     };

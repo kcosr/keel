@@ -187,8 +187,9 @@ Two `--user` units run the compiled binary (`~/.bun/bin/keel` → `dist/keel`):
 - `keel-daemon.service` runs `keel daemon` — owns the journal and runs
   workflows.
 - `keel-web.service` runs `keel web` — serves the local HTTP/SSE API and the
-  built `web/dist` console on `0.0.0.0:3000`. It orders after the daemon
-  (`After=`/`Wants=keel-daemon.service`).
+  built `web/dist` console on `0.0.0.0:4000`. The web unit connects to the
+  daemon socket at request time; do not add default-target ordering that creates
+  a cycle with the daemon unit.
 
 Check status:
 

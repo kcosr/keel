@@ -40,7 +40,7 @@ describe("ApprovalsScreen", () => {
     render(<ApprovalsScreen client={client} refreshKey={0} />);
 
     await screen.findByText("first prompt");
-    expect(screen.getByText("keel approve run_a gate_a")).toBeInTheDocument();
+    expect(await screen.findByText("keel approve run_a gate_a")).toBeInTheDocument();
     expect(screen.getByText("keel deny run_a gate_a")).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("Decision note"), { target: { value: "ship it" } });
@@ -84,7 +84,7 @@ describe("ApprovalsScreen", () => {
     render(<ApprovalsScreen client={client} refreshKey={0} />);
 
     await screen.findByText("first prompt");
-    const approve = screen.getByRole("button", { name: "Approve" });
+    const approve = await screen.findByRole("button", { name: "Approve" });
     expect(approve).toBeDisabled();
     fireEvent.click(approve);
 

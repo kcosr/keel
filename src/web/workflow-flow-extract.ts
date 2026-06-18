@@ -39,8 +39,8 @@ export function parseWorkflowSource(sourceFile: string, source: string): Workflo
   const operations: WorkflowOperation[] = [];
   const sessionVars = new Map<string, string>();
   const typeAliases = collectTypeAliases(sf);
-  const { usages: inputUsages, defaults: inputDefaults } = collectInputMetadata(sf);
   const entryNode = findEntryFunctionNode(sf);
+  const { usages: inputUsages, defaults: inputDefaults } = collectInputMetadata(sf, entryNode);
   let opIndex = 0;
 
   const nextId = (kind: string): string => `${kind}_${++opIndex}`;
@@ -49,7 +49,11 @@ export function parseWorkflowSource(sourceFile: string, source: string): Workflo
     if (ts.isImportDeclaration(node)) {
       imports.push(readImport(sf, node));
     }
-    if (ts.isReturnStatement(node) && entryNode && isWithin(node, entryNode)) {
+    if (!entryNode || !isWithin(node, entryNode)) {
+      ts.forEachChild(node, visit);
+      return;
+    }
+    if (ts.isReturnStatement(node)) {
       // Workflows commonly wrap their body in a callback, e.g.
       // `return ctx.withWorkspace(async () => { ... })`. Treat such a return as
       // a transparent wrapper: descend into the callback so its operations are
@@ -312,12 +316,16 @@ function resolveInputType(
   return undefined;
 }
 
-function collectInputMetadata(sf: ts.SourceFile): {
+function collectInputMetadata(
+  sf: ts.SourceFile,
+  entryNode: ts.FunctionDeclaration | ts.FunctionExpression | ts.ArrowFunction | null,
+): {
   usages: Set<string>;
   defaults: Map<string, ExprSummary>;
 } {
   const usages = new Set<string>();
   const defaults = new Map<string, ExprSummary>();
+  if (!entryNode) return { usages, defaults };
   const visit = (node: ts.Node): void => {
     if (ts.isPropertyAccessExpression(node) && node.expression.getText(sf) === "input") {
       usages.add(node.name.text);
@@ -345,7 +353,7 @@ function collectInputMetadata(sf: ts.SourceFile): {
     }
     ts.forEachChild(node, visit);
   };
-  visit(sf);
+  visit(entryNode);
   return { usages, defaults };
 }
 

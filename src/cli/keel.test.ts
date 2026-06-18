@@ -2089,97 +2089,105 @@ describe("keel CLI", () => {
     }
   });
 
-  test("unsupported output combinations fail before daemon connection", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "keel-output-combos-"));
-    try {
-      const env = { KEEL_SOCKET: join(dir, "missing.sock") };
-      const listNdjson = await runCli(["list", "--output", "ndjson"], dir, env);
-      expect(listNdjson.code).toBe(1);
-      expect(listNdjson.stderr).toContain("--output ndjson is not available for list");
+  test(
+    "unsupported output combinations fail before daemon connection",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "keel-output-combos-"));
+      try {
+        const env = { KEEL_SOCKET: join(dir, "missing.sock") };
+        const listNdjson = await runCli(["list", "--output", "ndjson"], dir, env);
+        expect(listNdjson.code).toBe(1);
+        expect(listNdjson.stderr).toContain("--output ndjson is not available for list");
 
-      const listInvalid = await runCli(["list", "--output", "xml"], dir, env);
-      expect(listInvalid.code).toBe(1);
-      expect(listInvalid.stderr).toContain("invalid --output xml for list");
+        const listInvalid = await runCli(["list", "--output", "xml"], dir, env);
+        expect(listInvalid.code).toBe(1);
+        expect(listInvalid.stderr).toContain("invalid --output xml for list");
 
-      const watch = await runCli(["watch", "run_123", "--output", "json"], dir, env);
-      expect(watch.code).toBe(1);
-      expect(watch.stderr).toContain("--output json is not available for watch");
+        const watch = await runCli(["watch", "run_123", "--output", "json"], dir, env);
+        expect(watch.code).toBe(1);
+        expect(watch.stderr).toContain("--output json is not available for watch");
 
-      const watchTools = await runCli(["watch", "run_123", "--tools"], dir, env);
-      expect(watchTools.code).toBe(1);
-      expect(watchTools.stderr).toContain(
-        "--tools is only available for attached watch --output text",
-      );
+        const watchTools = await runCli(["watch", "run_123", "--tools"], dir, env);
+        expect(watchTools.code).toBe(1);
+        expect(watchTools.stderr).toContain(
+          "--tools is only available for attached watch --output text",
+        );
 
-      const runTools = await runCli(["run", "--tools", "wf.ts"], dir, env);
-      expect(runTools.code).toBe(1);
-      expect(runTools.stderr).toContain("--tools is only available for attached run --output text");
+        const runTools = await runCli(["run", "--tools", "wf.ts"], dir, env);
+        expect(runTools.code).toBe(1);
+        expect(runTools.stderr).toContain(
+          "--tools is only available for attached run --output text",
+        );
 
-      const workflowSourceMissing = await runCli(["workflow", "source"], dir, env);
-      expect(workflowSourceMissing.code).toBe(1);
-      expect(workflowSourceMissing.stderr).toContain(
-        "workflow source requires a saved name, --run, or --definition",
-      );
+        const workflowSourceMissing = await runCli(["workflow", "source"], dir, env);
+        expect(workflowSourceMissing.code).toBe(1);
+        expect(workflowSourceMissing.stderr).toContain(
+          "workflow source requires a saved name, --run, or --definition",
+        );
 
-      const workflowSourceInvalidHash = await runCli(
-        ["workflow", "source", "--definition", "wf_sha256_nothex"],
-        dir,
-        env,
-      );
-      expect(workflowSourceInvalidHash.code).toBe(1);
-      expect(workflowSourceInvalidHash.stderr).toContain(
-        "workflow definition hash must match wf_sha256_<64 hex chars>",
-      );
+        const workflowSourceInvalidHash = await runCli(
+          ["workflow", "source", "--definition", "wf_sha256_nothex"],
+          dir,
+          env,
+        );
+        expect(workflowSourceInvalidHash.code).toBe(1);
+        expect(workflowSourceInvalidHash.stderr).toContain(
+          "workflow definition hash must match wf_sha256_<64 hex chars>",
+        );
 
-      const workflowSourceEmptyHash = await runCli(
-        ["workflow", "source", "--definition", ""],
-        dir,
-        env,
-      );
-      expect(workflowSourceEmptyHash.code).toBe(1);
-      expect(workflowSourceEmptyHash.stderr).toContain(
-        "workflow definition hash must match wf_sha256_<64 hex chars>",
-      );
+        const workflowSourceEmptyHash = await runCli(
+          ["workflow", "source", "--definition", ""],
+          dir,
+          env,
+        );
+        expect(workflowSourceEmptyHash.code).toBe(1);
+        expect(workflowSourceEmptyHash.stderr).toContain(
+          "workflow definition hash must match wf_sha256_<64 hex chars>",
+        );
 
-      const workflowSourceEmptyRun = await runCli(["workflow", "source", "--run", ""], dir, env);
-      expect(workflowSourceEmptyRun.code).toBe(1);
-      expect(workflowSourceEmptyRun.stderr).toContain(
-        "workflow source --run needs a non-empty run id",
-      );
-      const workflowInstallUnknown = await runCli(
-        ["workflow", "install", "unknown-package"],
-        dir,
-        env,
-      );
-      expect(workflowInstallUnknown.code).toBe(1);
-      expect(workflowInstallUnknown.stderr).toContain('unknown workflow package "unknown-package"');
-      expect(workflowInstallUnknown.stderr).not.toContain("Failed to connect");
+        const workflowSourceEmptyRun = await runCli(["workflow", "source", "--run", ""], dir, env);
+        expect(workflowSourceEmptyRun.code).toBe(1);
+        expect(workflowSourceEmptyRun.stderr).toContain(
+          "workflow source --run needs a non-empty run id",
+        );
+        const workflowInstallUnknown = await runCli(
+          ["workflow", "install", "unknown-package"],
+          dir,
+          env,
+        );
+        expect(workflowInstallUnknown.code).toBe(1);
+        expect(workflowInstallUnknown.stderr).toContain(
+          'unknown workflow package "unknown-package"',
+        );
+        expect(workflowInstallUnknown.stderr).not.toContain("Failed to connect");
 
-      const attached = await runCli(["launch", "--output", "json", "wf.ts"], dir, env);
-      expect(attached.code).toBe(1);
-      expect(attached.stderr).toContain("--output json is not available for attached launch");
+        const attached = await runCli(["launch", "--output", "json", "wf.ts"], dir, env);
+        expect(attached.code).toBe(1);
+        expect(attached.stderr).toContain("--output json is not available for attached launch");
 
-      const detachedTextTools = await runCli(
-        ["launch", "--detach", "--output", "text", "--tools", "wf.ts"],
-        dir,
-        env,
-      );
-      expect(detachedTextTools.code).toBe(1);
-      expect(detachedTextTools.stderr).toContain(
-        "--tools is only available for attached launch --output text",
-      );
+        const detachedTextTools = await runCli(
+          ["launch", "--detach", "--output", "text", "--tools", "wf.ts"],
+          dir,
+          env,
+        );
+        expect(detachedTextTools.code).toBe(1);
+        expect(detachedTextTools.stderr).toContain(
+          "--tools is only available for attached launch --output text",
+        );
 
-      const detached = await runCli(
-        ["launch", "--detach", "--output", "ndjson", "wf.ts"],
-        dir,
-        env,
-      );
-      expect(detached.code).toBe(1);
-      expect(detached.stderr).toContain("--output ndjson is not available for launch --detach");
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
+        const detached = await runCli(
+          ["launch", "--detach", "--output", "ndjson", "wf.ts"],
+          dir,
+          env,
+        );
+        expect(detached.code).toBe(1);
+        expect(detached.stderr).toContain("--output ndjson is not available for launch --detach");
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    DAEMON_TEST_TIMEOUT_MS,
+  );
 });
 
 type FakeWatchSubscription = {

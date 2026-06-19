@@ -401,6 +401,18 @@ describe("workspace setup commands", () => {
       setupStatus: "completed",
       activeHolderKind: null,
     });
+    const events = store.listEvents("run_workspace_setup").map((event) => event.type);
+    expect(events.filter((event) => event === "workspace.setup.started")).toHaveLength(2);
+    const secondSetupStarted = events.indexOf(
+      "workspace.setup.started",
+      events.indexOf("workspace.setup.started") + 1,
+    );
+    const secondCommandStarted = events.indexOf(
+      "workspace.setup.command.started",
+      events.indexOf("workspace.setup.command.started") + 1,
+    );
+    expect(secondSetupStarted).toBeGreaterThan(-1);
+    expect(secondCommandStarted).toBeGreaterThan(secondSetupStarted);
   });
 
   test("setup identity changes fail closed on rerun", async () => {

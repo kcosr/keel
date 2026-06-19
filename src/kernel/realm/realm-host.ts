@@ -2283,7 +2283,7 @@ export class RealmKernel {
     this.store.deleteWorkspaceSetupRows(runId);
     for (const row of failedWorkspaces) {
       this.store.updateAgentWorkspace(runId, row.workspaceId, {
-        setupStatus: "pending",
+        setupStatus: "none",
         setupStartedAtMs: null,
         setupFinishedAtMs: null,
         setupErrorJson: null,

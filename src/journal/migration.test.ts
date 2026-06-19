@@ -1347,3 +1347,100 @@ describe("schema migrations", () => {
     }
   });
 });
+
+describe("workspace setup migration", () => {
+  test("v21 agent workspace rows migrate with setup status none", () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-migrate-setup-"));
+    const dbPath = join(dir, "journal.sqlite");
+    const db = new Database(dbPath, { create: true });
+    db.exec(`
+      CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      INSERT INTO schema_meta (key, value) VALUES ('schema_version', '21');
+      CREATE TABLE agent_workspaces (
+        run_id                TEXT NOT NULL,
+        workspace_id          TEXT NOT NULL,
+        mode                  TEXT NOT NULL,
+        owner_kind            TEXT NOT NULL,
+        key                   TEXT NOT NULL,
+        last_attempt          INTEGER,
+        retention_policy      TEXT,
+        workspace_path        TEXT NOT NULL,
+        source_kind           TEXT,
+        source_path           TEXT,
+        source_uri            TEXT,
+        source_bare           INTEGER,
+        source_merge_eligible INTEGER NOT NULL DEFAULT 0,
+        supplied_path         TEXT,
+        source_ref            TEXT,
+        resolved_ref          TEXT,
+        checkout_branch       TEXT,
+        worktree_checkout_kind TEXT,
+        worktree_branch_owned INTEGER NOT NULL DEFAULT 0,
+        base_commit           TEXT,
+        copy_baseline_path    TEXT,
+        creation_error_json   TEXT,
+        workspace_identity_json TEXT NOT NULL,
+        workspace_identity_hash TEXT NOT NULL,
+        owned                 INTEGER NOT NULL DEFAULT 0,
+        status                TEXT NOT NULL,
+        failure_seen          INTEGER NOT NULL DEFAULT 0,
+        last_turn_key         TEXT,
+        last_turn_attempt     INTEGER,
+        active_holder_kind    TEXT,
+        active_holder_key     TEXT,
+        active_holder_attempt INTEGER,
+        active_started_at_ms  INTEGER,
+        last_diff_event_seq   INTEGER,
+        last_error_event_seq  INTEGER,
+        cleanup_error_json    TEXT,
+        created_at_ms         INTEGER NOT NULL,
+        updated_at_ms         INTEGER NOT NULL,
+        merged_at_ms          INTEGER,
+        discarded_at_ms       INTEGER,
+        removed_at_ms         INTEGER,
+        PRIMARY KEY (run_id, workspace_id)
+      );
+      INSERT INTO agent_workspaces (
+        run_id, workspace_id, mode, owner_kind, key, last_attempt, retention_policy,
+        workspace_path, source_kind, source_path, source_uri, source_bare, source_merge_eligible,
+        supplied_path, source_ref, resolved_ref, checkout_branch, worktree_checkout_kind,
+        worktree_branch_owned, base_commit, copy_baseline_path, creation_error_json,
+        workspace_identity_json, workspace_identity_hash, owned, status, failure_seen,
+        last_turn_key, last_turn_attempt, active_holder_kind, active_holder_key,
+        active_holder_attempt, active_started_at_ms, last_diff_event_seq, last_error_event_seq,
+        cleanup_error_json, created_at_ms, updated_at_ms, merged_at_ms, discarded_at_ms, removed_at_ms
+      ) VALUES (
+        'r', 'ws', 'direct', 'workflow', 'ws', NULL, NULL,
+        '/tmp/ws', 'direct-path', '/tmp/ws', NULL, NULL, 0,
+        '/tmp/ws', NULL, NULL, NULL, NULL,
+        0, NULL, NULL, NULL,
+        '{}', 'identity', 0, 'idle', 0,
+        NULL, NULL, NULL, NULL,
+        NULL, NULL, NULL, NULL,
+        NULL, 1, 1, NULL, NULL, NULL
+      );
+    `);
+    db.close();
+    try {
+      const store = JournalStore.open(dbPath);
+      expect(
+        store.db
+          .query<{ value: string }, [string]>("SELECT value FROM schema_meta WHERE key = ?")
+          .get("schema_version")?.value,
+      ).toBe(String(SCHEMA_VERSION));
+      expect(store.getAgentWorkspace("r", "ws")).toMatchObject({
+        setupStatus: "none",
+        setupIdentityHash: null,
+        setupErrorJson: null,
+      });
+      const cols = store.db
+        .query<{ name: string }, []>("PRAGMA table_info(agent_workspaces)")
+        .all()
+        .map((col) => col.name);
+      expect(cols).toEqual(expect.arrayContaining(["setup_status", "setup_identity_hash"]));
+      store.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

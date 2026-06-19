@@ -374,10 +374,11 @@ function currentWorkflowSettings(): WorkflowVisibleSettings {
 interface WorkspaceHandle {
   readonly id: string;
   readonly identityHash?: string;
+  readonly setupIdentityHash?: string | null;
 }
 
 type WorkspaceSpec =
-  | { key: string; mode?: "direct"; path?: string }
+  | { key: string; mode?: "direct"; path?: string; setup?: unknown }
   | {
       key: string;
       mode: "worktree";
@@ -385,9 +386,17 @@ type WorkspaceSpec =
       ref?: string;
       retention?: WorkspaceRetention;
       branch?: boolean;
+      setup?: unknown;
     }
-  | { key: string; mode: "copy"; path?: string; retention?: WorkspaceRetention }
-  | { key: string; mode: "clone"; repo: string; ref?: string; retention?: WorkspaceRetention };
+  | { key: string; mode: "copy"; path?: string; retention?: WorkspaceRetention; setup?: unknown }
+  | {
+      key: string;
+      mode: "clone";
+      repo: string;
+      ref?: string;
+      retention?: WorkspaceRetention;
+      setup?: unknown;
+    };
 
 function isWorkspaceHandle(value: WorkspaceSpec | WorkspaceHandle): value is WorkspaceHandle {
   return (
@@ -407,6 +416,10 @@ function resolveWorkspaceIdentityHash(handle: WorkspaceHandle | undefined): stri
   return (handle ?? workspaceScope.getStore())?.identityHash ?? null;
 }
 
+function resolveWorkspaceSetupIdentityHash(handle: WorkspaceHandle | undefined): string | null {
+  return (handle ?? workspaceScope.getStore())?.setupIdentityHash ?? null;
+}
+
 async function resolveWorkspace(spec: WorkspaceSpec): Promise<WorkspaceHandle> {
   const reply = await rpc<WorkspaceHandle>({
     type: "workspace",
@@ -418,6 +431,7 @@ async function resolveWorkspace(spec: WorkspaceSpec): Promise<WorkspaceHandle> {
       ref: (spec as { ref?: string }).ref ?? null,
       retention: (spec as { retention?: WorkspaceRetention }).retention ?? null,
       branch: (spec as { branch?: boolean }).branch ?? null,
+      setup: (spec as { setup?: unknown }).setup,
     },
   });
   return Object.freeze(reply);
@@ -606,6 +620,7 @@ const ctx = Object.freeze({
     rejectRemovedWorkspaceFields(rawSpec, `ctx.agent("${spec.key}")`);
     const workspaceId = resolveWorkspaceId(spec.workspace);
     const workspaceIdentityHash = resolveWorkspaceIdentityHash(spec.workspace);
+    const setupIdentityHash = resolveWorkspaceSetupIdentityHash(spec.workspace);
     const identityFields = {
       prompt: spec.prompt,
       provider,
@@ -617,6 +632,7 @@ const ctx = Object.freeze({
       denyTools: tools.denyTools,
       workspaceId,
       ...(workspaceIdentityHash !== null ? { workspaceIdentityHash } : {}),
+      ...(setupIdentityHash !== null ? { setupIdentityHash } : {}),
       capabilities: caps,
       environment,
     };
@@ -769,6 +785,7 @@ const ctx = Object.freeze({
     rejectRemovedWorkspaceFields(rawSessionSpec, `ctx.agentSession("${sessionSpec.key}")`);
     const workspaceId = resolveWorkspaceId(sessionSpec.workspace);
     const workspaceIdentityHash = resolveWorkspaceIdentityHash(sessionSpec.workspace);
+    const setupIdentityHash = resolveWorkspaceSetupIdentityHash(sessionSpec.workspace);
     const identity = {
       agentKey: sessionSpec.key,
       provider,
@@ -780,6 +797,7 @@ const ctx = Object.freeze({
       denyTools: tools.denyTools,
       workspaceId,
       ...(workspaceIdentityHash !== null ? { workspaceIdentityHash } : {}),
+      ...(setupIdentityHash !== null ? { setupIdentityHash } : {}),
       capabilities: caps,
       environment,
     };

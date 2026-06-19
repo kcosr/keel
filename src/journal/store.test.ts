@@ -60,6 +60,12 @@ function workspaceRow(
     creationErrorJson: null,
     workspaceIdentityJson: "{}",
     workspaceIdentityHash: `${runId}-${agentKey}`,
+    setupIdentityJson: null,
+    setupIdentityHash: null,
+    setupStatus: "none",
+    setupStartedAtMs: null,
+    setupFinishedAtMs: null,
+    setupErrorJson: null,
     owned: true,
     status: "idle",
     failureSeen: false,
@@ -78,7 +84,7 @@ function workspaceRow(
     discardedAtMs: null,
     removedAtMs: null,
     ...overrides,
-  };
+  } as AgentWorkspaceRow;
 }
 
 describe("JournalStore (in-memory)", () => {

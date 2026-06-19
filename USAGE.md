@@ -668,9 +668,25 @@ const workspace = await ctx.workspace({
   key: "implementation",
   mode: "worktree",
   retention: "retain-on-failure",
+  setup: {
+    capabilities: { fs: "workspace-write", shell: true, network: "none" },
+    commands: [
+      { key: "install", command: "bun", args: ["install", "--frozen-lockfile"] },
+    ],
+  },
 });
 await ctx.agent({ key: "impl", workspace, toolPolicy: "workspace-write", prompt: "..." });
 ```
+
+`setup` is workspace lifecycle preparation. It runs after the workspace
+filesystem is resolved or created and before any agent, session, or
+`ctx.command` uses that handle. Completed setup is reused on resume and repeated
+`ctx.workspace` calls in the same run. A pending setup command may run again
+after a crash, so setup scripts should be idempotent. Setup stdout/stderr are
+bounded diagnostics in the journal and event stream, not values returned to
+workflow code; use `ctx.command` when later workflow logic needs command output.
+Setup requires explicit capabilities with `fs: "workspace-write"` and
+`shell: true`. Direct workspace setup mutates the supplied directory.
 
 Branch-backed worktrees opt into a generated Keel-owned branch while keeping
 `mode: "worktree"`:
@@ -740,10 +756,11 @@ keel workspace gc [--older-than-ms ms] [--include-pending] [--include-removed]
 `RunWorkspaceView.workspaceId` is the canonical selector for show/diff/merge/
 discard. Views include `mode`, `sourceKind`, display `key`, provider
 `workspacePath`, source path/URI/ref/branch/base commit metadata, copy baseline
-path, ownership, retention, merge/discard/diff support, latest attempt/turn and active
-holder metadata, `failureSeen`, timestamps, and cleanup errors. Default list
-output hides the reserved direct workspace `__default`; `--all` includes removed
-audit rows and direct workspace rows, including `__default`.
+path, setup status and setup error, ownership, retention, merge/discard/diff
+support, latest attempt/turn and active holder metadata, `failureSeen`,
+timestamps, and cleanup errors. Default list output hides the reserved direct
+workspace `__default`; `--all` includes removed audit rows and direct workspace
+rows, including `__default`.
 
 Merge/discard are explicit operator actions and refuse while the run is
 non-terminal, a Keel-owned provider invocation is active, the workspace is
@@ -1023,6 +1040,8 @@ Important command semantics:
 
 - `workspace` must be a `WorkspaceHandle` from `ctx.workspace` or
   `ctx.withWorkspace`; raw paths are rejected.
+- Workspace handles prepared with `setup` carry `setupIdentityHash`; command
+  identity includes it so commands observe the prepared workspace contract.
 - `cwd` must be a relative path under the workspace. Missing directories,
   absolute paths, `..` segments, and symlink escapes fail before spawn.
 - `capabilities` is required and currently must include

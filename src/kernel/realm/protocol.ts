@@ -45,6 +45,7 @@ export type WorkerRequest =
         ref?: string | null;
         retention?: WorkspaceRetention | null;
         branch?: boolean | null;
+        setup?: unknown;
       };
     }
   | {

@@ -4,7 +4,13 @@
 // Effectful results live either inline (<=1KB) or as an artifact reference
 // (>1KB, Phase 8); for now both columns exist and inline is used.
 
-export type EffectType = "pure" | "effectful" | "command" | "completion_check" | "ambient";
+export type EffectType =
+  | "pure"
+  | "effectful"
+  | "command"
+  | "completion_check"
+  | "workspace_setup"
+  | "ambient";
 
 export type JournalStatus = "pending" | "completed" | "failed";
 
@@ -110,7 +116,7 @@ export type WorkspaceSourceKind =
   | "local-clone-git"
   | "remote-git";
 
-export type AgentWorkspaceOwnerKind = "workflow" | "agent" | "agent_session" | "command";
+export type AgentWorkspaceOwnerKind = "workflow" | "agent" | "agent_session" | "command" | "setup";
 
 export type AgentWorkspaceStatus =
   | "creating"
@@ -123,6 +129,8 @@ export type AgentWorkspaceStatus =
   | "abandoned"
   | "removed"
   | "cleanup_error";
+
+export type WorkspaceSetupStatus = "none" | "pending" | "completed" | "failed";
 
 export interface AgentWorkspaceRow {
   runId: string;
@@ -149,6 +157,12 @@ export interface AgentWorkspaceRow {
   creationErrorJson: string | null;
   workspaceIdentityJson: string;
   workspaceIdentityHash: string;
+  setupIdentityJson: string | null;
+  setupIdentityHash: string | null;
+  setupStatus: WorkspaceSetupStatus;
+  setupStartedAtMs: number | null;
+  setupFinishedAtMs: number | null;
+  setupErrorJson: string | null;
   owned: boolean;
   status: AgentWorkspaceStatus;
   failureSeen: boolean;

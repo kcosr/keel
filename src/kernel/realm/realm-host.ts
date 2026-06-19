@@ -91,6 +91,7 @@ import {
 } from "../../workspace/worktree.ts";
 import { type DurableAgentEvent, finalAgentMessageEvents } from "../agent-events.ts";
 import {
+  CommandFailure,
   type CommandResult,
   type NormalizedWorkflowCommandSpec,
   applyCommandFailureMode,
@@ -109,6 +110,15 @@ import { extractModuleHelpers } from "../module-helpers.ts";
 import { RUN_FINISHED_INLINE_OUTPUT_BYTES } from "../output.ts";
 import { CommandAbortError, runBoundedProcess } from "../process-runner.ts";
 import { StepEngine, prepareStepResult, readJournalResult } from "../step-engine.ts";
+import {
+  type NormalizedWorkspaceSetupSpec,
+  buildWorkspaceSetupEnvironment,
+  normalizeWorkspaceSetupSpec,
+  setupCommandToWorkflowCommand,
+  workspaceSetupCompletedEvent,
+  workspaceSetupFailedEvent,
+  workspaceSetupStartedEvent,
+} from "../workspace-setup.ts";
 import {
   CONTROL_WORDS,
   type HostReply,
@@ -211,6 +221,7 @@ interface WorkspaceSpecMessage {
   ref?: string | null;
   retention?: string | null;
   branch?: unknown;
+  setup?: unknown;
 }
 
 interface WorkspaceHolder {
@@ -320,6 +331,7 @@ export class RealmKernel {
   private readonly activeSessionRuns = new Set<string>();
   private readonly activeWorkers = new Set<Worker>();
   private readonly activeExecutions = new Map<string, Set<ActiveExecution>>();
+  private readonly activeWorkspaceSetups = new Map<string, Promise<void>>();
 
   constructor(store: JournalStore, opts: RealmKernelOptions = {}) {
     this.store = store;
@@ -892,11 +904,11 @@ export class RealmKernel {
     };
   }
 
-  private resolveWorkspaceSpec(
+  private async resolveWorkspaceSpec(
     runId: string,
     spec: WorkspaceSpecMessage,
     atMs: number,
-  ): { id: string; identityHash: string } {
+  ): Promise<{ id: string; identityHash: string; setupIdentityHash?: string | null }> {
     if (typeof spec.key !== "string" || spec.key.trim().length === 0) {
       throw new Error("WorkspaceSpec.key is required and must be a non-empty string");
     }
@@ -984,7 +996,7 @@ export class RealmKernel {
           );
         }
       });
-      return { id: workspaceId, identityHash: identity.hash };
+      return await this.ensureWorkspaceSetup(runId, spec, workspaceId, identity.hash, atMs);
     }
 
     if (!this.workspaceStore) {
@@ -1090,7 +1102,7 @@ export class RealmKernel {
           throw err;
         }
       }
-      return { id: workspaceId, identityHash: identity.hash };
+      return await this.ensureWorkspaceSetup(runId, spec, workspaceId, identity.hash, atMs);
     }
     if (mode === "clone") {
       if (spec.path != null) throw new Error("clone workspaces do not accept path; use repo");
@@ -1193,7 +1205,7 @@ export class RealmKernel {
           throw err;
         }
       }
-      return { id: workspaceId, identityHash: identity.hash };
+      return await this.ensureWorkspaceSetup(runId, spec, workspaceId, identity.hash, atMs);
     }
 
     if (spec.repo != null) throw new Error("worktree workspaces do not accept repo");
@@ -1397,7 +1409,7 @@ export class RealmKernel {
         throw err;
       }
     }
-    return { id: workspaceId, identityHash: identity.hash };
+    return await this.ensureWorkspaceSetup(runId, spec, workspaceId, identity.hash, atMs);
   }
 
   private ensureDefaultWorkspace(runId: string, atMs: number): AgentWorkspaceRow {
@@ -1475,6 +1487,351 @@ export class RealmKernel {
       row.lastTurnKey === null &&
       row.lastTurnAttempt === null
     );
+  }
+
+  private async ensureWorkspaceSetup(
+    runId: string,
+    spec: WorkspaceSpecMessage,
+    workspaceId: string,
+    workspaceIdentityHash: string,
+    atMs: number,
+  ): Promise<{ id: string; identityHash: string; setupIdentityHash?: string | null }> {
+    const row = this.store.getAgentWorkspace(runId, workspaceId);
+    if (!row) throw new Error(`workspace ${runId}/${workspaceId} not found after creation`);
+    const setup = normalizeWorkspaceSetupSpec(spec.setup, {
+      path: `workspace "${spec.key}".setup`,
+      workspaceId,
+      workspaceIdentityHash,
+    });
+    if (!setup) {
+      return {
+        id: workspaceId,
+        identityHash: workspaceIdentityHash,
+        ...(row.setupIdentityHash ? { setupIdentityHash: row.setupIdentityHash } : {}),
+      };
+    }
+    if (row.setupIdentityHash && row.setupIdentityHash !== setup.identityHash) {
+      throw new Error(
+        `workspace "${spec.key}" setup identity changed; use a new workspace key or a fresh run`,
+      );
+    }
+    if (row.setupStatus === "completed" && row.setupIdentityHash === setup.identityHash) {
+      return {
+        id: workspaceId,
+        identityHash: workspaceIdentityHash,
+        setupIdentityHash: setup.identityHash,
+      };
+    }
+    if (row.setupStatus === "failed" && row.setupIdentityHash === setup.identityHash) {
+      const error = row.setupErrorJson ? JSON.parse(row.setupErrorJson) : null;
+      throw new Error(
+        `workspace "${spec.key}" setup previously failed: ${error?.message ?? "unknown error"}`,
+      );
+    }
+    const activeKey = `${runId}\0${workspaceId}\0${setup.identityHash}`;
+    const active = this.activeWorkspaceSetups.get(activeKey);
+    if (active) {
+      await active;
+    } else {
+      const running = this.runWorkspaceSetup(runId, row, setup, atMs);
+      this.activeWorkspaceSetups.set(activeKey, running);
+      try {
+        await running;
+      } finally {
+        if (this.activeWorkspaceSetups.get(activeKey) === running) {
+          this.activeWorkspaceSetups.delete(activeKey);
+        }
+      }
+    }
+    return {
+      id: workspaceId,
+      identityHash: workspaceIdentityHash,
+      setupIdentityHash: setup.identityHash,
+    };
+  }
+
+  private async runWorkspaceSetup(
+    runId: string,
+    row: AgentWorkspaceRow,
+    setup: NormalizedWorkspaceSetupSpec,
+    atMs: number,
+  ): Promise<void> {
+    this.store.transaction(() => {
+      const current = this.store.getAgentWorkspace(runId, row.workspaceId);
+      if (!current) throw new Error(`workspace ${runId}/${row.workspaceId} not found`);
+      if (current.activeHolderKind) {
+        throw new Error(
+          `workspace "${row.workspaceId}" is already active for ${current.activeHolderKind} "${current.activeHolderKey}" attempt ${current.activeHolderAttempt}`,
+        );
+      }
+      this.store.updateAgentWorkspace(runId, row.workspaceId, {
+        setupIdentityJson: JSON.stringify(setup.identity),
+        setupIdentityHash: setup.identityHash,
+        setupStatus: "pending",
+        setupStartedAtMs: current.setupStartedAtMs ?? atMs,
+        setupFinishedAtMs: null,
+        setupErrorJson: null,
+        activeHolderKind: "setup",
+        activeHolderKey: setup.identityHash,
+        activeHolderAttempt: null,
+        activeStartedAtMs: atMs,
+        updatedAtMs: atMs,
+      });
+      if (current.setupStatus !== "pending") {
+        this.store.appendEvent(
+          runId,
+          "workspace.setup.started",
+          workspaceSetupStartedEvent({
+            workspaceId: row.workspaceId,
+            workspaceKey: row.key,
+            mode: row.mode,
+            workspacePath: row.workspacePath,
+            setupIdentityHash: setup.identityHash,
+            commandCount: setup.commands.length,
+          }),
+          atMs,
+        );
+      }
+    });
+
+    try {
+      for (const setupCommand of setup.commands) {
+        const command = setupCommandToWorkflowCommand(
+          row.workspaceId,
+          row.workspaceIdentityHash,
+          setup,
+          setupCommand,
+        );
+        await this.runWorkspaceSetupCommand(runId, row, setup, command);
+      }
+      const finishedAtMs = this.host.clock();
+      this.store.transaction(() => {
+        this.store.appendEvent(
+          runId,
+          "workspace.setup.completed",
+          workspaceSetupCompletedEvent({
+            workspaceId: row.workspaceId,
+            workspaceKey: row.key,
+            mode: row.mode,
+            workspacePath: row.workspacePath,
+            setupIdentityHash: setup.identityHash,
+            durationMs: Math.max(0, finishedAtMs - atMs),
+          }),
+          finishedAtMs,
+        );
+        this.store.updateAgentWorkspace(runId, row.workspaceId, {
+          setupStatus: "completed",
+          setupFinishedAtMs: finishedAtMs,
+          setupErrorJson: null,
+          activeHolderKind: null,
+          activeHolderKey: null,
+          activeHolderAttempt: null,
+          activeStartedAtMs: null,
+          updatedAtMs: finishedAtMs,
+        });
+      });
+    } catch (err) {
+      const finishedAtMs = this.host.clock();
+      const error = serializeError(err);
+      this.store.transaction(() => {
+        this.store.appendEvent(
+          runId,
+          "workspace.setup.failed",
+          workspaceSetupFailedEvent({
+            workspaceId: row.workspaceId,
+            workspaceKey: row.key,
+            mode: row.mode,
+            workspacePath: row.workspacePath,
+            setupIdentityHash: setup.identityHash,
+            error,
+          }),
+          finishedAtMs,
+        );
+        this.store.updateAgentWorkspace(runId, row.workspaceId, {
+          setupStatus: "failed",
+          setupFinishedAtMs: finishedAtMs,
+          setupErrorJson: JSON.stringify(error),
+          failureSeen: true,
+          activeHolderKind: null,
+          activeHolderKey: null,
+          activeHolderAttempt: null,
+          activeStartedAtMs: null,
+          updatedAtMs: finishedAtMs,
+        });
+      });
+      throw err;
+    }
+  }
+
+  private async runWorkspaceSetupCommand(
+    runId: string,
+    row: AgentWorkspaceRow,
+    setup: NormalizedWorkspaceSetupSpec,
+    command: NormalizedWorkflowCommandSpec,
+  ): Promise<void> {
+    const version = hashJson(command.identity);
+    const inputHash = hashJson(command.identity);
+    const existing = this.store.getLatestAttempt(runId, command.stableKey);
+    if (existing?.status === "completed") {
+      if (existing.inputHash !== inputHash || existing.version !== version) {
+        throw new Error(
+          `completed workspace setup command "${command.key}" identity changed; use a new workspace key or fresh run`,
+        );
+      }
+      const replayed = readJournalResult(this.store, existing) as CommandResult;
+      if (replayed.error) throw new CommandFailure(replayed);
+      return;
+    }
+    if (existing && existing.status !== "pending") {
+      if (existing.inputHash !== inputHash || existing.version !== version) {
+        throw new Error(
+          `workspace setup command "${command.key}" identity changed; use a new workspace key or fresh run`,
+        );
+      }
+    }
+    const attempt =
+      existing?.status === "pending" ? existing.attempt : existing ? existing.attempt + 1 : 1;
+    const startedAtMs =
+      existing?.status === "pending" && existing.startedAtMs
+        ? existing.startedAtMs
+        : this.host.clock();
+    if (existing?.status !== "pending") {
+      this.store.putJournalRow({
+        runId,
+        stableKey: command.stableKey,
+        attempt,
+        effectType: "workspace_setup",
+        status: "pending",
+        version,
+        inputHash,
+        inputDeps: null,
+        startedAtMs,
+      });
+      this.host.fault?.("after-pending", command.stableKey);
+    }
+    this.store.appendEvent(
+      runId,
+      "workspace.setup.command.started",
+      {
+        setupIdentityHash: setup.identityHash,
+        ...(commandStartedEvent(command, attempt) as Record<string, unknown>),
+      },
+      startedAtMs,
+    );
+    const cwd = this.resolveSetupCommandCwd(row, command);
+    const env = this.resolveWorkspaceSetupEnvironment(runId, command);
+    const result = await runBoundedProcess({
+      command,
+      attempt,
+      cwd,
+      env,
+    });
+    this.completeWorkspaceSetupCommand(
+      runId,
+      setup,
+      command,
+      {
+        attempt,
+        version,
+        inputHash,
+        startedAtMs,
+      },
+      result,
+    );
+    if (result.error) throw new CommandFailure(result);
+  }
+
+  private resolveSetupCommandCwd(
+    row: AgentWorkspaceRow,
+    command: NormalizedWorkflowCommandSpec,
+  ): string {
+    if (!existsSync(row.workspacePath) || !statSync(row.workspacePath).isDirectory()) {
+      throw new Error(`workspace "${row.workspaceId}" is missing at ${row.workspacePath}`);
+    }
+    const workspacePath = realpathSync(row.workspacePath);
+    const candidate = command.cwd === "." ? workspacePath : resolve(workspacePath, command.cwd);
+    const resolvedCwd = realpathSync(candidate);
+    if (!statSync(resolvedCwd).isDirectory()) {
+      throw new Error(`workspace setup cwd "${command.cwd}" is not a directory`);
+    }
+    const rel = relative(workspacePath, resolvedCwd);
+    if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+      throw new Error(
+        `workspace setup cwd "${command.cwd}" escapes workspace "${row.workspaceId}"`,
+      );
+    }
+    return resolvedCwd;
+  }
+
+  private resolveWorkspaceSetupEnvironment(
+    runId: string,
+    command: NormalizedWorkflowCommandSpec,
+  ): Record<string, string> {
+    if (command.environment.secrets.length === 0) {
+      return buildWorkspaceSetupEnvironment(command.environment, []);
+    }
+    if (!this.secrets) {
+      throw new Error("workspace setup environment.secrets requires a RealmKernel SecretStore");
+    }
+    const refs = this.secrets.resolveOrThrow(runId, command.environment.secrets);
+    return buildWorkspaceSetupEnvironment(command.environment, refs);
+  }
+
+  private completeWorkspaceSetupCommand(
+    runId: string,
+    setup: NormalizedWorkspaceSetupSpec,
+    command: NormalizedWorkflowCommandSpec,
+    begun: {
+      attempt: number;
+      version: string;
+      inputHash: string;
+      startedAtMs: number;
+    },
+    result: CommandResult,
+  ): CommandResult {
+    this.host.fault?.("before-commit", command.stableKey);
+    let completed: CommandResult = {
+      ...result,
+      output: { ...result.output, resultArtifactBacked: false },
+    };
+    let stored = prepareStepResult(completed);
+    if (stored.artifact) {
+      completed = {
+        ...result,
+        output: { ...result.output, resultArtifactBacked: true },
+      };
+      stored = prepareStepResult(completed);
+    }
+    const finishedAtMs = this.host.clock();
+    this.store.transaction(() => {
+      if (stored.artifact) {
+        this.store.putArtifact(stored.artifact.hash, stored.artifact.bytes, finishedAtMs);
+      }
+      this.store.appendEvent(
+        runId,
+        result.error ? "workspace.setup.command.failed" : "workspace.setup.command.completed",
+        {
+          setupIdentityHash: setup.identityHash,
+          ...(commandCompletedEvent(command, completed) as Record<string, unknown>),
+        },
+        finishedAtMs,
+      );
+      this.store.putJournalRow({
+        runId,
+        stableKey: command.stableKey,
+        attempt: begun.attempt,
+        effectType: "workspace_setup",
+        status: "completed",
+        version: begun.version,
+        inputHash: begun.inputHash,
+        inputDeps: null,
+        resultInline: stored.inline,
+        resultArtifact: stored.artifact?.hash ?? null,
+        startedAtMs: begun.startedAtMs,
+        finishedAtMs,
+      });
+    });
+    return completed;
   }
 
   private beginInvocationWorkspace(
@@ -1609,6 +1966,14 @@ export class RealmKernel {
       throw new Error(
         `workspace "${command.workspaceId}" identity changed; refusing to run command`,
       );
+    }
+    if (command.setupIdentityHash !== null && row.setupIdentityHash !== command.setupIdentityHash) {
+      throw new Error(
+        `workspace "${command.workspaceId}" setup identity changed; refusing to run command`,
+      );
+    }
+    if (row.setupStatus === "failed") {
+      throw new Error(`workspace "${command.workspaceId}" setup failed; refusing to run command`);
     }
     if (row.activeHolderKind !== null) {
       throw new Error(
@@ -2528,7 +2893,7 @@ export class RealmKernel {
         finish(() => reject(err));
       };
 
-      worker.onmessage = (e: MessageEvent<WorkerRequest>) => {
+      worker.onmessage = async (e: MessageEvent<WorkerRequest>) => {
         if (settled) return;
         const m = e.data;
         try {
@@ -2600,7 +2965,7 @@ export class RealmKernel {
             }
             case "workspace": {
               try {
-                const handle = this.resolveWorkspaceSpec(runId, m.spec, this.host.clock());
+                const handle = await this.resolveWorkspaceSpec(runId, m.spec, this.host.clock());
                 reply(m.id, handle);
               } catch (err) {
                 replyError(m.id, err);

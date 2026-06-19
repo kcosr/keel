@@ -137,6 +137,15 @@ function formatTextWatchEvent(event: EventEnvelope, opts: WatchFormatOptions): s
         effectType ? ` (${compact(effectType)})` : ""
       }\n`;
     }
+    case "command.started": {
+      const key = prop(payload, "key");
+      const cwd = prop(payload, "cwd");
+      return `${prefix} command${key ? ` ${compact(key)}` : ""} started${
+        cwd ? ` cwd=${compact(cwd)}` : ""
+      }\n`;
+    }
+    case "command.completed":
+      return `${prefix} ${formatCommandCompleted(payload)}\n`;
     case "run.parked": {
       const kind = prop(payload, "kind");
       const key = prop(payload, "key");
@@ -204,6 +213,38 @@ function formatAgentEvent(payload: unknown): string {
   if (!key && !traceType && !hasContent(data)) return `${label}: ${compact(payload)}`;
   if (!traceType && hasContent(event)) return `${label}: ${compact(event)}`;
   return hasContent(data) ? `${label}: ${compact(data)}` : label;
+}
+
+function formatCommandCompleted(payload: unknown): string {
+  const key = prop(payload, "key");
+  const status = prop(payload, "status");
+  const failureKind = prop(payload, "failureKind");
+  const exitCode = prop(payload, "exitCode");
+  const signal = prop(payload, "signal");
+  const durationMs = prop(payload, "durationMs");
+  const stdout = prop(payload, "stdout");
+  const stderr = prop(payload, "stderr");
+  const parts = ["command"];
+  if (key) parts.push(compact(key));
+  parts.push(failureKind ? compact(failureKind) : compact(status ?? "completed"));
+  if (typeof exitCode === "number") parts.push(`exit=${exitCode}`);
+  else if (signal) parts.push(`signal=${compact(signal)}`);
+  if (typeof durationMs === "number") parts.push(formatDuration(durationMs));
+  parts.push(`stdout=${formatByteCount(prop(stdout, "byteLength"))}`);
+  parts.push(`stderr=${formatByteCount(prop(stderr, "byteLength"))}`);
+  return parts.join(" ");
+}
+
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+function formatByteCount(value: unknown): string {
+  const bytes = typeof value === "number" && Number.isFinite(value) ? value : 0;
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)}KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
 }
 
 function formatPayload(payload: unknown): string {

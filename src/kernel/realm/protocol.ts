@@ -11,6 +11,7 @@ import type { NormalizedAgentEnvironment } from "../../agents/environment.ts";
 import type { ProviderConfigValue } from "../../agents/types.ts";
 import type { InputDep, WorkspaceRetention } from "../../journal/types.ts";
 import type { WorkflowVisibleSettings } from "../../settings/catalog.ts";
+import type { CommandResult, NormalizedWorkflowCommandSpec } from "../command.ts";
 
 /** SAB layout: Int32 control[0] is the ambient handshake flag; Float64 holds
  * the returned number. */
@@ -97,6 +98,14 @@ export type WorkerRequest =
       deps: InputDep[] | null;
     }
   | {
+      type: "command";
+      id: number;
+      command: NormalizedWorkflowCommandSpec;
+      version: string;
+      inputs: unknown;
+      deps: InputDep[] | null;
+    }
+  | {
       type: "step-commit";
       id: number;
       key: string;
@@ -170,3 +179,10 @@ export type HostReply =
     }
   | { type: "rpc-reply"; id: number; payload: unknown }
   | { type: "rpc-error"; id: number; error: { name: string; message: string } };
+
+export interface CommandReply {
+  ok: boolean;
+  result?: CommandResult;
+  contentHash?: string;
+  error?: { name: string; message: string };
+}

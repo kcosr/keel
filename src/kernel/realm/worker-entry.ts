@@ -34,10 +34,12 @@ import type { WorkspaceRetention } from "../../journal/types.ts";
 import type { WorkflowVisibleSettings } from "../../settings/catalog.ts";
 import { requireRunTarget } from "../../target.ts";
 import { DEFAULT_WORKSPACE_ID } from "../../workspace/identity.ts";
+import { CommandFailure, type CommandResult, normalizeWorkflowCommandSpec } from "../command.ts";
 import type { Schema } from "../schema.ts";
 import { closureOfHelpers, computeVersion } from "../version.ts";
 import {
   CONTROL_WORDS,
+  type CommandReply,
   type HostReply,
   type StepBeginReply,
   VALUE_OFFSET,
@@ -661,6 +663,24 @@ const ctx = Object.freeze({
     }
     const err = new Error(reply.error?.message ?? "agent failed");
     err.name = reply.error?.name ?? "AgentFailure";
+    throw err;
+  },
+  async command(rawSpec: unknown): Promise<CommandResult> {
+    const command = normalizeWorkflowCommandSpec(rawSpec, { path: "ctx.command" });
+    const version = computeVersion({ spec: command.identity });
+    const reply = await rpc<CommandReply>({
+      type: "command",
+      command,
+      version,
+      inputs: command.identity,
+      deps: null,
+    });
+    if (reply.ok && reply.result) {
+      return tag(reply.result, command.stableKey, reply.contentHash ?? "");
+    }
+    if (reply.result) throw new CommandFailure(reply.result);
+    const err = new Error(reply.error?.message ?? "command failed");
+    err.name = reply.error?.name ?? "CommandFailure";
     throw err;
   },
   agentSession(rawSessionSpec: {

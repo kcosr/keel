@@ -4,7 +4,7 @@
 // Effectful results live either inline (<=1KB) or as an artifact reference
 // (>1KB, Phase 8); for now both columns exist and inline is used.
 
-export type EffectType = "pure" | "effectful" | "ambient";
+export type EffectType = "pure" | "effectful" | "command" | "ambient";
 
 export type JournalStatus = "pending" | "completed" | "failed";
 
@@ -110,7 +110,7 @@ export type WorkspaceSourceKind =
   | "local-clone-git"
   | "remote-git";
 
-export type AgentWorkspaceOwnerKind = "workflow" | "agent" | "agent_session";
+export type AgentWorkspaceOwnerKind = "workflow" | "agent" | "agent_session" | "command";
 
 export type AgentWorkspaceStatus =
   | "creating"

@@ -153,6 +153,7 @@ versions, systemd state, logs, and restart controls are not inferred.
 | interrupt run | implemented | implemented | implemented | implemented | not-applicable | deferred | not-applicable | `run:interrupt` |
 | signal delivery | implemented | implemented | implemented | implemented | implemented | deferred | `ctx.signal` implemented | `run:signal` |
 | approval decision | implemented | implemented | implemented | implemented | implemented | deferred | `ctx.human` implemented | `admin` |
+| workflow command effect | existing run projection/events | watch text and NDJSON implemented | existing run report/output paths | visible through run events/projection | partial | deferred | `ctx.command` implemented | workflow launch authority plus normal run read/watch/output authority |
 | schedule put | implemented | implemented | deferred | deferred | not-applicable | deferred | not-applicable | `admin` |
 | schedule list/show | implemented | implemented | implemented | implemented | not-applicable | deferred | not-applicable | `admin` |
 | saved workflow save/install | implemented | implemented | deferred | deferred | not-applicable | deferred | not-applicable | `admin`, `workflow:save` |
@@ -178,6 +179,25 @@ on `launch`, `run`, `workflow run`, `retry`, and `rewind`; execute exposes
 `runSecrets` on `keel.launch`, `keel.retry`, and `keel.rewind`. The web
 transport rejects raw `runSecrets` until a browser-specific local secret
 authorization model exists.
+
+Workflow command effects use existing run surfaces rather than new RPC methods.
+`command.started` and `command.completed` are durable events available through
+`subscribeEvents`, `keel watch --output ndjson`, web SSE, and run reports.
+Text watch renders concise command started/completed/failure lines. Run
+projections include command journal nodes with `effectType: "command"` and the
+existing artifact-backed flag. Full bounded stdout/stderr lives in the journal
+result or result artifact, not duplicated into events; completed events carry
+byte counts, truncation flags, and small snippets. Event payloads list literal
+env var names and secret names, never secret values, but command stdout/stderr
+snippets may contain secrets if the command printed them.
+
+`ctx.command` runs as the local daemon user in an explicit workspace cwd. It is
+not provider sandboxed, provider `toolPolicy` does not authorize it, and current
+network capability values are authorization facts rather than enforced network
+isolation. Saved workflows containing fixed command specs grant that command
+authority to callers allowed to run the saved workflow; saved workflows that
+accept user-supplied command specs should be reviewed as daemon-user command
+authority over the selected workspace.
 
 ## CLI Interaction Behavior
 

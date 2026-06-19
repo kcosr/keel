@@ -12,15 +12,23 @@ export type {
   AgentSessionSpec,
   AgentSpec,
   AgentTurnSpec,
+  CommandResult,
   Ctx,
   HumanDecision,
   HumanSpec,
   StepOpts,
+  WorkflowCommandSpec,
   WorkspaceHandle,
   WorkspaceMode,
   WorkspaceRetention,
   WorkspaceSpec,
 } from "./kernel/ctx.ts";
+export { CommandFailure } from "./kernel/command.ts";
+export type {
+  BoundedText,
+  CommandResultStatus,
+  WorkflowCommandBase,
+} from "./kernel/command.ts";
 export type { AgentEnvironmentSpec } from "./agents/environment.ts";
 export type { Capabilities, ToolPolicy } from "./agents/capabilities.ts";
 export type { ProviderConfigMap, ProviderConfigValue } from "./agents/types.ts";

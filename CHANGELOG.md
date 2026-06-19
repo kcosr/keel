@@ -101,6 +101,14 @@
 - Workflow SDK ABI bumped to 8 for the workflow-facing agent environment shape.
   Re-register workflow definitions after upgrade and drain suspended or
   non-terminal older-ABI runs first unless Keel gains a real multi-ABI bridge.
+- Durable workflow command effects are available through `ctx.command(...)`.
+  Commands require an explicit `WorkspaceHandle`, relative `cwd`, argv or shell
+  invocation, command capabilities, wall-clock timeout, and stdout/stderr caps.
+  Completed command results replay from the journal; pending commands are
+  at-least-once after crash or interruption. Command execution runs as the local
+  daemon user, is not provider sandboxed, uses an explicit environment allowlist
+  plus literal vars and granted run secrets, and does not redact command output.
+  Workflow SDK ABI bumped to 9 for the new SDK surface and worker/host protocol.
 - Workflow SDK ABI bumped to 6 and journal schema to v17 for copy/clone workspace modes and canonical workspace identity hashes. Non-terminal runs captured with older SDK ABIs must be drained before upgrade or will fail resume with the existing unsupported-ABI error.
 - Workspace lifecycle metadata now distinguishes `mode`, `ownerKind`, source path, provider cwd, ownership, retention, and active worktree holders in RPC/CLI/execute views.
 - `keel execute` control scripts can list/get/diff/merge/discard/GC run workspaces through the daemon client.

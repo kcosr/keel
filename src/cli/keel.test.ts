@@ -1168,7 +1168,7 @@ describe("keel CLI", () => {
         expect(signaled.code).toBe(0);
         expect(signaled.stdout).toBe("running\n");
         const immediate = await runCli(["get", payload.runId], dir, runEnv);
-        expect(JSON.parse(immediate.stdout).status).not.toBe("finished");
+        expect(JSON.parse(immediate.stdout).status).toBe("running");
         await waitForCliStatus(payload.runId, dir, runEnv);
       } finally {
         daemon.stop();

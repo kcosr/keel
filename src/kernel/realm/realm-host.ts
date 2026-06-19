@@ -679,10 +679,10 @@ export class RealmKernel {
     }
     const executionPath = this.executionPathForRun(run);
     const input = run.inputRef ? JSON.parse(run.inputRef) : undefined;
-    if (run.status === "interrupted") {
+    this.store.transaction(() => {
       this.store.updateRun(runId, { status: "running", errorJson: null, finishedAtMs: null });
-    }
-    this.store.appendEvent(runId, "run.resumed", {}, this.host.clock());
+      this.store.appendEvent(runId, "run.resumed", {}, this.host.clock());
+    });
     return { runId, done: this.execute<O>(runId, executionPath, input) };
   }
 

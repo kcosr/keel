@@ -6,6 +6,7 @@
 - Resuming a parked run now immediately projects as `running` through `keel get`
   and related surfaces while resumed provider work is still active, instead of
   retaining the old `waiting-*` status until the next park or terminal event.
+  ([#22](https://github.com/kcosr/keel/pull/22))
 
 ### Added
 - Production React/Vite/TypeScript web UI foundation under `web/`, including

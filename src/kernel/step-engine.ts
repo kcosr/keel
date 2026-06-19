@@ -93,6 +93,25 @@ export class StepEngine {
    * effectful steps: a resumed pending command may re-execute only when version
    * and input hash still match. */
   beginCommand(key: string, inputs: Json, version: string, deps: InputDep[] | null): BeginResult {
+    return this.beginStrictEffect(key, inputs, version, deps, "command");
+  }
+
+  beginCompletionCheck(
+    key: string,
+    inputs: Json,
+    version: string,
+    deps: InputDep[] | null,
+  ): BeginResult {
+    return this.beginStrictEffect(key, inputs, version, deps, "completion_check");
+  }
+
+  private beginStrictEffect(
+    key: string,
+    inputs: Json,
+    version: string,
+    deps: InputDep[] | null,
+    effectType: "command" | "completion_check",
+  ): BeginResult {
     const inputHash = hashJson(inputs);
     const existing = this.store.getLatestAttempt(this.runId, key);
     if (
@@ -106,7 +125,7 @@ export class StepEngine {
     if (existing?.status === "pending") {
       if (existing.inputHash !== inputHash || existing.version !== version) {
         throw new Error(
-          `pending command "${key}" identity changed; use a new command key or rewind the run`,
+          `pending ${effectType} "${key}" identity changed; use a new key or rewind the run`,
         );
       }
       return {
@@ -122,7 +141,7 @@ export class StepEngine {
       runId: this.runId,
       stableKey: key,
       attempt,
-      effectType: "command",
+      effectType,
       status: "pending",
       version,
       inputHash,

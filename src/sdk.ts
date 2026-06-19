@@ -12,8 +12,21 @@ export type {
   AgentSessionSpec,
   AgentSpec,
   AgentTurnSpec,
+  BranchPushedCompletionCheck,
+  CommandCompletionCheck,
   CommandResult,
+  CompletionCheck,
+  CompletionCheckAttempt,
+  CompletionCheckEffectSpec,
+  CompletionCheckFailureAction,
+  CompletionCheckFailureKind,
+  CompletionCheckResult,
+  CompletionCheckStatus,
+  CompletionCheckTrigger,
   Ctx,
+  GitCleanCompletionCheck,
+  HasCommitsCompletionCheck,
+  NormalizedCompletionCheck,
   HumanDecision,
   HumanSpec,
   StepOpts,
@@ -24,6 +37,12 @@ export type {
   WorkspaceSpec,
 } from "./kernel/ctx.ts";
 export { CommandFailure } from "./kernel/command.ts";
+export {
+  completionCheckPromptSummary,
+  completionCheckStableKey,
+  normalizeCompletionCheckFailureAction,
+  normalizeCompletionChecks,
+} from "./kernel/completion-check.ts";
 export type {
   BoundedText,
   CommandResultStatus,

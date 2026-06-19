@@ -98,6 +98,12 @@ import {
   commandCompletedEvent,
   commandStartedEvent,
 } from "../command.ts";
+import { runCompletionCheck } from "../completion-check-runner.ts";
+import {
+  type CompletionCheckResult,
+  completionCheckCompletedEvent,
+  completionCheckStartedEvent,
+} from "../completion-check.ts";
 import type { CtxHost, FaultPoint } from "../ctx.ts";
 import { extractModuleHelpers } from "../module-helpers.ts";
 import { RUN_FINISHED_INLINE_OUTPUT_BYTES } from "../output.ts";
@@ -1762,6 +1768,54 @@ export class RealmKernel {
     return completed;
   }
 
+  private completeCompletionCheckResult(
+    runId: string,
+    result: CompletionCheckResult,
+    spec: Parameters<typeof completionCheckCompletedEvent>[0],
+    begun: {
+      attempt: number;
+      inputHash: string;
+      startedAtMs: number;
+      version: string;
+      inputDeps: InputDep[] | null;
+    },
+  ): CompletionCheckResult {
+    this.host.fault?.("before-commit", spec.stableKey);
+    let completed: CompletionCheckResult = result;
+    let stored = prepareStepResult(completed);
+    if (stored.artifact) {
+      completed = result;
+      stored = prepareStepResult(completed);
+    }
+    const finishedAtMs = this.host.clock();
+    this.store.transaction(() => {
+      if (stored.artifact) {
+        this.store.putArtifact(stored.artifact.hash, stored.artifact.bytes, finishedAtMs);
+      }
+      this.store.appendEvent(
+        runId,
+        "completion_check.completed",
+        completionCheckCompletedEvent(spec, completed),
+        finishedAtMs,
+      );
+      this.store.putJournalRow({
+        runId,
+        stableKey: spec.stableKey,
+        attempt: begun.attempt,
+        effectType: "completion_check",
+        status: "completed",
+        version: begun.version,
+        inputHash: begun.inputHash,
+        inputDeps: begun.inputDeps,
+        resultInline: stored.inline,
+        resultArtifact: stored.artifact?.hash ?? null,
+        startedAtMs: begun.startedAtMs,
+        finishedAtMs,
+      });
+    });
+    return completed;
+  }
+
   private releaseWorkspaceHolder(
     runId: string,
     workspaceId: string | undefined,
@@ -3181,6 +3235,98 @@ export class RealmKernel {
                     finishedAtMs: at,
                   });
                   reply(m.id, { ok: false, error: serializeError(commandErr) });
+                }
+              })();
+              break;
+            }
+            case "completion-check": {
+              let begun: ReturnType<StepEngine["beginCompletionCheck"]>;
+              try {
+                begun = engine.beginCompletionCheck(
+                  m.completionCheck.stableKey,
+                  m.inputs as Json,
+                  m.version,
+                  m.deps,
+                );
+              } catch (err) {
+                const pending = this.store.getLatestAttempt(runId, m.completionCheck.stableKey);
+                if (
+                  pending?.status === "pending" &&
+                  pending.version === m.version &&
+                  pending.inputHash === hashJson(m.inputs as Json)
+                ) {
+                  abort(err);
+                  break;
+                }
+                reply(m.id, { ok: false, error: serializeError(err) });
+                break;
+              }
+              if (begun.kind === "replay") {
+                const result = begun.value as CompletionCheckResult;
+                reply(m.id, {
+                  ok: true,
+                  result,
+                  contentHash: hashJson(result as unknown as Json),
+                });
+                break;
+              }
+
+              this.onStepExecute?.(m.completionCheck.stableKey);
+              engine.emit(
+                "completion_check.started",
+                completionCheckStartedEvent(m.completionCheck),
+              );
+              void (async () => {
+                try {
+                  const result = await runCompletionCheck({
+                    store: this.store,
+                    runId,
+                    spec: m.completionCheck,
+                    startedAtMs: begun.startedAtMs,
+                    clock: this.host.clock,
+                    signal: runAbortController.signal,
+                  });
+                  if (settled || this.isRunInterrupted(runId)) return;
+                  let completed: CompletionCheckResult;
+                  try {
+                    completed = this.completeCompletionCheckResult(
+                      runId,
+                      result,
+                      m.completionCheck,
+                      {
+                        attempt: begun.attempt,
+                        inputHash: begun.inputHash,
+                        startedAtMs: begun.startedAtMs,
+                        version: m.version,
+                        inputDeps: m.deps,
+                      },
+                    );
+                  } catch (faultErr) {
+                    abort(faultErr);
+                    return;
+                  }
+                  reply(m.id, {
+                    ok: true,
+                    result: completed,
+                    contentHash: hashJson(completed as unknown as Json),
+                  });
+                } catch (checkErr) {
+                  if (settled || this.isRunInterrupted(runId)) return;
+                  const at = this.host.clock();
+                  this.store.putJournalRow({
+                    runId,
+                    stableKey: m.completionCheck.stableKey,
+                    attempt: begun.attempt,
+                    effectType: "completion_check",
+                    status: "failed",
+                    version: m.version,
+                    inputHash: begun.inputHash,
+                    inputDeps: m.deps,
+                    errorJson: JSON.stringify(serializeError(checkErr)),
+                    startedAtMs: begun.startedAtMs,
+                    finishedAtMs: at,
+                  });
+                  reply(m.id, { ok: false, error: serializeError(checkErr) });
                 }
               })();
               break;

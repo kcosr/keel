@@ -12,6 +12,10 @@ import type { ProviderConfigValue } from "../../agents/types.ts";
 import type { InputDep, WorkspaceRetention } from "../../journal/types.ts";
 import type { WorkflowVisibleSettings } from "../../settings/catalog.ts";
 import type { CommandResult, NormalizedWorkflowCommandSpec } from "../command.ts";
+import type {
+  CompletionCheckResult,
+  NormalizedCompletionCheckEffectSpec,
+} from "../completion-check.ts";
 
 /** SAB layout: Int32 control[0] is the ambient handshake flag; Float64 holds
  * the returned number. */
@@ -106,6 +110,14 @@ export type WorkerRequest =
       deps: InputDep[] | null;
     }
   | {
+      type: "completion-check";
+      id: number;
+      completionCheck: NormalizedCompletionCheckEffectSpec;
+      version: string;
+      inputs: unknown;
+      deps: InputDep[] | null;
+    }
+  | {
       type: "step-commit";
       id: number;
       key: string;
@@ -183,6 +195,13 @@ export type HostReply =
 export interface CommandReply {
   ok: boolean;
   result?: CommandResult;
+  contentHash?: string;
+  error?: { name: string; message: string };
+}
+
+export interface CompletionCheckReply {
+  ok: boolean;
+  result?: CompletionCheckResult;
   contentHash?: string;
   error?: { name: string; message: string };
 }

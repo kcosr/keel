@@ -146,6 +146,15 @@ function formatTextWatchEvent(event: EventEnvelope, opts: WatchFormatOptions): s
     }
     case "command.completed":
       return `${prefix} ${formatCommandCompleted(payload)}\n`;
+    case "completion_check.started": {
+      const key = prop(payload, "key");
+      const type = prop(payload, "type");
+      return `${prefix} completion-check${key ? ` ${compact(key)}` : ""}${
+        type ? ` ${compact(type)}` : ""
+      } started\n`;
+    }
+    case "completion_check.completed":
+      return `${prefix} ${formatCompletionCheckCompleted(payload)}\n`;
     case "run.parked": {
       const kind = prop(payload, "kind");
       const key = prop(payload, "key");
@@ -232,6 +241,21 @@ function formatCommandCompleted(payload: unknown): string {
   if (typeof durationMs === "number") parts.push(formatDuration(durationMs));
   parts.push(`stdout=${formatByteCount(prop(stdout, "byteLength"))}`);
   parts.push(`stderr=${formatByteCount(prop(stderr, "byteLength"))}`);
+  return parts.join(" ");
+}
+
+function formatCompletionCheckCompleted(payload: unknown): string {
+  const key = prop(payload, "key");
+  const type = prop(payload, "type");
+  const status = prop(payload, "status");
+  const failureKind = prop(payload, "failureKind");
+  const durationMs = prop(payload, "durationMs");
+  const parts = ["completion-check"];
+  if (key) parts.push(compact(key));
+  if (type) parts.push(compact(type));
+  parts.push(compact(status ?? "completed"));
+  if (failureKind) parts.push(compact(failureKind));
+  if (typeof durationMs === "number") parts.push(formatDuration(durationMs));
   return parts.join(" ");
 }
 

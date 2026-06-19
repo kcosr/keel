@@ -35,11 +35,16 @@ import type { WorkflowVisibleSettings } from "../../settings/catalog.ts";
 import { requireRunTarget } from "../../target.ts";
 import { DEFAULT_WORKSPACE_ID } from "../../workspace/identity.ts";
 import { CommandFailure, type CommandResult, normalizeWorkflowCommandSpec } from "../command.ts";
+import {
+  type CompletionCheckResult,
+  normalizeCompletionCheckEffectSpec,
+} from "../completion-check.ts";
 import type { Schema } from "../schema.ts";
 import { closureOfHelpers, computeVersion } from "../version.ts";
 import {
   CONTROL_WORDS,
   type CommandReply,
+  type CompletionCheckReply,
   type HostReply,
   type StepBeginReply,
   VALUE_OFFSET,
@@ -681,6 +686,25 @@ const ctx = Object.freeze({
     if (reply.result) throw new CommandFailure(reply.result);
     const err = new Error(reply.error?.message ?? "command failed");
     err.name = reply.error?.name ?? "CommandFailure";
+    throw err;
+  },
+  async completionCheck(rawSpec: unknown): Promise<CompletionCheckResult> {
+    const completionCheck = normalizeCompletionCheckEffectSpec(rawSpec, {
+      path: "ctx.completionCheck",
+    });
+    const version = computeVersion({ spec: completionCheck.identity });
+    const reply = await rpc<CompletionCheckReply>({
+      type: "completion-check",
+      completionCheck,
+      version,
+      inputs: completionCheck.identity,
+      deps: null,
+    });
+    if (reply.ok && reply.result) {
+      return tag(reply.result, completionCheck.stableKey, reply.contentHash ?? "");
+    }
+    const err = new Error(reply.error?.message ?? "completion check failed");
+    err.name = reply.error?.name ?? "CompletionCheckFailure";
     throw err;
   },
   agentSession(rawSessionSpec: {

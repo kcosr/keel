@@ -73,6 +73,7 @@ The body runs in a sandbox. Stay inside it or the run is rejected:
 ctx.agent(spec)                       // call an LLM agent (the real work); see §4
 ctx.agentSession(spec).turn(spec)     // realm-only multi-turn logical agent; see §4.1
 ctx.command(spec)                     // durable bounded host command; see §4.2
+ctx.completionCheck(spec)             // durable host completion gate for curated workflows
 ctx.step(key, schema, inputs, fn)     // pure compute; memoized & re-run only if inputs/code change
 ctx.now() / ctx.random()              // the only time / randomness allowed
 ctx.sleep(key, ms)                    // durable pause
@@ -213,6 +214,10 @@ Rules:
 - Completed command results replay. Pending commands are at-least-once after
   crash or interruption, so commands that mutate files or external systems
   should be idempotent or fail clearly when repeated.
+
+The reusable implement/review workflows expose typed `completionChecks` for
+command, clean-tree, commit, and pushed-branch gates. Prefer those gates over
+prompt-only verification instructions when completion must be machine checked.
 
 Use `ctx.workspace` when agents should run somewhere other than the default
 direct workspace at `ctx.run.target`. Choose the mode deliberately:

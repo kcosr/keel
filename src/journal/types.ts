@@ -4,7 +4,7 @@
 // Effectful results live either inline (<=1KB) or as an artifact reference
 // (>1KB, Phase 8); for now both columns exist and inline is used.
 
-export type EffectType = "pure" | "effectful" | "command" | "ambient";
+export type EffectType = "pure" | "effectful" | "command" | "completion_check" | "ambient";
 
 export type JournalStatus = "pending" | "completed" | "failed";
 

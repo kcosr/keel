@@ -154,6 +154,7 @@ versions, systemd state, logs, and restart controls are not inferred.
 | signal delivery | implemented | implemented | implemented | implemented | implemented | deferred | `ctx.signal` implemented | `run:signal` |
 | approval decision | implemented | implemented | implemented | implemented | implemented | deferred | `ctx.human` implemented | `admin` |
 | workflow command effect | existing run projection/events | watch text and NDJSON implemented | existing run report/output paths | visible through run events/projection | partial | deferred | `ctx.command` implemented | workflow launch authority plus normal run read/watch/output authority |
+| workflow completion checks | existing run projection/events/output | watch text and NDJSON implemented | existing run report/output paths | visible through run events/projection | partial | deferred | `ctx.completionCheck` implemented for curated workflows | workflow launch authority plus normal run read/watch/output authority |
 | schedule put | implemented | implemented | deferred | deferred | not-applicable | deferred | not-applicable | `admin` |
 | schedule list/show | implemented | implemented | implemented | implemented | not-applicable | deferred | not-applicable | `admin` |
 | saved workflow save/install | implemented | implemented | deferred | deferred | not-applicable | deferred | not-applicable | `admin`, `workflow:save` |
@@ -198,6 +199,14 @@ isolation. Saved workflows containing fixed command specs grant that command
 authority to callers allowed to run the saved workflow; saved workflows that
 accept user-supplied command specs should be reviewed as daemon-user command
 authority over the selected workspace.
+
+Completion checks use existing run surfaces rather than new RPC methods.
+`completion_check.started` and `completion_check.completed` are durable events
+available through `subscribeEvents`, `keel watch --output ndjson`, web SSE, and
+run reports. Text watch renders concise completion-check pass/fail lines.
+Terminal output from the reusable implement/review workflows includes the
+bounded `completion` object with attempts, per-check status, failure kind, and
+diagnostics.
 
 ## CLI Interaction Behavior
 

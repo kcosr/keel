@@ -109,6 +109,13 @@
   daemon user, is not provider sandboxed, uses an explicit environment allowlist
   plus literal vars and granted run secrets, and does not redact command output.
   Workflow SDK ABI bumped to 9 for the new SDK surface and worker/host protocol.
+- Reusable implement/review workflows now use typed `completionChecks` instead
+  of `verificationCommand`. Checks can run daemon-owned commands, require clean
+  git state, require commits after the selected base, and require local `HEAD`
+  to equal a configured remote ref. Failed checks produce bounded diagnostics,
+  can continue the implementation loop, park, or block, and mark owned
+  worktrees `failureSeen` for `retain-on-failure`. Workflow SDK ABI bumped to
+  10 for the `ctx.completionCheck(...)` surface and worker/host protocol.
 - Workflow SDK ABI bumped to 6 and journal schema to v17 for copy/clone workspace modes and canonical workspace identity hashes. Non-terminal runs captured with older SDK ABIs must be drained before upgrade or will fail resume with the existing unsupported-ABI error.
 - Workspace lifecycle metadata now distinguishes `mode`, `ownerKind`, source path, provider cwd, ownership, retention, and active worktree holders in RPC/CLI/execute views.
 - `keel execute` control scripts can list/get/diff/merge/discard/GC run workspaces through the daemon client.

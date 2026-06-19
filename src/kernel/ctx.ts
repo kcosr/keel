@@ -41,6 +41,14 @@ import {
   commandStartedEvent,
   normalizeWorkflowCommandSpec,
 } from "./command.ts";
+import { runCompletionCheck } from "./completion-check-runner.ts";
+import {
+  type CompletionCheckEffectSpec,
+  type CompletionCheckResult,
+  completionCheckCompletedEvent,
+  completionCheckStartedEvent,
+  normalizeCompletionCheckEffectSpec,
+} from "./completion-check.ts";
 import { runBoundedProcess } from "./process-runner.ts";
 import type { Schema } from "./schema.ts";
 import { StepEngine, prepareStepResult } from "./step-engine.ts";
@@ -53,6 +61,21 @@ export type {
   WorkflowCommandBase,
   WorkflowCommandSpec,
 } from "./command.ts";
+export type {
+  BranchPushedCompletionCheck,
+  CommandCompletionCheck,
+  CompletionCheck,
+  CompletionCheckAttempt,
+  CompletionCheckEffectSpec,
+  CompletionCheckFailureAction,
+  CompletionCheckFailureKind,
+  CompletionCheckResult,
+  CompletionCheckStatus,
+  CompletionCheckTrigger,
+  GitCleanCompletionCheck,
+  HasCommitsCompletionCheck,
+  NormalizedCompletionCheck,
+} from "./completion-check.ts";
 
 const SESSION_STABLE_KEY_PREFIX = "__session.";
 
@@ -224,6 +247,9 @@ export interface Ctx {
 
   /** Durable host-side command effect in an explicit workspace. */
   command(spec: WorkflowCommandSpec): Promise<CommandResult>;
+
+  /** Durable host-side completion gate in an explicit workspace. */
+  completionCheck(spec: CompletionCheckEffectSpec): Promise<CompletionCheckResult>;
 
   /** Realm-only durable logical agent session. */
   agentSession(spec: AgentSessionSpec): AgentSession;
@@ -637,6 +663,55 @@ export class WorkflowCtx implements Ctx {
       throw err;
     }
     applyCommandFailureMode(completed, command.failureMode);
+    return completed;
+  }
+
+  async completionCheck(rawSpec: CompletionCheckEffectSpec): Promise<CompletionCheckResult> {
+    const spec = normalizeCompletionCheckEffectSpec(rawSpec, { path: "ctx.completionCheck" });
+    const version = computeVersion({ spec: spec.identity });
+    const begun = this.engine.beginCompletionCheck(spec.stableKey, spec.identity, version, null);
+    if (begun.kind === "replay") return begun.value as CompletionCheckResult;
+    this.engine.emit("completion_check.started", completionCheckStartedEvent(spec));
+    const result = await runCompletionCheck({
+      store: this.store,
+      runId: this.runId,
+      spec,
+      startedAtMs: begun.startedAtMs,
+      clock: this.host.clock,
+    });
+    this.host.fault?.("before-commit", spec.stableKey);
+    let completed: CompletionCheckResult = result;
+    let stored = prepareStepResult(completed);
+    if (stored.artifact) {
+      completed = result;
+      stored = prepareStepResult(completed);
+    }
+    const finishedAtMs = this.host.clock();
+    this.store.transaction(() => {
+      if (stored.artifact) {
+        this.store.putArtifact(stored.artifact.hash, stored.artifact.bytes, finishedAtMs);
+      }
+      this.store.appendEvent(
+        this.runId,
+        "completion_check.completed",
+        completionCheckCompletedEvent(spec, completed),
+        finishedAtMs,
+      );
+      this.store.putJournalRow({
+        runId: this.runId,
+        stableKey: spec.stableKey,
+        attempt: begun.attempt,
+        effectType: "completion_check",
+        status: "completed",
+        version,
+        inputHash: begun.inputHash,
+        inputDeps: null,
+        resultInline: stored.inline,
+        resultArtifact: stored.artifact?.hash ?? null,
+        startedAtMs: begun.startedAtMs,
+        finishedAtMs,
+      });
+    });
     return completed;
   }
 

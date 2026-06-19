@@ -121,6 +121,29 @@ describe("watch text formatter", () => {
     );
   });
 
+  test("renders completion check events", () => {
+    expect(
+      render([
+        durable(7, "completion_check.started", { key: "tests", type: "command" }),
+        durable(8, "completion_check.completed", {
+          key: "tests",
+          type: "command",
+          status: "passed",
+          durationMs: 8200,
+        }),
+        durable(9, "completion_check.completed", {
+          key: "clean",
+          type: "git-clean",
+          status: "failed",
+          failureKind: "dirty-worktree",
+          durationMs: 20,
+        }),
+      ]),
+    ).toBe(
+      "[7] completion-check tests command started\n[8] completion-check tests command passed 8.2s\n[9] completion-check clean git-clean failed dirty-worktree 20ms\n",
+    );
+  });
+
   test("does not coalesce non-string text or reasoning payloads", () => {
     expect(
       render([agentEvent("review", "text", "A"), agentEvent("review", "text", { bad: true })]),

@@ -950,6 +950,7 @@ versioning and can cause affected steps to re-run.
 | `agent(spec)` | Journaled LLM agent call. A completed agent effect never re-runs on resume. |
 | `agentSession(spec)` | Realm-only logical agent participant with multiple durable `.turn(...)` calls in one backend conversation. |
 | `command(spec)` | Journaled host-side command in an explicit workspace. Completed command results replay; pending commands may run again after crash. |
+| `completionCheck(spec)` | Journaled host-side completion gate in an explicit workspace. Used by curated implement/review workflows. |
 | `now()` / `random()` | Journaled wall-clock and entropy. Recorded once, replayed thereafter. |
 | `sleep(key, ms)` | Durable sleep. Parks the run until the supervisor wakes it. |
 | `human(spec)` | Park until a human approval/denial is delivered. |
@@ -1054,6 +1055,46 @@ Important command semantics:
 [5] command code-map exited exit=0 1.8s stdout=42KB stderr=0B
 [6] command verify nonzero-exit exit=1 12.4s stdout=0B stderr=8KB
 ```
+
+## Completion Checks
+
+The reusable `implement-review-loop` and `branch-worktree-implement-review`
+workflows accept typed `completionChecks` instead of the old prompt-only
+`verificationCommand`. Checks run after a clean review and before a workflow can
+return `clean`; `park-before-complete` runs them before parking and again after
+an external `complete` signal.
+
+Supported checks are:
+
+- `command`: daemon-run argv or explicit `/bin/sh -c` command in the selected
+  workspace.
+- `git-clean`: require `git status --porcelain=v1 -z --untracked-files=all` to
+  have no entries.
+- `has-commits`: require commits after the generated worktree base commit, or
+  after `baseRef` for direct workspaces.
+- `branch-pushed`: require local `HEAD` to exactly equal a configured remote ref
+  from `git ls-remote`; Keel does not fetch or push.
+
+`completionCheckFailureAction` defaults to `"continue-loop"`, which sends
+bounded failure diagnostics back to the implementer while rounds remain.
+`"block"` returns terminal `blocked`; `"park"` is valid only with
+`completionMode: "park-before-complete"`.
+
+Terminal workflow output includes:
+
+```ts
+completion: {
+  checksConfigured: number;
+  attempts: CompletionCheckAttempt[];
+  latestAttempt?: CompletionCheckAttempt;
+}
+```
+
+`completion_check.started` and `completion_check.completed` are durable events
+available through `keel watch --output ndjson`; text watch renders concise
+`completion-check <key> <type> passed|failed` lines. Failed owned-worktree
+attempts mark the workspace `failureSeen`, so `retain-on-failure` keeps the
+worktree for inspection.
 
 ## Agent Calls
 

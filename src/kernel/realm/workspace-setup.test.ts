@@ -320,7 +320,9 @@ describe("workspace setup commands", () => {
     const row = store.getAgentWorkspace("run_workspace_setup", "prepared");
     expect(row?.setupIdentityHash).toBeTruthy();
     writeFileSync(join(workspace, "prepared.txt"), "stale");
-    store.deleteWorkspaceSetupRows("run_workspace_setup");
+    store.deleteWorkspaceSetupRowsByStableKeyPrefix("run_workspace_setup", [
+      "workspace.setup.prepared.",
+    ]);
     store.updateAgentWorkspace("run_workspace_setup", "prepared", {
       setupStatus: "pending",
       setupFinishedAtMs: null,
@@ -413,6 +415,122 @@ describe("workspace setup commands", () => {
     );
     expect(secondSetupStarted).toBeGreaterThan(-1);
     expect(secondCommandStarted).toBeGreaterThan(secondSetupStarted);
+  });
+
+  test("terminal retry preserves completed setup rows for other workspaces", async () => {
+    const store = JournalStore.memory();
+    const workspace = tempDir("keel-workspace-setup-retry-scoped-");
+    const provider: AgentProvider = {
+      name: "noop",
+      async generate(): Promise<AgentResult> {
+        return { text: "unused", transcript: [] };
+      },
+    };
+    const workflow = {
+      name: "workspace-setup-retry-scoped",
+      source: `
+        import { type Ctx } from "@kcosr/keel";
+        export default async function wf(ctx: Ctx, input: { workspace: string }): Promise<string> {
+          const ready = await ctx.workspace({
+            key: "ready",
+            mode: "direct",
+            path: input.workspace,
+            setup: {
+              capabilities: { fs: "workspace-write", shell: true, network: "none" },
+              commands: [
+                { key: "write", command: "/bin/sh", args: ["-c", "printf ready > ready.txt"] },
+              ],
+            },
+          });
+          const flaky = await ctx.workspace({
+            key: "flaky",
+            mode: "direct",
+            path: input.workspace,
+            setup: {
+              capabilities: { fs: "workspace-write", shell: true, network: "none" },
+              commands: [
+                {
+                  key: "write",
+                  command: "/bin/sh",
+                  args: ["-c", "if [ ! -f marker ]; then touch marker; exit 7; fi; printf flaky > flaky.txt"],
+                },
+              ],
+            },
+          });
+          const readReady = await ctx.command({
+            key: "read-ready",
+            workspace: ready,
+            cwd: ".",
+            mode: "argv",
+            argv: ["/bin/sh", "-c", "cat ready.txt"],
+            capabilities: { fs: "workspace-write", shell: true, network: "none" },
+            timeoutMs: 5000,
+            maxStdoutBytes: 1000,
+            maxStderrBytes: 1000,
+          });
+          const readFlaky = await ctx.command({
+            key: "read-flaky",
+            workspace: flaky,
+            cwd: ".",
+            mode: "argv",
+            argv: ["/bin/sh", "-c", "cat flaky.txt"],
+            capabilities: { fs: "workspace-write", shell: true, network: "none" },
+            timeoutMs: 5000,
+            maxStdoutBytes: 1000,
+            maxStderrBytes: 1000,
+          });
+          return readReady.stdout.text + "/" + readFlaky.stdout.text;
+        }
+      `,
+    };
+
+    await expect(
+      kernel(store, provider).run<string>(workflow, { workspace }, { target: workspace }),
+    ).rejects.toThrow(/command write failed/);
+    expect(
+      store.getLatestAttempt("run_workspace_setup", "workspace.setup.ready.write"),
+    ).toMatchObject({
+      effectType: "workspace_setup",
+      status: "completed",
+    });
+    expect(
+      store.getLatestAttempt("run_workspace_setup", "workspace.setup.flaky.write"),
+    ).toMatchObject({
+      effectType: "workspace_setup",
+      status: "completed",
+    });
+
+    const retried = await kernel(store, provider).retry<string>("run_workspace_setup");
+
+    expect(retried.status).toBe("finished");
+    expect(retried.output).toBe("ready/flaky");
+    expect(
+      store.getLatestAttempt("run_workspace_setup", "workspace.setup.ready.write"),
+    ).toMatchObject({
+      effectType: "workspace_setup",
+      status: "completed",
+    });
+    expect(
+      store.getLatestAttempt("run_workspace_setup", "workspace.setup.flaky.write"),
+    ).toMatchObject({
+      effectType: "workspace_setup",
+      status: "completed",
+    });
+    const events = store.listEvents("run_workspace_setup");
+    expect(
+      events.filter(
+        (event) =>
+          event.type === "workspace.setup.started" &&
+          (JSON.parse(event.payloadJson) as { workspaceId?: string }).workspaceId === "ready",
+      ),
+    ).toHaveLength(1);
+    expect(
+      events.filter(
+        (event) =>
+          event.type === "workspace.setup.started" &&
+          (JSON.parse(event.payloadJson) as { workspaceId?: string }).workspaceId === "flaky",
+      ),
+    ).toHaveLength(2);
   });
 
   test("setup identity changes fail closed on rerun", async () => {

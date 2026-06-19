@@ -1918,18 +1918,34 @@ export class JournalStore {
     });
   }
 
-  /** Delete workspace setup command rows so an explicit retry can rerun setup from command 0. */
-  deleteWorkspaceSetupRows(runId: string): void {
+  /** Delete selected workspace setup command rows so an explicit retry can rerun setup from command 0. */
+  deleteWorkspaceSetupRowsByStableKeyPrefix(runId: string, stableKeyPrefixes: string[]): void {
+    if (stableKeyPrefixes.length === 0) return;
     this.transaction(() => {
-      const artifacts = this.db
-        .query<{ result_artifact: string }, [string]>(
-          "SELECT DISTINCT result_artifact FROM journal WHERE run_id = ? AND effect_type = 'workspace_setup' AND result_artifact IS NOT NULL",
-        )
-        .all(runId);
-      for (const artifact of artifacts) this.decrementArtifactRefcount(artifact.result_artifact);
-      this.db
-        .query("DELETE FROM journal WHERE run_id = ? AND effect_type = 'workspace_setup'")
-        .run(runId);
+      const artifactHashes = new Set<string>();
+      const artifacts = this.db.query<{ result_artifact: string }, [string, number, string]>(
+        `SELECT DISTINCT result_artifact
+         FROM journal
+         WHERE run_id = ?
+           AND effect_type = 'workspace_setup'
+           AND result_artifact IS NOT NULL
+           AND substr(stable_key, 1, ?) = ?`,
+      );
+      const deleteRows = this.db.query<unknown, [string, number, string]>(
+        `DELETE FROM journal
+         WHERE run_id = ?
+           AND effect_type = 'workspace_setup'
+           AND substr(stable_key, 1, ?) = ?`,
+      );
+      for (const prefix of stableKeyPrefixes) {
+        for (const artifact of artifacts.all(runId, prefix.length, prefix)) {
+          artifactHashes.add(artifact.result_artifact);
+        }
+      }
+      for (const hash of artifactHashes) this.decrementArtifactRefcount(hash);
+      for (const prefix of stableKeyPrefixes) {
+        deleteRows.run(runId, prefix.length, prefix);
+      }
     });
   }
 

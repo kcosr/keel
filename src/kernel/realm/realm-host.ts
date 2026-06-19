@@ -112,6 +112,7 @@ import { CommandAbortError, runBoundedProcess } from "../process-runner.ts";
 import { StepEngine, prepareStepResult, readJournalResult } from "../step-engine.ts";
 import {
   type NormalizedWorkspaceSetupSpec,
+  WORKSPACE_SETUP_STABLE_KEY_PREFIX,
   buildWorkspaceSetupEnvironment,
   normalizeWorkspaceSetupSpec,
   setupCommandToWorkflowCommand,
@@ -2280,7 +2281,10 @@ export class RealmKernel {
       .listAgentWorkspaces(runId, { includeRemoved: true })
       .filter((row) => row.setupStatus === "failed");
     if (failedWorkspaces.length === 0) return;
-    this.store.deleteWorkspaceSetupRows(runId);
+    this.store.deleteWorkspaceSetupRowsByStableKeyPrefix(
+      runId,
+      failedWorkspaces.map((row) => `${WORKSPACE_SETUP_STABLE_KEY_PREFIX}${row.workspaceId}.`),
+    );
     for (const row of failedWorkspaces) {
       this.store.updateAgentWorkspace(runId, row.workspaceId, {
         setupStatus: "none",

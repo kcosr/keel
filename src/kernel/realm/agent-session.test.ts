@@ -272,7 +272,7 @@ describe("ctx.agentSession", () => {
     expect(provider.calls.map((call) => call.timeoutMs)).toEqual([1234, 1234]);
   });
 
-  test("session turn identity ignores default timeout and stall settings", async () => {
+  test("session turn identity includes default timeout and stall settings", async () => {
     const store = JournalStore.memory();
     const provider = new RecordingSessionProvider();
     let nextRun = 1;
@@ -328,8 +328,8 @@ describe("ctx.agentSession", () => {
       )
       .all();
     expect(turnRows).toHaveLength(2);
-    expect(turnRows[0]?.version).toBe(turnRows[1]?.version);
-    expect(turnRows[0]?.input_hash).toBe(turnRows[1]?.input_hash);
+    expect(turnRows[0]?.version).not.toBe(turnRows[1]?.version);
+    expect(turnRows[0]?.input_hash).not.toBe(turnRows[1]?.input_hash);
     expect(provider.calls.map((call) => call.timeoutMs)).toEqual([1234, 9999]);
   });
 

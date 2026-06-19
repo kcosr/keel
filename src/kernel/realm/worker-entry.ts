@@ -371,6 +371,33 @@ function currentWorkflowSettings(): WorkflowVisibleSettings {
   return workflowSettings;
 }
 
+interface AgentControls {
+  maxRetries: number;
+  lenient: boolean;
+  onFailure: "throw" | "null";
+  timeoutMs: number;
+  stallRetries: number;
+}
+
+function resolveAgentControls(
+  spec: {
+    maxRetries?: number;
+    lenient?: boolean;
+    onFailure?: "throw" | "null";
+    timeoutMs?: number;
+    stallRetries?: number;
+  },
+  settings: WorkflowVisibleSettings,
+): AgentControls {
+  return {
+    maxRetries: spec.maxRetries ?? settings.agentDefaultMaxRetries,
+    lenient: spec.lenient ?? settings.agentDefaultLenient,
+    onFailure: spec.onFailure ?? settings.agentDefaultOnFailure,
+    timeoutMs: spec.timeoutMs ?? settings.agentDefaultTimeoutMs,
+    stallRetries: spec.stallRetries ?? settings.agentDefaultStallRetries,
+  };
+}
+
 interface WorkspaceHandle {
   readonly id: string;
   readonly identityHash?: string;
@@ -621,6 +648,7 @@ const ctx = Object.freeze({
     const workspaceId = resolveWorkspaceId(spec.workspace);
     const workspaceIdentityHash = resolveWorkspaceIdentityHash(spec.workspace);
     const setupIdentityHash = resolveWorkspaceSetupIdentityHash(spec.workspace);
+    const controls = resolveAgentControls(spec, settings);
     const identityFields = {
       prompt: spec.prompt,
       provider,
@@ -635,6 +663,7 @@ const ctx = Object.freeze({
       ...(setupIdentityHash !== null ? { setupIdentityHash } : {}),
       capabilities: caps,
       environment,
+      controls,
     };
     const version =
       spec.version ??
@@ -670,11 +699,11 @@ const ctx = Object.freeze({
       version,
       inputs,
       jsonSchema: schema?.structural?.() ?? null,
-      maxRetries: spec.maxRetries ?? settings.agentDefaultMaxRetries,
-      lenient: spec.lenient ?? settings.agentDefaultLenient,
-      onFailure: spec.onFailure ?? settings.agentDefaultOnFailure,
-      timeoutMs: spec.timeoutMs ?? settings.agentDefaultTimeoutMs,
-      stallRetries: spec.stallRetries ?? settings.agentDefaultStallRetries,
+      maxRetries: controls.maxRetries,
+      lenient: controls.lenient,
+      onFailure: controls.onFailure,
+      timeoutMs: controls.timeoutMs,
+      stallRetries: controls.stallRetries,
       deps: null,
     });
     // The host applies onFailure: an accepted failure is journaled as a
@@ -820,13 +849,7 @@ const ctx = Object.freeze({
         assertSessionKey(rawTurnSpec.key, "agentSession.turn");
         const schema = rawTurnSpec.schema as Schema<unknown> | undefined;
         const stableKey = sessionStableKey(sessionSpec.key, rawTurnSpec.key);
-        const controls = {
-          maxRetries: rawTurnSpec.maxRetries ?? settings.agentDefaultMaxRetries,
-          lenient: rawTurnSpec.lenient ?? settings.agentDefaultLenient,
-          onFailure: rawTurnSpec.onFailure ?? settings.agentDefaultOnFailure,
-          timeoutMs: rawTurnSpec.timeoutMs ?? null,
-          stallRetries: rawTurnSpec.stallRetries ?? null,
-        };
+        const controls = resolveAgentControls(rawTurnSpec, settings);
         const version =
           rawTurnSpec.version ??
           computeVersion({

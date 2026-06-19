@@ -3153,7 +3153,7 @@ export class RealmKernel {
                               ...(invocationEnv !== undefined ? { env: invocationEnv } : {}),
                               ...(begun.resumeToken ? { resumeToken: begun.resumeToken } : {}),
                               abortSignal: signal,
-                              timeoutMs: m.timeoutMs ?? settings.agentDefaultTimeoutMs,
+                              timeoutMs: m.timeoutMs,
                             },
                             {
                               onSessionToken: (tok) => {
@@ -3176,8 +3176,8 @@ export class RealmKernel {
                             },
                           ),
                         {
-                          timeoutMs: m.timeoutMs ?? settings.agentDefaultTimeoutMs,
-                          stallRetries: m.stallRetries ?? settings.agentDefaultStallRetries,
+                          timeoutMs: m.timeoutMs,
+                          stallRetries: m.stallRetries,
                           signal: runAbortController.signal,
                           onStall: (a) => engine.emit("agent.stalled", { key: m.key, attempt: a }),
                         },
@@ -3383,7 +3383,7 @@ export class RealmKernel {
                               ...(invocationEnv !== undefined ? { env: invocationEnv } : {}),
                               ...(begun.resumeToken ? { resumeToken: begun.resumeToken } : {}),
                               abortSignal: signal,
-                              timeoutMs: m.timeoutMs ?? settings.agentDefaultTimeoutMs,
+                              timeoutMs: m.timeoutMs,
                             },
                             {
                               onSessionToken: (tok) => {
@@ -3411,8 +3411,8 @@ export class RealmKernel {
                             },
                           ),
                         {
-                          timeoutMs: m.timeoutMs ?? settings.agentDefaultTimeoutMs,
-                          stallRetries: m.stallRetries ?? settings.agentDefaultStallRetries,
+                          timeoutMs: m.timeoutMs,
+                          stallRetries: m.stallRetries,
                           signal: runAbortController.signal,
                           onStall: (a) =>
                             engine.emit("agent.stalled", { key: m.stableKey, attempt: a }),

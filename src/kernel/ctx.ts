@@ -13,7 +13,14 @@ import {
   resolveToolPolicy,
   validateProviderToolPolicy,
 } from "../agents/capabilities.ts";
-import { DEFAULT_AGENT_PROVIDER, DEFAULT_SCHEMA_MAX_RETRIES } from "../agents/defaults.ts";
+import {
+  DEFAULT_AGENT_LENIENT,
+  DEFAULT_AGENT_ON_FAILURE,
+  DEFAULT_AGENT_PROVIDER,
+  DEFAULT_AGENT_TIMEOUT_MS,
+  DEFAULT_SCHEMA_MAX_RETRIES,
+  DEFAULT_STALL_RETRIES,
+} from "../agents/defaults.ts";
 import {
   type AgentEnvironmentSpec,
   assertEnvironmentSecretsGranted,
@@ -80,6 +87,30 @@ export type {
 export type { WorkspaceSetupCommand, WorkspaceSetupSpec } from "./workspace-setup.ts";
 
 const SESSION_STABLE_KEY_PREFIX = "__session.";
+
+interface AgentControls {
+  maxRetries: number;
+  lenient: boolean;
+  onFailure: "throw" | "null";
+  timeoutMs: number;
+  stallRetries: number;
+}
+
+function resolveInProcessAgentControls(spec: {
+  maxRetries?: number;
+  lenient?: boolean;
+  onFailure?: "throw" | "null";
+  timeoutMs?: number;
+  stallRetries?: number;
+}): AgentControls {
+  return {
+    maxRetries: spec.maxRetries ?? DEFAULT_SCHEMA_MAX_RETRIES,
+    lenient: spec.lenient ?? DEFAULT_AGENT_LENIENT,
+    onFailure: spec.onFailure ?? DEFAULT_AGENT_ON_FAILURE,
+    timeoutMs: spec.timeoutMs ?? DEFAULT_AGENT_TIMEOUT_MS,
+    stallRetries: spec.stallRetries ?? DEFAULT_STALL_RETRIES,
+  };
+}
 
 function assertNotReservedAuthorKey(key: string, kind: string): void {
   if (key.startsWith(SESSION_STABLE_KEY_PREFIX)) {
@@ -510,6 +541,7 @@ export class WorkflowCtx implements Ctx {
     const workspaceId = workspaceHandle.id;
     const workspaceIdentityHash = workspaceHandle.identityHash ?? null;
     const cwd = this.resolveInProcessWorkspace(workspaceId, spec.key);
+    const controls = resolveInProcessAgentControls(spec);
     const identityFields = {
       prompt: spec.prompt,
       provider,
@@ -523,6 +555,7 @@ export class WorkflowCtx implements Ctx {
       ...(workspaceIdentityHash !== null ? { workspaceIdentityHash } : {}),
       capabilities: caps,
       environment,
+      controls,
     };
     const version =
       spec.version ??
@@ -572,13 +605,13 @@ export class WorkflowCtx implements Ctx {
             },
             {
               ...(jsonSchema !== undefined ? { jsonSchema } : {}),
-              maxRetries: spec.maxRetries ?? DEFAULT_SCHEMA_MAX_RETRIES,
-              ...(spec.lenient ? { coerce: true } : {}),
+              maxRetries: controls.maxRetries,
+              ...(controls.lenient ? { coerce: true } : {}),
             },
           ),
         {
-          ...(spec.timeoutMs != null ? { timeoutMs: spec.timeoutMs } : {}),
-          ...(spec.stallRetries != null ? { stallRetries: spec.stallRetries } : {}),
+          timeoutMs: controls.timeoutMs,
+          stallRetries: controls.stallRetries,
           onStall: (a) => this.engine.emit("agent.stalled", { key: spec.key, attempt: a }),
         },
       );
@@ -596,7 +629,7 @@ export class WorkflowCtx implements Ctx {
       return execution.output as T;
     } catch (err) {
       // onFailure:'null' (D7): journal a completed null so resume replays it.
-      if (spec.onFailure === "null" && err instanceof AgentFailure) {
+      if (controls.onFailure === "null" && err instanceof AgentFailure) {
         this.engine.emit("agent.tolerated_failure", {
           key: spec.key,
           error: { name: err.name, message: err.message },

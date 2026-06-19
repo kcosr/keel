@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DEFAULT_AGENT_TIMEOUT_MS, DEFAULT_STALL_RETRIES } from "../agents/defaults.ts";
 import {
   type AgentInvocation,
   type AgentProvider,
@@ -11,6 +12,68 @@ import { JournalStore } from "../journal/store.ts";
 import { WorkflowCtx } from "./ctx.ts";
 
 describe("WorkflowCtx workspaces", () => {
+  test("plain agent controls participate in in-process identity", async () => {
+    const target = mkdtempSync(join(tmpdir(), "keel-agent-controls-"));
+    const provider: AgentProvider = {
+      name: "recorder",
+      async generate() {
+        return { text: "ok", transcript: [] };
+      },
+    };
+    const registry = new AgentProviderRegistry().register(provider);
+    const identityFor = async (
+      runId: string,
+      controls: {
+        maxRetries?: number;
+        lenient?: boolean;
+        onFailure?: "throw" | "null";
+        timeoutMs?: number;
+        stallRetries?: number;
+      },
+    ): Promise<{ version: string; inputHash: string }> => {
+      const store = JournalStore.memory();
+      const ctx = new WorkflowCtx(
+        store,
+        runId,
+        { clock: () => Date.now(), rng: () => 0.5 },
+        registry,
+        undefined,
+        target,
+      );
+      await ctx.agent({ key: "ask", provider: "recorder", prompt: "ask", ...controls });
+      const row = store.getJournalRow(runId, "ask", 1);
+      if (!row) throw new Error(`missing journal row for ${runId}`);
+      return { version: row.version, inputHash: row.inputHash };
+    };
+
+    try {
+      const base = await identityFor("base", {});
+      expect(
+        await identityFor("explicit-defaults", {
+          maxRetries: 2,
+          lenient: false,
+          onFailure: "throw",
+          timeoutMs: DEFAULT_AGENT_TIMEOUT_MS,
+          stallRetries: DEFAULT_STALL_RETRIES,
+        }),
+      ).toEqual(base);
+
+      for (const [runId, controls] of [
+        ["max-retries", { maxRetries: 0 }],
+        ["lenient", { lenient: true }],
+        ["on-failure", { onFailure: "null" as const }],
+        ["timeout", { timeoutMs: 1234 }],
+        ["stall-retries", { stallRetries: 3 }],
+      ] as const) {
+        const identity = await identityFor(runId, controls);
+        expect(identity.version).not.toBe(base.version);
+        expect(identity.inputHash).not.toBe(base.inputHash);
+      }
+    } finally {
+      rmSync(target, { recursive: true, force: true });
+    }
+  });
+
   test("parallel in-process withWorkspace scopes do not bleed into each other", async () => {
     const target = mkdtempSync(join(tmpdir(), "keel-target-"));
     const pathA = mkdtempSync(join(tmpdir(), "keel-direct-a-"));

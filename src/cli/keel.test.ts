@@ -1044,7 +1044,10 @@ describe("keel CLI", () => {
         expect(resumed.code).toBe(3);
         expect(resumed.stdout).toContain(`run ${payload.runId}`);
         expect(resumed.stdout).toContain("run.resumed");
-        expect(resumed.stdout).not.toContain("run.parked human approve-deploy");
+        expect(resumed.stdout).toContain("run.parked human approve-deploy");
+        expect(resumed.stdout.indexOf("run.resumed")).toBeLessThan(
+          resumed.stdout.indexOf("run.parked human approve-deploy"),
+        );
 
         const approved = await runCli(["approve", payload.runId, "approve-deploy"], dir, env);
         expect(approved.code).toBe(0);

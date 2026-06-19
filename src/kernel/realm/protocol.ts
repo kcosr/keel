@@ -70,8 +70,8 @@ export type WorkerRequest =
       maxRetries: number;
       lenient: boolean;
       onFailure: "throw" | "null";
-      timeoutMs: number | null;
-      stallRetries: number | null;
+      timeoutMs: number;
+      stallRetries: number;
       deps: InputDep[] | null;
     }
   | {
@@ -100,8 +100,8 @@ export type WorkerRequest =
       maxRetries: number;
       lenient: boolean;
       onFailure: "throw" | "null";
-      timeoutMs: number | null;
-      stallRetries: number | null;
+      timeoutMs: number;
+      stallRetries: number;
       deps: InputDep[] | null;
     }
   | {

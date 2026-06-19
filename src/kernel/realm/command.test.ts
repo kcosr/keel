@@ -206,6 +206,27 @@ describe("ctx.command", () => {
         error: /capabilities is required and must be a plain object/,
       },
       {
+        name: "toolPolicy",
+        mutate: (spec) => {
+          spec.toolPolicy = "read-only";
+        },
+        error: /toolPolicy is not supported/,
+      },
+      {
+        name: "allowTools",
+        mutate: (spec) => {
+          spec.allowTools = ["Read"];
+        },
+        error: /allowTools is not supported/,
+      },
+      {
+        name: "denyTools",
+        mutate: (spec) => {
+          spec.denyTools = ["Bash"];
+        },
+        error: /denyTools is not supported/,
+      },
+      {
         name: "invalid env name",
         mutate: (spec) => {
           commandEnvironment(spec).vars = { "1BAD": "value" };

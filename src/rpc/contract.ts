@@ -173,11 +173,16 @@ export interface RunWorkspaceView {
   runId: string;
   workspaceId: string;
   mode: "direct" | "worktree" | "copy" | "clone";
-  ownerKind: "workflow" | "agent" | "agent_session" | "command";
+  ownerKind: "workflow" | "agent" | "agent_session" | "command" | "setup";
   key: string;
   lastAttempt: number | null;
   retentionPolicy: "remove" | "retain-on-failure" | "retain" | null;
   workspacePath: string;
+  setupStatus: "none" | "pending" | "completed" | "failed";
+  setupIdentityHash: string | null;
+  setupStartedAtMs: number | null;
+  setupFinishedAtMs: number | null;
+  setupError: unknown | null;
   sourceKind:
     | "direct-path"
     | "local-copy"
@@ -202,7 +207,7 @@ export interface RunWorkspaceView {
   failureSeen: boolean;
   lastTurnKey: string | null;
   lastTurnAttempt: number | null;
-  activeHolderKind: "workflow" | "agent" | "agent_session" | "command" | null;
+  activeHolderKind: "workflow" | "agent" | "agent_session" | "command" | "setup" | null;
   activeHolderKey: string | null;
   activeHolderAttempt: number | null;
   activeStartedAtMs: number | null;

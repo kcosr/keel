@@ -27,7 +27,7 @@ import type { AgentProviderRegistry, ProviderConfigMap } from "../agents/types.t
 import type { Json } from "../hash.ts";
 import type { JournalStore } from "../journal/store.ts";
 import { requireRunTarget } from "../target.ts";
-import { WORKFLOW_SDK_ABI_VERSION } from "../workflow-definitions/snapshot.ts";
+import { WORKFLOW_SDK_ABI_VERSION } from "../workflow-definitions/abi.ts";
 import { DEFAULT_WORKSPACE_ID, workspaceIdentity } from "../workspace/identity.ts";
 import { resolveUsableDirectory } from "../workspace/worktree.ts";
 import { finalAgentMessageEvents } from "./agent-events.ts";
@@ -53,6 +53,7 @@ import { runBoundedProcess } from "./process-runner.ts";
 import type { Schema } from "./schema.ts";
 import { StepEngine, prepareStepResult } from "./step-engine.ts";
 import { computeVersion } from "./version.ts";
+import type { WorkspaceSetupSpec } from "./workspace-setup.ts";
 
 export type {
   BoundedText,
@@ -76,6 +77,7 @@ export type {
   HasCommitsCompletionCheck,
   NormalizedCompletionCheck,
 } from "./completion-check.ts";
+export type { WorkspaceSetupCommand, WorkspaceSetupSpec } from "./workspace-setup.ts";
 
 const SESSION_STABLE_KEY_PREFIX = "__session.";
 
@@ -172,6 +174,7 @@ export type WorkspaceSpec =
       key: string;
       mode?: "direct";
       path?: string;
+      setup?: WorkspaceSetupSpec;
     }
   | {
       key: string;
@@ -180,12 +183,14 @@ export type WorkspaceSpec =
       ref?: string;
       retention?: WorkspaceRetention;
       branch?: boolean;
+      setup?: WorkspaceSetupSpec;
     }
   | {
       key: string;
       mode: "copy";
       path?: string;
       retention?: WorkspaceRetention;
+      setup?: WorkspaceSetupSpec;
     }
   | {
       key: string;
@@ -193,11 +198,13 @@ export type WorkspaceSpec =
       repo: string;
       ref?: string;
       retention?: WorkspaceRetention;
+      setup?: WorkspaceSetupSpec;
     };
 
 export interface WorkspaceHandle {
   readonly id: string;
   readonly identityHash?: string;
+  readonly setupIdentityHash?: string | null;
 }
 
 export interface AgentSession {
@@ -342,6 +349,9 @@ export class WorkflowCtx implements Ctx {
     }
     if (normalized.mode !== "direct") {
       throw new Error(`ctx.workspace({ mode: "${normalized.mode}" }) requires the realm kernel`);
+    }
+    if (normalized.setup !== undefined) {
+      throw new Error("ctx.workspace({ setup }) requires the realm kernel");
     }
     const now = Date.now();
     const identity = workspaceIdentity({
@@ -728,6 +738,14 @@ export class WorkflowCtx implements Ctx {
         `workspace "${command.workspaceId}" identity changed; refusing to run command`,
       );
     }
+    if (command.setupIdentityHash !== null && row.setupIdentityHash !== command.setupIdentityHash) {
+      throw new Error(
+        `workspace "${command.workspaceId}" setup identity changed; refusing to run command`,
+      );
+    }
+    if (row.setupStatus === "failed") {
+      throw new Error(`workspace "${command.workspaceId}" setup failed; refusing to run command`);
+    }
     if (row.activeHolderKind !== null) {
       throw new Error(
         `workspace "${row.workspaceId}" is already active for ${row.activeHolderKind} "${row.activeHolderKey}" attempt ${row.activeHolderAttempt}`,
@@ -973,7 +991,13 @@ function normalizeWorkspaceSpec(
   spec: WorkspaceSpec,
   runTarget: string | null,
 ):
-  | { key: string; mode: "direct"; path: string; suppliedPath: string | null }
+  | {
+      key: string;
+      mode: "direct";
+      path: string;
+      suppliedPath: string | null;
+      setup?: unknown;
+    }
   | {
       key: string;
       mode: "worktree" | "copy";
@@ -982,6 +1006,7 @@ function normalizeWorkspaceSpec(
       ref?: string;
       retention: WorkspaceRetention;
       branch?: boolean;
+      setup?: unknown;
     }
   | {
       key: string;
@@ -989,6 +1014,7 @@ function normalizeWorkspaceSpec(
       repo: string;
       ref: string | null;
       retention: WorkspaceRetention;
+      setup?: unknown;
     } {
   const raw = spec as Record<string, unknown>;
   if (typeof raw.key !== "string" || raw.key.trim().length === 0) {
@@ -1018,6 +1044,7 @@ function normalizeWorkspaceSpec(
       mode: "direct",
       path: resolveUsableDirectory(suppliedPath ?? defaultPath),
       suppliedPath,
+      ...(raw.setup === undefined ? {} : { setup: raw.setup }),
     };
   }
   if (mode === "clone") {
@@ -1033,6 +1060,7 @@ function normalizeWorkspaceSpec(
       ref: typeof raw.ref === "string" && raw.ref.length > 0 ? raw.ref : null,
       retention:
         raw.retention === undefined ? "remove" : validateWorkspaceRetentionForCtx(raw.retention),
+      ...(raw.setup === undefined ? {} : { setup: raw.setup }),
     };
   }
   if (mode === "copy") {
@@ -1046,6 +1074,7 @@ function normalizeWorkspaceSpec(
       suppliedPath,
       retention:
         raw.retention === undefined ? "remove" : validateWorkspaceRetentionForCtx(raw.retention),
+      ...(raw.setup === undefined ? {} : { setup: raw.setup }),
     };
   }
   if (raw.repo !== undefined) throw new Error("worktree workspaces do not accept repo");
@@ -1061,6 +1090,7 @@ function normalizeWorkspaceSpec(
     retention:
       raw.retention === undefined ? "remove" : validateWorkspaceRetentionForCtx(raw.retention),
     ...(raw.branch === undefined ? {} : { branch: raw.branch }),
+    ...(raw.setup === undefined ? {} : { setup: raw.setup }),
   };
 }
 

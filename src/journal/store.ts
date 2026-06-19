@@ -662,6 +662,12 @@ export class JournalStore {
       | "worktreeBranchOwned"
       | "copyBaselinePath"
       | "creationErrorJson"
+      | "setupIdentityJson"
+      | "setupIdentityHash"
+      | "setupStatus"
+      | "setupStartedAtMs"
+      | "setupFinishedAtMs"
+      | "setupErrorJson"
     > &
       Partial<
         Pick<
@@ -676,6 +682,12 @@ export class JournalStore {
           | "worktreeBranchOwned"
           | "copyBaselinePath"
           | "creationErrorJson"
+          | "setupIdentityJson"
+          | "setupIdentityHash"
+          | "setupStatus"
+          | "setupStartedAtMs"
+          | "setupFinishedAtMs"
+          | "setupErrorJson"
         >
       >,
   ): void {
@@ -687,11 +699,13 @@ export class JournalStore {
           workspace_path, source_kind, source_path, source_uri, source_bare, source_merge_eligible,
           supplied_path, source_ref, resolved_ref, checkout_branch, worktree_checkout_kind,
           worktree_branch_owned, base_commit, copy_baseline_path,
-          creation_error_json, workspace_identity_json, workspace_identity_hash, owned, status, failure_seen,
+          creation_error_json, workspace_identity_json, workspace_identity_hash,
+          setup_identity_json, setup_identity_hash, setup_status, setup_started_at_ms,
+          setup_finished_at_ms, setup_error_json, owned, status, failure_seen,
           last_turn_key, last_turn_attempt, active_holder_kind, active_holder_key,
           active_holder_attempt, active_started_at_ms, last_diff_event_seq, last_error_event_seq,
           cleanup_error_json, created_at_ms, updated_at_ms, merged_at_ms, discarded_at_ms, removed_at_ms
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         full.runId,
@@ -718,6 +732,12 @@ export class JournalStore {
         full.creationErrorJson,
         full.workspaceIdentityJson,
         full.workspaceIdentityHash,
+        full.setupIdentityJson,
+        full.setupIdentityHash,
+        full.setupStatus,
+        full.setupStartedAtMs,
+        full.setupFinishedAtMs,
+        full.setupErrorJson,
         full.owned ? 1 : 0,
         full.status,
         full.failureSeen ? 1 : 0,
@@ -770,6 +790,12 @@ export class JournalStore {
         | "creationErrorJson"
         | "workspaceIdentityJson"
         | "workspaceIdentityHash"
+        | "setupIdentityJson"
+        | "setupIdentityHash"
+        | "setupStatus"
+        | "setupStartedAtMs"
+        | "setupFinishedAtMs"
+        | "setupErrorJson"
         | "owned"
         | "failureSeen"
         | "lastTurnKey"
@@ -826,6 +852,17 @@ export class JournalStore {
       add("workspace_identity_json", "workspaceIdentityJson", patch.workspaceIdentityJson ?? null);
     if ("workspaceIdentityHash" in patch)
       add("workspace_identity_hash", "workspaceIdentityHash", patch.workspaceIdentityHash ?? null);
+    if ("setupIdentityJson" in patch)
+      add("setup_identity_json", "setupIdentityJson", patch.setupIdentityJson ?? null);
+    if ("setupIdentityHash" in patch)
+      add("setup_identity_hash", "setupIdentityHash", patch.setupIdentityHash ?? null);
+    if ("setupStatus" in patch) add("setup_status", "setupStatus", patch.setupStatus ?? null);
+    if ("setupStartedAtMs" in patch)
+      add("setup_started_at_ms", "setupStartedAtMs", patch.setupStartedAtMs ?? null);
+    if ("setupFinishedAtMs" in patch)
+      add("setup_finished_at_ms", "setupFinishedAtMs", patch.setupFinishedAtMs ?? null);
+    if ("setupErrorJson" in patch)
+      add("setup_error_json", "setupErrorJson", patch.setupErrorJson ?? null);
     if ("owned" in patch) add("owned", "owned", patch.owned ? 1 : 0);
     if ("failureSeen" in patch) add("failure_seen", "failureSeen", patch.failureSeen ? 1 : 0);
     if ("lastTurnKey" in patch) add("last_turn_key", "lastTurnKey", patch.lastTurnKey ?? null);
@@ -1881,6 +1918,37 @@ export class JournalStore {
     });
   }
 
+  /** Delete selected workspace setup command rows so an explicit retry can rerun setup from command 0. */
+  deleteWorkspaceSetupRowsByStableKeyPrefix(runId: string, stableKeyPrefixes: string[]): void {
+    if (stableKeyPrefixes.length === 0) return;
+    this.transaction(() => {
+      const artifactHashes = new Set<string>();
+      const artifacts = this.db.query<{ result_artifact: string }, [string, number, string]>(
+        `SELECT DISTINCT result_artifact
+         FROM journal
+         WHERE run_id = ?
+           AND effect_type = 'workspace_setup'
+           AND result_artifact IS NOT NULL
+           AND substr(stable_key, 1, ?) = ?`,
+      );
+      const deleteRows = this.db.query<unknown, [string, number, string]>(
+        `DELETE FROM journal
+         WHERE run_id = ?
+           AND effect_type = 'workspace_setup'
+           AND substr(stable_key, 1, ?) = ?`,
+      );
+      for (const prefix of stableKeyPrefixes) {
+        for (const artifact of artifacts.all(runId, prefix.length, prefix)) {
+          artifactHashes.add(artifact.result_artifact);
+        }
+      }
+      for (const hash of artifactHashes) this.decrementArtifactRefcount(hash);
+      for (const prefix of stableKeyPrefixes) {
+        deleteRows.run(runId, prefix.length, prefix);
+      }
+    });
+  }
+
   /** Delete everything journaled AFTER a target step (rewind to that step). */
   /**
    * Rewind a run's durable state to a target step (§18). Deletes journal rows
@@ -2202,6 +2270,12 @@ function withAgentWorkspaceDefaults(
     | "worktreeBranchOwned"
     | "copyBaselinePath"
     | "creationErrorJson"
+    | "setupIdentityJson"
+    | "setupIdentityHash"
+    | "setupStatus"
+    | "setupStartedAtMs"
+    | "setupFinishedAtMs"
+    | "setupErrorJson"
   > &
     Partial<
       Pick<
@@ -2216,6 +2290,12 @@ function withAgentWorkspaceDefaults(
         | "worktreeBranchOwned"
         | "copyBaselinePath"
         | "creationErrorJson"
+        | "setupIdentityJson"
+        | "setupIdentityHash"
+        | "setupStatus"
+        | "setupStartedAtMs"
+        | "setupFinishedAtMs"
+        | "setupErrorJson"
       >
     >,
 ): AgentWorkspaceRow {
@@ -2245,6 +2325,12 @@ function withAgentWorkspaceDefaults(
     creationErrorJson: row.creationErrorJson ?? null,
     workspaceIdentityJson: row.workspaceIdentityJson,
     workspaceIdentityHash: row.workspaceIdentityHash,
+    setupIdentityJson: row.setupIdentityJson ?? null,
+    setupIdentityHash: row.setupIdentityHash ?? null,
+    setupStatus: row.setupStatus ?? "none",
+    setupStartedAtMs: row.setupStartedAtMs ?? null,
+    setupFinishedAtMs: row.setupFinishedAtMs ?? null,
+    setupErrorJson: row.setupErrorJson ?? null,
   };
 }
 
@@ -2340,6 +2426,12 @@ interface RawAgentWorkspaceRow {
   creation_error_json: string | null;
   workspace_identity_json: string;
   workspace_identity_hash: string;
+  setup_identity_json: string | null;
+  setup_identity_hash: string | null;
+  setup_status: string;
+  setup_started_at_ms: number | null;
+  setup_finished_at_ms: number | null;
+  setup_error_json: string | null;
   owned: number;
   status: string;
   failure_seen: number;
@@ -2740,6 +2832,12 @@ function mapAgentWorkspace(r: RawAgentWorkspaceRow): AgentWorkspaceRow {
     creationErrorJson: r.creation_error_json,
     workspaceIdentityJson: r.workspace_identity_json,
     workspaceIdentityHash: r.workspace_identity_hash,
+    setupIdentityJson: r.setup_identity_json,
+    setupIdentityHash: r.setup_identity_hash,
+    setupStatus: r.setup_status as AgentWorkspaceRow["setupStatus"],
+    setupStartedAtMs: r.setup_started_at_ms,
+    setupFinishedAtMs: r.setup_finished_at_ms,
+    setupErrorJson: r.setup_error_json,
     owned: r.owned !== 0,
     status: r.status as AgentWorkspaceStatus,
     failureSeen: r.failure_seen !== 0,

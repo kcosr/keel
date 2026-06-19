@@ -35,6 +35,8 @@ export type {
   WorkspaceMode,
   WorkspaceRetention,
   WorkspaceSpec,
+  WorkspaceSetupCommand,
+  WorkspaceSetupSpec,
 } from "./kernel/ctx.ts";
 export { CommandFailure } from "./kernel/command.ts";
 export {

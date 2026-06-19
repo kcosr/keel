@@ -609,6 +609,7 @@ function internalCommandSpec(opts: {
     stableKey: `completion-check-internal.${opts.key}`,
     workspaceId: opts.workspaceId,
     workspaceIdentityHash: opts.workspaceIdentityHash,
+    setupIdentityHash: null,
     cwd: opts.cwd,
     invocation: opts.invocation,
     capabilities: {

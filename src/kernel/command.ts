@@ -11,7 +11,7 @@ import {
   normalizeAgentEnvironment,
 } from "../agents/environment.ts";
 import type { Json } from "../hash.ts";
-import { WORKFLOW_SDK_ABI_VERSION } from "../workflow-definitions/snapshot.ts";
+import { WORKFLOW_SDK_ABI_VERSION } from "../workflow-definitions/abi.ts";
 
 export const WORKFLOW_COMMAND_RUNNER_VERSION = 1;
 export const WORKFLOW_COMMAND_ENVIRONMENT_POLICY_VERSION = 1;
@@ -61,6 +61,7 @@ export interface WorkflowCommandBase {
 export interface WorkspaceHandleLike {
   readonly id: string;
   readonly identityHash?: string;
+  readonly setupIdentityHash?: string | null;
 }
 
 export interface ArgvCommandInvocation {
@@ -123,6 +124,7 @@ export interface NormalizedWorkflowCommandSpec {
   stableKey: string;
   workspaceId: string;
   workspaceIdentityHash: string | null;
+  setupIdentityHash: string | null;
   cwd: string;
   invocation:
     | { mode: "argv"; argv: string[] }
@@ -230,6 +232,7 @@ export function normalizeWorkflowCommandSpec(
     key,
     workspaceId: workspace.id,
     workspaceIdentityHash: workspace.identityHash ?? null,
+    setupIdentityHash: workspace.setupIdentityHash ?? null,
     cwd,
     invocation,
     capabilities,
@@ -248,6 +251,7 @@ export function normalizeWorkflowCommandSpec(
     stableKey,
     workspaceId: workspace.id,
     workspaceIdentityHash: workspace.identityHash ?? null,
+    setupIdentityHash: workspace.setupIdentityHash ?? null,
     cwd,
     invocation,
     capabilities: Object.freeze({
@@ -408,6 +412,7 @@ function commandIdentity(fields: {
   key: string;
   workspaceId: string;
   workspaceIdentityHash: string | null;
+  setupIdentityHash: string | null;
   cwd: string;
   invocation: NormalizedWorkflowCommandSpec["invocation"];
   capabilities: Capabilities;
@@ -428,6 +433,7 @@ function commandIdentity(fields: {
     ...(fields.workspaceIdentityHash
       ? { workspaceIdentityHash: fields.workspaceIdentityHash }
       : {}),
+    ...(fields.setupIdentityHash ? { setupIdentityHash: fields.setupIdentityHash } : {}),
     cwd: fields.cwd,
     invocation: fields.invocation,
     capabilities: {
@@ -469,7 +475,9 @@ function normalizeWorkspaceHandle(value: unknown, path: string): WorkspaceHandle
   rejectSymbolOrNonEnumerableKeys(value, path);
   const keys = Object.keys(value);
   for (const key of keys) {
-    if (key !== "id" && key !== "identityHash") throw new Error(`${path}.${key} is not supported`);
+    if (key !== "id" && key !== "identityHash" && key !== "setupIdentityHash") {
+      throw new Error(`${path}.${key} is not supported`);
+    }
   }
   const raw = value as Record<string, unknown>;
   if (typeof raw.id !== "string" || raw.id.length === 0) {
@@ -478,9 +486,19 @@ function normalizeWorkspaceHandle(value: unknown, path: string): WorkspaceHandle
   if (raw.identityHash !== undefined && typeof raw.identityHash !== "string") {
     throw new Error(`${path}.identityHash must be a string`);
   }
+  if (
+    raw.setupIdentityHash !== undefined &&
+    raw.setupIdentityHash !== null &&
+    typeof raw.setupIdentityHash !== "string"
+  ) {
+    throw new Error(`${path}.setupIdentityHash must be a string or null`);
+  }
   return {
     id: raw.id,
     ...(raw.identityHash !== undefined ? { identityHash: raw.identityHash } : {}),
+    ...(raw.setupIdentityHash !== undefined
+      ? { setupIdentityHash: raw.setupIdentityHash as string | null }
+      : {}),
   };
 }
 

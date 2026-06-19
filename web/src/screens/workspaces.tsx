@@ -346,6 +346,7 @@ function WorkspaceMetadata({ workspace }: { workspace: RunWorkspaceView }) {
       </div>
       <div className="workspace-meta-grid">
         <MetadataItem label="Owner" value={`${workspace.ownerKind}:${workspace.key}`} />
+        <MetadataItem label="Setup" value={workspaceSetupSummary(workspace)} />
         <MetadataItem
           label="Run"
           value={
@@ -539,6 +540,15 @@ function workspaceColumns(): Array<Column<RunWorkspaceView>> {
 
 function workspaceKey(workspace: RunWorkspaceView): string {
   return `${workspace.runId}:${workspace.workspaceId}`;
+}
+
+function workspaceSetupSummary(workspace: RunWorkspaceView): string {
+  if (workspace.setupStatus === "none") return "none";
+  const finished =
+    workspace.setupFinishedAtMs !== null
+      ? ` finished ${formatTime(workspace.setupFinishedAtMs)}`
+      : "";
+  return `${workspace.setupStatus}${finished}`;
 }
 
 function workspaceSummary(workspaces: RunWorkspaceView[]): {

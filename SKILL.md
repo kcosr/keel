@@ -239,9 +239,20 @@ const workspace = await ctx.workspace({
   mode: "worktree",
   // branch: true,
   retention: "retain-on-failure",
+  setup: {
+    capabilities: { fs: "workspace-write", shell: true, network: "none" },
+    commands: [{ key: "install", command: "bun", args: ["install", "--frozen-lockfile"] }],
+  },
 });
 await ctx.agent({ key: "impl", workspace, toolPolicy: "workspace-write", prompt });
 ```
+
+Use workspace `setup` for preparation that must finish before an agent starts:
+dependency installs, generated files, cache warmup, or repository bootstrap.
+Setup output is retained as bounded diagnostics and is not returned to workflow
+code. Use `ctx.command` instead when command stdout/stderr should influence
+workflow branching or prompts. Setup can mutate direct workspaces, and pending
+setup may run again after a crash.
 
 Retention is `"remove"` (default), `"retain-on-failure"`, or `"retain"` and
 applies only to Keel-owned `worktree`, `copy`, and `clone` workspaces. Direct

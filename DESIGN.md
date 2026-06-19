@@ -204,6 +204,7 @@ The prior-runtime defects that shaped Keel map to these requirements:
 | **Pure step** | `ctx.step(key, schema, fn)` — `fn` deterministic in its inputs (reducers, transforms). | Execute, validate against schema, persist result + `inputHash`. | `inputHash` and `version` unchanged → **replay** without executing. Changed → re-execute as a new attempt. | `pure` |
 | **Effectful step** | `ctx.agent`, `ctx.human`, `ctx.signal` (and `ctx.spawn`, deferred) — result not re-derivable from inputs. | Execute under write-ahead (§5.5), persist result. | **A `completed` effectful step is never re-executed** (exactly-once result replay). **A `pending` one re-executes at-least-once** — which is why agent calls must be idempotent or carry a dedup key. | `effectful` |
 | **Command effect** | `ctx.command(spec)` — bounded host-side process execution in an explicit workspace. | Validate workspace/cwd/capabilities/env, write pending row, acquire the workspace holder, run the command, persist bounded result. | Matching completed commands replay without spawning. Matching pending commands may spawn again under at-least-once crash/retry semantics. Pending identity mismatches fail closed. | `command` |
+| **Workspace setup** | `ctx.workspace({ setup })` — bounded host-side preparation commands attached to an explicit workspace. | Resolve/create the workspace, compute setup identity, mark setup pending, run setup commands sequentially, persist bounded command diagnostics, then mark the workspace ready. | Matching completed setup is reused for the same run-scoped workspace. Pending setup commands may run again after crash; failed setup fails later workspace resolution. | `workspace_setup` |
 | **Completion check effect** | `ctx.completionCheck(spec)` — host-side command/git gate for curated workflow completion. | Validate workspace row and check identity, write pending row, acquire the workspace holder, run the check, persist bounded result and events. | Matching completed checks replay. New completion attempts use new keys and observe current workspace/git/remote state. Pending identity mismatches fail closed. | `completion_check` |
 | **Ambient** | `ctx.now()`, `ctx.random()`, `ctx.sleep()`. | Generate/record once. | Replay the recorded value (`sleep`: already-elapsed if the wake time passed). | `ambient` |
 
@@ -224,6 +225,17 @@ terminal process failures are stored as `CommandResult` values so
 `failureMode: "throw"` can replay the same `CommandFailure` without spawning.
 If a daemon crash leaves a pending command row, resume may run the process again
 in the same workspace; filesystem and external side effects are not rolled back.
+
+Workspace setup is a lifecycle phase on explicit `ctx.workspace` calls. It uses
+the same bounded local process runner as `ctx.command`, but setup output is
+diagnostic state rather than workflow data. The workspace row stores setup
+identity, status, timestamps, and failure JSON. Individual setup command attempts
+are journaled as `workspace_setup` rows and emit `workspace.setup.*` events.
+Setup identity includes the base workspace identity, SDK ABI, setup
+capabilities, ordered commands, cwd, environment names/vars, timeouts, output
+caps, and success exit codes. A prepared `WorkspaceHandle` exposes
+`setupIdentityHash`, and later agent/session/command identity includes it when
+present.
 
 `ctx.completionCheck` is the same durable-effect boundary for reusable
 implement/review completion gates. The host effect reads the persisted workspace

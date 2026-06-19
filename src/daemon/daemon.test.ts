@@ -1547,7 +1547,7 @@ describe("HITL over the socket", () => {
         status: "running",
         attachCursor: { kind: "after-seq", runId, seq: 2 },
       });
-      expect((await c.getRun(runId))?.status).not.toBe("finished");
+      expect((await c.getRun(runId))?.status).toBe("running");
       await expect(c.waitForRun(runId)).resolves.toMatchObject({ status: "finished", output: 7 });
       c.close();
     } finally {
@@ -1585,7 +1585,7 @@ describe("HITL over the socket", () => {
         status: "running",
         attachCursor: { kind: "after-seq", runId, seq: 2 },
       });
-      expect((await c.getRun(runId))?.status).not.toBe("finished");
+      expect((await c.getRun(runId))?.status).toBe("running");
       await c.authenticate(capability as string);
       await expect(c.waitForRun(runId)).resolves.toMatchObject({ status: "finished", output: 11 });
       c.close();

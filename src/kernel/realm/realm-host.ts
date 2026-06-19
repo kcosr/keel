@@ -1781,12 +1781,7 @@ export class RealmKernel {
     },
   ): CompletionCheckResult {
     this.host.fault?.("before-commit", spec.stableKey);
-    let completed: CompletionCheckResult = result;
-    let stored = prepareStepResult(completed);
-    if (stored.artifact) {
-      completed = result;
-      stored = prepareStepResult(completed);
-    }
+    const stored = prepareStepResult(result);
     const finishedAtMs = this.host.clock();
     this.store.transaction(() => {
       if (stored.artifact) {
@@ -1795,7 +1790,7 @@ export class RealmKernel {
       this.store.appendEvent(
         runId,
         "completion_check.completed",
-        completionCheckCompletedEvent(spec, completed),
+        completionCheckCompletedEvent(spec, result),
         finishedAtMs,
       );
       this.store.putJournalRow({
@@ -1813,7 +1808,7 @@ export class RealmKernel {
         finishedAtMs,
       });
     });
-    return completed;
+    return result;
   }
 
   private releaseWorkspaceHolder(

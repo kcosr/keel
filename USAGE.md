@@ -1092,9 +1092,11 @@ completion: {
 
 `completion_check.started` and `completion_check.completed` are durable events
 available through `keel watch --output ndjson`; text watch renders concise
-`completion-check <key> <type> passed|failed` lines. Failed owned-worktree
-attempts mark the workspace `failureSeen`, so `retain-on-failure` keeps the
-worktree for inspection.
+`completion-check <key> <type> passed|failed` lines. These per-check events
+include `attempt` and `trigger` fields so clients can group checks into an
+attempt; v1 does not emit separate attempt boundary event types. Failed
+owned-worktree attempts mark the workspace `failureSeen`, so
+`retain-on-failure` keeps the worktree for inspection.
 
 ## Agent Calls
 

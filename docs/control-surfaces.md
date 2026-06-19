@@ -204,8 +204,10 @@ Completion checks use existing run surfaces rather than new RPC methods.
 `completion_check.started` and `completion_check.completed` are durable events
 available through `subscribeEvents`, `keel watch --output ndjson`, web SSE, and
 run reports. Text watch renders concise completion-check pass/fail lines.
-Terminal output from the reusable implement/review workflows includes the
-bounded `completion` object with attempts, per-check status, failure kind, and
+The events include `attempt` and `trigger` fields so clients can group checks
+into an attempt; v1 does not emit separate attempt boundary event types.
+Terminal output from the reusable implement/review workflows includes the bounded
+`completion` object with attempts, per-check status, failure kind, and
 diagnostics.
 
 ## CLI Interaction Behavior

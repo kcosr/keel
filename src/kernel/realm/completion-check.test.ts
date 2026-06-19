@@ -97,6 +97,44 @@ const worktreeCompletionCheckWorkflow = {
   `,
 };
 
+const worktreeCommandFailureWorkflow = {
+  name: "completion-check-worktree-command-failure",
+  source: `
+    import {
+      type Ctx,
+      completionCheckStableKey,
+      normalizeCompletionChecks
+    } from "@kcosr/keel";
+    export default async function wf(ctx: Ctx, input: { repository: string }) {
+      const workspace = await ctx.workspace({
+        key: "impl",
+        mode: "worktree",
+        path: input.repository,
+        branch: true,
+        retention: "retain-on-failure",
+      });
+      const checks = normalizeCompletionChecks([
+        {
+          key: "tests",
+          type: "command",
+          command: "/bin/sh",
+          args: ["-c", "printf failed >&2; exit 7"],
+        },
+      ], {
+        workspaceMode: "worktree",
+      });
+      return await ctx.completionCheck({
+        key: completionCheckStableKey(1, checks[0].key),
+        workspace,
+        attempt: 1,
+        trigger: "auto",
+        check: checks[0],
+        markFailureSeenOnFailure: true,
+      });
+    }
+  `,
+};
+
 describe("ctx.completionCheck", () => {
   test("static validation rejects invalid completion-check input", () => {
     expect(() =>
@@ -191,6 +229,28 @@ describe("ctx.completionCheck", () => {
       key: "committed",
       status: "failed",
       failureKind: "no-commits",
+    });
+    expect(store.getAgentWorkspace("run_completion_check", "impl")?.failureSeen).toBe(true);
+  });
+
+  test("failed owned worktree command checks mark failureSeen for retain-on-failure", async () => {
+    const store = JournalStore.memory();
+    const repo = tempDir("keel-completion-worktree-command-repo-");
+    const workspaceStore = tempDir("keel-completion-worktree-command-store-");
+    initGitRepo(repo);
+    const result = await kernel(store, { workspaceStore }).run(
+      worktreeCommandFailureWorkflow,
+      {
+        repository: repo,
+      },
+      { target: repo },
+    );
+
+    expect(result.status).toBe("finished");
+    expect(result.output).toMatchObject({
+      key: "tests",
+      status: "failed",
+      failureKind: "nonzero-exit",
     });
     expect(store.getAgentWorkspace("run_completion_check", "impl")?.failureSeen).toBe(true);
   });

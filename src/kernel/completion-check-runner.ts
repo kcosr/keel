@@ -228,6 +228,7 @@ async function runCommandCheck(
       diagnostics,
     };
   }
+  if (opts.spec.markFailureSeenOnFailure) markFailureSeen(opts);
   return {
     key: check.key,
     type: check.type,

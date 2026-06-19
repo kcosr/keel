@@ -34,6 +34,16 @@ import {
   type WorkflowSourceInput,
   type WorkflowSourceModule,
 } from "./source.ts";
+export {
+  CURRENT_WORKFLOW_SDK_ABI_VERSION,
+  WORKFLOW_DEFINITION_ABI_VERSION,
+  WORKFLOW_SDK_ABI_VERSION,
+} from "./abi.ts";
+import {
+  CURRENT_WORKFLOW_SDK_ABI_VERSION,
+  WORKFLOW_DEFINITION_ABI_VERSION,
+  WORKFLOW_SDK_ABI_VERSION,
+} from "./abi.ts";
 
 type CapturedModule = WorkflowSourceModule;
 
@@ -73,9 +83,6 @@ export interface SnapshotWorkflowOptions {
 }
 
 const DEFINITION_PREFIX = "wf_sha256_";
-export const WORKFLOW_DEFINITION_ABI_VERSION = 1;
-export const WORKFLOW_SDK_ABI_VERSION = 11;
-export const CURRENT_WORKFLOW_SDK_ABI_VERSION = WORKFLOW_SDK_ABI_VERSION;
 export const MAX_WORKFLOW_SOURCE_BYTES = 256 * 1024;
 export const MAX_WORKFLOW_BUNDLE_BYTES = MAX_WORKFLOW_SOURCE_BYTES;
 export const DEFAULT_WORKFLOW_DEFINITION_TTL_MS = 30 * 24 * 60 * 60 * 1000;

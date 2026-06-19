@@ -10,7 +10,7 @@ import {
   normalizeAgentEnvironment,
 } from "../agents/environment.ts";
 import { type Json, hashJson } from "../hash.ts";
-import { WORKFLOW_SDK_ABI_VERSION } from "../workflow-definitions/snapshot.ts";
+import { WORKFLOW_SDK_ABI_VERSION } from "../workflow-definitions/abi.ts";
 import {
   type NormalizedWorkflowCommandSpec,
   type WorkflowCommandBase,

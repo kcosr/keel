@@ -27,7 +27,7 @@ import type { AgentProviderRegistry, ProviderConfigMap } from "../agents/types.t
 import type { Json } from "../hash.ts";
 import type { JournalStore } from "../journal/store.ts";
 import { requireRunTarget } from "../target.ts";
-import { WORKFLOW_SDK_ABI_VERSION } from "../workflow-definitions/snapshot.ts";
+import { WORKFLOW_SDK_ABI_VERSION } from "../workflow-definitions/abi.ts";
 import { DEFAULT_WORKSPACE_ID, workspaceIdentity } from "../workspace/identity.ts";
 import { resolveUsableDirectory } from "../workspace/worktree.ts";
 import { finalAgentMessageEvents } from "./agent-events.ts";

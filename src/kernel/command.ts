@@ -11,7 +11,7 @@ import {
   normalizeAgentEnvironment,
 } from "../agents/environment.ts";
 import type { Json } from "../hash.ts";
-import { WORKFLOW_SDK_ABI_VERSION } from "../workflow-definitions/snapshot.ts";
+import { WORKFLOW_SDK_ABI_VERSION } from "../workflow-definitions/abi.ts";
 
 export const WORKFLOW_COMMAND_RUNNER_VERSION = 1;
 export const WORKFLOW_COMMAND_ENVIRONMENT_POLICY_VERSION = 1;

@@ -1,6 +1,6 @@
 import { posix } from "node:path";
 import type { Json } from "../hash.ts";
-import { WORKFLOW_SDK_ABI_VERSION } from "../workflow-definitions/snapshot.ts";
+import { WORKFLOW_SDK_ABI_VERSION } from "../workflow-definitions/abi.ts";
 import type { BoundedText, WorkspaceHandleLike } from "./command.ts";
 
 export const COMPLETION_CHECK_RUNNER_VERSION = 1;

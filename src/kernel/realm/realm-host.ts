@@ -3889,7 +3889,20 @@ export class RealmKernel {
           finishInterrupted();
           return;
         }
-        finish(() => reject(new Error(`realm worker error: ${e.message}`)));
+        const err = new Error(`realm worker error: ${e.message}`);
+        const at = this.host.clock();
+        const error = serializeError(err);
+        this.store.transaction(() => {
+          this.store.updateRun(runId, {
+            status: "failed",
+            errorJson: JSON.stringify(error),
+            finishedAtMs: at,
+          });
+          this.store.appendEvent(runId, "run.failed", error, at);
+        });
+        cleanupTerminalRunWorkspaces(this.store, runId, "failed", at);
+        this.secrets?.wipe(runId);
+        finish(() => reject(err));
       };
     });
   }

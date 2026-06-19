@@ -61,6 +61,7 @@ export type WorkerRequest =
       allowTools: string[];
       denyTools: string[];
       workspaceId: string;
+      setupIdentityHash: string | null;
       capabilities: Capabilities | null;
       environment: NormalizedAgentEnvironment;
       version: string;
@@ -90,6 +91,7 @@ export type WorkerRequest =
       allowTools: string[];
       denyTools: string[];
       workspaceId: string;
+      setupIdentityHash: string | null;
       capabilities: Capabilities | null;
       environment: NormalizedAgentEnvironment;
       version: string;

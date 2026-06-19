@@ -1918,6 +1918,21 @@ export class JournalStore {
     });
   }
 
+  /** Delete workspace setup command rows so an explicit retry can rerun setup from command 0. */
+  deleteWorkspaceSetupRows(runId: string): void {
+    this.transaction(() => {
+      const artifacts = this.db
+        .query<{ result_artifact: string }, [string]>(
+          "SELECT DISTINCT result_artifact FROM journal WHERE run_id = ? AND effect_type = 'workspace_setup' AND result_artifact IS NOT NULL",
+        )
+        .all(runId);
+      for (const artifact of artifacts) this.decrementArtifactRefcount(artifact.result_artifact);
+      this.db
+        .query("DELETE FROM journal WHERE run_id = ? AND effect_type = 'workspace_setup'")
+        .run(runId);
+    });
+  }
+
   /** Delete everything journaled AFTER a target step (rewind to that step). */
   /**
    * Rewind a run's durable state to a target step (§18). Deletes journal rows

@@ -795,6 +795,7 @@ export class RealmKernel {
     this.store.transaction(() => {
       this.store.updateRun(runId, { status: "running", errorJson: null, finishedAtMs: null });
       this.store.reopenPendingReviewWorkspaces(runId, at);
+      this.resetFailedWorkspaceSetupsForRetry(runId, at);
       this.store.appendEvent(runId, "run.retry", {}, at);
     });
     this.putRunSecrets(runId, runSecrets);
@@ -1559,7 +1560,11 @@ export class RealmKernel {
     this.store.transaction(() => {
       const current = this.store.getAgentWorkspace(runId, row.workspaceId);
       if (!current) throw new Error(`workspace ${runId}/${row.workspaceId} not found`);
-      if (current.activeHolderKind) {
+      const staleSetupHolder =
+        current.activeHolderKind === "setup" &&
+        current.activeHolderKey === setup.identityHash &&
+        current.setupStatus === "pending";
+      if (current.activeHolderKind && !staleSetupHolder) {
         throw new Error(
           `workspace "${row.workspaceId}" is already active for ${current.activeHolderKind} "${current.activeHolderKey}" attempt ${current.activeHolderAttempt}`,
         );
@@ -1837,6 +1842,7 @@ export class RealmKernel {
   private beginInvocationWorkspace(
     runId: string,
     workspaceId: string,
+    setupIdentityHash: string | null,
     holder: WorkspaceHolder,
     atMs: number,
   ): InvocationWorkspace {
@@ -1845,6 +1851,7 @@ export class RealmKernel {
         ? this.ensureDefaultWorkspace(runId, atMs)
         : this.store.getAgentWorkspace(runId, workspaceId);
     if (!row) throw new Error(`workspace handle "${workspaceId}" was not created in this run`);
+    this.assertWorkspaceSetupReadyForInvocation(row, setupIdentityHash);
     if (row.mode === "direct") {
       const sameHolder =
         row.activeHolderKind === holder.kind &&
@@ -1949,6 +1956,26 @@ export class RealmKernel {
       mode: row.mode,
       owned: true,
     };
+  }
+
+  private assertWorkspaceSetupReadyForInvocation(
+    row: AgentWorkspaceRow,
+    setupIdentityHash: string | null,
+  ): void {
+    if (row.setupIdentityHash === null && row.setupStatus === "none") return;
+    if (setupIdentityHash === null || row.setupIdentityHash !== setupIdentityHash) {
+      throw new Error(
+        `workspace "${row.workspaceId}" setup identity changed; refusing to run agent`,
+      );
+    }
+    if (row.setupStatus === "failed") {
+      throw new Error(`workspace "${row.workspaceId}" setup failed; refusing to run agent`);
+    }
+    if (row.setupStatus !== "completed") {
+      throw new Error(
+        `workspace "${row.workspaceId}" setup is ${row.setupStatus}; refusing to run agent`,
+      );
+    }
   }
 
   private resolveCommandWorkspaceCwd(
@@ -2248,6 +2275,27 @@ export class RealmKernel {
     }
   }
 
+  private resetFailedWorkspaceSetupsForRetry(runId: string, atMs: number): void {
+    const failedWorkspaces = this.store
+      .listAgentWorkspaces(runId, { includeRemoved: true })
+      .filter((row) => row.setupStatus === "failed");
+    if (failedWorkspaces.length === 0) return;
+    this.store.deleteWorkspaceSetupRows(runId);
+    for (const row of failedWorkspaces) {
+      this.store.updateAgentWorkspace(runId, row.workspaceId, {
+        setupStatus: "pending",
+        setupStartedAtMs: null,
+        setupFinishedAtMs: null,
+        setupErrorJson: null,
+        activeHolderKind: null,
+        activeHolderKey: null,
+        activeHolderAttempt: null,
+        activeStartedAtMs: null,
+        updatedAtMs: atMs,
+      });
+    }
+  }
+
   private beginAgentSessionTurn(
     runId: string,
     m: Extract<WorkerRequest, { type: "agent-turn" }>,
@@ -2352,7 +2400,13 @@ export class RealmKernel {
       key: m.agentKey,
       attempt: preflight.attempt,
     };
-    const workspace = this.beginInvocationWorkspace(runId, m.workspaceId, holder, startedAtMs);
+    const workspace = this.beginInvocationWorkspace(
+      runId,
+      m.workspaceId,
+      m.setupIdentityHash,
+      holder,
+      startedAtMs,
+    );
 
     this.store.transaction(() => {
       this.store.putJournalRow({
@@ -2424,6 +2478,7 @@ export class RealmKernel {
     return this.beginInvocationWorkspace(
       runId,
       m.workspaceId,
+      m.setupIdentityHash,
       { kind: "agent", key: m.key, attempt },
       startedAtMs,
     );

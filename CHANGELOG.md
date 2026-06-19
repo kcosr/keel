@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### Fixed
+- Plain `ctx.agent` calls now include resolved execution controls in durable
+  version/input identity, matching replay-visible runtime behavior when
+  `maxRetries`, `lenient`, `onFailure`, `timeoutMs`, `stallRetries`, or their
+  workflow-visible defaults change. `ctx.agentSession` turns now also include
+  resolved timeout/stall defaults. The workflow SDK ABI is now 12.
 - Resuming a parked run now immediately projects as `running` through `keel get`
   and related surfaces while resumed provider work is still active, instead of
   retaining the old `waiting-*` status until the next park or terminal event.

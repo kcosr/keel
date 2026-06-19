@@ -22,6 +22,9 @@ const FIX = new URL("./fixtures/", import.meta.url);
 const providerToolAliasUrl = captureWorkflowFile(
   new URL("agent-provider-tool-alias.workflow.ts", FIX).pathname,
 );
+const controlIdentityUrl = captureWorkflowFile(
+  new URL("agent-control-identity.workflow.ts", FIX).pathname,
+);
 const reviewUrl = captureWorkflowFile(new URL("agent-review.workflow.ts", FIX).pathname);
 const singleUrl = captureWorkflowFile(new URL("agent-single.workflow.ts", FIX).pathname);
 const TASK_REVIEW = new URL("../../../workflows/task-review-guidance/", import.meta.url);
@@ -74,6 +77,99 @@ const mockProfiles = {
 };
 
 describe("ctx.agent — structured output + fan-out", () => {
+  test("plain agent controls participate in realm identity", async () => {
+    let nextRun = 1;
+    const store = JournalStore.memory();
+    const provider = new RecordingProvider({
+      ask: { value: 1 },
+    });
+    const k = new RealmKernel(store, {
+      idgen: () => `run_control_${nextRun++}`,
+      clock: () => 1,
+      rng: () => 0.5,
+      agents: new AgentProviderRegistry().register(provider),
+    });
+    const identityFor = async (
+      variant:
+        | "default"
+        | "explicit-defaults"
+        | "timeout-default"
+        | "stall-retries-default"
+        | "max-retries"
+        | "lenient"
+        | "on-failure"
+        | "timeout"
+        | "stall-retries",
+    ): Promise<{ version: string; inputHash: string }> => {
+      const handle = await k.run<number>(
+        controlIdentityUrl,
+        { variant },
+        { name: `control-${variant}`, target: process.cwd() },
+      );
+      expect(handle.status).toBe("finished");
+      const row = store.getJournalRow(handle.runId, "ask", 1);
+      if (!row) throw new Error(`missing journal row for ${handle.runId}`);
+      return { version: row.version, inputHash: row.inputHash };
+    };
+
+    const base = await identityFor("default");
+    expect(await identityFor("explicit-defaults")).toEqual(base);
+    expect(await identityFor("timeout-default")).toEqual(base);
+    expect(await identityFor("stall-retries-default")).toEqual(base);
+
+    for (const variant of [
+      "max-retries",
+      "lenient",
+      "on-failure",
+      "timeout",
+      "stall-retries",
+    ] as const) {
+      const identity = await identityFor(variant);
+      expect(identity.version).not.toBe(base.version);
+      expect(identity.inputHash).not.toBe(base.inputHash);
+    }
+  });
+
+  test("plain agent identity includes workflow-visible default timeout and stall settings", async () => {
+    let nextRun = 1;
+    const store = JournalStore.memory();
+    const provider = new RecordingProvider({
+      ask: { value: 1 },
+    });
+    const k = new RealmKernel(store, {
+      idgen: () => `run_control_settings_${nextRun++}`,
+      clock: () => 1,
+      rng: () => 0.5,
+      agents: new AgentProviderRegistry().register(provider),
+    });
+    const identityForCurrentDefaults = async (): Promise<{
+      version: string;
+      inputHash: string;
+    }> => {
+      const handle = await k.run<number>(
+        controlIdentityUrl,
+        { variant: "default" },
+        { name: "control-settings", target: process.cwd() },
+      );
+      expect(handle.status).toBe("finished");
+      const row = store.getJournalRow(handle.runId, "ask", 1);
+      if (!row) throw new Error(`missing journal row for ${handle.runId}`);
+      return { version: row.version, inputHash: row.inputHash };
+    };
+
+    store.putDaemonSettingRow({ key: "agent.defaultTimeoutMs", valueJson: "1234", nowMs: 1 });
+    store.putDaemonSettingRow({ key: "agent.defaultStallRetries", valueJson: "0", nowMs: 1 });
+    const first = await identityForCurrentDefaults();
+
+    store.putDaemonSettingRow({ key: "agent.defaultTimeoutMs", valueJson: "9999", nowMs: 2 });
+    store.putDaemonSettingRow({ key: "agent.defaultStallRetries", valueJson: "7", nowMs: 2 });
+    const second = await identityForCurrentDefaults();
+
+    expect(second.version).not.toBe(first.version);
+    expect(second.inputHash).not.toBe(first.inputHash);
+    expect(provider.calls.map((call) => call.timeoutMs)).toEqual([1234, 9999]);
+  });
+
   test("known provider tool aliases reject before provider invocation", async () => {
     const store = JournalStore.memory();
     const calls: AgentInvocation[] = [];

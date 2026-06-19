@@ -6,8 +6,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { SecretStore } from "../../agents/secrets.ts";
+import { hashJson } from "../../hash.ts";
 import { JournalStore } from "../../journal/store.ts";
-import { WORKFLOW_COMMAND_KILL_GRACE_MS, normalizeWorkflowCommandSpec } from "../command.ts";
+import { WORKFLOW_SDK_ABI_VERSION } from "../../workflow-definitions/snapshot.ts";
+import {
+  MAX_WORKFLOW_COMMAND_STALL_TIMEOUT_MS,
+  MAX_WORKFLOW_COMMAND_STDERR_BYTES,
+  MAX_WORKFLOW_COMMAND_STDOUT_BYTES,
+  MAX_WORKFLOW_COMMAND_TIMEOUT_MS,
+  WORKFLOW_COMMAND_KILL_GRACE_MS,
+  WORKFLOW_COMMAND_RUNNER_VERSION,
+  buildCommandEnvironment,
+  normalizeWorkflowCommandSpec,
+} from "../command.ts";
 import {
   type BoundedProcessChild,
   type BoundedProcessSpawn,
@@ -48,6 +59,56 @@ function initGitRepo(path: string): void {
   execFileSync("git", ["commit", "-m", "base"], { cwd: path, stdio: "ignore" });
 }
 
+function validCommandSpec(): Record<string, unknown> {
+  return {
+    key: "validate",
+    workspace: { id: "workspace", identityHash: "workspace-hash" },
+    cwd: ".",
+    mode: "argv",
+    argv: ["/bin/echo", "ok"],
+    capabilities: {
+      fs: "workspace-write",
+      shell: true,
+      network: "none",
+      secrets: ["TOKEN"],
+    },
+    environment: {
+      vars: { LITERAL: "value" },
+      secrets: ["TOKEN"],
+    },
+    timeoutMs: 1000,
+    stallTimeoutMs: 500,
+    maxStdoutBytes: 1000,
+    maxStderrBytes: 1000,
+    successExitCodes: [0],
+    failureMode: "throw",
+  };
+}
+
+function validShellCommandSpec(shell = "printf ok"): Record<string, unknown> {
+  const spec = validCommandSpec();
+  spec.mode = "shell";
+  removeCommandSpecField(spec, "argv");
+  spec.shell = shell;
+  return spec;
+}
+
+function removeCommandSpecField(spec: Record<string, unknown>, key: string): void {
+  Reflect.deleteProperty(spec, key);
+}
+
+function commandInputHash(spec: Record<string, unknown>): string {
+  return hashJson(normalizeWorkflowCommandSpec(spec).identity);
+}
+
+function commandCapabilities(spec: Record<string, unknown>): Record<string, unknown> {
+  return spec.capabilities as Record<string, unknown>;
+}
+
+function commandEnvironment(spec: Record<string, unknown>): Record<string, unknown> {
+  return spec.environment as Record<string, unknown>;
+}
+
 function commandWorkflow(commandSource: string): { name: string; source: string } {
   return {
     name: "command-case",
@@ -85,6 +146,356 @@ class FakeChild extends EventEmitter implements BoundedProcessChild {
 }
 
 describe("ctx.command", () => {
+  test("normalization rejects invalid command validation and identity inputs", () => {
+    const cases: Array<{
+      name: string;
+      mutate: (spec: Record<string, unknown>) => void;
+      error: RegExp;
+    }> = [
+      {
+        name: "capabilities without shell true",
+        mutate: (spec) => {
+          commandCapabilities(spec).shell = false;
+        },
+        error: /capabilities\.shell must be true/,
+      },
+      {
+        name: "fs without workspace-write",
+        mutate: (spec) => {
+          commandCapabilities(spec).fs = "read";
+        },
+        error: /capabilities\.fs must be "workspace-write"/,
+      },
+      {
+        name: "unknown mode",
+        mutate: (spec) => {
+          spec.mode = "raw";
+          removeCommandSpecField(spec, "argv");
+          spec.shell = "printf ok";
+        },
+        error: /mode must be "argv" or "shell"/,
+      },
+      {
+        name: "empty argv",
+        mutate: (spec) => {
+          spec.argv = [];
+        },
+        error: /argv must not be empty/,
+      },
+      {
+        name: "non-string argv item",
+        mutate: (spec) => {
+          spec.argv = ["/bin/echo", 1];
+        },
+        error: /argv\[1\] must be a non-empty string/,
+      },
+      {
+        name: "empty shell",
+        mutate: (spec) => {
+          spec.mode = "shell";
+          removeCommandSpecField(spec, "argv");
+          spec.shell = " ";
+        },
+        error: /shell must be a non-empty string/,
+      },
+      {
+        name: "missing capabilities",
+        mutate: (spec) => {
+          removeCommandSpecField(spec, "capabilities");
+        },
+        error: /capabilities is required and must be a plain object/,
+      },
+      {
+        name: "invalid env name",
+        mutate: (spec) => {
+          commandEnvironment(spec).vars = { "1BAD": "value" };
+        },
+        error: /environment\.vars\.1BAD must match/,
+      },
+      {
+        name: "reserved KEEL_ env name",
+        mutate: (spec) => {
+          commandEnvironment(spec).vars = { KEEL_TOKEN: "value" };
+        },
+        error: /environment\.vars\.KEEL_TOKEN must not start with KEEL_/,
+      },
+      {
+        name: "duplicate secret names",
+        mutate: (spec) => {
+          commandEnvironment(spec).secrets = ["TOKEN", "TOKEN"];
+        },
+        error: /environment\.secrets must not contain duplicate TOKEN/,
+      },
+      {
+        name: "literal and secret name collision",
+        mutate: (spec) => {
+          commandEnvironment(spec).vars = { TOKEN: "literal" };
+        },
+        error: /cannot define TOKEN in both vars and secrets/,
+      },
+      {
+        name: "ungranted secret ref",
+        mutate: (spec) => {
+          commandCapabilities(spec).secrets = [];
+        },
+        error: /environment\.secrets includes TOKEN.*capabilities\.secrets does not grant it/,
+      },
+      {
+        name: "missing timeout",
+        mutate: (spec) => {
+          removeCommandSpecField(spec, "timeoutMs");
+        },
+        error: /timeoutMs must be a positive integer/,
+      },
+      {
+        name: "timeout above maximum",
+        mutate: (spec) => {
+          spec.timeoutMs = MAX_WORKFLOW_COMMAND_TIMEOUT_MS + 1;
+        },
+        error: /timeoutMs must be <=/,
+      },
+      {
+        name: "stall timeout above maximum",
+        mutate: (spec) => {
+          spec.timeoutMs = MAX_WORKFLOW_COMMAND_TIMEOUT_MS;
+          spec.stallTimeoutMs = MAX_WORKFLOW_COMMAND_STALL_TIMEOUT_MS + 1;
+        },
+        error: /stallTimeoutMs must be <=/,
+      },
+      {
+        name: "missing stdout cap",
+        mutate: (spec) => {
+          removeCommandSpecField(spec, "maxStdoutBytes");
+        },
+        error: /maxStdoutBytes must be a positive integer/,
+      },
+      {
+        name: "stdout cap above maximum",
+        mutate: (spec) => {
+          spec.maxStdoutBytes = MAX_WORKFLOW_COMMAND_STDOUT_BYTES + 1;
+        },
+        error: /maxStdoutBytes must be <=/,
+      },
+      {
+        name: "missing stderr cap",
+        mutate: (spec) => {
+          removeCommandSpecField(spec, "maxStderrBytes");
+        },
+        error: /maxStderrBytes must be a positive integer/,
+      },
+      {
+        name: "stderr cap above maximum",
+        mutate: (spec) => {
+          spec.maxStderrBytes = MAX_WORKFLOW_COMMAND_STDERR_BYTES + 1;
+        },
+        error: /maxStderrBytes must be <=/,
+      },
+      {
+        name: "empty success exit codes",
+        mutate: (spec) => {
+          spec.successExitCodes = [];
+        },
+        error: /successExitCodes must not be empty/,
+      },
+      {
+        name: "out-of-range success exit code",
+        mutate: (spec) => {
+          spec.successExitCodes = [0, 256];
+        },
+        error: /successExitCodes\[1\] must be an integer from 0 to 255/,
+      },
+      {
+        name: "duplicate success exit code",
+        mutate: (spec) => {
+          spec.successExitCodes = [0, 0];
+        },
+        error: /successExitCodes contains duplicate 0/,
+      },
+    ];
+
+    for (const item of cases) {
+      const spec = validCommandSpec();
+      item.mutate(spec);
+      try {
+        expect(() => normalizeWorkflowCommandSpec(spec)).toThrow(item.error);
+      } catch (err) {
+        throw new Error(`${item.name}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+  });
+
+  test("command identity hash changes for execution-affecting inputs", () => {
+    const cases: Array<{
+      name: string;
+      base?: () => Record<string, unknown>;
+      mutate: (spec: Record<string, unknown>) => void;
+    }> = [
+      {
+        name: "cwd",
+        mutate: (spec) => {
+          spec.cwd = "nested";
+        },
+      },
+      {
+        name: "mode",
+        mutate: (spec) => {
+          spec.mode = "shell";
+          removeCommandSpecField(spec, "argv");
+          spec.shell = "printf ok";
+        },
+      },
+      {
+        name: "argv",
+        mutate: (spec) => {
+          spec.argv = ["/bin/echo", "changed"];
+        },
+      },
+      {
+        name: "shell",
+        base: () => validShellCommandSpec("printf one"),
+        mutate: (spec) => {
+          spec.shell = "printf two";
+        },
+      },
+      {
+        name: "capabilities",
+        mutate: (spec) => {
+          commandCapabilities(spec).network = ["example.test"];
+        },
+      },
+      {
+        name: "environment vars",
+        mutate: (spec) => {
+          commandEnvironment(spec).vars = { LITERAL: "changed" };
+        },
+      },
+      {
+        name: "secret names",
+        mutate: (spec) => {
+          commandCapabilities(spec).secrets = ["OTHER"];
+          commandEnvironment(spec).secrets = ["OTHER"];
+        },
+      },
+      {
+        name: "timeout",
+        mutate: (spec) => {
+          spec.timeoutMs = 2000;
+        },
+      },
+      {
+        name: "stall timeout",
+        mutate: (spec) => {
+          spec.stallTimeoutMs = 750;
+        },
+      },
+      {
+        name: "stdout cap",
+        mutate: (spec) => {
+          spec.maxStdoutBytes = 2000;
+        },
+      },
+      {
+        name: "stderr cap",
+        mutate: (spec) => {
+          spec.maxStderrBytes = 2000;
+        },
+      },
+      {
+        name: "success exit codes",
+        mutate: (spec) => {
+          spec.successExitCodes = [0, 2];
+        },
+      },
+      {
+        name: "failure mode",
+        mutate: (spec) => {
+          spec.failureMode = "return";
+        },
+      },
+      {
+        name: "bump",
+        mutate: (spec) => {
+          spec.bump = "v2";
+        },
+      },
+    ];
+
+    for (const item of cases) {
+      const base = item.base?.() ?? validCommandSpec();
+      const changed = item.base?.() ?? validCommandSpec();
+      item.mutate(changed);
+      const baseHash = commandInputHash(base);
+      const changedHash = commandInputHash(changed);
+      if (changedHash === baseHash) {
+        throw new Error(`${item.name}: command identity hash did not change`);
+      }
+    }
+
+    const identity = normalizeWorkflowCommandSpec(validCommandSpec()).identity;
+    const baseHash = hashJson(identity);
+    expect(
+      hashJson({
+        ...(identity as Record<string, unknown>),
+        commandRunnerVersion: WORKFLOW_COMMAND_RUNNER_VERSION + 1,
+      }),
+    ).not.toBe(baseHash);
+    expect(
+      hashJson({
+        ...(identity as Record<string, unknown>),
+        workflowSdkAbiVersion: WORKFLOW_SDK_ABI_VERSION + 1,
+      }),
+    ).not.toBe(baseHash);
+  });
+
+  test("command identity excludes raw secrets, base env values, and runtime observations", () => {
+    const spec = validCommandSpec();
+    const command = normalizeWorkflowCommandSpec(spec);
+    const identityHash = hashJson(command.identity);
+    const firstEnv = buildCommandEnvironment(
+      command.environment,
+      [{ name: "TOKEN", value: "raw-secret-value-a" }],
+      { PATH: "/tmp/base-env-a" },
+    );
+    const secondEnv = buildCommandEnvironment(
+      command.environment,
+      [{ name: "TOKEN", value: "raw-secret-value-b" }],
+      { PATH: "/tmp/base-env-b" },
+    );
+    const observed = {
+      stdout: "stdout-observation-a",
+      stderr: "stderr-observation-a",
+      exitCode: 9,
+      durationMs: 1234,
+      startedAtMs: 5000,
+      finishedAtMs: 6234,
+      pid: 98765,
+      fileState: "observed-filesystem-state-a",
+    };
+
+    expect(firstEnv).toMatchObject({ PATH: "/tmp/base-env-a", TOKEN: "raw-secret-value-a" });
+    expect(secondEnv).toMatchObject({ PATH: "/tmp/base-env-b", TOKEN: "raw-secret-value-b" });
+    expect(observed.exitCode).toBe(9);
+    expect(commandInputHash(spec)).toBe(identityHash);
+
+    const identityText = JSON.stringify(command.identity);
+    for (const excluded of [
+      "raw-secret-value-a",
+      "raw-secret-value-b",
+      "/tmp/base-env-a",
+      "/tmp/base-env-b",
+      "stdout-observation-a",
+      "stderr-observation-a",
+      "observed-filesystem-state-a",
+      "exitCode",
+      "durationMs",
+      "startedAtMs",
+      "finishedAtMs",
+      "pid",
+    ]) {
+      expect(identityText).not.toContain(excluded);
+    }
+  });
+
   test("runs in an explicit workspace and replays a completed result without spawning again", async () => {
     const store = JournalStore.memory();
     const workspace = tempDir("keel-command-workspace-");

@@ -3054,6 +3054,15 @@ export class RealmKernel {
                   m.deps,
                 );
               } catch (err) {
+                const pending = this.store.getLatestAttempt(runId, m.command.stableKey);
+                if (
+                  pending?.status === "pending" &&
+                  pending.version === m.version &&
+                  pending.inputHash === hashJson(m.inputs as Json)
+                ) {
+                  abort(err);
+                  break;
+                }
                 reply(m.id, { ok: false, error: serializeError(err) });
                 break;
               }

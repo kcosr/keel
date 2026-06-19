@@ -94,4 +94,58 @@ describe("WorkflowCtx workspaces", () => {
       rmSync(path, { recursive: true, force: true });
     }
   });
+
+  test("in-process command commit fault leaves the pending row resumable", async () => {
+    const target = mkdtempSync(join(tmpdir(), "keel-target-"));
+    const path = mkdtempSync(join(tmpdir(), "keel-command-commit-fault-"));
+    const store = JournalStore.memory();
+    let clock = 1_000;
+    try {
+      const ctx = new WorkflowCtx(
+        store,
+        "run-1",
+        {
+          clock: () => clock++,
+          rng: () => 0.5,
+          fault: (point, key) => {
+            if (point === "before-commit" && key === "command.count") throw new Error("CRASH");
+          },
+        },
+        undefined,
+        undefined,
+        target,
+      );
+      const workspace = await ctx.workspace({ key: "cmd", mode: "direct", path });
+      await expect(
+        ctx.command({
+          key: "count",
+          workspace,
+          cwd: ".",
+          mode: "argv" as const,
+          argv: ["/bin/sh", "-c", "printf ok; echo run >> count.txt"] as [string, ...string[]],
+          capabilities: { fs: "workspace-write" as const, shell: true, network: "none" as const },
+          timeoutMs: 5000,
+          maxStdoutBytes: 1000,
+          maxStderrBytes: 1000,
+        }),
+      ).rejects.toThrow(/CRASH/);
+
+      expect(readFileSync(join(path, "count.txt"), "utf8")).toBe("run\n");
+      expect(store.getJournalRow("run-1", "command.count", 1)).toMatchObject({
+        effectType: "command",
+        status: "pending",
+        resultInline: null,
+        resultArtifact: null,
+      });
+      expect(store.getAgentWorkspace("run-1", workspace.id)).toMatchObject({
+        status: "idle",
+        activeHolderKind: null,
+        activeHolderKey: null,
+        activeHolderAttempt: null,
+      });
+    } finally {
+      rmSync(target, { recursive: true, force: true });
+      rmSync(path, { recursive: true, force: true });
+    }
+  });
 });

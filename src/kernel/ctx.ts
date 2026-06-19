@@ -608,15 +608,14 @@ export class WorkflowCtx implements Ctx {
 
     this.acquireInProcessCommandWorkspace(command, begun.attempt, begun.startedAtMs);
     this.engine.emit("command.started", commandStartedEvent(command, begun.attempt));
-    let completed: CommandResult;
+    let result: CommandResult;
     try {
-      const result = await runBoundedProcess({
+      result = await runBoundedProcess({
         command,
         attempt: begun.attempt,
         cwd: workspace.resolvedCwd,
         env: buildCommandEnvironment(command.environment, []),
       });
-      completed = this.completeInProcessCommand(command, begun, version, result);
     } catch (err) {
       this.releaseInProcessCommandWorkspace(command, begun.attempt, this.host.clock());
       this.engine.failStep(
@@ -628,6 +627,13 @@ export class WorkflowCtx implements Ctx {
         err,
         "command",
       );
+      throw err;
+    }
+    let completed: CommandResult;
+    try {
+      completed = this.completeInProcessCommand(command, begun, version, result);
+    } catch (err) {
+      this.releaseInProcessCommandWorkspace(command, begun.attempt, this.host.clock());
       throw err;
     }
     applyCommandFailureMode(completed, command.failureMode);

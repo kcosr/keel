@@ -173,7 +173,7 @@ export interface RunWorkspaceView {
   runId: string;
   workspaceId: string;
   mode: "direct" | "worktree" | "copy" | "clone";
-  ownerKind: "workflow" | "agent" | "agent_session";
+  ownerKind: "workflow" | "agent" | "agent_session" | "command";
   key: string;
   lastAttempt: number | null;
   retentionPolicy: "remove" | "retain-on-failure" | "retain" | null;
@@ -202,7 +202,7 @@ export interface RunWorkspaceView {
   failureSeen: boolean;
   lastTurnKey: string | null;
   lastTurnAttempt: number | null;
-  activeHolderKind: "workflow" | "agent" | "agent_session" | null;
+  activeHolderKind: "workflow" | "agent" | "agent_session" | "command" | null;
   activeHolderKey: string | null;
   activeHolderAttempt: number | null;
   activeStartedAtMs: number | null;

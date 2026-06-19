@@ -24,7 +24,15 @@ keel launch --detach workflows/implement-review-loop/implement-review-loop.workf
     "maxRounds": 3,
     "implementerReasoning": "high",
     "reviewerReasoning": "high",
-    "verificationCommand": "bun test src/kernel/realm/agent-session.test.ts"
+    "completionChecks": [
+      {
+        "key": "tests",
+        "type": "command",
+        "command": "bun",
+        "args": ["test", "src/kernel/realm/agent-session.test.ts"],
+        "timeoutMs": 600000
+      }
+    ]
 }'
 ```
 
@@ -70,11 +78,14 @@ KEEL_RUN_CAP=kc_run_... keel signal <run-id> implementation-completion '{
   repository directly.
 - The reviewer uses the daemon `claude-default` profile with read-only tools and
   is prompted not to modify files.
-- If `verificationCommand` is set, the implementer is asked to run it when
-  practical; the `codex-default` profile supplies the tool access.
+- `completionChecks` are daemon-run gates after a clean review. Command checks
+  run as the local daemon user in the selected workspace; stdout/stderr are
+  journaled without secret redaction.
 - This workflow uses a direct workspace for the resolved repository. It does not
   create a Keel-owned worktree. Use a manually-created git worktree as `--target`
   when edits should be isolated from `main`.
+- Direct `has-commits` checks require `baseRef`; direct `git-clean` checks fail
+  on any local dirt in the selected checkout.
 - Keep `maxRounds` small. The workflow caps it at `10`.
 - This workflow does not request Keel secret refs. Do not put raw secret values in
   prompts or input; agent outputs are journaled as-is.
@@ -89,10 +100,11 @@ KEEL_RUN_CAP=kc_run_... keel signal <run-id> implementation-completion '{
 | `maxRounds` | no | Maximum implement/review rounds. Defaults to `3`, capped at `10`. |
 | `completionMode` | no | `"auto"` by default. Use `"park-before-complete"` to wait for a final completion/continue signal after a clean review. |
 | `completionSignalName` | no | Signal name for parked clean completion. Defaults to `implementation-completion`. |
+| `completionCheckFailureAction` | no | `"continue-loop"` by default. Also accepts `"block"` or, with `park-before-complete`, `"park"`. |
+| `completionChecks` | no | Typed daemon-enforced gates: `command`, `git-clean`, `has-commits`, or `branch-pushed`. Defaults to `[]`. |
 | `implementerReasoning` | no | Override reasoning effort for the `codex-default` implementer profile. |
 | `reviewerReasoning` | no | Override reasoning effort for the `claude-default` reviewer profile. |
 | `reviewFocus` | no | Optional focus for the reviewer. |
-| `verificationCommand` | no | Optional command the implementer should run when practical. |
 
 The implementer participant key is `implementer`; reviewer participant key is
 `reviewer`.

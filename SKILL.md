@@ -40,7 +40,7 @@ The body runs in a sandbox. Stay inside it or the run is rejected:
 
 - **No `Date.now()`, `new Date()`, `Math.random()`, `fetch`, `Bun.*`, or
   file/network access** in the body. Use `ctx.now()` / `ctx.random()`; do real
-  work via `ctx.agent`.
+  work via `ctx.agent` or bounded `ctx.command`.
 - File-launched workflows may import local static `.ts`/`.tsx` helpers through
   relative specifiers. Inline/stdin workflows are single-module only. The only
   external import allowed in workflow source or helpers is the exact authoring
@@ -72,6 +72,8 @@ The body runs in a sandbox. Stay inside it or the run is rejected:
 ```ts
 ctx.agent(spec)                       // call an LLM agent (the real work); see §4
 ctx.agentSession(spec).turn(spec)     // realm-only multi-turn logical agent; see §4.1
+ctx.command(spec)                     // durable bounded host command; see §4.2
+ctx.completionCheck(spec)             // durable host completion gate for curated workflows
 ctx.step(key, schema, inputs, fn)     // pure compute; memoized & re-run only if inputs/code change
 ctx.now() / ctx.random()              // the only time / randomness allowed
 ctx.sleep(key, ms)                    // durable pause
@@ -172,6 +174,50 @@ from that token rather than starting a fresh session. Changing a participant's
 resolved provider/model/selected-provider-config/tool/capability/workspace
 identity or changing a completed/pending turn's prompt/schema/options for the
 same turn key fails closed.
+
+## 4.2 Durable Commands (`ctx.command`)
+
+Use `ctx.command` for workflow-owned, bounded host-side commands whose output
+should affect later workflow logic or prompts: code maps, focused test
+discovery, small static checks, or deterministic helper scripts. Do not use it
+as an agent shell escape, a generic CI runner, or hidden workspace setup.
+
+```ts
+const workspace = await ctx.workspace({ key: "impl", mode: "worktree" });
+const result = await ctx.command({
+  key: "code-map",
+  workspace,
+  cwd: ".",
+  mode: "argv",
+  argv: ["bun", "scripts/code-map.ts", "--json"],
+  capabilities: { fs: "workspace-write", shell: true, network: "none" },
+  timeoutMs: 30_000,
+  maxStdoutBytes: 200_000,
+  maxStderrBytes: 32_000,
+});
+```
+
+Rules:
+
+- Pass a real `WorkspaceHandle`; raw paths are rejected.
+- Pass a relative `cwd` under that workspace. Use `"."` for the root.
+- Prefer `mode: "argv"`; use `mode: "shell"` only for compound shell syntax.
+- Declare command `capabilities` explicitly. In v1 commands require
+  `fs: "workspace-write"` and `shell: true`; provider `toolPolicy` does not
+  apply.
+- Set required `timeoutMs`, `maxStdoutBytes`, and `maxStderrBytes`.
+- Use `failureMode: "return"` when the workflow should inspect nonzero exits,
+  timeouts, or stderr and decide what to do.
+- Command environments are explicit: base allowlist, `environment.vars`, and
+  granted `environment.secrets`. Raw secret values stay out of identity and
+  started events, but command output is not redacted if the process prints them.
+- Completed command results replay. Pending commands are at-least-once after
+  crash or interruption, so commands that mutate files or external systems
+  should be idempotent or fail clearly when repeated.
+
+The reusable implement/review workflows expose typed `completionChecks` for
+command, clean-tree, commit, and pushed-branch gates. Prefer those gates over
+prompt-only verification instructions when completion must be machine checked.
 
 Use `ctx.workspace` when agents should run somewhere other than the default
 direct workspace at `ctx.run.target`. Choose the mode deliberately:

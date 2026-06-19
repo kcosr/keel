@@ -21,6 +21,7 @@ orientation, read [`docs/api.md`](./docs/api.md).
 - [CLI Reference](#cli-reference)
 - [Paths, State, And Workspaces](#paths-state-and-workspaces)
 - [Workflow Authoring](#workflow-authoring)
+- [Command Effects](#command-effects)
 - [Agent Calls](#agent-calls)
 - [Capabilities And Secrets](#capabilities-and-secrets)
 - [Durability Features](#durability-features)
@@ -948,6 +949,8 @@ versioning and can cause affected steps to re-run.
 | `step(key, schema, inputs, fn, opts?)` | Pure, memoized step. Re-runs only if inputs or version change. |
 | `agent(spec)` | Journaled LLM agent call. A completed agent effect never re-runs on resume. |
 | `agentSession(spec)` | Realm-only logical agent participant with multiple durable `.turn(...)` calls in one backend conversation. |
+| `command(spec)` | Journaled host-side command in an explicit workspace. Completed command results replay; pending commands may run again after crash. |
+| `completionCheck(spec)` | Journaled host-side completion gate in an explicit workspace. Used by curated implement/review workflows. |
 | `now()` / `random()` | Journaled wall-clock and entropy. Recorded once, replayed thereafter. |
 | `sleep(key, ms)` | Durable sleep. Parks the run until the supervisor wakes it. |
 | `human(spec)` | Park until a human approval/denial is delivered. |
@@ -962,6 +965,138 @@ stable across resumes, so derive fan-out keys from content, not array index:
 ```ts
 ctx.stepKey("verify", `${finding.file}|${finding.title}`);
 ```
+
+## Command Effects
+
+Use `ctx.command` when workflow-owned host process output should influence later
+control flow or prompts, such as repository maps, targeted test discovery, small
+static checks, or bounded helper scripts. It is not an agent provider tool and
+does not use provider `toolPolicy`.
+
+Every command must choose an explicit workspace and cwd. Keel never falls back to
+the daemon cwd or workflow source directory:
+
+```ts
+const workspace = await ctx.workspace({
+  key: "implementation",
+  mode: "worktree",
+  retention: "retain-on-failure",
+});
+
+const result = await ctx.command({
+  key: "code-map",
+  workspace,
+  cwd: ".",
+  mode: "argv",
+  argv: ["bun", "scripts/code-map.ts", "--json"],
+  capabilities: {
+    fs: "workspace-write",
+    shell: true,
+    network: "none",
+  },
+  environment: { vars: { CI: "1" } },
+  timeoutMs: 30_000,
+  maxStdoutBytes: 200_000,
+  maxStderrBytes: 32_000,
+});
+```
+
+Shell mode is explicit and runs through `/bin/sh -c`; Keel never infers shell
+parsing from a string:
+
+```ts
+const verify = await ctx.command({
+  key: "verify",
+  workspace,
+  cwd: ".",
+  mode: "shell",
+  shell: "bun test src/foo.test.ts && bun run typecheck",
+  capabilities: { fs: "workspace-write", shell: true, network: "none" },
+  timeoutMs: 10 * 60_000,
+  maxStdoutBytes: 128_000,
+  maxStderrBytes: 128_000,
+  failureMode: "return",
+});
+```
+
+Important command semantics:
+
+- `workspace` must be a `WorkspaceHandle` from `ctx.workspace` or
+  `ctx.withWorkspace`; raw paths are rejected.
+- `cwd` must be a relative path under the workspace. Missing directories,
+  absolute paths, `..` segments, and symlink escapes fail before spawn.
+- `capabilities` is required and currently must include
+  `fs: "workspace-write"` and `shell: true`. `network` is recorded and
+  authorized as a capability fact, but Keel does not yet enforce network
+  isolation for host commands.
+- `environment` uses the same `{ vars, secrets }` shape as agents. Literal vars
+  override a small daemon environment allowlist (`PATH`, `HOME`, locale, temp,
+  and git/ssh helper variables). Secret names must be granted by
+  `capabilities.secrets` and supplied as run secrets; raw secret values are not
+  stored in command identity or started events.
+- Command output is not redacted. If a command prints a secret, stdout/stderr,
+  completed events, returned results, artifacts, retained files, and errors may
+  contain it.
+- `timeoutMs`, `maxStdoutBytes`, and `maxStderrBytes` are required. Stdout and
+  stderr are capped independently; truncation is reported in the returned
+  `BoundedText`.
+- `successExitCodes` defaults to `[0]`. With `failureMode: "throw"` (default),
+  nonzero exits, signals, timeouts, stalls, spawn errors, and capture errors are
+  committed as `CommandResult` values and then rethrown as `CommandFailure`.
+  With `failureMode: "return"`, the workflow can branch on the result.
+- Completed command rows replay and do not spawn a process. Pending command rows
+  are at-least-once: after crash, restart, retry, or journal cuts, the command
+  may run again in the same workspace.
+
+`keel watch --output text` renders concise command lines, for example:
+
+```text
+[4] command code-map started cwd=.
+[5] command code-map exited exit=0 1.8s stdout=42KB stderr=0B
+[6] command verify nonzero-exit exit=1 12.4s stdout=0B stderr=8KB
+```
+
+## Completion Checks
+
+The reusable `implement-review-loop` and `branch-worktree-implement-review`
+workflows accept typed `completionChecks` instead of the old prompt-only
+`verificationCommand`. Checks run after a clean review and before a workflow can
+return `clean`; `park-before-complete` runs them before parking and again after
+an external `complete` signal.
+
+Supported checks are:
+
+- `command`: daemon-run argv or explicit `/bin/sh -c` command in the selected
+  workspace.
+- `git-clean`: require `git status --porcelain=v1 -z --untracked-files=all` to
+  have no entries.
+- `has-commits`: require commits after the generated worktree base commit, or
+  after `baseRef` for direct workspaces.
+- `branch-pushed`: require local `HEAD` to exactly equal a configured remote ref
+  from `git ls-remote`; Keel does not fetch or push.
+
+`completionCheckFailureAction` defaults to `"continue-loop"`, which sends
+bounded failure diagnostics back to the implementer while rounds remain.
+`"block"` returns terminal `blocked`; `"park"` is valid only with
+`completionMode: "park-before-complete"`.
+
+Terminal workflow output includes:
+
+```ts
+completion: {
+  checksConfigured: number;
+  attempts: CompletionCheckAttempt[];
+  latestAttempt?: CompletionCheckAttempt;
+}
+```
+
+`completion_check.started` and `completion_check.completed` are durable events
+available through `keel watch --output ndjson`; text watch renders concise
+`completion-check <key> <type> passed|failed` lines. These per-check events
+include `attempt` and `trigger` fields so clients can group checks into an
+attempt; v1 does not emit separate attempt boundary event types. Failed
+owned-worktree attempts mark the workspace `failureSeen`, so
+`retain-on-failure` keeps the worktree for inspection.
 
 ## Agent Calls
 

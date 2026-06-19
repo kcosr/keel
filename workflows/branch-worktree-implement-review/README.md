@@ -22,7 +22,18 @@ keel launch --detach workflows/branch-worktree-implement-review/branch-worktree-
     "completionMode": "park-before-complete",
     "implementerReasoning": "high",
     "reviewerReasoning": "high",
-    "verificationCommand": "bun test src/agents/capabilities.test.ts && bun run typecheck"
+    "completionChecks": [
+      {
+        "key": "verify",
+        "type": "command",
+        "shell": true,
+        "command": "bun test src/agents/capabilities.test.ts && bun run typecheck",
+        "timeoutMs": 900000
+      },
+      { "key": "committed", "type": "has-commits" },
+      { "key": "clean", "type": "git-clean" },
+      { "key": "pushed", "type": "branch-pushed", "remote": "origin" }
+    ]
   }'
 ```
 
@@ -50,6 +61,12 @@ The implementer and reviewer both run in that same worktree, so the reviewer
 sees the implementer's uncommitted and committed changes. Prompts instruct both
 agents to use the current working directory rather than the source repository
 path.
+
+`completionChecks` are daemon-run gates after a clean review. In branch-backed
+mode, `has-commits` uses the generated worktree's persisted base commit,
+`git-clean` checks the generated worktree, and `branch-pushed` requires the
+remote ref SHA to exactly equal local `HEAD`. Keel does not push for the
+implementer.
 
 Because this workflow uses durable `ctx.agentSession` participants, crash-resume
 and turn retry are supported, but rerun, rewind, and fork are rejected for runs
@@ -95,10 +112,11 @@ KEEL_RUN_CAP=kc_run_... keel signal <run-id> implementation-completion '{
 | `maxRounds` | no | Maximum implement/review rounds. Defaults to `3`, capped at `10`. |
 | `completionMode` | no | `"auto"` by default. Use `"park-before-complete"` to wait for completion/follow-up. |
 | `completionSignalName` | no | Signal name for parked clean completion. Defaults to `implementation-completion`. |
+| `completionCheckFailureAction` | no | `"continue-loop"` by default. Also accepts `"block"` or, with `park-before-complete`, `"park"`. |
+| `completionChecks` | no | Typed daemon-enforced gates: `command`, `git-clean`, `has-commits`, or `branch-pushed`. Defaults to `[]`. |
 | `implementerReasoning` | no | Override reasoning effort for the `codex-default` implementer profile. |
 | `reviewerReasoning` | no | Override reasoning effort for the `claude-default` reviewer profile. |
 | `reviewFocus` | no | Optional focus for the reviewer. |
-| `verificationCommand` | no | Optional command the implementer should run when practical. |
 
 The implementer participant key is `implementer`; reviewer participant key is
 `reviewer`; workspace key is `implementation`.

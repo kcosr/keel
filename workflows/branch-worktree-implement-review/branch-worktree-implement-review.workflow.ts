@@ -1,4 +1,19 @@
-import { type Ctx, jsonSchema } from "@kcosr/keel";
+import {
+  type CompletionCheck,
+  type CompletionCheckAttempt,
+  type CompletionCheckFailureAction,
+  type Ctx,
+  type NormalizedCompletionCheck,
+  jsonSchema,
+} from "@kcosr/keel";
+import {
+  type CompletionSummary,
+  completionFailureFeedback,
+  completionInstructions,
+  completionOutput,
+  resolveCompletionConfig,
+  runCompletionAttempt,
+} from "../completion-checks";
 
 type Finding = {
   severity: "critical" | "high" | "medium" | "low";
@@ -33,10 +48,11 @@ type BranchWorktreeImplementReviewInput = {
   maxRounds?: number;
   completionMode?: "auto" | "park-before-complete";
   completionSignalName?: string;
+  completionCheckFailureAction?: CompletionCheckFailureAction;
+  completionChecks?: CompletionCheck[];
   implementerReasoning?: string;
   reviewerReasoning?: string;
   reviewFocus?: string;
-  verificationCommand?: string;
 };
 
 type Round = {
@@ -51,11 +67,12 @@ type CompletionSignal = {
   reviewFocus?: string;
 };
 
-type ResolvedInput = BranchWorktreeImplementReviewInput & {
+type ResolvedInput = Omit<BranchWorktreeImplementReviewInput, "completionChecks"> & {
   repository: string;
   ref: string;
   retention: WorkspaceRetention;
   workspaceId: string;
+  completionChecks: NormalizedCompletionCheck[];
 };
 
 const FindingSchema = {
@@ -110,12 +127,22 @@ export default async function branchWorktreeImplementReview(
   input: BranchWorktreeImplementReviewInput,
 ): Promise<{
   status: "clean" | "blocked" | "max-rounds-reached";
-  workspace: { id: string; identityHash?: string; repository: string; ref: string; retention: WorkspaceRetention };
+  blockedReason?: "implementer-blocked" | "completion-check-failed";
+  workspace: {
+    id: string;
+    identityHash?: string;
+    repository: string;
+    ref: string;
+    retention: WorkspaceRetention;
+  };
   rounds: Round[];
   remainingFindings: Finding[];
   blockedImplementation?: ImplementationResult;
+  lastCompletionFailureFeedback?: string;
+  completion: CompletionSummary;
 }> {
   const repository = resolveRepository(input.repository, ctx.run.target);
+  const completionConfig = resolveCompletionConfig(input, "worktree");
   const ref = input.ref && input.ref.trim().length > 0 ? input.ref : "HEAD";
   const retention = input.retention ?? DEFAULT_RETENTION;
   const workspace = await ctx.workspace({
@@ -132,6 +159,7 @@ export default async function branchWorktreeImplementReview(
     ref,
     retention,
     workspaceId: workspace.id,
+    completionChecks: completionConfig.checks,
   };
   const maxRounds = clampRounds(input.maxRounds ?? DEFAULT_MAX_ROUNDS);
   const completionSignalName = input.completionSignalName ?? "implementation-completion";
@@ -150,33 +178,59 @@ export default async function branchWorktreeImplementReview(
     });
 
     const rounds: Round[] = [];
+    const completionAttempts: CompletionCheckAttempt[] = [];
     let findings: Finding[] = [];
     let followUp: CompletionSignal | undefined;
+    let completionAttempt = 0;
+    let completionRepairFeedback: string | undefined;
+    let lastCompletionFailureFeedback: string | undefined;
+    let manualExtraRounds = 0;
 
-    for (let round = 1; round <= maxRounds; round++) {
+    const finish = (result: {
+      status: "clean" | "blocked" | "max-rounds-reached";
+      blockedReason?: "implementer-blocked" | "completion-check-failed";
+      remainingFindings: Finding[];
+      blockedImplementation?: ImplementationResult;
+    }) => ({
+      ...result,
+      rounds,
+      ...(lastCompletionFailureFeedback ? { lastCompletionFailureFeedback } : {}),
+      completion: completionOutput(completionConfig.checks, completionAttempts),
+    });
+
+    for (let round = 1; round <= maxRounds + manualExtraRounds; round++) {
       ctx.phase(`Implement ${round}`);
       const followUpForRound = followUp;
+      const completionRepairForRound = completionRepairFeedback;
       const implementation = await implementer.turn({
         key: round === 1 ? "implement-1" : `fix-${round}`,
         prompt:
           round === 1
             ? initialImplementationPrompt(resolvedInput)
             : followUpForRound
-              ? followUpImplementationPrompt(resolvedInput, round, followUpForRound)
-              : fixImplementationPrompt(resolvedInput, round, findings),
+              ? followUpImplementationPrompt(
+                  resolvedInput,
+                  round,
+                  followUpForRound,
+                  completionRepairForRound,
+                )
+              : completionRepairForRound
+                ? completionCheckRepairPrompt(resolvedInput, round, completionRepairForRound)
+                : fixImplementationPrompt(resolvedInput, round, findings),
         schema: ImplementationSchema,
         lenient: true,
       });
       followUp = undefined;
+      completionRepairFeedback = undefined;
 
       ctx.log(`implementation.${round}`, implementation);
       if (implementation.status === "blocked") {
-        return {
+        return finish({
           status: "blocked" as const,
-          rounds,
+          blockedReason: "implementer-blocked",
           remainingFindings: findings,
           blockedImplementation: implementation,
-        };
+        });
       }
 
       ctx.phase(`Review ${round}`);
@@ -197,20 +251,88 @@ export default async function branchWorktreeImplementReview(
       rounds.push({ round, implementation, review });
       findings = review.findings;
       if (findings.length === 0) {
+        if (completionConfig.checks.length > 0) {
+          const trigger = input.completionMode === "park-before-complete" ? "pre-park" : "auto";
+          const attempt = await runCompletionAttempt(
+            ctx,
+            workspace,
+            completionConfig.checks,
+            ++completionAttempt,
+            trigger,
+          );
+          completionAttempts.push(attempt);
+          if (attempt.status === "failed") {
+            lastCompletionFailureFeedback = completionFailureFeedback(attempt);
+            if (completionConfig.failureAction === "block") {
+              return finish({
+                status: "blocked",
+                blockedReason: "completion-check-failed",
+                remainingFindings: [],
+              });
+            }
+            if (
+              completionConfig.failureAction === "continue-loop" &&
+              round < maxRounds + manualExtraRounds
+            ) {
+              completionRepairFeedback = lastCompletionFailureFeedback;
+              findings = [];
+              continue;
+            }
+            if (input.completionMode !== "park-before-complete") {
+              return finish({
+                status: "blocked",
+                blockedReason: "completion-check-failed",
+                remainingFindings: [],
+              });
+            }
+          } else if (input.completionMode !== "park-before-complete") {
+            return finish({ status: "clean", remainingFindings: [] });
+          }
+        } else if (input.completionMode !== "park-before-complete") {
+          return finish({ status: "clean", remainingFindings: [] });
+        }
+
         if (input.completionMode === "park-before-complete") {
-          ctx.phase("Awaiting implementation completion");
-          const completion = await ctx.signal<CompletionSignal>(completionSignalName);
-          if (completion.action === "continue") {
-            followUp = completion;
-            findings = [];
-            continue;
+          let parkedFailureFeedback =
+            completionAttempts[completionAttempts.length - 1]?.status === "failed"
+              ? lastCompletionFailureFeedback
+              : undefined;
+          while (true) {
+            ctx.phase(
+              parkedFailureFeedback
+                ? "Completion checks failed"
+                : "Awaiting implementation completion",
+            );
+            const completion = await ctx.signal<CompletionSignal>(completionSignalName);
+            if (completion.action === "continue") {
+              followUp = completion;
+              completionRepairFeedback = parkedFailureFeedback;
+              if (round >= maxRounds + manualExtraRounds) manualExtraRounds += 1;
+              findings = [];
+              break;
+            }
+            if (completionConfig.checks.length === 0) {
+              return finish({ status: "clean", remainingFindings: [] });
+            }
+            const finalAttempt = await runCompletionAttempt(
+              ctx,
+              workspace,
+              completionConfig.checks,
+              ++completionAttempt,
+              "final",
+            );
+            completionAttempts.push(finalAttempt);
+            if (finalAttempt.status === "passed") {
+              return finish({ status: "clean", remainingFindings: [] });
+            }
+            lastCompletionFailureFeedback = completionFailureFeedback(finalAttempt);
+            parkedFailureFeedback = lastCompletionFailureFeedback;
           }
         }
-        return { status: "clean" as const, rounds, remainingFindings: [] };
       }
     }
 
-    return { status: "max-rounds-reached" as const, rounds, remainingFindings: findings };
+    return finish({ status: "max-rounds-reached" as const, remainingFindings: findings });
   });
 
   return {
@@ -229,13 +351,14 @@ function followUpImplementationPrompt(
   input: ResolvedInput,
   round: number,
   followUp: CompletionSignal,
+  completionFailure: string | undefined,
 ): string {
   return `${workspaceInstructions(input)}
 
 Perform a human-requested follow-up implementation round ${round}.
 
 Spec: ${input.spec}
-${input.task ? `Task: ${input.task}\n` : ""}${input.verificationCommand ? `Verification command: ${input.verificationCommand}\n` : ""}
+${input.task ? `Task: ${input.task}\n` : ""}${completionInstructions(input.completionChecks)}${completionFailure ? `Completion-check diagnostics to address:\n${completionFailure}\n\n` : ""}
 Follow-up instructions:
 ${followUp.instructions ?? "Continue implementation review with another focused pass."}
 
@@ -251,23 +374,38 @@ function initialImplementationPrompt(input: ResolvedInput): string {
 Implement the requested change.
 
 Spec: ${input.spec}
-${input.task ? `Task: ${input.task}\n` : ""}${input.verificationCommand ? `Verification command: ${input.verificationCommand}\n` : ""}
+${input.task ? `Task: ${input.task}\n` : ""}${completionInstructions(input.completionChecks)}
 Modify files only inside the current branch-backed worktree. Keep the change
 scoped to the spec. Run focused verification when practical. Return a concise
 implementation summary, changed files, verification performed, and any notes.`;
 }
 
-function fixImplementationPrompt(
+function completionCheckRepairPrompt(
   input: ResolvedInput,
   round: number,
-  findings: Finding[],
+  feedback: string,
 ): string {
+  return `${workspaceInstructions(input)}
+
+Fix completion-check failures for implementation round ${round}.
+
+Spec: ${input.spec}
+${input.task ? `Task: ${input.task}\n` : ""}${completionInstructions(input.completionChecks)}
+Completion-check diagnostics to address:
+${feedback}
+
+Modify files only inside the current branch-backed worktree. Repair the failing
+completion gate, then run focused verification when practical. Return a concise
+implementation summary, changed files, verification performed, and any notes.`;
+}
+
+function fixImplementationPrompt(input: ResolvedInput, round: number, findings: Finding[]): string {
   return `${workspaceInstructions(input)}
 
 Fix reviewer findings for implementation round ${round}.
 
 Spec: ${input.spec}
-${input.task ? `Task: ${input.task}\n` : ""}${input.verificationCommand ? `Verification command: ${input.verificationCommand}\n` : ""}
+${input.task ? `Task: ${input.task}\n` : ""}${completionInstructions(input.completionChecks)}
 Reviewer findings to address:
 ${JSON.stringify(findings, null, 2)}
 

@@ -5,6 +5,8 @@
 // which runs workflow modules in a Worker while sharing the same StepEngine.
 
 import { AsyncLocalStorage } from "node:async_hooks";
+import { existsSync, realpathSync, statSync } from "node:fs";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import {
   type Capabilities,
   type ToolPolicy,
@@ -29,9 +31,51 @@ import { WORKFLOW_SDK_ABI_VERSION } from "../workflow-definitions/snapshot.ts";
 import { DEFAULT_WORKSPACE_ID, workspaceIdentity } from "../workspace/identity.ts";
 import { resolveUsableDirectory } from "../workspace/worktree.ts";
 import { finalAgentMessageEvents } from "./agent-events.ts";
+import {
+  type CommandResult,
+  type NormalizedWorkflowCommandSpec,
+  type WorkflowCommandSpec,
+  applyCommandFailureMode,
+  buildCommandEnvironment,
+  commandCompletedEvent,
+  commandStartedEvent,
+  normalizeWorkflowCommandSpec,
+} from "./command.ts";
+import { runCompletionCheck } from "./completion-check-runner.ts";
+import {
+  type CompletionCheckEffectSpec,
+  type CompletionCheckResult,
+  completionCheckCompletedEvent,
+  completionCheckStartedEvent,
+  normalizeCompletionCheckEffectSpec,
+} from "./completion-check.ts";
+import { runBoundedProcess } from "./process-runner.ts";
 import type { Schema } from "./schema.ts";
-import { StepEngine } from "./step-engine.ts";
+import { StepEngine, prepareStepResult } from "./step-engine.ts";
 import { computeVersion } from "./version.ts";
+
+export type {
+  BoundedText,
+  CommandResult,
+  CommandResultStatus,
+  WorkflowCommandBase,
+  WorkflowCommandSpec,
+} from "./command.ts";
+export type {
+  BranchPushedCompletionCheck,
+  CommandCompletionCheck,
+  CompletionCheck,
+  CompletionCheckAttempt,
+  CompletionCheckEffectSpec,
+  CompletionCheckFailureAction,
+  CompletionCheckFailureKind,
+  CompletionCheckResult,
+  CompletionCheckStatus,
+  CompletionCheckTrigger,
+  GitCleanCompletionCheck,
+  HasCommitsCompletionCheck,
+  NormalizedCompletionCheck,
+} from "./completion-check.ts";
 
 const SESSION_STABLE_KEY_PREFIX = "__session.";
 
@@ -201,6 +245,12 @@ export interface Ctx {
   /** Effectful agent call: journaled; a completed one never re-runs on resume. */
   agent<T>(spec: AgentSpec<T>): Promise<T>;
 
+  /** Durable host-side command effect in an explicit workspace. */
+  command(spec: WorkflowCommandSpec): Promise<CommandResult>;
+
+  /** Durable host-side completion gate in an explicit workspace. */
+  completionCheck(spec: CompletionCheckEffectSpec): Promise<CompletionCheckResult>;
+
   /** Realm-only durable logical agent session. */
   agentSession(spec: AgentSessionSpec): AgentSession;
 
@@ -260,6 +310,7 @@ export class WorkflowCtx implements Ctx {
   private readonly registry: AgentProviderRegistry | undefined;
   private readonly agentProfiles: Record<string, unknown> | undefined;
   private readonly workspaceScope = new AsyncLocalStorage<WorkspaceHandle>();
+  private readonly host: CtxHost;
 
   constructor(
     private readonly store: JournalStore,
@@ -269,6 +320,7 @@ export class WorkflowCtx implements Ctx {
     agentProfiles?: Record<string, unknown>,
     private readonly runTarget: string | null = null,
   ) {
+    this.host = host;
     this.engine = new StepEngine(store, runId, host);
     this.registry = registry;
     this.agentProfiles = agentProfiles;
@@ -562,6 +614,236 @@ export class WorkflowCtx implements Ctx {
       );
       throw err;
     }
+  }
+
+  async command(rawSpec: WorkflowCommandSpec): Promise<CommandResult> {
+    const command = normalizeWorkflowCommandSpec(rawSpec, { path: "ctx.command" });
+    if (command.environment.secrets.length > 0) {
+      throw new Error(
+        "ctx.command({ environment: { secrets } }) requires the realm kernel (secret side-channel)",
+      );
+    }
+    const workspace = this.resolveInProcessCommandWorkspace(command);
+    const version = computeVersion({ spec: command.identity });
+    const begun = this.engine.beginCommand(command.stableKey, command.identity, version, null);
+    if (begun.kind === "replay") {
+      const result = begun.value as CommandResult;
+      applyCommandFailureMode(result, command.failureMode);
+      return result;
+    }
+
+    this.acquireInProcessCommandWorkspace(command, begun.attempt, begun.startedAtMs);
+    this.engine.emit("command.started", commandStartedEvent(command, begun.attempt));
+    let result: CommandResult;
+    try {
+      result = await runBoundedProcess({
+        command,
+        attempt: begun.attempt,
+        cwd: workspace.resolvedCwd,
+        env: buildCommandEnvironment(command.environment, []),
+      });
+    } catch (err) {
+      this.releaseInProcessCommandWorkspace(command, begun.attempt, this.host.clock());
+      this.engine.failStep(
+        command.stableKey,
+        begun.attempt,
+        version,
+        begun.inputHash,
+        begun.startedAtMs,
+        err,
+        "command",
+      );
+      throw err;
+    }
+    let completed: CommandResult;
+    try {
+      completed = this.completeInProcessCommand(command, begun, version, result);
+    } catch (err) {
+      this.releaseInProcessCommandWorkspace(command, begun.attempt, this.host.clock());
+      throw err;
+    }
+    applyCommandFailureMode(completed, command.failureMode);
+    return completed;
+  }
+
+  async completionCheck(rawSpec: CompletionCheckEffectSpec): Promise<CompletionCheckResult> {
+    const spec = normalizeCompletionCheckEffectSpec(rawSpec, { path: "ctx.completionCheck" });
+    const version = computeVersion({ spec: spec.identity });
+    const begun = this.engine.beginCompletionCheck(spec.stableKey, spec.identity, version, null);
+    if (begun.kind === "replay") return begun.value as CompletionCheckResult;
+    this.engine.emit("completion_check.started", completionCheckStartedEvent(spec));
+    const result = await runCompletionCheck({
+      store: this.store,
+      runId: this.runId,
+      spec,
+      startedAtMs: begun.startedAtMs,
+      clock: this.host.clock,
+    });
+    this.host.fault?.("before-commit", spec.stableKey);
+    const stored = prepareStepResult(result);
+    const finishedAtMs = this.host.clock();
+    this.store.transaction(() => {
+      if (stored.artifact) {
+        this.store.putArtifact(stored.artifact.hash, stored.artifact.bytes, finishedAtMs);
+      }
+      this.store.appendEvent(
+        this.runId,
+        "completion_check.completed",
+        completionCheckCompletedEvent(spec, result),
+        finishedAtMs,
+      );
+      this.store.putJournalRow({
+        runId: this.runId,
+        stableKey: spec.stableKey,
+        attempt: begun.attempt,
+        effectType: "completion_check",
+        status: "completed",
+        version,
+        inputHash: begun.inputHash,
+        inputDeps: null,
+        resultInline: stored.inline,
+        resultArtifact: stored.artifact?.hash ?? null,
+        startedAtMs: begun.startedAtMs,
+        finishedAtMs,
+      });
+    });
+    return result;
+  }
+
+  private resolveInProcessCommandWorkspace(command: NormalizedWorkflowCommandSpec): {
+    resolvedCwd: string;
+  } {
+    const row = this.store.getAgentWorkspace(this.runId, command.workspaceId);
+    if (!row) {
+      throw new Error(`workspace handle "${command.workspaceId}" was not created in this run`);
+    }
+    if (row.mode !== "direct") {
+      throw new Error(`ctx.command with ${row.mode} workspace requires the realm kernel`);
+    }
+    if (
+      command.workspaceIdentityHash !== null &&
+      row.workspaceIdentityHash !== command.workspaceIdentityHash
+    ) {
+      throw new Error(
+        `workspace "${command.workspaceId}" identity changed; refusing to run command`,
+      );
+    }
+    if (row.activeHolderKind !== null) {
+      throw new Error(
+        `workspace "${row.workspaceId}" is already active for ${row.activeHolderKind} "${row.activeHolderKey}" attempt ${row.activeHolderAttempt}`,
+      );
+    }
+    if (row.status !== "idle" && row.status !== "diff_error") {
+      throw new Error(`workspace "${row.workspaceId}" is ${row.status} and cannot run commands`);
+    }
+    if (!existsSync(row.workspacePath) || !statSync(row.workspacePath).isDirectory()) {
+      throw new Error(`workspace "${row.workspaceId}" is missing at ${row.workspacePath}`);
+    }
+    const workspacePath = realpathSync(row.workspacePath);
+    const candidate = command.cwd === "." ? workspacePath : resolve(workspacePath, command.cwd);
+    const resolvedCwd = realpathSync(candidate);
+    if (!statSync(resolvedCwd).isDirectory()) {
+      throw new Error(`command cwd "${command.cwd}" is not a directory`);
+    }
+    const rel = relative(workspacePath, resolvedCwd);
+    if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+      throw new Error(`command cwd "${command.cwd}" escapes workspace "${row.workspaceId}"`);
+    }
+    return { resolvedCwd };
+  }
+
+  private acquireInProcessCommandWorkspace(
+    command: NormalizedWorkflowCommandSpec,
+    attempt: number,
+    atMs: number,
+  ): void {
+    this.store.updateAgentWorkspace(this.runId, command.workspaceId, {
+      status: "active",
+      activeHolderKind: "command",
+      activeHolderKey: command.stableKey,
+      activeHolderAttempt: attempt,
+      activeStartedAtMs: atMs,
+      updatedAtMs: atMs,
+    });
+  }
+
+  private releaseInProcessCommandWorkspace(
+    command: NormalizedWorkflowCommandSpec,
+    attempt: number,
+    atMs: number,
+  ): void {
+    const row = this.store.getAgentWorkspace(this.runId, command.workspaceId);
+    if (!row) return;
+    if (
+      row.activeHolderKind &&
+      (row.activeHolderKind !== "command" ||
+        row.activeHolderKey !== command.stableKey ||
+        row.activeHolderAttempt !== attempt)
+    ) {
+      throw new Error(
+        `workspace "${command.workspaceId}" active holder changed while command was running`,
+      );
+    }
+    const workspaceExists =
+      existsSync(row.workspacePath) && statSync(row.workspacePath).isDirectory();
+    this.store.updateAgentWorkspace(this.runId, command.workspaceId, {
+      status: workspaceExists || !row.owned ? "idle" : "abandoned",
+      ...(workspaceExists || !row.owned ? {} : { failureSeen: true }),
+      activeHolderKind: null,
+      activeHolderKey: null,
+      activeHolderAttempt: null,
+      activeStartedAtMs: null,
+      updatedAtMs: atMs,
+    });
+  }
+
+  private completeInProcessCommand(
+    command: NormalizedWorkflowCommandSpec,
+    begun: { attempt: number; inputHash: string; startedAtMs: number },
+    version: string,
+    result: CommandResult,
+  ): CommandResult {
+    this.host.fault?.("before-commit", command.stableKey);
+    let completed: CommandResult = {
+      ...result,
+      output: { ...result.output, resultArtifactBacked: false },
+    };
+    let stored = prepareStepResult(completed);
+    if (stored.artifact) {
+      completed = {
+        ...result,
+        output: { ...result.output, resultArtifactBacked: true },
+      };
+      stored = prepareStepResult(completed);
+    }
+    const finishedAtMs = this.host.clock();
+    this.store.transaction(() => {
+      if (stored.artifact) {
+        this.store.putArtifact(stored.artifact.hash, stored.artifact.bytes, finishedAtMs);
+      }
+      this.store.appendEvent(
+        this.runId,
+        "command.completed",
+        commandCompletedEvent(command, completed),
+        finishedAtMs,
+      );
+      this.store.putJournalRow({
+        runId: this.runId,
+        stableKey: command.stableKey,
+        attempt: begun.attempt,
+        effectType: "command",
+        status: "completed",
+        version,
+        inputHash: begun.inputHash,
+        inputDeps: null,
+        resultInline: stored.inline,
+        resultArtifact: stored.artifact?.hash ?? null,
+        startedAtMs: begun.startedAtMs,
+        finishedAtMs,
+      });
+      this.releaseInProcessCommandWorkspace(command, begun.attempt, finishedAtMs);
+    });
+    return completed;
   }
 
   private resolveAgentWorkspaceHandle(handle: WorkspaceHandle | undefined): WorkspaceHandle {

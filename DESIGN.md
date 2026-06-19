@@ -203,6 +203,8 @@ The prior-runtime defects that shaped Keel map to these requirements:
 |---|---|---|---|---|
 | **Pure step** | `ctx.step(key, schema, fn)` — `fn` deterministic in its inputs (reducers, transforms). | Execute, validate against schema, persist result + `inputHash`. | `inputHash` and `version` unchanged → **replay** without executing. Changed → re-execute as a new attempt. | `pure` |
 | **Effectful step** | `ctx.agent`, `ctx.human`, `ctx.signal` (and `ctx.spawn`, deferred) — result not re-derivable from inputs. | Execute under write-ahead (§5.5), persist result. | **A `completed` effectful step is never re-executed** (exactly-once result replay). **A `pending` one re-executes at-least-once** — which is why agent calls must be idempotent or carry a dedup key. | `effectful` |
+| **Command effect** | `ctx.command(spec)` — bounded host-side process execution in an explicit workspace. | Validate workspace/cwd/capabilities/env, write pending row, acquire the workspace holder, run the command, persist bounded result. | Matching completed commands replay without spawning. Matching pending commands may spawn again under at-least-once crash/retry semantics. Pending identity mismatches fail closed. | `command` |
+| **Completion check effect** | `ctx.completionCheck(spec)` — host-side command/git gate for curated workflow completion. | Validate workspace row and check identity, write pending row, acquire the workspace holder, run the check, persist bounded result and events. | Matching completed checks replay. New completion attempts use new keys and observe current workspace/git/remote state. Pending identity mismatches fail closed. | `completion_check` |
 | **Ambient** | `ctx.now()`, `ctx.random()`, `ctx.sleep()`. | Generate/record once. | Replay the recorded value (`sleep`: already-elapsed if the wake time passed). | `ambient` |
 
 Plain code *between* `ctx.*` calls (loops, `if`, dedupe logic) is not journaled.
@@ -210,6 +212,25 @@ It re-runs on every resume; because the `ctx.*` calls it interleaves
 short-circuit, re-running it is milliseconds and correct. The 106-minute,
 111-agent body re-runs top-to-bottom on resume — the 111 journaled transcripts
 replay instantly, and no agent re-fires.
+
+`ctx.command` is a host-side workflow effect, not a provider tool. It runs as the
+daemon user in a required `WorkspaceHandle` plus relative `cwd`, never in the
+daemon cwd. Command identity includes the normalized invocation, workspace id
+and identity hash, cwd, resolved capabilities, explicit environment policy,
+timeouts, output caps, success codes, failure mode, runner version, SDK ABI, and
+author bump. Raw secret values, stdout/stderr, exit status, timestamps, process
+ids, and observed filesystem state are excluded from identity. Completed
+terminal process failures are stored as `CommandResult` values so
+`failureMode: "throw"` can replay the same `CommandFailure` without spawning.
+If a daemon crash leaves a pending command row, resume may run the process again
+in the same workspace; filesystem and external side effects are not rolled back.
+
+`ctx.completionCheck` is the same durable-effect boundary for reusable
+implement/review completion gates. The host effect reads the persisted workspace
+row, including generated-worktree base commit and checkout branch metadata, so
+`has-commits` and `branch-pushed` do not reconstruct durable workspace state
+from shell output. Failed owned-worktree checks mark `failureSeen` for
+`retain-on-failure` cleanup semantics.
 
 ### 5.2 Step identity & structural versioning
 

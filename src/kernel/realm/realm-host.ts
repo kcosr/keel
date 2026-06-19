@@ -6,8 +6,8 @@
 // path (the StepEngine is identical, validated under real kill -9 in Phase 3).
 
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { AgentConcurrencyLimiter } from "../../agents/concurrency.ts";
 import {
@@ -40,6 +40,7 @@ import type { JournalStore } from "../../journal/store.ts";
 import type {
   AgentWorkspaceOwnerKind,
   AgentWorkspaceRow,
+  InputDep,
   RunRow,
   RunStatus,
 } from "../../journal/types.ts";
@@ -89,9 +90,24 @@ import {
   retainedWorkspacePath,
 } from "../../workspace/worktree.ts";
 import { type DurableAgentEvent, finalAgentMessageEvents } from "../agent-events.ts";
+import {
+  type CommandResult,
+  type NormalizedWorkflowCommandSpec,
+  applyCommandFailureMode,
+  buildCommandEnvironment,
+  commandCompletedEvent,
+  commandStartedEvent,
+} from "../command.ts";
+import { runCompletionCheck } from "../completion-check-runner.ts";
+import {
+  type CompletionCheckResult,
+  completionCheckCompletedEvent,
+  completionCheckStartedEvent,
+} from "../completion-check.ts";
 import type { CtxHost, FaultPoint } from "../ctx.ts";
 import { extractModuleHelpers } from "../module-helpers.ts";
 import { RUN_FINISHED_INLINE_OUTPUT_BYTES } from "../output.ts";
+import { CommandAbortError, runBoundedProcess } from "../process-runner.ts";
 import { StepEngine, prepareStepResult, readJournalResult } from "../step-engine.ts";
 import {
   CONTROL_WORDS,
@@ -212,6 +228,13 @@ interface InvocationWorkspace {
   baseCommit?: string;
   copyBaselinePath?: string;
   mode: AgentWorkspaceRow["mode"];
+  owned: boolean;
+}
+
+interface CommandWorkspace {
+  workspaceId: string;
+  workspacePath: string;
+  resolvedCwd: string;
   owned: boolean;
 }
 
@@ -450,6 +473,20 @@ export class RealmKernel {
       }
     }
     return env;
+  }
+
+  private resolveCommandEnvironmentEnv(
+    runId: string,
+    command: NormalizedWorkflowCommandSpec,
+  ): Record<string, string> {
+    if (command.environment.secrets.length === 0) {
+      return buildCommandEnvironment(command.environment, []);
+    }
+    if (!this.secrets) {
+      throw new Error("command environment.secrets requires a RealmKernel SecretStore");
+    }
+    const refs = this.secrets.resolveOrThrow(runId, command.environment.secrets);
+    return buildCommandEnvironment(command.environment, refs);
   }
 
   /** Start a run and return its id immediately, with a promise for completion.
@@ -1452,6 +1489,18 @@ export class RealmKernel {
         : this.store.getAgentWorkspace(runId, workspaceId);
     if (!row) throw new Error(`workspace handle "${workspaceId}" was not created in this run`);
     if (row.mode === "direct") {
+      const sameHolder =
+        row.activeHolderKind === holder.kind &&
+        row.activeHolderKey === holder.key &&
+        row.activeHolderAttempt === holder.attempt;
+      if (row.activeHolderKind && !sameHolder) {
+        throw new Error(
+          `workspace "${row.workspaceId}" is already active for ${row.activeHolderKind} "${row.activeHolderKey}" attempt ${row.activeHolderAttempt}`,
+        );
+      }
+      if (row.status !== "idle" && row.status !== "diff_error" && row.status !== "active") {
+        throw new Error(`workspace "${row.workspaceId}" is ${row.status} and cannot start`);
+      }
       assertUsableTargetDirectory(row.workspacePath);
       return {
         cwd: row.workspacePath,
@@ -1543,6 +1592,223 @@ export class RealmKernel {
       mode: row.mode,
       owned: true,
     };
+  }
+
+  private resolveCommandWorkspaceCwd(
+    runId: string,
+    command: NormalizedWorkflowCommandSpec,
+  ): CommandWorkspace {
+    const row = this.store.getAgentWorkspace(runId, command.workspaceId);
+    if (!row) {
+      throw new Error(`workspace handle "${command.workspaceId}" was not created in this run`);
+    }
+    if (
+      command.workspaceIdentityHash !== null &&
+      row.workspaceIdentityHash !== command.workspaceIdentityHash
+    ) {
+      throw new Error(
+        `workspace "${command.workspaceId}" identity changed; refusing to run command`,
+      );
+    }
+    if (row.activeHolderKind !== null) {
+      throw new Error(
+        `workspace "${row.workspaceId}" is already active for ${row.activeHolderKind} "${row.activeHolderKey}" attempt ${row.activeHolderAttempt}`,
+      );
+    }
+    if (row.status !== "idle" && row.status !== "diff_error") {
+      throw new Error(`workspace "${row.workspaceId}" is ${row.status} and cannot run commands`);
+    }
+    if (!existsSync(row.workspacePath) || !statSync(row.workspacePath).isDirectory()) {
+      if (row.owned) {
+        this.store.updateAgentWorkspace(runId, row.workspaceId, {
+          status: "abandoned",
+          failureSeen: true,
+          updatedAtMs: this.host.clock(),
+        });
+      }
+      throw new Error(`workspace "${row.workspaceId}" is missing at ${row.workspacePath}`);
+    }
+
+    const workspacePath = realpathSync(row.workspacePath);
+    const candidate = command.cwd === "." ? workspacePath : resolve(workspacePath, command.cwd);
+    const resolvedCwd = realpathSync(candidate);
+    if (!statSync(resolvedCwd).isDirectory()) {
+      throw new Error(`command cwd "${command.cwd}" is not a directory`);
+    }
+    const rel = relative(workspacePath, resolvedCwd);
+    if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+      throw new Error(`command cwd "${command.cwd}" escapes workspace "${row.workspaceId}"`);
+    }
+    return {
+      workspaceId: row.workspaceId,
+      workspacePath,
+      resolvedCwd,
+      owned: row.owned,
+    };
+  }
+
+  private acquireCommandWorkspace(
+    runId: string,
+    command: NormalizedWorkflowCommandSpec,
+    attempt: number,
+    atMs: number,
+  ): void {
+    this.store.transaction(() => {
+      const current = this.store.getAgentWorkspace(runId, command.workspaceId);
+      if (!current) throw new Error(`workspace ${runId}/${command.workspaceId} not found`);
+      if (current.activeHolderKind) {
+        throw new Error(
+          `workspace "${current.workspaceId}" is already active for ${current.activeHolderKind} "${current.activeHolderKey}" attempt ${current.activeHolderAttempt}`,
+        );
+      }
+      if (current.status !== "idle" && current.status !== "diff_error") {
+        throw new Error(
+          `workspace "${current.workspaceId}" is ${current.status} and cannot run commands`,
+        );
+      }
+      this.store.updateAgentWorkspace(runId, command.workspaceId, {
+        status: "active",
+        activeHolderKind: "command",
+        activeHolderKey: command.stableKey,
+        activeHolderAttempt: attempt,
+        activeStartedAtMs: atMs,
+        updatedAtMs: atMs,
+      });
+    });
+  }
+
+  private releaseCommandWorkspaceHolderInTransaction(
+    runId: string,
+    workspaceId: string,
+    command: NormalizedWorkflowCommandSpec,
+    attempt: number,
+    atMs: number,
+  ): void {
+    const row = this.store.getAgentWorkspace(runId, workspaceId);
+    if (!row) return;
+    if (
+      row.activeHolderKind &&
+      (row.activeHolderKind !== "command" ||
+        row.activeHolderKey !== command.stableKey ||
+        row.activeHolderAttempt !== attempt)
+    ) {
+      throw new Error(`workspace "${workspaceId}" active holder changed while command was running`);
+    }
+    const workspaceExists =
+      existsSync(row.workspacePath) && statSync(row.workspacePath).isDirectory();
+    this.store.updateAgentWorkspace(runId, workspaceId, {
+      status: workspaceExists || !row.owned ? "idle" : "abandoned",
+      ...(workspaceExists || !row.owned ? {} : { failureSeen: true }),
+      activeHolderKind: null,
+      activeHolderKey: null,
+      activeHolderAttempt: null,
+      activeStartedAtMs: null,
+      updatedAtMs: atMs,
+    });
+  }
+
+  private completeCommandResult(
+    runId: string,
+    command: NormalizedWorkflowCommandSpec,
+    begun: {
+      attempt: number;
+      inputHash: string;
+      startedAtMs: number;
+      version: string;
+      inputDeps: InputDep[] | null;
+    },
+    result: CommandResult,
+  ): CommandResult {
+    this.host.fault?.("before-commit", command.stableKey);
+    let completed: CommandResult = {
+      ...result,
+      output: { ...result.output, resultArtifactBacked: false },
+    };
+    let stored = prepareStepResult(completed);
+    if (stored.artifact) {
+      completed = {
+        ...result,
+        output: { ...result.output, resultArtifactBacked: true },
+      };
+      stored = prepareStepResult(completed);
+    }
+    const finishedAtMs = this.host.clock();
+    this.store.transaction(() => {
+      if (stored.artifact) {
+        this.store.putArtifact(stored.artifact.hash, stored.artifact.bytes, finishedAtMs);
+      }
+      this.store.appendEvent(
+        runId,
+        "command.completed",
+        commandCompletedEvent(command, completed),
+        finishedAtMs,
+      );
+      this.store.putJournalRow({
+        runId,
+        stableKey: command.stableKey,
+        attempt: begun.attempt,
+        effectType: "command",
+        status: "completed",
+        version: begun.version,
+        inputHash: begun.inputHash,
+        inputDeps: begun.inputDeps,
+        resultInline: stored.inline,
+        resultArtifact: stored.artifact?.hash ?? null,
+        startedAtMs: begun.startedAtMs,
+        finishedAtMs,
+      });
+      this.releaseCommandWorkspaceHolderInTransaction(
+        runId,
+        command.workspaceId,
+        command,
+        begun.attempt,
+        finishedAtMs,
+      );
+    });
+    return completed;
+  }
+
+  private completeCompletionCheckResult(
+    runId: string,
+    result: CompletionCheckResult,
+    spec: Parameters<typeof completionCheckCompletedEvent>[0],
+    begun: {
+      attempt: number;
+      inputHash: string;
+      startedAtMs: number;
+      version: string;
+      inputDeps: InputDep[] | null;
+    },
+  ): CompletionCheckResult {
+    this.host.fault?.("before-commit", spec.stableKey);
+    const stored = prepareStepResult(result);
+    const finishedAtMs = this.host.clock();
+    this.store.transaction(() => {
+      if (stored.artifact) {
+        this.store.putArtifact(stored.artifact.hash, stored.artifact.bytes, finishedAtMs);
+      }
+      this.store.appendEvent(
+        runId,
+        "completion_check.completed",
+        completionCheckCompletedEvent(spec, result),
+        finishedAtMs,
+      );
+      this.store.putJournalRow({
+        runId,
+        stableKey: spec.stableKey,
+        attempt: begun.attempt,
+        effectType: "completion_check",
+        status: "completed",
+        version: begun.version,
+        inputHash: begun.inputHash,
+        inputDeps: begun.inputDeps,
+        resultInline: stored.inline,
+        resultArtifact: stored.artifact?.hash ?? null,
+        startedAtMs: begun.startedAtMs,
+        finishedAtMs,
+      });
+    });
+    return result;
   }
 
   private releaseWorkspaceHolder(
@@ -2813,6 +3079,249 @@ export class RealmKernel {
                     error: serializeError(agentErr),
                     failure: agentErr instanceof AgentFailure,
                   });
+                }
+              })();
+              break;
+            }
+            case "command": {
+              let workspace: CommandWorkspace;
+              let invocationEnv: Record<string, string>;
+              try {
+                workspace = this.resolveCommandWorkspaceCwd(runId, m.command);
+                invocationEnv = this.resolveCommandEnvironmentEnv(runId, m.command);
+              } catch (err) {
+                reply(m.id, { ok: false, error: serializeError(err) });
+                break;
+              }
+
+              let begun: ReturnType<StepEngine["beginCommand"]>;
+              try {
+                begun = engine.beginCommand(
+                  m.command.stableKey,
+                  m.inputs as Json,
+                  m.version,
+                  m.deps,
+                );
+              } catch (err) {
+                const pending = this.store.getLatestAttempt(runId, m.command.stableKey);
+                if (
+                  pending?.status === "pending" &&
+                  pending.version === m.version &&
+                  pending.inputHash === hashJson(m.inputs as Json)
+                ) {
+                  abort(err);
+                  break;
+                }
+                reply(m.id, { ok: false, error: serializeError(err) });
+                break;
+              }
+              if (begun.kind === "replay") {
+                const result = begun.value as CommandResult;
+                try {
+                  applyCommandFailureMode(result, m.command.failureMode);
+                  reply(m.id, {
+                    ok: true,
+                    result,
+                    contentHash: hashJson(result as unknown as Json),
+                  });
+                } catch (err) {
+                  reply(m.id, {
+                    ok: false,
+                    result,
+                    error: serializeError(err),
+                    contentHash: hashJson(result as unknown as Json),
+                  });
+                }
+                break;
+              }
+
+              this.onStepExecute?.(m.command.stableKey);
+              try {
+                this.acquireCommandWorkspace(runId, m.command, begun.attempt, begun.startedAtMs);
+                engine.emit("command.started", commandStartedEvent(m.command, begun.attempt));
+              } catch (err) {
+                reply(m.id, { ok: false, error: serializeError(err) });
+                break;
+              }
+
+              void (async () => {
+                try {
+                  const result = await runBoundedProcess({
+                    command: m.command,
+                    attempt: begun.attempt,
+                    cwd: workspace.resolvedCwd,
+                    env: invocationEnv,
+                    signal: runAbortController.signal,
+                  });
+                  if (settled || this.isRunInterrupted(runId)) {
+                    this.store.transaction(() => {
+                      this.releaseCommandWorkspaceHolderInTransaction(
+                        runId,
+                        workspace.workspaceId,
+                        m.command,
+                        begun.attempt,
+                        this.host.clock(),
+                      );
+                    });
+                    return;
+                  }
+                  let completed: CommandResult;
+                  try {
+                    completed = this.completeCommandResult(
+                      runId,
+                      m.command,
+                      {
+                        attempt: begun.attempt,
+                        inputHash: begun.inputHash,
+                        startedAtMs: begun.startedAtMs,
+                        version: m.version,
+                        inputDeps: m.deps,
+                      },
+                      result,
+                    );
+                  } catch (faultErr) {
+                    abort(faultErr);
+                    return;
+                  }
+                  try {
+                    applyCommandFailureMode(completed, m.command.failureMode);
+                    reply(m.id, {
+                      ok: true,
+                      result: completed,
+                      contentHash: hashJson(completed as unknown as Json),
+                    });
+                  } catch (err) {
+                    reply(m.id, {
+                      ok: false,
+                      result: completed,
+                      error: serializeError(err),
+                      contentHash: hashJson(completed as unknown as Json),
+                    });
+                  }
+                } catch (commandErr) {
+                  this.store.transaction(() => {
+                    this.releaseCommandWorkspaceHolderInTransaction(
+                      runId,
+                      workspace.workspaceId,
+                      m.command,
+                      begun.attempt,
+                      this.host.clock(),
+                    );
+                  });
+                  if (
+                    commandErr instanceof CommandAbortError ||
+                    settled ||
+                    this.isRunInterrupted(runId)
+                  ) {
+                    return;
+                  }
+                  const at = this.host.clock();
+                  this.store.putJournalRow({
+                    runId,
+                    stableKey: m.command.stableKey,
+                    attempt: begun.attempt,
+                    effectType: "command",
+                    status: "failed",
+                    version: m.version,
+                    inputHash: begun.inputHash,
+                    inputDeps: m.deps,
+                    errorJson: JSON.stringify(serializeError(commandErr)),
+                    startedAtMs: begun.startedAtMs,
+                    finishedAtMs: at,
+                  });
+                  reply(m.id, { ok: false, error: serializeError(commandErr) });
+                }
+              })();
+              break;
+            }
+            case "completion-check": {
+              let begun: ReturnType<StepEngine["beginCompletionCheck"]>;
+              try {
+                begun = engine.beginCompletionCheck(
+                  m.completionCheck.stableKey,
+                  m.inputs as Json,
+                  m.version,
+                  m.deps,
+                );
+              } catch (err) {
+                const pending = this.store.getLatestAttempt(runId, m.completionCheck.stableKey);
+                if (
+                  pending?.status === "pending" &&
+                  pending.version === m.version &&
+                  pending.inputHash === hashJson(m.inputs as Json)
+                ) {
+                  abort(err);
+                  break;
+                }
+                reply(m.id, { ok: false, error: serializeError(err) });
+                break;
+              }
+              if (begun.kind === "replay") {
+                const result = begun.value as CompletionCheckResult;
+                reply(m.id, {
+                  ok: true,
+                  result,
+                  contentHash: hashJson(result as unknown as Json),
+                });
+                break;
+              }
+
+              this.onStepExecute?.(m.completionCheck.stableKey);
+              engine.emit(
+                "completion_check.started",
+                completionCheckStartedEvent(m.completionCheck),
+              );
+              void (async () => {
+                try {
+                  const result = await runCompletionCheck({
+                    store: this.store,
+                    runId,
+                    spec: m.completionCheck,
+                    startedAtMs: begun.startedAtMs,
+                    clock: this.host.clock,
+                    signal: runAbortController.signal,
+                  });
+                  if (settled || this.isRunInterrupted(runId)) return;
+                  let completed: CompletionCheckResult;
+                  try {
+                    completed = this.completeCompletionCheckResult(
+                      runId,
+                      result,
+                      m.completionCheck,
+                      {
+                        attempt: begun.attempt,
+                        inputHash: begun.inputHash,
+                        startedAtMs: begun.startedAtMs,
+                        version: m.version,
+                        inputDeps: m.deps,
+                      },
+                    );
+                  } catch (faultErr) {
+                    abort(faultErr);
+                    return;
+                  }
+                  reply(m.id, {
+                    ok: true,
+                    result: completed,
+                    contentHash: hashJson(completed as unknown as Json),
+                  });
+                } catch (checkErr) {
+                  if (settled || this.isRunInterrupted(runId)) return;
+                  const at = this.host.clock();
+                  this.store.putJournalRow({
+                    runId,
+                    stableKey: m.completionCheck.stableKey,
+                    attempt: begun.attempt,
+                    effectType: "completion_check",
+                    status: "failed",
+                    version: m.version,
+                    inputHash: begun.inputHash,
+                    inputDeps: m.deps,
+                    errorJson: JSON.stringify(serializeError(checkErr)),
+                    startedAtMs: begun.startedAtMs,
+                    finishedAtMs: at,
+                  });
+                  reply(m.id, { ok: false, error: serializeError(checkErr) });
                 }
               })();
               break;

@@ -89,6 +89,69 @@ export class StepEngine {
     };
   }
 
+  /** Command effects have a stricter pending-row identity guard than legacy
+   * effectful steps: a resumed pending command may re-execute only when version
+   * and input hash still match. */
+  beginCommand(key: string, inputs: Json, version: string, deps: InputDep[] | null): BeginResult {
+    return this.beginStrictEffect(key, inputs, version, deps, "command");
+  }
+
+  beginCompletionCheck(
+    key: string,
+    inputs: Json,
+    version: string,
+    deps: InputDep[] | null,
+  ): BeginResult {
+    return this.beginStrictEffect(key, inputs, version, deps, "completion_check");
+  }
+
+  private beginStrictEffect(
+    key: string,
+    inputs: Json,
+    version: string,
+    deps: InputDep[] | null,
+    effectType: "command" | "completion_check",
+  ): BeginResult {
+    const inputHash = hashJson(inputs);
+    const existing = this.store.getLatestAttempt(this.runId, key);
+    if (
+      existing &&
+      existing.status === "completed" &&
+      existing.inputHash === inputHash &&
+      existing.version === version
+    ) {
+      return { kind: "replay", value: this.readResult(existing) };
+    }
+    if (existing?.status === "pending") {
+      if (existing.inputHash !== inputHash || existing.version !== version) {
+        throw new Error(
+          `pending ${effectType} "${key}" identity changed; use a new key or rewind the run`,
+        );
+      }
+      return {
+        kind: "execute",
+        attempt: existing.attempt,
+        inputHash,
+        startedAtMs: existing.startedAtMs ?? this.host.clock(),
+      };
+    }
+    const attempt = existing ? existing.attempt + 1 : 1;
+    const startedAtMs = this.host.clock();
+    this.store.putJournalRow({
+      runId: this.runId,
+      stableKey: key,
+      attempt,
+      effectType,
+      status: "pending",
+      version,
+      inputHash,
+      inputDeps: deps,
+      startedAtMs,
+    });
+    this.host.fault?.("after-pending", key);
+    return { kind: "execute", attempt, inputHash, startedAtMs };
+  }
+
   /** Write-ahead capture of a vendor session token on the pending row (§10.4). */
   recordSessionToken(key: string, attempt: number, token: string): void {
     const row = this.store.getJournalRow(this.runId, key, attempt);

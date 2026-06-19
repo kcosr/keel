@@ -92,6 +92,58 @@ describe("watch text formatter", () => {
     ).toBe("[live] agent review text: Hello\n[3] agent review message: Hello\n");
   });
 
+  test("renders command started and completed events", () => {
+    expect(
+      render([
+        durable(4, "command.started", { key: "verify", cwd: "." }),
+        durable(5, "command.completed", {
+          key: "verify",
+          status: "exited",
+          exitCode: 0,
+          signal: null,
+          durationMs: 1800,
+          stdout: { byteLength: 42 },
+          stderr: { byteLength: 0 },
+        }),
+        durable(6, "command.completed", {
+          key: "verify",
+          status: "exited",
+          exitCode: 1,
+          signal: null,
+          durationMs: 12_400,
+          failureKind: "nonzero-exit",
+          stdout: { byteLength: 0 },
+          stderr: { byteLength: 8192 },
+        }),
+      ]),
+    ).toBe(
+      "[4] command verify started cwd=.\n[5] command verify exited exit=0 1.8s stdout=42B stderr=0B\n[6] command verify nonzero-exit exit=1 12.4s stdout=0B stderr=8KB\n",
+    );
+  });
+
+  test("renders completion check events", () => {
+    expect(
+      render([
+        durable(7, "completion_check.started", { key: "tests", type: "command" }),
+        durable(8, "completion_check.completed", {
+          key: "tests",
+          type: "command",
+          status: "passed",
+          durationMs: 8200,
+        }),
+        durable(9, "completion_check.completed", {
+          key: "clean",
+          type: "git-clean",
+          status: "failed",
+          failureKind: "dirty-worktree",
+          durationMs: 20,
+        }),
+      ]),
+    ).toBe(
+      "[7] completion-check tests command started\n[8] completion-check tests command passed 8.2s\n[9] completion-check clean git-clean failed dirty-worktree 20ms\n",
+    );
+  });
+
   test("does not coalesce non-string text or reasoning payloads", () => {
     expect(
       render([agentEvent("review", "text", "A"), agentEvent("review", "text", { bad: true })]),

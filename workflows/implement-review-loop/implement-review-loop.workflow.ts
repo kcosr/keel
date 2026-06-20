@@ -110,8 +110,11 @@ const ReviewSchema = jsonSchema<Review>({
 
 const DEFAULT_MAX_ROUNDS = 3;
 const HARD_MAX_ROUNDS = 10;
-const IMPLEMENTER_PROFILE = "codex-default";
-const REVIEWER_PROFILE = "claude-default";
+const CODEX_PROVIDER = "codex";
+const CODEX_MODEL = "gpt-5.5";
+const CLAUDE_PROVIDER = "claude";
+const CLAUDE_MODEL = "claude-opus-4-8";
+const DEFAULT_REASONING = "xhigh";
 
 export default async function implementReviewLoop(
   ctx: Ctx,
@@ -143,13 +146,15 @@ export default async function implementReviewLoop(
   return await ctx.withWorkspace(workspace, async () => {
     const implementer = ctx.agentSession({
       key: "implementer",
-      profile: IMPLEMENTER_PROFILE,
-      ...(input.implementerReasoning ? { reasoning: input.implementerReasoning } : {}),
+      provider: CODEX_PROVIDER,
+      model: CODEX_MODEL,
+      reasoning: input.implementerReasoning ?? DEFAULT_REASONING,
     });
     const reviewer = ctx.agentSession({
       key: "reviewer",
-      profile: REVIEWER_PROFILE,
-      ...(input.reviewerReasoning ? { reasoning: input.reviewerReasoning } : {}),
+      provider: CLAUDE_PROVIDER,
+      model: CLAUDE_MODEL,
+      reasoning: input.reviewerReasoning ?? DEFAULT_REASONING,
       toolPolicy: "read-only",
     });
 

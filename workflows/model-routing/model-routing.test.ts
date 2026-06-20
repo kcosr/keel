@@ -19,12 +19,15 @@ import {
   selectModelRoute,
 } from "./model-routing";
 
+const CODEX_BACKEND = { provider: "codex", model: "gpt-5.5" };
+const CLAUDE_BACKEND = { provider: "claude", model: "claude-opus-4-8" };
+
 const BASE_CONSTRAINTS: RoutingConstraints = {
-  allowedProfiles: ["codex-default", "claude-default"],
+  allowedBackends: [CODEX_BACKEND, CLAUDE_BACKEND],
   allowedReasoning: ["low", "medium", "high", "xhigh"],
   maxReasoning: "xhigh",
-  defaultImplementerProfile: "codex-default",
-  defaultReviewerProfile: "claude-default",
+  defaultImplementer: CODEX_BACKEND,
+  defaultReviewer: CLAUDE_BACKEND,
 };
 
 const ROUTER_OUTPUT: RouterAgentOutput = {
@@ -33,12 +36,14 @@ const ROUTER_OUTPUT: RouterAgentOutput = {
   risks: ["unknown"],
   languages: ["typescript"],
   implementer: {
-    profile: "codex-default",
+    provider: "codex",
+    model: "gpt-5.5",
     reasoning: "medium",
     timeoutMs: 120000,
   },
   reviewer: {
-    profile: "claude-default",
+    provider: "claude",
+    model: "claude-opus-4-8",
     reasoning: "medium",
   },
   maxRounds: 3,
@@ -114,6 +119,19 @@ class ExampleSessionProvider implements AgentProvider {
   }
 }
 
+function testAgentRegistry(provider: AgentProvider): AgentProviderRegistry {
+  const registry = new AgentProviderRegistry();
+  for (const name of ["codex", "claude"]) {
+    registry.register({
+      ...provider,
+      name,
+      supportsSessions: provider.supportsSessions,
+      generate: provider.generate.bind(provider),
+    });
+  }
+  return registry;
+}
+
 describe("model routing helper", () => {
   test("static routing applies critical surface and risk floors", () => {
     const journalRoute = selectModelRoute({
@@ -124,7 +142,8 @@ describe("model routing helper", () => {
       risks: ["migration"],
       budget: "cheap",
     });
-    expect(journalRoute.profile).toBe("claude-default");
+    expect(journalRoute.provider).toBe("claude");
+    expect(journalRoute.model).toBe("claude-opus-4-8");
     expect(journalRoute.reasoning).toBe("high");
     expect(journalRoute.rationale).toContain("critical floor high");
 
@@ -135,7 +154,8 @@ describe("model routing helper", () => {
       risks: ["data-loss"],
       budget: "cheap",
     });
-    expect(dataLossRoute.profile).toBe("codex-default");
+    expect(dataLossRoute.provider).toBe("codex");
+    expect(dataLossRoute.model).toBe("gpt-5.5");
     expect(dataLossRoute.reasoning).toBe("xhigh");
 
     const cheapExplicitHighRoute = selectModelRoute({
@@ -171,26 +191,26 @@ describe("model routing helper", () => {
     ).toThrow(/complexity/);
   });
 
-  test("sanitizeRoute rejects unknown profiles and out-of-order reasoning", () => {
+  test("sanitizeRoute rejects unknown backends and out-of-order reasoning", () => {
     expect(() =>
       sanitizeRoute(
         {
           ...ROUTER_OUTPUT,
-          implementer: { ...ROUTER_OUTPUT.implementer, profile: "not-allowed" },
+          implementer: { ...ROUTER_OUTPUT.implementer, model: "not-allowed" },
         },
         { constraints: BASE_CONSTRAINTS },
       ),
-    ).toThrow(/allowedProfiles/);
+    ).toThrow(/allowedBackends/);
 
     expect(() =>
       sanitizeRoute(
         {
           ...ROUTER_OUTPUT,
-          implementer: { ...ROUTER_OUTPUT.implementer, profile: " " },
+          implementer: { ...ROUTER_OUTPUT.implementer, provider: " " },
         },
         { constraints: BASE_CONSTRAINTS },
       ),
-    ).toThrow(/profile cannot be empty/);
+    ).toThrow(/provider cannot be empty/);
 
     expect(() =>
       sanitizeRoute(
@@ -334,16 +354,22 @@ describe("model routing helper", () => {
       candidateRisks: ["migration", "replay"],
       constraints: BASE_CONSTRAINTS,
     });
-    expect(prompt).toContain("Allowed output profiles: codex-default, claude-default");
+    expect(prompt).toContain("Allowed output backends: codex/gpt-5.5, claude/claude-opus-4-8");
     expect(prompt).toContain("Allowed output reasoning: low, medium, high, xhigh");
     expect(prompt).toContain("Caller-declared candidate surfaces: journal, workflow-sdk");
     expect(prompt).toContain("Caller-declared candidate risks: migration, replay");
     expect(prompt).toContain("Spec path: .specs/journal.md");
   });
 
-  test("routeWithAgent uses router profile and read-only policy before sanitizing", async () => {
+  test("routeWithAgent uses router backend and read-only policy before sanitizing", async () => {
     let capturedSpec:
-      | { profile?: string; reasoning?: string; toolPolicy?: string; prompt?: string }
+      | {
+          provider?: string;
+          model?: string;
+          reasoning?: string;
+          toolPolicy?: string;
+          prompt?: string;
+        }
       | undefined;
     const ctx = {
       run: { id: "run_test", target: "/repo" },
@@ -365,13 +391,14 @@ describe("model routing helper", () => {
       candidateRisks: ["replay"],
       constraints: {
         ...BASE_CONSTRAINTS,
-        routerProfile: "claude-default",
+        router: CLAUDE_BACKEND,
       },
     });
 
-    expect(capturedSpec?.profile).toBe("claude-default");
+    expect(capturedSpec?.provider).toBe("claude");
+    expect(capturedSpec?.model).toBe("claude-opus-4-8");
     expect((capturedSpec as { key?: string } | undefined)?.key).toBe("router-preflight");
-    expect(capturedSpec?.reasoning).toBe("medium");
+    expect(capturedSpec?.reasoning).toBe("xhigh");
     expect(capturedSpec?.toolPolicy).toBe("read-only");
     expect(capturedSpec?.prompt).toContain("workflow-sdk");
     expect(route.implementer?.reasoning).toBe("high");
@@ -428,11 +455,7 @@ describe("model routing helper", () => {
       idgen: () => "run_example_clean",
       clock: () => 1,
       rng: () => 0.5,
-      agents: new AgentProviderRegistry().register(provider),
-      agentProfiles: {
-        "codex-default": { provider: "session" },
-        "claude-default": { provider: "session" },
-      },
+      agents: testAgentRegistry(provider),
     });
 
     const handle = await kernel.run<{
@@ -474,11 +497,7 @@ describe("model routing helper", () => {
       idgen: () => "run_example_max_rounds",
       clock: () => 1,
       rng: () => 0.5,
-      agents: new AgentProviderRegistry().register(provider),
-      agentProfiles: {
-        "codex-default": { provider: "session" },
-        "claude-default": { provider: "session" },
-      },
+      agents: testAgentRegistry(provider),
     });
 
     const handle = await kernel.run<{
@@ -511,7 +530,7 @@ describe("model routing helper", () => {
     ]);
   });
 
-  test("example workflow fails loud when the daemon lacks the router profile", async () => {
+  test("example workflow fails loud when the daemon lacks the router backend", async () => {
     const store = JournalStore.memory();
     const provider: AgentProvider = {
       name: "mock",
@@ -520,7 +539,7 @@ describe("model routing helper", () => {
       },
     };
     const kernel = new RealmKernel(store, {
-      idgen: () => "run_router_profile",
+      idgen: () => "run_router_backend",
       clock: () => 1,
       rng: () => 0.5,
       agents: new AgentProviderRegistry().register(provider),
@@ -536,7 +555,7 @@ describe("model routing helper", () => {
         },
         { name: "model-routing-example", target: process.cwd() },
       ),
-    ).rejects.toThrow(/unknown agent profile "claude-default"/);
-    expect(store.getRun("run_router_profile")?.status).toBe("failed");
+    ).rejects.toThrow(/no agent provider registered for "claude"/);
+    expect(store.getRun("run_router_backend")?.status).toBe("failed");
   });
 });

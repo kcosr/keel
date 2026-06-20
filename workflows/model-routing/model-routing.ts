@@ -46,6 +46,11 @@ export const ROUTING_RISKS = [
 
 export type RoutingRisk = (typeof ROUTING_RISKS)[number];
 
+export interface AgentBackend {
+  provider: string;
+  model: string;
+}
+
 export interface RoutingInput {
   role: RoutingRole;
   task: RoutingTask;
@@ -58,7 +63,8 @@ export interface RoutingInput {
 }
 
 export interface AgentRoute {
-  profile: string;
+  provider: string;
+  model: string;
   reasoning?: string;
   /** Apply to ctx.agent(...) or individual session.turn(...) calls. */
   timeoutMs?: number;
@@ -80,17 +86,17 @@ export interface MultiAgentRoute {
 }
 
 export interface RoutingConstraints {
-  /** Profile used by the router agent itself; must be daemon-configured. */
-  routerProfile?: string;
-  allowedProfiles: string[];
+  /** Backend used by the router agent itself. */
+  router?: AgentBackend;
+  allowedBackends: AgentBackend[];
   /** Must be a subset of the active reasoning order. */
   allowedReasoning: string[];
   /** Optional custom order; defaults to ROUTING_REASONING_ORDER. */
   reasoningOrder?: readonly string[];
   maxReasoning: string;
   minReasoning?: string;
-  defaultImplementerProfile: string;
-  defaultReviewerProfile: string;
+  defaultImplementer: AgentBackend;
+  defaultReviewer: AgentBackend;
   allowToolPolicyEscalation?: false;
 }
 
@@ -111,12 +117,14 @@ export interface RouterAgentOutput {
   risks: RoutingRisk[];
   languages: string[];
   implementer: {
-    profile: string;
+    provider: string;
+    model: string;
     reasoning: string;
     timeoutMs?: number;
   };
   reviewer: {
-    profile: string;
+    provider: string;
+    model: string;
     reasoning: string;
     timeoutMs?: number;
   };
@@ -134,14 +142,14 @@ export interface SanitizeRouteOptions {
 }
 
 type NormalizedConstraints = {
-  routerProfile?: string;
-  allowedProfiles: string[];
+  router?: AgentBackend;
+  allowedBackends: AgentBackend[];
   allowedReasoning: string[];
   activeOrder: readonly string[];
   maxReasoning: string;
   minReasoning?: string;
-  defaultImplementerProfile: string;
-  defaultReviewerProfile: string;
+  defaultImplementer: AgentBackend;
+  defaultReviewer: AgentBackend;
 };
 
 type NormalizedValues<T extends string> = {
@@ -149,10 +157,13 @@ type NormalizedValues<T extends string> = {
   warnings: string[];
 };
 
-const DEFAULT_IMPLEMENTER_PROFILE = "codex-default";
-const DEFAULT_REVIEWER_PROFILE = "claude-default";
-const DEFAULT_ROUTER_PROFILE = "claude-default";
-const DEFAULT_ROUTER_REASONING = "medium";
+const DEFAULT_IMPLEMENTER_BACKEND: AgentBackend = { provider: "codex", model: "gpt-5.5" };
+const DEFAULT_REVIEWER_BACKEND: AgentBackend = {
+  provider: "claude",
+  model: "claude-opus-4-8",
+};
+const DEFAULT_ROUTER_BACKEND = DEFAULT_REVIEWER_BACKEND;
+const DEFAULT_ROUTER_REASONING = "xhigh";
 const DEFAULT_TIMEOUT_MS_BY_REASONING = {
   low: 20 * 60 * 1000,
   medium: 45 * 60 * 1000,
@@ -208,9 +219,10 @@ const ROUTING_ROLES = [
 const AgentRouteSchema = {
   type: "object",
   additionalProperties: false,
-  required: ["profile", "reasoning"],
+  required: ["provider", "model", "reasoning"],
   properties: {
-    profile: { type: "string" },
+    provider: { type: "string" },
+    model: { type: "string" },
     reasoning: { type: "string" },
     timeoutMs: { type: "number" },
   },
@@ -257,8 +269,10 @@ export function selectModelRoute(input: RoutingInput): AgentRoute {
 
   reasoning = maxReasoning([reasoning, floor], ROUTING_REASONING_ORDER) as RoutingComplexity;
 
+  const backend = defaultBackendFor(input.role);
   return {
-    profile: defaultProfileFor(input.role),
+    provider: backend.provider,
+    model: backend.model,
     reasoning,
     timeoutMs: DEFAULT_TIMEOUT_MS_BY_REASONING[reasoning],
     maxRounds: DEFAULT_MAX_ROUNDS_BY_REASONING[reasoning],
@@ -286,14 +300,14 @@ export function buildRoutingPrompt(input: RouteWithAgentInput): string {
     "Return JSON only matching the provided schema. Do not include markdown.",
     "",
     "Hard bounds:",
-    `- Allowed output profiles: ${constraints.allowedProfiles.join(", ")}`,
+    `- Allowed output backends: ${constraints.allowedBackends.map(formatBackend).join(", ")}`,
     `- Allowed output reasoning: ${constraints.allowedReasoning.join(", ")}`,
     `- Maximum output reasoning: ${constraints.maxReasoning}`,
     constraints.minReasoning ? `- Minimum output reasoning: ${constraints.minReasoning}` : null,
     "- You may not choose tool policy, capabilities, secrets, provider config, workspace mode, or workflow source.",
-    "- Prefer the default implementer and reviewer profiles unless there is a clear reason within the allowlist.",
-    `- Default implementer profile: ${constraints.defaultImplementerProfile}`,
-    `- Default reviewer profile: ${constraints.defaultReviewerProfile}`,
+    "- Prefer the default implementer and reviewer backends unless there is a clear reason within the allowlist.",
+    `- Default implementer backend: ${formatBackend(constraints.defaultImplementer)}`,
+    `- Default reviewer backend: ${formatBackend(constraints.defaultReviewer)}`,
     "",
     "Task:",
     input.request,
@@ -311,7 +325,7 @@ export function buildRoutingPrompt(input: RouteWithAgentInput): string {
     `- surfaces: ${ROUTING_SURFACES.join(", ")}`,
     `- risks: ${ROUTING_RISKS.join(", ")}`,
     "",
-    "Choose implementer and reviewer profile/reasoning. Include concise rationale and concrete verification steps.",
+    "Choose implementer and reviewer provider/model/reasoning. Include concise rationale and concrete verification steps.",
   ]
     .filter((line): line is string => line !== null)
     .join("\n");
@@ -345,7 +359,8 @@ export async function routeWithAgent(
   }
   const raw = await ctx.agent({
     key,
-    profile: constraints.routerProfile ?? DEFAULT_ROUTER_PROFILE,
+    provider: (constraints.router ?? DEFAULT_ROUTER_BACKEND).provider,
+    model: (constraints.router ?? DEFAULT_ROUTER_BACKEND).model,
     reasoning: DEFAULT_ROUTER_REASONING,
     toolPolicy: "read-only",
     prompt: buildRoutingPrompt(input),
@@ -433,9 +448,8 @@ function sanitizeAgentRoute(
   },
 ): AgentRoute {
   const route = requireRecord(raw, `${input.label} route`);
-  const profile = requireString(route.profile, `${input.label} profile`).trim();
-  if (profile.length === 0) throw new Error(`${input.label} profile cannot be empty`);
-  assertAllowedProfile(profile, input.constraints, `${input.label} profile`);
+  const backend = requireBackend(route, `${input.label} backend`);
+  assertAllowedBackend(backend, input.constraints, `${input.label} backend`);
   const routerReasoning = requireString(route.reasoning, `${input.label} reasoning`).trim();
   validateInOrder(routerReasoning, input.constraints.activeOrder, `${input.label} reasoning`);
   validateAllowed(routerReasoning, input.constraints.allowedReasoning, `${input.label} reasoning`);
@@ -451,11 +465,12 @@ function sanitizeAgentRoute(
   );
   const timeoutMs = normalizeOptionalPositiveInteger(route.timeoutMs, `${input.label} timeoutMs`);
   return {
-    profile,
+    provider: backend.provider,
+    model: backend.model,
     reasoning,
     ...(timeoutMs !== undefined ? { timeoutMs } : {}),
     ...(input.maxRounds !== undefined ? { maxRounds: input.maxRounds } : {}),
-    rationale: `${input.label} route selected ${profile} at ${reasoning}`,
+    rationale: `${input.label} route selected ${formatBackend(backend)} at ${reasoning}`,
   };
 }
 
@@ -471,30 +486,31 @@ function normalizeConstraints(constraints: RoutingConstraints): NormalizedConstr
   if (constraints.allowedReasoning.length === 0) {
     throw new Error("allowedReasoning must include at least one level");
   }
-  const allowedProfiles = normalizeProfileList(constraints.allowedProfiles, "allowedProfiles");
-  if (allowedProfiles.length === 0) {
-    throw new Error("allowedProfiles must include at least one profile");
+  const allowedBackends = normalizeBackendList(constraints.allowedBackends, "allowedBackends");
+  if (allowedBackends.length === 0) {
+    throw new Error("allowedBackends must include at least one backend");
   }
   if ((constraints as { allowToolPolicyEscalation?: unknown }).allowToolPolicyEscalation === true) {
     throw new Error("router output cannot escalate tool policy in v1");
   }
-  const routerProfile = constraints.routerProfile?.trim();
-  if (routerProfile !== undefined && routerProfile.length === 0) {
-    throw new Error("routerProfile cannot be empty");
-  }
-  const defaultImplementerProfile = constraints.defaultImplementerProfile.trim();
-  const defaultReviewerProfile = constraints.defaultReviewerProfile.trim();
-  assertAllowedProfile(defaultImplementerProfile, { allowedProfiles }, "defaultImplementerProfile");
-  assertAllowedProfile(defaultReviewerProfile, { allowedProfiles }, "defaultReviewerProfile");
+  const router = constraints.router ? normalizeBackend(constraints.router, "router") : undefined;
+  if (router) assertAllowedBackend(router, { allowedBackends }, "router");
+  const defaultImplementer = normalizeBackend(
+    constraints.defaultImplementer,
+    "defaultImplementer",
+  );
+  const defaultReviewer = normalizeBackend(constraints.defaultReviewer, "defaultReviewer");
+  assertAllowedBackend(defaultImplementer, { allowedBackends }, "defaultImplementer");
+  assertAllowedBackend(defaultReviewer, { allowedBackends }, "defaultReviewer");
   return {
-    ...(routerProfile ? { routerProfile } : {}),
-    allowedProfiles,
+    ...(router ? { router } : {}),
+    allowedBackends,
     allowedReasoning: [...constraints.allowedReasoning],
     activeOrder,
     maxReasoning: constraints.maxReasoning,
     ...(constraints.minReasoning ? { minReasoning: constraints.minReasoning } : {}),
-    defaultImplementerProfile,
-    defaultReviewerProfile,
+    defaultImplementer,
+    defaultReviewer,
   };
 }
 
@@ -611,9 +627,9 @@ function defaultReasoningFor(role: RoutingRole, task: RoutingTask): RoutingCompl
   return "medium";
 }
 
-function defaultProfileFor(role: RoutingRole): string {
-  if (role === "reviewer" || role === "planner") return DEFAULT_REVIEWER_PROFILE;
-  return DEFAULT_IMPLEMENTER_PROFILE;
+function defaultBackendFor(role: RoutingRole): AgentBackend {
+  if (role === "reviewer" || role === "planner") return DEFAULT_REVIEWER_BACKEND;
+  return DEFAULT_IMPLEMENTER_BACKEND;
 }
 
 function staticRouteRationale(
@@ -768,27 +784,49 @@ function firstReasoning(order: readonly string[]): string {
   return first;
 }
 
-function normalizeProfileList(profiles: readonly string[], label: string): string[] {
+function normalizeBackendList(backends: readonly AgentBackend[], label: string): AgentBackend[] {
+  if (!Array.isArray(backends)) throw new Error(`${label} must be an array`);
   const seen = new Set<string>();
-  const normalized: string[] = [];
-  for (const profile of profiles) {
-    const trimmed = profile.trim();
-    if (trimmed.length === 0) throw new Error(`${label} cannot contain empty profiles`);
-    if (seen.has(trimmed)) throw new Error(`${label} contains duplicate profile ${trimmed}`);
-    seen.add(trimmed);
-    normalized.push(trimmed);
+  const normalized: AgentBackend[] = [];
+  for (const backend of backends) {
+    const next = normalizeBackend(backend, `${label} entry`);
+    const key = formatBackend(next);
+    if (seen.has(key)) throw new Error(`${label} contains duplicate backend ${key}`);
+    seen.add(key);
+    normalized.push(next);
   }
   return normalized;
 }
 
-function assertAllowedProfile(
-  profile: string,
-  constraints: Pick<RoutingConstraints, "allowedProfiles">,
+function normalizeBackend(backend: AgentBackend, label: string): AgentBackend {
+  const record = requireRecord(backend, label);
+  return requireBackend(record, label);
+}
+
+function requireBackend(raw: Record<string, unknown>, label: string): AgentBackend {
+  const provider = requireString(raw.provider, `${label} provider`).trim();
+  const model = requireString(raw.model, `${label} model`).trim();
+  if (provider.length === 0) throw new Error(`${label} provider cannot be empty`);
+  if (model.length === 0) throw new Error(`${label} model cannot be empty`);
+  return { provider, model };
+}
+
+function assertAllowedBackend(
+  backend: AgentBackend,
+  constraints: Pick<NormalizedConstraints, "allowedBackends">,
   label: string,
 ): void {
-  if (!constraints.allowedProfiles.includes(profile)) {
-    throw new Error(`${label} ${profile} is outside allowedProfiles`);
+  if (!constraints.allowedBackends.some((allowed) => sameBackend(allowed, backend))) {
+    throw new Error(`${label} ${formatBackend(backend)} is outside allowedBackends`);
   }
+}
+
+function sameBackend(left: AgentBackend, right: AgentBackend): boolean {
+  return left.provider === right.provider && left.model === right.model;
+}
+
+function formatBackend(backend: AgentBackend): string {
+  return `${backend.provider}/${backend.model}`;
 }
 
 function unionValues<T extends string>(left: readonly T[], right: readonly T[]): T[] {

@@ -51,10 +51,10 @@ The body runs in a sandbox. Stay inside it or the run is rejected:
   rubrics, task lists, and render functions. Keep them pure and deterministic,
   and keep raw secrets out of workflow source and helper modules.
 - Workflows can import `workflows/model-routing/model-routing.ts` or a local
-  copy when profile/reasoning selection should be captured with the workflow
-  source. Static routing is pure TypeScript; agentic routing uses a read-only
-  router agent and must keep profile, reasoning, tools, capabilities, secrets,
-  and workspace choices bounded by workflow-owned allowlists.
+  copy when provider/model/reasoning selection should be captured with the
+  workflow source. Static routing is pure TypeScript; agentic routing uses a
+  read-only router agent and must keep backend, reasoning, tools, capabilities,
+  secrets, and workspace choices bounded by workflow-owned allowlists.
 - Saved workflows capture those helper modules as TypeScript source in the
   immutable bundle. Prefer these Keel-native helpers for reusable guidance. Do
   not import agent-pack YAML, mutable task state, task-note files, or external

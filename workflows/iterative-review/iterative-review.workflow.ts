@@ -70,7 +70,9 @@ const ReviewSchema = jsonSchema<Review>({
 
 const DEFAULT_MAX_ROUNDS = 3;
 const HARD_MAX_ROUNDS = 20;
-const REVIEWER_PROFILE = "claude-default";
+const CLAUDE_PROVIDER = "claude";
+const CLAUDE_MODEL = "claude-opus-4-8";
+const DEFAULT_REASONING = "xhigh";
 
 export default async function iterativeReview(
   ctx: Ctx,
@@ -91,8 +93,9 @@ export default async function iterativeReview(
     async () => {
       const reviewer = ctx.agentSession({
         key: "reviewer",
-        profile: REVIEWER_PROFILE,
-        ...(input.reasoning ? { reasoning: input.reasoning } : {}),
+        provider: CLAUDE_PROVIDER,
+        model: CLAUDE_MODEL,
+        reasoning: input.reasoning ?? DEFAULT_REASONING,
         toolPolicy: "read-only",
       });
 

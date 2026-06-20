@@ -6,7 +6,6 @@ export const CodeReviewInputSchema = {
     repository: { type: "string" },
     task: { type: "string" },
     focus: { type: "array", items: { type: "string" } },
-    reviewerProfile: { type: "string" },
     reviewerReasoning: { type: "string" },
     maxFindings: { type: "integer", minimum: 1 },
   },
@@ -22,7 +21,6 @@ export const PlanReviewInputSchema = {
     focus: { type: "array", items: { type: "string" } },
     appendCorrespondence: { type: "boolean" },
     correspondenceHeader: { type: "string" },
-    reviewerProfile: { type: "string" },
     reviewerReasoning: { type: "string" },
   },
 } as const;
@@ -35,7 +33,6 @@ export const DocsReviewInputSchema = {
     repository: { type: "string" },
     task: { type: "string" },
     focus: { type: "array", items: { type: "string" } },
-    reviewerProfile: { type: "string" },
     reviewerReasoning: { type: "string" },
     maxFindings: { type: "integer", minimum: 1 },
   },

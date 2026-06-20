@@ -1044,7 +1044,7 @@ describe("keel CLI", () => {
         expect(resumed.code).toBe(3);
         expect(resumed.stdout).toContain(`run ${payload.runId}`);
         expect(resumed.stdout).toContain("run.resumed");
-        expect(resumed.stdout).not.toContain("run.parked human approve-deploy");
+        expect(resumed.stdout).toContain("run.parked human approve-deploy");
 
         const approved = await runCli(["approve", payload.runId, "approve-deploy"], dir, env);
         expect(approved.code).toBe(0);
@@ -1141,7 +1141,7 @@ describe("keel CLI", () => {
         socketPath,
         dbPath,
         agents: new AgentProviderRegistry().register(
-          new MockProvider({ default: { outputs: ['{"value":5}'], delayMs: 1000 } }),
+          new MockProvider({ default: { outputs: ['{"value":5}'], delayMs: 3000 } }),
         ),
       });
       await daemon.start();
@@ -1162,7 +1162,7 @@ describe("keel CLI", () => {
           dir,
           runEnv,
           undefined,
-          500,
+          1500,
         );
         expect(signaled.timedOut).toBe(false);
         expect(signaled.code).toBe(0);

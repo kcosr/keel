@@ -9,7 +9,6 @@ export interface PlanReviewInput {
   focus?: string[];
   appendCorrespondence?: boolean;
   correspondenceHeader?: string;
-  reviewerProfile?: string;
   reviewerReasoning?: string;
 }
 
@@ -61,7 +60,9 @@ const ConfirmationSchema = jsonSchema<ConfirmationOutput>({
   },
 });
 
-const DEFAULT_REVIEWER_PROFILE = "claude-default";
+const CLAUDE_PROVIDER = "claude";
+const CLAUDE_MODEL = "claude-opus-4-8";
+const DEFAULT_REASONING = "xhigh";
 
 export default async function planReview(
   ctx: Ctx,
@@ -78,8 +79,9 @@ export default async function planReview(
     async () => {
       const raw = await ctx.agent({
         key: "review",
-        profile: input.reviewerProfile ?? DEFAULT_REVIEWER_PROFILE,
-        ...(input.reviewerReasoning ? { reasoning: input.reviewerReasoning } : {}),
+        provider: CLAUDE_PROVIDER,
+        model: CLAUDE_MODEL,
+        reasoning: input.reviewerReasoning ?? DEFAULT_REASONING,
         toolPolicy: appendCorrespondence ? "workspace-write" : "read-only",
         prompt: buildPlanReviewPrompt({
           specPath: input.specPath,
@@ -95,7 +97,9 @@ export default async function planReview(
       if (appendCorrespondence) {
         const confirmation = await ctx.agent({
           key: "confirm-correspondence",
-          profile: input.reviewerProfile ?? DEFAULT_REVIEWER_PROFILE,
+          provider: CLAUDE_PROVIDER,
+          model: CLAUDE_MODEL,
+          reasoning: input.reviewerReasoning ?? DEFAULT_REASONING,
           toolPolicy: "read-only",
           prompt: confirmationPrompt(input.specPath, input.correspondenceHeader as string),
           schema: ConfirmationSchema,

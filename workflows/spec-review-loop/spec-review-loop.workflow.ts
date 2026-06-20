@@ -72,7 +72,9 @@ const SpecReviewSchema = jsonSchema<SpecReview>({
 
 const DEFAULT_MAX_REVIEWS = 3;
 const HARD_MAX_REVIEWS = 20;
-const REVIEWER_PROFILE = "claude-default";
+const CLAUDE_PROVIDER = "claude";
+const CLAUDE_MODEL = "claude-opus-4-8";
+const DEFAULT_REASONING = "xhigh";
 
 export default async function specReviewLoop(
   ctx: Ctx,
@@ -86,11 +88,12 @@ export default async function specReviewLoop(
   const signalName = input.signalName ?? "spec-review-cycle";
   const completionSignalName = input.completionSignalName ?? "spec-review-completion";
   const stopWhenClean = input.stopWhenClean ?? true;
-  const identity = input.reviewerIdentity ?? `Reviewer: ${REVIEWER_PROFILE}`;
+  const identity = input.reviewerIdentity ?? `Reviewer: ${CLAUDE_PROVIDER}/${CLAUDE_MODEL}`;
   const reviewer = ctx.agentSession({
     key: "spec_reviewer",
-    profile: REVIEWER_PROFILE,
-    ...(input.reviewerReasoning ? { reasoning: input.reviewerReasoning } : {}),
+    provider: CLAUDE_PROVIDER,
+    model: CLAUDE_MODEL,
+    reasoning: input.reviewerReasoning ?? DEFAULT_REASONING,
     toolPolicy: "workspace-write",
   });
 

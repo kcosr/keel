@@ -79,6 +79,19 @@ class WebUiLoopProvider implements AgentProvider {
   }
 }
 
+function testAgentRegistry(provider: AgentProvider): AgentProviderRegistry {
+  const registry = new AgentProviderRegistry();
+  for (const name of ["codex", "claude"]) {
+    registry.register({
+      ...provider,
+      name,
+      supportsSessions: provider.supportsSessions,
+      generate: provider.generate.bind(provider),
+    });
+  }
+  return registry;
+}
+
 describe("web UI product loop workflow", () => {
   test("rework uses fresh agent-session turn keys", async () => {
     const dir = mkdtempSync(join(tmpdir(), "keel-web-loop-"));
@@ -101,11 +114,7 @@ describe("web UI product loop workflow", () => {
         clock: () => 1,
         rng: () => 0.5,
         workspaceStore: join(dir, "workspaces"),
-        agents: new AgentProviderRegistry().register(provider),
-        agentProfiles: {
-          "codex-default": { provider: "session" },
-          "claude-default": { provider: "session" },
-        },
+        agents: testAgentRegistry(provider),
       });
 
       const milestone = {
@@ -168,11 +177,7 @@ describe("web UI product loop workflow", () => {
         clock: () => 1,
         rng: () => 0.5,
         workspaceStore: join(dir, "workspaces"),
-        agents: new AgentProviderRegistry().register(provider),
-        agentProfiles: {
-          "codex-default": { provider: "session" },
-          "claude-default": { provider: "session" },
-        },
+        agents: testAgentRegistry(provider),
       });
 
       const parked = await kernel.run<{ rounds: Array<{ round: number }> }>(

@@ -144,8 +144,11 @@ const ReviewSchema = jsonSchema<ReviewResult>({
 
 const DEFAULT_MAX_ROUNDS_PER_MILESTONE = 4;
 const HARD_MAX_ROUNDS_PER_MILESTONE = 10;
-const IMPLEMENTER_PROFILE = "codex-default";
-const REVIEWER_PROFILE = "claude-default";
+const CODEX_PROVIDER = "codex";
+const CODEX_MODEL = "gpt-5.5";
+const CLAUDE_PROVIDER = "claude";
+const CLAUDE_MODEL = "claude-opus-4-8";
+const DEFAULT_REASONING = "xhigh";
 const WORKSPACE_KEY = "web-ui-product";
 const DEFAULT_SPEC = ".specs/web-ui-end-state-implementation.md";
 const DEFAULT_PROTOTYPE_DIR = ".specs/web-ui-mockups/prototype";
@@ -270,13 +273,15 @@ export default async function webUiProductLoop(
     for (const milestone of resolved.milestones) {
       const implementer = ctx.agentSession({
         key: `implementer-${milestone.id}`,
-        profile: IMPLEMENTER_PROFILE,
-        reasoning: input.implementerReasoning ?? "xhigh",
+        provider: CODEX_PROVIDER,
+        model: CODEX_MODEL,
+        reasoning: input.implementerReasoning ?? DEFAULT_REASONING,
       });
       const reviewer = ctx.agentSession({
         key: `reviewer-${milestone.id}`,
-        profile: REVIEWER_PROFILE,
-        reasoning: input.reviewerReasoning ?? "xhigh",
+        provider: CLAUDE_PROVIDER,
+        model: CLAUDE_MODEL,
+        reasoning: input.reviewerReasoning ?? DEFAULT_REASONING,
         toolPolicy: "read-only",
       });
       let findings: Finding[] = [];

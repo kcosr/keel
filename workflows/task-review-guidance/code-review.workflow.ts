@@ -7,7 +7,6 @@ export interface CodeReviewInput {
   repository: string;
   task: string;
   focus?: string[];
-  reviewerProfile?: string;
   reviewerReasoning?: string;
   maxFindings?: number;
 }
@@ -44,7 +43,9 @@ const ReviewOutputSchema = jsonSchema<unknown>({
   },
 });
 
-const DEFAULT_REVIEWER_PROFILE = "claude-default";
+const CLAUDE_PROVIDER = "claude";
+const CLAUDE_MODEL = "claude-opus-4-8";
+const DEFAULT_REASONING = "xhigh";
 
 export default async function codeReview(
   ctx: Ctx,
@@ -56,8 +57,9 @@ export default async function codeReview(
     async () => {
       const raw = await ctx.agent({
         key: "review",
-        profile: input.reviewerProfile ?? DEFAULT_REVIEWER_PROFILE,
-        ...(input.reviewerReasoning ? { reasoning: input.reviewerReasoning } : {}),
+        provider: CLAUDE_PROVIDER,
+        model: CLAUDE_MODEL,
+        reasoning: input.reviewerReasoning ?? DEFAULT_REASONING,
         toolPolicy: "read-only",
         prompt: buildCodeReviewPrompt({
           repository,

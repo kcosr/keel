@@ -1,9 +1,10 @@
 # Model Routing Workflow Helper
 
-`model-routing.ts` is a captured workflow helper for choosing agent profiles,
-reasoning levels, timeouts, and loop hints from explicit task metadata. It is
-workflow source, not daemon policy: importing it into a workflow snapshots the
-helper with the workflow bundle and pins the routing behavior for that run.
+`model-routing.ts` is a captured workflow helper for choosing explicit agent
+providers, models, reasoning levels, timeouts, and loop hints from task
+metadata. It is workflow source, not daemon policy: importing it into a workflow
+snapshots the helper with the workflow bundle and pins the routing behavior for
+that run.
 
 Use deterministic routing when the workflow already knows the task shape:
 
@@ -21,7 +22,8 @@ const reviewerRoute = selectModelRoute({
 
 const reviewer = ctx.agentSession({
   key: "reviewer",
-  profile: reviewerRoute.profile,
+  provider: reviewerRoute.provider,
+  model: reviewerRoute.model,
   reasoning: reviewerRoute.reasoning,
   toolPolicy: "read-only",
 });
@@ -40,6 +42,9 @@ return a bounded implementer/reviewer plan:
 ```ts
 import { routeWithAgent } from "./model-routing/model-routing";
 
+const codexBackend = { provider: "codex", model: "gpt-5.5" };
+const claudeBackend = { provider: "claude", model: "claude-opus-4-8" };
+
 const route = await routeWithAgent(ctx, {
   key: "model-router",
   request: input.task,
@@ -48,12 +53,12 @@ const route = await routeWithAgent(ctx, {
   candidateSurfaces: ["rpc", "journal", "workflow-sdk"],
   candidateRisks: ["migration", "replay", "authorization"],
   constraints: {
-    routerProfile: "claude-default",
-    allowedProfiles: ["codex-default", "claude-default"],
+    router: claudeBackend,
+    allowedBackends: [codexBackend, claudeBackend],
     allowedReasoning: ["low", "medium", "high", "xhigh"],
     maxReasoning: "xhigh",
-    defaultImplementerProfile: "codex-default",
-    defaultReviewerProfile: "claude-default",
+    defaultImplementer: codexBackend,
+    defaultReviewer: claudeBackend,
   },
 });
 ```
@@ -61,8 +66,8 @@ const route = await routeWithAgent(ctx, {
 Guardrails:
 
 - The router uses `ctx.agent` with `toolPolicy: "read-only"`.
-- Router output can select only allowlisted profile names and allowlisted
-  reasoning values.
+- Router output can select only allowlisted provider/model backends and
+  allowlisted reasoning values.
 - Caller-declared `candidateSurfaces` and `candidateRisks` are trusted floor
   inputs. The router can add classification detail, but it cannot lower the
   minimum reasoning by omitting a critical surface or risk.
@@ -80,7 +85,7 @@ Guardrails:
 
 `example-smart-implement-review.workflow.ts` demonstrates agentic routing feeding
 an implementer/reviewer session pair. It requires explicit candidate surfaces
-and risks from the caller, keeps profile allowlists in workflow source, and
+and risks from the caller, keeps backend allowlists in workflow source, and
 consumes the route's `maxRounds` hint in a bounded loop. It is intentionally
 small; production workflows should keep their own workspace setup and completion
 criteria explicit.

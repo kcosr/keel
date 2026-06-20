@@ -26,16 +26,17 @@ Both agents receive an ISO timestamp from `ctx.now()` and are instructed to appe
 under `## Correspondence` with headers like:
 
 ```md
-### 2026-06-13T23:00:00.000Z - Creator: codex-default
-### 2026-06-13T23:01:00.000Z - Reviewer: claude-default
+### 2026-06-13T23:00:00.000Z - Creator: codex/gpt-5.5
+### 2026-06-13T23:01:00.000Z - Reviewer: claude/claude-opus-4-8
 ```
 
 No round label is required; the timestamp and identity preserve history.
 
 ## Safety Notes
 
-- The creator uses the daemon `codex-default` profile, and the reviewer uses the
-  daemon `claude-default` profile with workspace-write tools.
+- The creator uses Codex `gpt-5.5`, and the reviewer uses Claude
+  `claude-opus-4-8` with workspace-write tools. Both default to `xhigh`
+  reasoning.
 - Both creator and reviewer are write-capable.
 - Keel does not currently enforce that the reviewer only appends correspondence.
 - This workflow uses the run default direct workspace, so it edits the target
@@ -52,6 +53,6 @@ No round label is required; the timestamp and identity preserve history.
 | `request` | yes | High-level user request for the spec. |
 | `creatorIdentity` | no | Header identity string for creator correspondence. |
 | `reviewerIdentity` | no | Header identity string for reviewer correspondence. |
-| `creatorReasoning` | no | Override reasoning effort for the `codex-default` creator profile. |
-| `reviewerReasoning` | no | Override reasoning effort for the `claude-default` reviewer profile. |
+| `creatorReasoning` | no | Override reasoning effort for the Codex creator. Defaults to `xhigh`. |
+| `reviewerReasoning` | no | Override reasoning effort for the Claude reviewer. Defaults to `xhigh`. |
 | `maxRounds` | no | Maximum creator/reviewer rounds. Defaults to `3`, capped at `10`. |

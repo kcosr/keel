@@ -82,8 +82,11 @@ const SpecReviewSchema = jsonSchema<SpecReview>({
 
 const DEFAULT_MAX_ROUNDS = 3;
 const HARD_MAX_ROUNDS = 10;
-const CREATOR_PROFILE = "codex-default";
-const REVIEWER_PROFILE = "claude-default";
+const CODEX_PROVIDER = "codex";
+const CODEX_MODEL = "gpt-5.5";
+const CLAUDE_PROVIDER = "claude";
+const CLAUDE_MODEL = "claude-opus-4-8";
+const DEFAULT_REASONING = "xhigh";
 
 export default async function specAuthorReviewLoop(
   ctx: Ctx,
@@ -95,17 +98,19 @@ export default async function specAuthorReviewLoop(
   blockedAuthor?: AuthorResult;
 }> {
   const maxRounds = clampCount(input.maxRounds ?? DEFAULT_MAX_ROUNDS);
-  const creatorIdentity = input.creatorIdentity ?? `Creator: ${CREATOR_PROFILE}`;
-  const reviewerIdentity = input.reviewerIdentity ?? `Reviewer: ${REVIEWER_PROFILE}`;
+  const creatorIdentity = input.creatorIdentity ?? `Creator: ${CODEX_PROVIDER}/${CODEX_MODEL}`;
+  const reviewerIdentity = input.reviewerIdentity ?? `Reviewer: ${CLAUDE_PROVIDER}/${CLAUDE_MODEL}`;
   const creator = ctx.agentSession({
     key: "spec_creator",
-    profile: CREATOR_PROFILE,
-    ...(input.creatorReasoning ? { reasoning: input.creatorReasoning } : {}),
+    provider: CODEX_PROVIDER,
+    model: CODEX_MODEL,
+    reasoning: input.creatorReasoning ?? DEFAULT_REASONING,
   });
   const reviewer = ctx.agentSession({
     key: "spec_reviewer",
-    profile: REVIEWER_PROFILE,
-    ...(input.reviewerReasoning ? { reasoning: input.reviewerReasoning } : {}),
+    provider: CLAUDE_PROVIDER,
+    model: CLAUDE_MODEL,
+    reasoning: input.reviewerReasoning ?? DEFAULT_REASONING,
     toolPolicy: "workspace-write",
   });
 

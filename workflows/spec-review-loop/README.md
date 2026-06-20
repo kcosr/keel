@@ -86,8 +86,8 @@ No round label is required; the timestamp and identity preserve history.
 
 ## Safety Notes
 
-- The reviewer uses the daemon `claude-default` profile with workspace-write
-  tools so it can append correspondence.
+- The reviewer uses Claude `claude-opus-4-8` with `xhigh` reasoning and
+  workspace-write tools so it can append correspondence.
 - The reviewer is write-capable and should only append correspondence.
 - Keel does not currently enforce append-only writes to a section; this is prompt
   discipline, not a sandbox boundary.
@@ -100,8 +100,8 @@ No round label is required; the timestamp and identity preserve history.
 |---|---:|---|
 | `specPath` | yes | Absolute path to the spec document. |
 | `task` | yes | What the reviewer should evaluate. |
-| `reviewerIdentity` | no | Header identity string. Defaults to `Reviewer: claude-default`. |
-| `reviewerReasoning` | no | Override reasoning effort for the `claude-default` reviewer profile. |
+| `reviewerIdentity` | no | Header identity string. Defaults to `Reviewer: claude/claude-opus-4-8`. |
+| `reviewerReasoning` | no | Override reasoning effort for the Claude reviewer. Defaults to `xhigh`. |
 | `maxReviews` | no | Maximum reviewer turns. Defaults to `3`, capped at `20`. |
 | `signalName` | no | Defaults to `spec-review-cycle`. |
 | `completionMode` | no | `"auto"` by default. Use `"park-before-complete"` to wait for a final completion/continue signal after a clean review. |

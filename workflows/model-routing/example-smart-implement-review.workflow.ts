@@ -77,9 +77,9 @@ const ReviewSchema = jsonSchema<ReviewResult>({
 });
 
 const DEFAULT_ALLOWED_REASONING = ["low", "medium", "high", "xhigh"];
-const DEFAULT_ROUTER_PROFILE = "claude-default";
-const DEFAULT_IMPLEMENTER_PROFILE = "codex-default";
-const DEFAULT_REVIEWER_PROFILE = "claude-default";
+const DEFAULT_ROUTER = { provider: "claude", model: "claude-opus-4-8" };
+const DEFAULT_IMPLEMENTER = { provider: "codex", model: "gpt-5.5" };
+const DEFAULT_REVIEWER = { provider: "claude", model: "claude-opus-4-8" };
 const DEFAULT_MAX_ROUNDS = 3;
 const HARD_MAX_ROUNDS = 10;
 
@@ -102,12 +102,12 @@ export default async function smartImplementReview(
     candidateSurfaces,
     candidateRisks,
     constraints: {
-      routerProfile: DEFAULT_ROUTER_PROFILE,
-      allowedProfiles: [DEFAULT_IMPLEMENTER_PROFILE, DEFAULT_REVIEWER_PROFILE],
+      router: DEFAULT_ROUTER,
+      allowedBackends: [DEFAULT_IMPLEMENTER, DEFAULT_REVIEWER],
       allowedReasoning: input.allowedReasoning ?? DEFAULT_ALLOWED_REASONING,
       maxReasoning: input.maxReasoning ?? "xhigh",
-      defaultImplementerProfile: DEFAULT_IMPLEMENTER_PROFILE,
-      defaultReviewerProfile: DEFAULT_REVIEWER_PROFILE,
+      defaultImplementer: DEFAULT_IMPLEMENTER,
+      defaultReviewer: DEFAULT_REVIEWER,
     },
   });
   ctx.log("model.routing", {
@@ -115,10 +115,18 @@ export default async function smartImplementReview(
     surfaces: route.surfaces,
     risks: route.risks,
     implementer: route.implementer
-      ? { profile: route.implementer.profile, reasoning: route.implementer.reasoning ?? null }
+      ? {
+          provider: route.implementer.provider,
+          model: route.implementer.model,
+          reasoning: route.implementer.reasoning ?? null,
+        }
       : null,
     reviewer: route.reviewer
-      ? { profile: route.reviewer.profile, reasoning: route.reviewer.reasoning ?? null }
+      ? {
+          provider: route.reviewer.provider,
+          model: route.reviewer.model,
+          reasoning: route.reviewer.reasoning ?? null,
+        }
       : null,
     rationale: route.rationale,
   });
@@ -144,12 +152,14 @@ export default async function smartImplementReview(
 
   const implementer = ctx.agentSession({
     key: "implementer",
-    profile: implementerRoute.profile,
+    provider: implementerRoute.provider,
+    model: implementerRoute.model,
     reasoning: implementerRoute.reasoning,
   });
   const reviewer = ctx.agentSession({
     key: "reviewer",
-    profile: reviewerRoute.profile,
+    provider: reviewerRoute.provider,
+    model: reviewerRoute.model,
     reasoning: reviewerRoute.reasoning,
     toolPolicy: "read-only",
   });

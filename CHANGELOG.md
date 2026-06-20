@@ -150,8 +150,8 @@
   `created`/`unchanged`/`conflict`/`failed` reporting. The package now includes
   a read-only docs review workflow and richer Keel-native review rubrics.
 - Reusable `workflows/model-routing/` helper package for captured static or
-  read-only-agent routing of profile/reasoning choices, with guardrails for
-  allowlisted profiles, allowlisted reasoning levels, critical surface/risk
+  read-only-agent routing of provider/model/reasoning choices, with guardrails
+  for allowlisted backends, allowlisted reasoning levels, critical surface/risk
   floors, and workflow-owned timeout/verification hints.
 - `ctx.agentSession({ key, ... }).turn({ key, prompt, ... })` for realm
   workflows that need one logical Pi/Codex or Claude backend conversation across
@@ -351,9 +351,9 @@
 - Reusable implement/review and spec-review workflows can now park after a clean
   review with `completionMode: "park-before-complete"`, allowing an orchestrator
   to request another round or explicitly signal final completion.
-- Reusable review/spec/implementation workflows now default to the
-  `codex-default` and `claude-default` agent profiles, exposing only reasoning
-  overrides for normal launches.
+- Reusable review/spec/implementation workflows now use explicit Codex
+  `gpt-5.5` and Claude `claude-opus-4-8` backends with `xhigh` reasoning by
+  default, exposing only reasoning overrides for normal launches.
 - Long-lived waits/event streams re-check capability validity and fail when a
   presented capability is revoked or expires; each wait/subscription is bound to
   the credential presented when it was started.

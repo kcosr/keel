@@ -60,11 +60,11 @@ KEEL_RUN_CAP=kc_run_... keel signal <run-id> review-cycle '{
 | `task` | yes | The concrete implementation, design, or change to review. |
 | `spec` | no | Optional absolute path to a spec, design note, or acceptance criteria. |
 | `focus` | no | Optional review focus such as security, replay semantics, or docs. |
-| `reasoning` | no | Override reasoning effort for the `claude-default` reviewer profile. |
+| `reasoning` | no | Override reasoning effort for the Claude reviewer. Defaults to `xhigh`. |
 | `maxRounds` | no | Maximum follow-up review turns. Defaults to `3`, capped at `20`. |
 | `signalName` | no | Signal name for follow-up payloads. Defaults to `review-cycle`. |
 | `stopWhenClean` | no | Defaults to `true`. Set `false` to keep parking for more cycles even after a clean review. |
 
 The reviewer participant key is `reviewer`; turn keys are `initial`,
-`followup-1`, `followup-2`, and so on. The reviewer uses the daemon
-`claude-default` profile with read-only tools.
+`followup-1`, `followup-2`, and so on. The reviewer uses Claude
+`claude-opus-4-8` with `xhigh` reasoning and read-only tools.

@@ -52,6 +52,8 @@ No round label is required; the timestamp and identity preserve history.
 | `request` | yes | High-level user request for the spec. |
 | `creatorIdentity` | no | Header identity string for creator correspondence. |
 | `reviewerIdentity` | no | Header identity string for reviewer correspondence. |
-| `creatorReasoning` | no | Override reasoning effort for the `codex-default` creator profile. |
-| `reviewerReasoning` | no | Override reasoning effort for the `claude-default` reviewer profile. |
+| `creatorProfile` | no | Creator profile name. Defaults to `codex-default`. |
+| `reviewerProfile` | no | Reviewer profile name. Defaults to `claude-default`. |
+| `creatorReasoning` | no | Override reasoning effort for the selected creator profile. |
+| `reviewerReasoning` | no | Override reasoning effort for the selected reviewer profile. |
 | `maxRounds` | no | Maximum creator/reviewer rounds. Defaults to `3`, capped at `10`. |

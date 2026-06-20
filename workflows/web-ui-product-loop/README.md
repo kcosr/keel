@@ -104,8 +104,10 @@ a wait-any primitive across multiple signal names.
 | `mockupsDir` | no | Mockup image directory. Defaults to `.specs/web-ui-mockups`. |
 | `milestones` | no | Override milestone list. |
 | `maxRoundsPerMilestone` | no | Defaults to `4`, capped at `10`. |
-| `implementerReasoning` | no | Defaults to `xhigh`. |
-| `reviewerReasoning` | no | Defaults to `xhigh`. |
+| `implementerProfile` | no | Implementer profile name. Defaults to `codex-default`. |
+| `reviewerProfile` | no | Reviewer profile name. Defaults to `claude-default`. |
+| `implementerReasoning` | no | Override reasoning effort for the selected implementer profile. |
+| `reviewerReasoning` | no | Override reasoning effort for the selected reviewer profile. |
 | `controlSignalName` | no | Defaults to `web-ui-control`. |
 | `verificationCommand` | no | Additional verification instruction for the implementer. |
 

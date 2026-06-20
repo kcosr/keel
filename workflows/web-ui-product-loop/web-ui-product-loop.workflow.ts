@@ -60,6 +60,8 @@ type WebUiProductLoopInput = {
   mockupsDir?: string;
   milestones?: Milestone[];
   maxRoundsPerMilestone?: number;
+  implementerProfile?: string;
+  reviewerProfile?: string;
   implementerReasoning?: string;
   reviewerReasoning?: string;
   controlSignalName?: string;
@@ -270,13 +272,13 @@ export default async function webUiProductLoop(
     for (const milestone of resolved.milestones) {
       const implementer = ctx.agentSession({
         key: `implementer-${milestone.id}`,
-        profile: IMPLEMENTER_PROFILE,
-        reasoning: input.implementerReasoning ?? "xhigh",
+        profile: input.implementerProfile ?? IMPLEMENTER_PROFILE,
+        ...(input.implementerReasoning ? { reasoning: input.implementerReasoning } : {}),
       });
       const reviewer = ctx.agentSession({
         key: `reviewer-${milestone.id}`,
-        profile: REVIEWER_PROFILE,
-        reasoning: input.reviewerReasoning ?? "xhigh",
+        profile: input.reviewerProfile ?? REVIEWER_PROFILE,
+        ...(input.reviewerReasoning ? { reasoning: input.reviewerReasoning } : {}),
         toolPolicy: "read-only",
       });
       let findings: Finding[] = [];

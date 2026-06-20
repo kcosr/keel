@@ -79,7 +79,7 @@ The workflow supplies an ISO timestamp from `ctx.now()` and instructs the review
 to append under `## Correspondence` using:
 
 ```md
-### 2026-06-13T23:00:00.000Z - Reviewer: claude/claude-opus-4-8
+### 2026-06-13T23:00:00.000Z - Reviewer: claude-default
 ```
 
 No round label is required; the timestamp and identity preserve history.
@@ -101,7 +101,8 @@ No round label is required; the timestamp and identity preserve history.
 | `specPath` | yes | Absolute path to the spec document. |
 | `task` | yes | What the reviewer should evaluate. |
 | `reviewerIdentity` | no | Header identity string. Defaults to `Reviewer: claude-default`. |
-| `reviewerReasoning` | no | Override reasoning effort for the `claude-default` reviewer profile. |
+| `reviewerProfile` | no | Reviewer profile name. Defaults to `claude-default`. |
+| `reviewerReasoning` | no | Override reasoning effort for the selected reviewer profile. |
 | `maxReviews` | no | Maximum reviewer turns. Defaults to `3`, capped at `20`. |
 | `signalName` | no | Defaults to `spec-review-cycle`. |
 | `completionMode` | no | `"auto"` by default. Use `"park-before-complete"` to wait for a final completion/continue signal after a clean review. |

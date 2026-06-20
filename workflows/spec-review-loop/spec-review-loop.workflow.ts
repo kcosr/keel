@@ -20,6 +20,7 @@ type SpecReviewInput = {
   specPath: string;
   task: string;
   reviewerIdentity?: string;
+  reviewerProfile?: string;
   reviewerReasoning?: string;
   maxReviews?: number;
   signalName?: string;
@@ -86,10 +87,11 @@ export default async function specReviewLoop(
   const signalName = input.signalName ?? "spec-review-cycle";
   const completionSignalName = input.completionSignalName ?? "spec-review-completion";
   const stopWhenClean = input.stopWhenClean ?? true;
-  const identity = input.reviewerIdentity ?? `Reviewer: ${REVIEWER_PROFILE}`;
+  const reviewerProfile = input.reviewerProfile ?? REVIEWER_PROFILE;
+  const identity = input.reviewerIdentity ?? `Reviewer: ${reviewerProfile}`;
   const reviewer = ctx.agentSession({
     key: "spec_reviewer",
-    profile: REVIEWER_PROFILE,
+    profile: reviewerProfile,
     ...(input.reviewerReasoning ? { reasoning: input.reviewerReasoning } : {}),
     toolPolicy: "workspace-write",
   });

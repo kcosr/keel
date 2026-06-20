@@ -102,8 +102,10 @@ KEEL_RUN_CAP=kc_run_... keel signal <run-id> implementation-completion '{
 | `completionSignalName` | no | Signal name for parked clean completion. Defaults to `implementation-completion`. |
 | `completionCheckFailureAction` | no | `"continue-loop"` by default. Also accepts `"block"` or, with `park-before-complete`, `"park"`. |
 | `completionChecks` | no | Typed daemon-enforced gates: `command`, `git-clean`, `has-commits`, or `branch-pushed`. Defaults to `[]`. |
-| `implementerReasoning` | no | Override reasoning effort for the `codex-default` implementer profile. |
-| `reviewerReasoning` | no | Override reasoning effort for the `claude-default` reviewer profile. |
+| `implementerProfile` | no | Implementer profile name. Defaults to `codex-default`. |
+| `reviewerProfile` | no | Reviewer profile name. Defaults to `claude-default`. |
+| `implementerReasoning` | no | Override reasoning effort for the selected implementer profile. |
+| `reviewerReasoning` | no | Override reasoning effort for the selected reviewer profile. |
 | `reviewFocus` | no | Optional focus for the reviewer. |
 
 The implementer participant key is `implementer`; reviewer participant key is

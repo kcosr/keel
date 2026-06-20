@@ -31,6 +31,9 @@ export interface SmartImplementReviewInput {
   specPath?: string;
   candidateSurfaces: RoutingSurface[];
   candidateRisks: RoutingRisk[];
+  routerProfile?: string;
+  implementerProfile?: string;
+  reviewerProfile?: string;
   maxReasoning?: string;
   allowedReasoning?: string[];
 }
@@ -102,12 +105,15 @@ export default async function smartImplementReview(
     candidateSurfaces,
     candidateRisks,
     constraints: {
-      routerProfile: DEFAULT_ROUTER_PROFILE,
-      allowedProfiles: [DEFAULT_IMPLEMENTER_PROFILE, DEFAULT_REVIEWER_PROFILE],
+      routerProfile: input.routerProfile ?? DEFAULT_ROUTER_PROFILE,
+      allowedProfiles: uniqueProfiles([
+        input.implementerProfile ?? DEFAULT_IMPLEMENTER_PROFILE,
+        input.reviewerProfile ?? DEFAULT_REVIEWER_PROFILE,
+      ]),
       allowedReasoning: input.allowedReasoning ?? DEFAULT_ALLOWED_REASONING,
       maxReasoning: input.maxReasoning ?? "xhigh",
-      defaultImplementerProfile: DEFAULT_IMPLEMENTER_PROFILE,
-      defaultReviewerProfile: DEFAULT_REVIEWER_PROFILE,
+      defaultImplementerProfile: input.implementerProfile ?? DEFAULT_IMPLEMENTER_PROFILE,
+      defaultReviewerProfile: input.reviewerProfile ?? DEFAULT_REVIEWER_PROFILE,
     },
   });
   ctx.log("model.routing", {
@@ -206,6 +212,10 @@ function buildImplementationPrompt(task: string, verification: readonly string[]
     "",
     "Return structured JSON describing status, summary, files changed, and verification run.",
   ].join("\n");
+}
+
+function uniqueProfiles(profiles: readonly string[]): string[] {
+  return [...new Set(profiles)];
 }
 
 function buildFixPrompt(

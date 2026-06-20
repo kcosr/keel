@@ -105,6 +105,8 @@ describe("web UI product loop workflow", () => {
         agentProfiles: {
           "codex-default": { provider: "session" },
           "claude-default": { provider: "session" },
+          "custom-implementer": { provider: "session", model: "custom-impl" },
+          "custom-reviewer": { provider: "session", model: "custom-review" },
         },
       });
 
@@ -125,6 +127,10 @@ describe("web UI product loop workflow", () => {
           mockupsDir: "/tmp/mockups",
           milestones: [milestone],
           maxRoundsPerMilestone: 2,
+          implementerProfile: "custom-implementer",
+          reviewerProfile: "custom-reviewer",
+          implementerReasoning: "low",
+          reviewerReasoning: "medium",
         },
         { name: "web-loop", target: repo },
       );
@@ -151,6 +157,10 @@ describe("web UI product loop workflow", () => {
         "__session.implementer-foundation.foundation-implement-2",
         "__session.reviewer-foundation.foundation-review-2",
       ]);
+      expect(provider.calls[0]?.model).toBe("custom-impl");
+      expect(provider.calls[0]?.reasoning).toBe("low");
+      expect(provider.calls[1]?.model).toBe("custom-review");
+      expect(provider.calls[1]?.reasoning).toBe("medium");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

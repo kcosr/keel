@@ -29,6 +29,8 @@ type SpecAuthorReviewInput = {
   request: string;
   creatorIdentity?: string;
   reviewerIdentity?: string;
+  creatorProfile?: string;
+  reviewerProfile?: string;
   creatorReasoning?: string;
   reviewerReasoning?: string;
   maxRounds?: number;
@@ -95,16 +97,18 @@ export default async function specAuthorReviewLoop(
   blockedAuthor?: AuthorResult;
 }> {
   const maxRounds = clampCount(input.maxRounds ?? DEFAULT_MAX_ROUNDS);
-  const creatorIdentity = input.creatorIdentity ?? `Creator: ${CREATOR_PROFILE}`;
-  const reviewerIdentity = input.reviewerIdentity ?? `Reviewer: ${REVIEWER_PROFILE}`;
+  const creatorProfile = input.creatorProfile ?? CREATOR_PROFILE;
+  const reviewerProfile = input.reviewerProfile ?? REVIEWER_PROFILE;
+  const creatorIdentity = input.creatorIdentity ?? `Creator: ${creatorProfile}`;
+  const reviewerIdentity = input.reviewerIdentity ?? `Reviewer: ${reviewerProfile}`;
   const creator = ctx.agentSession({
     key: "spec_creator",
-    profile: CREATOR_PROFILE,
+    profile: creatorProfile,
     ...(input.creatorReasoning ? { reasoning: input.creatorReasoning } : {}),
   });
   const reviewer = ctx.agentSession({
     key: "spec_reviewer",
-    profile: REVIEWER_PROFILE,
+    profile: reviewerProfile,
     ...(input.reviewerReasoning ? { reasoning: input.reviewerReasoning } : {}),
     toolPolicy: "workspace-write",
   });

@@ -19,6 +19,7 @@ type IterativeReviewInput = {
   task: string;
   spec?: string;
   focus?: string;
+  profile?: string;
   reasoning?: string;
   maxRounds?: number;
   signalName?: string;
@@ -91,7 +92,7 @@ export default async function iterativeReview(
     async () => {
       const reviewer = ctx.agentSession({
         key: "reviewer",
-        profile: REVIEWER_PROFILE,
+        profile: input.profile ?? REVIEWER_PROFILE,
         ...(input.reasoning ? { reasoning: input.reasoning } : {}),
         toolPolicy: "read-only",
       });

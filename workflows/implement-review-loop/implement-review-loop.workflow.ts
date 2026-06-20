@@ -46,6 +46,8 @@ type ImplementReviewInput = {
   completionSignalName?: string;
   completionCheckFailureAction?: CompletionCheckFailureAction;
   completionChecks?: CompletionCheck[];
+  implementerProfile?: string;
+  reviewerProfile?: string;
   implementerReasoning?: string;
   reviewerReasoning?: string;
   reviewFocus?: string;
@@ -143,12 +145,12 @@ export default async function implementReviewLoop(
   return await ctx.withWorkspace(workspace, async () => {
     const implementer = ctx.agentSession({
       key: "implementer",
-      profile: IMPLEMENTER_PROFILE,
+      profile: input.implementerProfile ?? IMPLEMENTER_PROFILE,
       ...(input.implementerReasoning ? { reasoning: input.implementerReasoning } : {}),
     });
     const reviewer = ctx.agentSession({
       key: "reviewer",
-      profile: REVIEWER_PROFILE,
+      profile: input.reviewerProfile ?? REVIEWER_PROFILE,
       ...(input.reviewerReasoning ? { reasoning: input.reviewerReasoning } : {}),
       toolPolicy: "read-only",
     });

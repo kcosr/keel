@@ -1186,6 +1186,23 @@ All profile commands use the daemon connection (`KEEL_SOCKET`/`KEEL_DIR`) and re
 
 The daemon snapshots the complete effective catalog (programmatic plus persisted catalog profiles) when a run is launched or rerun. Resume, retry, rewind, daemon restart, provider retries, and default forks keep the existing snapshot; editing or deleting a profile only affects future launches and reruns.
 
+To seed the conventional local defaults, run:
+
+```bash
+bun run profiles:seed-defaults
+```
+
+The seed script upserts:
+
+| Name | Provider | Model | Reasoning |
+|---|---|---|---|
+| `codex-default` | `codex` | `gpt-5.5` | `xhigh` |
+| `claude-default` | `claude` | `claude-opus-4-8` | `xhigh` |
+| `work-gemma-4-31b` | `pi` | `work-gemma-4-31b/gemma-4-31b` | `high` |
+| `work-gpt-oss-120b` | `pi` | `work-gpt-oss-120b//models/gpt-oss-120b` | `high` |
+| `work-nemotron-3-ultra` | `pi` | `work-nemotron-3-ultra/nemotron-3-ultra` | `high` |
+| `work-qwen-3-6-27b` | `pi` | `work-qwen-3-6-27b/qwen3.6-27b` | `high` |
+
 ### Persistent Daemon Settings
 
 Operators can inspect and tune a small typed daemon settings catalog:

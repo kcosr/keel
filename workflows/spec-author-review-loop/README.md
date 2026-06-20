@@ -2,8 +2,9 @@
 
 `spec-author-review-loop.workflow.ts` is fully orchestrated. A write-capable spec
 creator drafts or revises the main spec, then a write-capable reviewer appends
-timestamped correspondence. Findings are fed back to the creator until the spec is
-clean, the creator is blocked, or `maxRounds` is reached.
+timestamped correspondence. Findings are fed back to the creator until the spec
+is clean, the creator is blocked, or `maxRounds` is reached. By default, a clean
+review parks for a human complete/continue decision before the workflow returns.
 
 Launch:
 

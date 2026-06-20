@@ -130,8 +130,8 @@ export default async function implementReviewLoop(
   completion: CompletionSummary;
 }> {
   const repository = resolveRepository(input.repository, ctx.run.target);
-  const completionConfig = resolveCompletionConfig(input, "direct");
   const completionMode = input.completionMode ?? DEFAULT_COMPLETION_MODE;
+  const completionConfig = resolveCompletionConfig({ ...input, completionMode }, "direct");
   const resolvedInput: ResolvedImplementReviewInput = {
     ...input,
     repository,

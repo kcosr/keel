@@ -146,8 +146,8 @@ export default async function branchWorktreeImplementReview(
   completion: CompletionSummary;
 }> {
   const repository = resolveRepository(input.repository, ctx.run.target);
-  const completionConfig = resolveCompletionConfig(input, "worktree");
   const completionMode = input.completionMode ?? DEFAULT_COMPLETION_MODE;
+  const completionConfig = resolveCompletionConfig({ ...input, completionMode }, "worktree");
   const ref = input.ref && input.ref.trim().length > 0 ? input.ref : "HEAD";
   const retention = input.retention ?? DEFAULT_RETENTION;
   const workspace = await ctx.workspace({

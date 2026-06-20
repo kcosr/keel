@@ -9,6 +9,10 @@
   completion by default, and all five default/cap review rounds at `10`.
 
 ### Fixed
+- Sample implement review workflows now validate
+  `completionCheckFailureAction: "park"` against the resolved
+  `completionMode` default, so callers can rely on the default
+  `"park-before-complete"` mode without restating it.
 - Plain `ctx.agent` calls now include resolved execution controls in durable
   version/input identity, matching replay-visible runtime behavior when
   `maxRetries`, `lenient`, `onFailure`, `timeoutMs`, `stallRetries`, or their

@@ -18,7 +18,7 @@ keel launch --detach workflows/branch-worktree-implement-review/branch-worktree-
   --input '{
     "spec": "/home/kevin/worktrees/keel/.specs/some-feature.md",
     "task": "Implement the feature described by the spec",
-    "maxRounds": 3,
+    "maxRounds": 10,
     "completionMode": "park-before-complete",
     "implementerReasoning": "high",
     "reviewerReasoning": "high",
@@ -81,8 +81,8 @@ keel workspace show <run-id> <workspaceId>
 keel workspace diff <run-id> <workspaceId>
 ```
 
-Use `completionMode: "park-before-complete"` when a human or orchestrator should
-make the final call after a clean review. Complete it with:
+By default, `completionMode` is `"park-before-complete"` so a human or
+orchestrator can make the final call after a clean review. Complete it with:
 
 ```bash
 KEEL_RUN_CAP=kc_run_... keel signal <run-id> implementation-completion '{
@@ -109,8 +109,8 @@ KEEL_RUN_CAP=kc_run_... keel signal <run-id> implementation-completion '{
 | `retention` | no | `"retain"` by default; also accepts `"remove"` or `"retain-on-failure"`. |
 | `spec` | yes | Absolute path to the implementation spec or design note. |
 | `task` | no | Additional task wording for the implementer and reviewer. |
-| `maxRounds` | no | Maximum implement/review rounds. Defaults to `3`, capped at `10`. |
-| `completionMode` | no | `"auto"` by default. Use `"park-before-complete"` to wait for completion/follow-up. |
+| `maxRounds` | no | Maximum implement/review rounds. Defaults to `10`, capped at `10`. |
+| `completionMode` | no | `"park-before-complete"` by default. Set `"auto"` to complete immediately after a clean review and passing completion checks. |
 | `completionSignalName` | no | Signal name for parked clean completion. Defaults to `implementation-completion`. |
 | `completionCheckFailureAction` | no | `"continue-loop"` by default. Also accepts `"block"` or, with `park-before-complete`, `"park"`. |
 | `completionChecks` | no | Typed daemon-enforced gates: `command`, `git-clean`, `has-commits`, or `branch-pushed`. Defaults to `[]`. |

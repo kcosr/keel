@@ -23,10 +23,10 @@ keel launch --detach workflows/spec-review-loop/spec-review-loop.workflow.ts \
   }'
 ```
 
-For iterative spec work, prefer `stopWhenClean: false` with a higher
-`maxReviews` such as `10`. That keeps the durable reviewer session parked after a
-clean review so the creator can make follow-up changes and re-invoke the same
-reviewer conversation. Stop the run explicitly when no further review is needed.
+By default, `stopWhenClean` is `false`. That keeps the durable reviewer session
+parked after a clean review so the creator can make follow-up changes and
+re-invoke the same reviewer conversation. Stop the run explicitly when no
+further review is needed.
 
 For agent/orchestrator use, prefer watching the run after launch instead of
 ending the turn at the detached run id:
@@ -35,11 +35,10 @@ ending the turn at the detached run id:
 keel watch <run-id> --output text
 ```
 
-Use `completionMode: "park-before-complete"` with the default
-`stopWhenClean: true` when the reviewer should stop at a clean review but the
-creator should decide whether to complete or ask for one more pass. In that mode,
-the workflow parks on `spec-review-completion` after a clean review. Complete it
-with:
+Use `completionMode: "park-before-complete"` with `stopWhenClean: true` when the
+reviewer should stop at a clean review but the creator should decide whether to
+complete or ask for one more pass. In that mode, the workflow parks on
+`spec-review-completion` after a clean review. Complete it with:
 
 ```bash
 KEEL_RUN_CAP=kc_run_... keel signal <run-id> spec-review-completion '{
@@ -91,8 +90,7 @@ No round label is required; the timestamp and identity preserve history.
 - The reviewer is write-capable and should only append correspondence.
 - Keel does not currently enforce append-only writes to a section; this is prompt
   discipline, not a sandbox boundary.
-- Keep `maxReviews` bounded. For manual back-and-forth spec work, `10` is a good
-  default; the workflow caps it at `20`.
+- Keep `maxReviews` bounded. The workflow defaults to and caps at `10`.
 
 ## Input
 
@@ -103,8 +101,8 @@ No round label is required; the timestamp and identity preserve history.
 | `reviewerIdentity` | no | Header identity string. Defaults to `Reviewer: claude-default`. |
 | `reviewerProfile` | no | Reviewer profile name. Defaults to `claude-default`. |
 | `reviewerReasoning` | no | Override reasoning effort for the selected reviewer profile. |
-| `maxReviews` | no | Maximum reviewer turns. Defaults to `3`, capped at `20`. |
+| `maxReviews` | no | Maximum reviewer turns. Defaults to `10`, capped at `10`. |
 | `signalName` | no | Defaults to `spec-review-cycle`. |
-| `completionMode` | no | `"auto"` by default. Use `"park-before-complete"` to wait for a final completion/continue signal after a clean review. |
+| `completionMode` | no | `"auto"` by default. With `stopWhenClean: true`, use `"park-before-complete"` to wait for a final completion/continue signal after a clean review. |
 | `completionSignalName` | no | Signal name for parked clean completion. Defaults to `spec-review-completion`. |
-| `stopWhenClean` | no | Defaults to `true`. |
+| `stopWhenClean` | no | Defaults to `false`, keeping the workflow parked for more cycles even after a clean review. Set `true` to complete or use `completionMode` on clean. |

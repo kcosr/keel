@@ -69,8 +69,9 @@ const ReviewSchema = jsonSchema<Review>({
   },
 });
 
-const DEFAULT_MAX_ROUNDS = 3;
-const HARD_MAX_ROUNDS = 20;
+const DEFAULT_MAX_ROUNDS = 10;
+const HARD_MAX_ROUNDS = 10;
+const DEFAULT_STOP_WHEN_CLEAN = false;
 const REVIEWER_PROFILE = "claude-default";
 
 export default async function iterativeReview(
@@ -85,7 +86,7 @@ export default async function iterativeReview(
   const resolvedInput: ResolvedIterativeReviewInput = { ...input, repository };
   const maxRounds = clampRounds(input.maxRounds ?? DEFAULT_MAX_ROUNDS);
   const signalName = input.signalName ?? "review-cycle";
-  const stopWhenClean = input.stopWhenClean ?? true;
+  const stopWhenClean = input.stopWhenClean ?? DEFAULT_STOP_WHEN_CLEAN;
 
   return await ctx.withWorkspace(
     { key: "repository", mode: "direct", path: repository },

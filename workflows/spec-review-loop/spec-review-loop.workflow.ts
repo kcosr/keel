@@ -71,8 +71,9 @@ const SpecReviewSchema = jsonSchema<SpecReview>({
   },
 });
 
-const DEFAULT_MAX_REVIEWS = 3;
-const HARD_MAX_REVIEWS = 20;
+const DEFAULT_MAX_REVIEWS = 10;
+const HARD_MAX_REVIEWS = 10;
+const DEFAULT_STOP_WHEN_CLEAN = false;
 const REVIEWER_PROFILE = "claude-default";
 
 export default async function specReviewLoop(
@@ -86,7 +87,7 @@ export default async function specReviewLoop(
   const maxReviews = clampCount(input.maxReviews ?? DEFAULT_MAX_REVIEWS);
   const signalName = input.signalName ?? "spec-review-cycle";
   const completionSignalName = input.completionSignalName ?? "spec-review-completion";
-  const stopWhenClean = input.stopWhenClean ?? true;
+  const stopWhenClean = input.stopWhenClean ?? DEFAULT_STOP_WHEN_CLEAN;
   const reviewerProfile = input.reviewerProfile ?? REVIEWER_PROFILE;
   const identity = input.reviewerIdentity ?? `Reviewer: ${reviewerProfile}`;
   const reviewer = ctx.agentSession({

@@ -590,7 +590,7 @@ function statusGlyph(status: string): string {
   }
 }
 
-function stringField(workspace: RunWorkspaceView, key: string): string {
+function stringField(workspace: RunWorkspaceView, key: keyof RunWorkspaceView): string {
   const value = workspace[key];
   if (value === null || value === undefined) return "-";
   return typeof value === "string" ? value : String(value);

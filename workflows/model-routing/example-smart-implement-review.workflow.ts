@@ -152,6 +152,7 @@ export default async function smartImplementReview(
     key: "implementer",
     profile: implementerRoute.profile,
     reasoning: implementerRoute.reasoning,
+    toolPolicy: "unrestricted",
   });
   const reviewer = ctx.agentSession({
     key: "reviewer",

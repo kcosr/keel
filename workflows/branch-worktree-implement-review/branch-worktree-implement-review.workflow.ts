@@ -175,6 +175,7 @@ export default async function branchWorktreeImplementReview(
       key: "implementer",
       profile: input.implementerProfile ?? IMPLEMENTER_PROFILE,
       ...(input.implementerReasoning ? { reasoning: input.implementerReasoning } : {}),
+      toolPolicy: "unrestricted",
     });
     const reviewer = ctx.agentSession({
       key: "reviewer",

@@ -1,6 +1,16 @@
-import { Box, Globe, type LucideIcon, Zap, ZoomIn, ZoomOut } from "lucide-react";
+import {
+  Box,
+  CircleCheck,
+  FolderCog,
+  Globe,
+  type LucideIcon,
+  Terminal,
+  Zap,
+  ZoomIn,
+  ZoomOut,
+} from "lucide-react";
 import { useMemo, useState } from "react";
-import type { NodeView } from "../api/types";
+import type { EffectType, NodeView } from "../api/types";
 import { StatusPill, formatTime, toneForStatus } from "./controls";
 
 // Workflow graph canvas: SVG dependency edges behind absolutely-positioned node
@@ -17,11 +27,14 @@ const ZOOM_STEP = 0.15;
 const ZOOM_MIN = 0.5;
 const ZOOM_MAX = 1.6;
 
-const EFFECT_ICON: Record<NodeView["effectType"], LucideIcon> = {
+const EFFECT_ICON = {
   pure: Box,
   effectful: Zap,
+  command: Terminal,
+  completion_check: CircleCheck,
+  workspace_setup: FolderCog,
   ambient: Globe,
-};
+} satisfies Record<EffectType, LucideIcon>;
 
 interface PlacedNode {
   node: NodeView;

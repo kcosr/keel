@@ -17,6 +17,7 @@
 - The web run-detail graph now uses the shared run projection effect-type
   contract and renders `command`, `completion_check`, and `workspace_setup`
   journal nodes instead of crashing on unknown icon mappings.
+  ([#25](https://github.com/kcosr/keel/pull/25))
 - Sample implement review workflows now validate
   `completionCheckFailureAction: "park"` against the resolved
   `completionMode` default, so callers can rely on the default

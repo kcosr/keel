@@ -116,6 +116,7 @@ export default async function specAuthorReviewLoop(
     key: "spec_creator",
     profile: creatorProfile,
     ...(input.creatorReasoning ? { reasoning: input.creatorReasoning } : {}),
+    toolPolicy: "unrestricted",
   });
   const reviewer = ctx.agentSession({
     key: "spec_reviewer",

@@ -4,104 +4,47 @@
 // MCP) consumes THIS — no surface reconstructs run state independently. Building
 // it here prevents per-surface drift.
 
-import type { AgentConcurrencyWaitSnapshot } from "../agents/concurrency.ts";
 import type { JournalStore } from "../journal/store.ts";
-import type {
-  EffectType,
-  JournalStatus,
-  RunRow,
-  RunStatus,
-  ScheduleRow,
-} from "../journal/types.ts";
+import type { RunRow, ScheduleRow } from "../journal/types.ts";
 import { isRunOwnerStale, ownerStaleWindowMs } from "../kernel/liveness.ts";
 import { RUN_FINISHED_INLINE_OUTPUT_BYTES } from "../kernel/output.ts";
 import { workflowDefinitionSourceSelection } from "../workflow-definitions/source-view.ts";
-import type { WorkflowDefinitionSourceView } from "./contract.ts";
+import type {
+  Blockage,
+  InterruptionBlockageDetails,
+  NodeView,
+  ReportNodeView,
+  RunProjection,
+  RunReport,
+  RunStats,
+  RunSummary,
+  RunSummaryPage,
+  ScheduleErrorProjection,
+  ScheduleSummary,
+  ScheduleView,
+  WorkflowDefinitionSourceView,
+} from "./view-contract.ts";
+
+export type {
+  Blockage,
+  BlockageReason,
+  EffectType,
+  InterruptionBlockageDetails,
+  JournalStatus,
+  NodeView,
+  ReportNodeView,
+  RunProjection,
+  RunReport,
+  RunStatus,
+  RunSummary,
+  RunSummaryPage,
+  RunStats,
+  ScheduleErrorProjection,
+  ScheduleSummary,
+  ScheduleView,
+} from "./view-contract.ts";
 
 export const MAX_RUN_SUMMARY_PAGE_LIMIT = 500;
-
-export interface NodeView {
-  stableKey: string;
-  effectType: EffectType;
-  status: JournalStatus;
-  attempt: number;
-  /** Durable journal row start time. Surfaces derive pending age from their own clock. */
-  startedAtMs: number | null;
-  /** Dependency edges (stepKey → this node) recorded during execution. */
-  dependsOn: string[];
-  /** True if the result is stored as an artifact rather than inline. */
-  artifactBacked: boolean;
-}
-
-export interface RunStats {
-  steps: number;
-  agents: number;
-  artifacts: number;
-}
-
-export interface RunProjection {
-  runId: string;
-  workflowName: string | null;
-  status: RunStatus;
-  definitionVersion: string;
-  runTarget?: string | null;
-  parentRunId: string | null;
-  createdAtMs: number;
-  finishedAtMs: number | null;
-  nodes: NodeView[];
-  /** The current phase (last ctx.phase narration), if any. */
-  phase: string | null;
-  error: { name: string; message: string } | null;
-  stats: RunStats;
-}
-
-export interface ReportNodeView extends NodeView {
-  result?: unknown;
-  resultOmitted?: true;
-  resultByteLength?: number;
-}
-
-export interface RunReport {
-  runId: string;
-  workflowName: string | null;
-  status: RunStatus;
-  createdAtMs: number;
-  finishedAtMs: number | null;
-  output?: unknown;
-  outputOmitted?: true;
-  outputByteLength?: number;
-  error: { name: string; message: string } | null;
-  blockage?: Blockage;
-  nodes: ReportNodeView[];
-  stats: RunStats;
-}
-
-export type ScheduleErrorProjection =
-  | { kind: "none" }
-  | { kind: "error"; error: { name?: string; message: string } }
-  | { kind: "parse-error"; raw: string; message: string };
-
-export interface ScheduleSummary {
-  name: string;
-  enabled: boolean;
-  workflowRef: string;
-  definitionState: "available" | "missing";
-  workflowName: string | null;
-  workflowKind: string | null;
-  target: string | null;
-  intervalMs: number;
-  nextFireMs: number;
-  lastRunId: string | null;
-  lastRunStatus: RunStatus | null;
-  lastFailedAtMs: number | null;
-  lastError: ScheduleErrorProjection;
-}
-
-export interface ScheduleView extends ScheduleSummary {
-  input: unknown;
-  inputJson: string | null;
-  source?: WorkflowDefinitionSourceView | null;
-}
 
 /** Build the canonical projection for a run from the journal + events. */
 export function buildProjection(store: JournalStore, runId: string): RunProjection | null {
@@ -338,32 +281,6 @@ function resultJsonForReport(
   return { kind: "inline", json: Buffer.from(data).toString("utf8") };
 }
 
-export type BlockageReason =
-  | "none"
-  | "running"
-  | "agent_concurrency"
-  | "stalled_no_heartbeat"
-  | "waiting_human"
-  | "waiting_signal"
-  | "waiting_timer"
-  | "waiting_child"
-  | "interrupted";
-
-export interface InterruptionBlockageDetails {
-  reason?: string;
-  previousStatus: string;
-  phase: string | null;
-  wait: { kind?: string; key?: string; until?: number } | null;
-}
-
-export interface Blockage {
-  reason: BlockageReason;
-  blockedOn: { stableKey: string; since: number } | null;
-  context: string;
-  interrupted?: InterruptionBlockageDetails;
-  agentConcurrency?: AgentConcurrencyWaitSnapshot;
-}
-
 export function isVisibleBlockage(blockage: Blockage | null | undefined): blockage is Blockage {
   return Boolean(blockage && blockage.reason !== "none" && blockage.reason !== "running");
 }
@@ -479,21 +396,6 @@ export function getBlockage(
     };
   }
   return { reason: "running", blockedOn: null, context: "executing normally" };
-}
-
-export interface RunSummary {
-  runId: string;
-  workflowName: string | null;
-  status: RunStatus;
-  runTarget?: string | null;
-  createdAtMs: number;
-  finishedAtMs: number | null;
-  parentRunId: string | null;
-}
-
-export interface RunSummaryPage {
-  runs: RunSummary[];
-  total: number;
 }
 
 export function listRunSummaries(store: JournalStore): RunSummary[] {

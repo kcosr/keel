@@ -1,7 +1,15 @@
-import { describe, expect, test, vi } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import { resetWebDebugCacheForTest } from "../lib/debug";
 import { ApiError, KeelWebClient, WEB_RUNS_DEFAULT_LIMIT } from "./client";
 
 describe("KeelWebClient", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    localStorage.clear();
+    window.history.replaceState(null, "", "/");
+    resetWebDebugCacheForTest();
+  });
+
   test("sends bearer credentials on protected projection requests", async () => {
     const fetchImpl = vi.fn<typeof fetch>(async () =>
       jsonResponse({
@@ -250,6 +258,44 @@ describe("KeelWebClient", () => {
     expect(frames).toEqual([
       { event: "event", data: { seq: 1 }, raw: 'event: event\ndata: {"seq":1}' },
     ]);
+  });
+
+  test("event debug summaries omit raw streamed agent text", async () => {
+    const marker = "raw-secret-debug-marker";
+    localStorage.setItem("keelDebug", "events");
+    resetWebDebugCacheForTest();
+    const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
+    const encoder = new TextEncoder();
+    const fetchImpl = vi.fn<typeof fetch>(
+      async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(
+                encoder.encode(
+                  `event: event\ndata: {"kind":"ephemeral","type":"agent.event","payload":{"key":"review","event":{"type":"reasoning","data":"${marker}"}},"atMs":1}\n\n`,
+                ),
+              );
+              controller.close();
+            },
+          }),
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        ),
+    );
+    const frames: unknown[] = [];
+    const client = new KeelWebClient({ baseUrl: "http://keel.test", fetchImpl });
+
+    const stop = client.watchRunEvents("run_1", {
+      onFrame: (frame) => frames.push(frame),
+    });
+
+    await vi.waitFor(() => expect(frames).toHaveLength(1));
+    stop();
+
+    const logged = JSON.stringify(debug.mock.calls);
+    expect(logged).not.toContain(marker);
+    expect(logged).toContain(`"dataLength":${marker.length}`);
+    expect(logged).toContain('"innerType":"reasoning"');
   });
 });
 

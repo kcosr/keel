@@ -921,6 +921,19 @@ Gateway debug logs are written to stderr/systemd journal and include route/RPC
 names, run ids or page limits, elapsed timings, and success/error status; they
 do not log bearer credentials or full RPC payloads.
 
+The browser console has opt-in run-event diagnostics for troubleshooting live
+transcript rendering. Enable them for the current browser profile with:
+
+```js
+localStorage.setItem("keelDebug", "events,transcript");
+```
+
+Reload the web console after setting the flag. The `events` scope logs SSE
+connection state, frame shape, cursor movement, run-frame conversion, and merge
+counts. The `transcript` scope logs transcript coalescing counts and row
+summaries. Browser diagnostics intentionally report payload shape and text
+lengths rather than raw agent text by default.
+
 ## Workflow Authoring
 
 A workflow module default-exports `async (ctx, input) => output`.

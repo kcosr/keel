@@ -7,15 +7,18 @@
   single-reviewer workflows keep waiting after a clean review unless
   `stopWhenClean` is set, autonomous implement/spec-author workflows park before
   completion by default, and all five default/cap review rounds at `10`.
+  ([#24](https://github.com/kcosr/keel/pull/24))
 - `bun run defaults:seed` now seeds conventional local profiles plus the five
   reusable saved review workflows; `profiles:seed-defaults` and
   `workflows:seed-defaults` are available for narrower seeding.
+  ([#24](https://github.com/kcosr/keel/pull/24))
 
 ### Fixed
 - Sample implement review workflows now validate
   `completionCheckFailureAction: "park"` against the resolved
   `completionMode` default, so callers can rely on the default
   `"park-before-complete"` mode without restating it.
+  ([#24](https://github.com/kcosr/keel/pull/24))
 - Plain `ctx.agent` calls now include resolved execution controls in durable
   version/input identity, matching replay-visible runtime behavior when
   `maxRetries`, `lenient`, `onFailure`, `timeoutMs`, `stallRetries`, or their

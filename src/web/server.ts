@@ -28,6 +28,7 @@ export const MAX_WEB_RUNS_LIMIT = MAX_RUN_SUMMARY_PAGE_LIMIT;
 
 const GATEWAY_DEBUG =
   process.env.KEEL_GATEWAY_DEBUG === "1" || process.env.KEEL_WEB_GATEWAY_DEBUG === "1";
+const RUN_EVENTS_PATH_RE = /^\/runs\/([^/]+)\/events$/;
 let nextProjectionDebugId = 1;
 
 export interface KeelWebServerOptions {
@@ -44,6 +45,10 @@ export interface KeelWebServer {
   readonly port: number;
   readonly url: string;
   stop(force?: boolean): void;
+}
+
+interface WebRequestTimeouts {
+  timeout(request: Request, seconds: number): void;
 }
 
 interface GatewayMessage {
@@ -276,7 +281,8 @@ export function startWebServer(opts: KeelWebServerOptions): KeelWebServer {
   const server = Bun.serve({
     hostname,
     port,
-    async fetch(request) {
+    async fetch(request, server) {
+      disableEventStreamTimeout(request, server);
       return handleWebRequest(request, {
         socketPath: opts.socketPath,
         assetsDir,
@@ -296,6 +302,20 @@ export function startWebServer(opts: KeelWebServerOptions): KeelWebServer {
   };
 }
 
+export function isEventStreamRequest(request: Request): boolean {
+  return eventStreamRunId(request) !== null;
+}
+
+export function disableEventStreamTimeout(request: Request, server: WebRequestTimeouts): void {
+  if (isEventStreamRequest(request)) server.timeout(request, 0);
+}
+
+export function eventStreamRunId(request: Request): string | null {
+  if (request.method !== "GET") return null;
+  const match = new URL(request.url).pathname.match(RUN_EVENTS_PATH_RE);
+  return match?.[1] ? decodeURIComponent(match[1]) : null;
+}
+
 async function handleWebRequest(
   request: Request,
   opts: {
@@ -313,14 +333,9 @@ async function handleWebRequest(
     if (request.method === "POST" && url.pathname === "/rpc") {
       return await rpcRoute(request, opts.socketPath);
     }
-    const eventMatch = url.pathname.match(/^\/runs\/([^/]+)\/events$/);
-    if (request.method === "GET" && eventMatch?.[1]) {
-      return await eventsRoute(
-        request,
-        opts.socketPath,
-        decodeURIComponent(eventMatch[1]),
-        opts.heartbeatMs,
-      );
+    const eventRunId = eventStreamRunId(request);
+    if (eventRunId) {
+      return await eventsRoute(request, opts.socketPath, eventRunId, opts.heartbeatMs);
     }
     if (request.method === "GET" && url.pathname === "/api/runs") {
       return await projectionRoute(opts.socketPath, request, "runs");

@@ -14,6 +14,10 @@
   ([#24](https://github.com/kcosr/keel/pull/24))
 
 ### Fixed
+- The web event stream now disables Bun's per-request idle timeout for SSE
+  watch requests, preventing live run views from failing with incomplete
+  chunked responses while waiting for sparse agent events.
+  ([#26](https://github.com/kcosr/keel/pull/26))
 - The web run-detail graph now uses the shared run projection effect-type
   contract and renders `command`, `completion_check`, and `workspace_setup`
   journal nodes instead of crashing on unknown icon mappings.
@@ -34,6 +38,9 @@
   ([#22](https://github.com/kcosr/keel/pull/22))
 
 ### Added
+- The web console now has opt-in browser diagnostics for run-event streaming
+  and transcript coalescing via `localStorage.keelDebug`.
+  ([#26](https://github.com/kcosr/keel/pull/26))
 - Production React/Vite/TypeScript web UI foundation under `web/`, including
   the shared operator shell, design primitives, typed browser API client,
   fetch-based SSE parser, frontend tests, root `web:*` scripts, and `web/dist`

@@ -33,6 +33,7 @@ import { Inspector } from "../components/inspector";
 import { type RawEventFrame, RawEventList, Transcript } from "../components/transcript";
 import { WorkflowFlow } from "../components/workflow-flow";
 import { useAsync } from "../hooks/use-async";
+import { summarizeEventFrameForDebug, webDebug } from "../lib/debug";
 import { flowPhaseFromEvents, flowRuntimeFromEvents } from "../lib/workflow-flow-live";
 
 type RunTab =
@@ -119,6 +120,11 @@ export function RunDetailScreen({
           },
         ]);
         const event = streamFrameFromSse(frame);
+        webDebug("events", "run frame conversion", () => ({
+          sseEvent: frame.event,
+          accepted: event !== null,
+          frame: event ? summarizeEventFrameForDebug(event) : null,
+        }));
         if (event) setLiveEvents((events) => [...events.slice(-499), event]);
         if (shouldReloadProjection(frame)) detailState.reload();
         const seq = cursorSeqFromSse(frame);
@@ -154,10 +160,15 @@ export function RunDetailScreen({
     [detail, liveEvents],
   );
   const renderedDetail = displayDetail ?? detail;
-  const allEvents = useMemo(
-    () => mergeEventFrames(detail?.events ?? [], liveEvents),
-    [detail?.events, liveEvents],
-  );
+  const allEvents = useMemo(() => {
+    const merged = mergeEventFrames(detail?.events ?? [], liveEvents);
+    webDebug("events", "merged event frames", () => ({
+      tail: detail?.events.length ?? 0,
+      live: liveEvents.length,
+      merged: merged.length,
+    }));
+    return merged;
+  }, [detail?.events, liveEvents]);
   const rawFrames = useMemo(
     () => mergeRawFrames(tailRawFrames(detail?.events ?? []), rawLiveFrames),
     [detail?.events, rawLiveFrames],
@@ -286,7 +297,7 @@ function renderTab(
                 Open transcript
               </button>
             </div>
-            <Transcript events={events.slice(-8)} compact />
+            <Transcript events={events} compact maxRows={8} />
           </section>
         </div>
       );
@@ -540,8 +551,6 @@ function RunDetailInspector({
 }) {
   const run = detail?.run ?? null;
   const commands = detail?.availableCommands ?? [];
-  const latestEvents = events.slice(-6);
-
   return (
     <Inspector
       title={run ? <span className="mono">{run.runId}</span> : "Run detail"}
@@ -607,7 +616,7 @@ function RunDetailInspector({
           </section>
           <section className="inspector-section">
             <h3>Latest Transcript</h3>
-            <Transcript events={latestEvents} compact />
+            <Transcript events={events} compact maxRows={6} />
           </section>
         </>
       ) : (

@@ -1,4 +1,5 @@
 import type { EventStreamFrame } from "../api/types";
+import { summarizeTranscriptRowForDebug, webDebug } from "../lib/debug";
 import { StatusPill, formatTime, toneForStatus } from "./controls";
 
 function formatClock(value: number | null): string {
@@ -10,6 +11,7 @@ function formatClock(value: number | null): string {
 // hover tooltip; MESSAGE_TITLE_MAX bounds the tooltip for very large payloads.
 const MESSAGE_DISPLAY_MAX = 600;
 const MESSAGE_TITLE_MAX = 4000;
+const COALESCED_TRANSCRIPT_CACHE = new WeakMap<EventStreamFrame[], TranscriptRow[]>();
 
 export interface RawEventFrame {
   event: string;
@@ -38,9 +40,11 @@ interface ActiveStream {
 export function Transcript({
   events,
   compact = false,
-}: { events: EventStreamFrame[]; compact?: boolean }) {
+  maxRows,
+}: { events: EventStreamFrame[]; compact?: boolean; maxRows?: number }) {
   const rows = coalesceTranscript(events);
-  if (rows.length === 0) {
+  const visibleRows = maxRows === undefined ? rows : maxRows <= 0 ? [] : rows.slice(-maxRows);
+  if (visibleRows.length === 0) {
     return <div className="table-empty">No transcript events in the current tail.</div>;
   }
 
@@ -56,7 +60,7 @@ export function Transcript({
         <span>Message</span>
         {compact ? null : <span>Seq</span>}
       </div>
-      {rows.map((row) => {
+      {visibleRows.map((row) => {
         const truncated = row.message.length > MESSAGE_DISPLAY_MAX;
         const shown = truncated ? `${row.message.slice(0, MESSAGE_DISPLAY_MAX - 1)}…` : row.message;
         return (
@@ -104,6 +108,8 @@ export function RawEventList({ frames }: { frames: RawEventFrame[] }) {
 }
 
 export function coalesceTranscript(events: EventStreamFrame[]): TranscriptRow[] {
+  const cached = COALESCED_TRANSCRIPT_CACHE.get(events);
+  if (cached) return cached;
   const rows: TranscriptRow[] = [];
   let active: ActiveStream | null = null;
 
@@ -135,6 +141,12 @@ export function coalesceTranscript(events: EventStreamFrame[]): TranscriptRow[] 
     if (row) rows.push(row);
   });
 
+  webDebug("transcript", "coalesced", () => ({
+    events: events.length,
+    rows: rows.length,
+    rowSummary: rows.map(summarizeTranscriptRowForDebug),
+  }));
+  COALESCED_TRANSCRIPT_CACHE.set(events, rows);
   return rows;
 }
 

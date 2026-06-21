@@ -3,10 +3,17 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import type { KeelWebClient, WatchRunEventsOptions } from "../api/client";
 import type { EventStreamFrame, RunDetailResponse, RunWorkspaceView } from "../api/types";
 import type { RawEventFrame } from "../components/transcript";
+import { resetWebDebugCacheForTest } from "../lib/debug";
 import { RunDetailScreen, mergeEventFrames, mergeRawFrames } from "./run-detail";
 
 describe("RunDetailScreen", () => {
-  afterEach(cleanup);
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+    localStorage.clear();
+    window.history.replaceState(null, "", "/");
+    resetWebDebugCacheForTest();
+  });
 
   test("deduplicates replayed durable events and keeps durable rows ordered", () => {
     const merged = mergeEventFrames(
@@ -189,6 +196,47 @@ describe("RunDetailScreen", () => {
 
     await waitFor(() => expect(client.getRun).toHaveBeenCalledTimes(1));
     expect(screen.getAllByText("synthesis").length).toBeGreaterThan(0);
+  });
+
+  test("event conversion debug summaries omit raw streamed agent text", async () => {
+    const marker = "raw-run-detail-debug-marker";
+    localStorage.setItem("keelDebug", "events");
+    resetWebDebugCacheForTest();
+    const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
+    const watched: WatchRunEventsOptions[] = [];
+    const client = {
+      getRun: vi.fn(async () => detail()),
+      watchRunEvents: vi.fn((_runId: string, opts: WatchRunEventsOptions) => {
+        watched.push(opts);
+        return vi.fn();
+      }),
+    } as unknown as KeelWebClient;
+
+    render(<RunDetailScreen client={client} runId="run_1" refreshKey={0} />);
+
+    await screen.findByText("cursor 5");
+    fireEvent.click(screen.getByRole("button", { name: "Watch live" }));
+    await waitFor(() => expect(client.watchRunEvents).toHaveBeenCalledTimes(1));
+
+    act(() => {
+      watched[0]?.onFrame({
+        event: "event",
+        data: {
+          kind: "ephemeral",
+          type: "agent.event",
+          payload: { key: "review", event: { type: "reasoning", data: marker } },
+          atMs: 12,
+        },
+        raw: "event: event",
+      });
+    });
+
+    await waitFor(() => {
+      expect(JSON.stringify(debug.mock.calls)).toContain(`"dataLength":${marker.length}`);
+    });
+    const logged = JSON.stringify(debug.mock.calls);
+    expect(logged).not.toContain(marker);
+    expect(logged).toContain('"innerType":"reasoning"');
   });
 
   test("labels the internal default workspace as the run target on detail", async () => {

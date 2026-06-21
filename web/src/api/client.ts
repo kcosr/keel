@@ -1,3 +1,4 @@
+import { summarizeSseFrameForDebug, webDebug } from "../lib/debug";
 import { type SseMessage, parseSseStream } from "./sse";
 import type {
   AgentProfileCheckResult,
@@ -223,6 +224,11 @@ export class KeelWebClient {
           opts.onStatus?.({ state: "connecting", cursor: nextCursor });
           const url = new URL(`/runs/${encodeURIComponent(runId)}/events`, this.baseUrl);
           applyCursor(url, nextCursor);
+          webDebug("events", "connect", {
+            runId,
+            cursor: nextCursor,
+            url: `${url.pathname}${url.search}`,
+          });
           const headers = this.headers({ includeAuth: true });
           headers.set("accept", "text/event-stream");
           const response = await this.fetchImpl(url, {
@@ -231,18 +237,29 @@ export class KeelWebClient {
           });
           if (!response.ok) throw await toApiError(response);
           if (!response.body) throw new ApiError("event stream did not include a body", 500, null);
+          webDebug("events", "open", { runId, cursor: nextCursor });
           opts.onStatus?.({ state: "open", cursor: nextCursor });
           await parseSseStream(response.body, {
             onMessage: (frame) => {
               if (frame.event === "heartbeat") return;
+              webDebug("events", "frame", () => summarizeSseFrameForDebug(frame));
               opts.onFrame(frame);
               const advanced = cursorFromFrame(frame);
-              if (advanced) nextCursor = advanced;
+              if (advanced) {
+                webDebug("events", "cursor advanced", { from: nextCursor, to: advanced });
+                nextCursor = advanced;
+              }
               if (frame.event === "caught-up") {
+                webDebug("events", "caught up", { runId, cursor: nextCursor });
                 opts.onStatus?.({ state: "caught-up", cursor: nextCursor });
               }
               if (frame.event === "closed" || frame.event === "authorization.failed") {
                 terminal = true;
+                webDebug("events", "closed", {
+                  runId,
+                  cursor: nextCursor,
+                  reason: terminalReason(frame),
+                });
                 opts.onStatus?.({
                   state: "closed",
                   cursor: nextCursor,
@@ -252,10 +269,16 @@ export class KeelWebClient {
             },
           });
           if (terminal || controller.signal.aborted) return;
+          webDebug("events", "reconnect scheduled", { runId, cursor: nextCursor });
           opts.onStatus?.({ state: "reconnecting", cursor: nextCursor });
           await waitForReconnect();
         } catch (err) {
           if (controller.signal.aborted) return;
+          webDebug("events", "error", {
+            runId,
+            cursor: nextCursor,
+            error: err instanceof Error ? err.message : String(err),
+          });
           opts.onError?.(err);
           if (err instanceof ApiError && err.status < 500) {
             opts.onStatus?.({ state: "closed", cursor: nextCursor, reason: err.message });

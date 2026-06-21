@@ -28,11 +28,10 @@ the reviewer cwd matches the repository named in prompts. To review a
 manually-created git worktree, pass that worktree path as `--target`;
 `repository` may be omitted unless you need to override it intentionally.
 
-For manual code review cycles, prefer `stopWhenClean: false` with a higher
-`maxRounds` such as `10`. That keeps the durable reviewer session parked after a
-clean review so a human or implementing agent can make more changes and
-re-invoke the same reviewer conversation. Stop the run explicitly when review is
-complete.
+By default, `stopWhenClean` is `false`. That keeps the durable reviewer session
+parked after a clean review so a human or implementing agent can make more
+changes and re-invoke the same reviewer conversation. Stop the run explicitly
+when review is complete.
 
 Signal after applying fixes:
 
@@ -60,11 +59,12 @@ KEEL_RUN_CAP=kc_run_... keel signal <run-id> review-cycle '{
 | `task` | yes | The concrete implementation, design, or change to review. |
 | `spec` | no | Optional absolute path to a spec, design note, or acceptance criteria. |
 | `focus` | no | Optional review focus such as security, replay semantics, or docs. |
-| `reasoning` | no | Override reasoning effort for the `claude-default` reviewer profile. |
-| `maxRounds` | no | Maximum follow-up review turns. Defaults to `3`, capped at `20`. |
+| `profile` | no | Reviewer profile name. Defaults to `claude-default`. |
+| `reasoning` | no | Override reasoning effort for the selected reviewer profile. |
+| `maxRounds` | no | Maximum follow-up review turns. Defaults to `10`, capped at `10`. |
 | `signalName` | no | Signal name for follow-up payloads. Defaults to `review-cycle`. |
-| `stopWhenClean` | no | Defaults to `true`. Set `false` to keep parking for more cycles even after a clean review. |
+| `stopWhenClean` | no | Defaults to `false`, keeping the workflow parked for more cycles even after a clean review. Set `true` to complete on clean. |
 
 The reviewer participant key is `reviewer`; turn keys are `initial`,
-`followup-1`, `followup-2`, and so on. The reviewer uses the daemon
-`claude-default` profile with read-only tools.
+`followup-1`, `followup-2`, and so on. The reviewer uses the selected profile
+with read-only tools.

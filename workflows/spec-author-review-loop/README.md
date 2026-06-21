@@ -2,8 +2,9 @@
 
 `spec-author-review-loop.workflow.ts` is fully orchestrated. A write-capable spec
 creator drafts or revises the main spec, then a write-capable reviewer appends
-timestamped correspondence. Findings are fed back to the creator until the spec is
-clean, the creator is blocked, or `maxRounds` is reached.
+timestamped correspondence. Findings are fed back to the creator until the spec
+is clean, the creator is blocked, or `maxRounds` is reached. By default, a clean
+review parks for a human complete/continue decision before the workflow returns.
 
 Launch:
 
@@ -16,8 +17,26 @@ keel launch --detach workflows/spec-author-review-loop/spec-author-review-loop.w
     "request": "Design a durable feature and preserve reviewer correspondence",
     "creatorReasoning": "high",
     "reviewerReasoning": "xhigh",
-    "maxRounds": 3
+    "maxRounds": 10
   }'
+```
+
+By default, `completionMode` is `"park-before-complete"` so a human or
+orchestrator can make the final call after a clean review. Complete it with:
+
+```bash
+KEEL_RUN_CAP=kc_run_... keel signal <run-id> spec-author-completion '{
+  "action": "complete"
+}'
+```
+
+Or request another creator/reviewer round:
+
+```bash
+KEEL_RUN_CAP=kc_run_... keel signal <run-id> spec-author-completion '{
+  "action": "continue",
+  "instructions": "Before completion, add rollout and rollback details."
+}'
 ```
 
 ## Correspondence Format
@@ -52,6 +71,10 @@ No round label is required; the timestamp and identity preserve history.
 | `request` | yes | High-level user request for the spec. |
 | `creatorIdentity` | no | Header identity string for creator correspondence. |
 | `reviewerIdentity` | no | Header identity string for reviewer correspondence. |
-| `creatorReasoning` | no | Override reasoning effort for the `codex-default` creator profile. |
-| `reviewerReasoning` | no | Override reasoning effort for the `claude-default` reviewer profile. |
-| `maxRounds` | no | Maximum creator/reviewer rounds. Defaults to `3`, capped at `10`. |
+| `creatorProfile` | no | Creator profile name. Defaults to `codex-default`. |
+| `reviewerProfile` | no | Reviewer profile name. Defaults to `claude-default`. |
+| `creatorReasoning` | no | Override reasoning effort for the selected creator profile. |
+| `reviewerReasoning` | no | Override reasoning effort for the selected reviewer profile. |
+| `maxRounds` | no | Maximum creator/reviewer rounds. Defaults to `10`, capped at `10`. |
+| `completionMode` | no | `"park-before-complete"` by default. Set `"auto"` to complete immediately after a clean review. |
+| `completionSignalName` | no | Signal name for parked clean completion. Defaults to `spec-author-completion`. |

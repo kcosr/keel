@@ -1186,6 +1186,46 @@ All profile commands use the daemon connection (`KEEL_SOCKET`/`KEEL_DIR`) and re
 
 The daemon snapshots the complete effective catalog (programmatic plus persisted catalog profiles) when a run is launched or rerun. Resume, retry, rewind, daemon restart, provider retries, and default forks keep the existing snapshot; editing or deleting a profile only affects future launches and reruns.
 
+To seed the conventional local defaults, including profiles and reusable saved
+workflows, run:
+
+```bash
+bun run defaults:seed
+```
+
+To seed only profiles, run:
+
+```bash
+bun run profiles:seed-defaults
+```
+
+To seed only saved workflows, run:
+
+```bash
+bun run workflows:seed-defaults
+```
+
+The profile seed upserts:
+
+| Name | Provider | Model | Reasoning |
+|---|---|---|---|
+| `codex-default` | `codex` | `gpt-5.5` | `xhigh` |
+| `claude-default` | `claude` | `claude-opus-4-8` | `xhigh` |
+| `work-gemma-4-31b` | `pi` | `work-gemma-4-31b/gemma-4-31b` | `high` |
+| `work-gpt-oss-120b` | `pi` | `work-gpt-oss-120b//models/gpt-oss-120b` | `high` |
+| `work-nemotron-3-ultra` | `pi` | `work-nemotron-3-ultra/nemotron-3-ultra` | `high` |
+| `work-qwen-3-6-27b` | `pi` | `work-qwen-3-6-27b/qwen3.6-27b` | `high` |
+
+The workflow seed saves or refreshes these reusable saved workflows:
+
+| Name | Source |
+|---|---|
+| `iterative-review` | `workflows/iterative-review/iterative-review.workflow.ts` |
+| `implement-review-loop` | `workflows/implement-review-loop/implement-review-loop.workflow.ts` |
+| `branch-worktree-implement-review` | `workflows/branch-worktree-implement-review/branch-worktree-implement-review.workflow.ts` |
+| `spec-review-loop` | `workflows/spec-review-loop/spec-review-loop.workflow.ts` |
+| `spec-author-review-loop` | `workflows/spec-author-review-loop/spec-author-review-loop.workflow.ts` |
+
 ### Persistent Daemon Settings
 
 Operators can inspect and tune a small typed daemon settings catalog:

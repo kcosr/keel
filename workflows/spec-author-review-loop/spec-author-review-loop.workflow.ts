@@ -29,9 +29,18 @@ type SpecAuthorReviewInput = {
   request: string;
   creatorIdentity?: string;
   reviewerIdentity?: string;
+  creatorProfile?: string;
+  reviewerProfile?: string;
   creatorReasoning?: string;
   reviewerReasoning?: string;
   maxRounds?: number;
+  completionMode?: "auto" | "park-before-complete";
+  completionSignalName?: string;
+};
+
+type CompletionSignal = {
+  action: "complete" | "continue";
+  instructions?: string;
 };
 
 type SpecRound = {
@@ -80,8 +89,10 @@ const SpecReviewSchema = jsonSchema<SpecReview>({
   },
 });
 
-const DEFAULT_MAX_ROUNDS = 3;
+const DEFAULT_MAX_ROUNDS = 10;
 const HARD_MAX_ROUNDS = 10;
+const DEFAULT_COMPLETION_MODE: NonNullable<SpecAuthorReviewInput["completionMode"]> =
+  "park-before-complete";
 const CREATOR_PROFILE = "codex-default";
 const REVIEWER_PROFILE = "claude-default";
 
@@ -95,32 +106,42 @@ export default async function specAuthorReviewLoop(
   blockedAuthor?: AuthorResult;
 }> {
   const maxRounds = clampCount(input.maxRounds ?? DEFAULT_MAX_ROUNDS);
-  const creatorIdentity = input.creatorIdentity ?? `Creator: ${CREATOR_PROFILE}`;
-  const reviewerIdentity = input.reviewerIdentity ?? `Reviewer: ${REVIEWER_PROFILE}`;
+  const completionMode = input.completionMode ?? DEFAULT_COMPLETION_MODE;
+  const completionSignalName = input.completionSignalName ?? "spec-author-completion";
+  const creatorProfile = input.creatorProfile ?? CREATOR_PROFILE;
+  const reviewerProfile = input.reviewerProfile ?? REVIEWER_PROFILE;
+  const creatorIdentity = input.creatorIdentity ?? `Creator: ${creatorProfile}`;
+  const reviewerIdentity = input.reviewerIdentity ?? `Reviewer: ${reviewerProfile}`;
   const creator = ctx.agentSession({
     key: "spec_creator",
-    profile: CREATOR_PROFILE,
+    profile: creatorProfile,
     ...(input.creatorReasoning ? { reasoning: input.creatorReasoning } : {}),
   });
   const reviewer = ctx.agentSession({
     key: "spec_reviewer",
-    profile: REVIEWER_PROFILE,
+    profile: reviewerProfile,
     ...(input.reviewerReasoning ? { reasoning: input.reviewerReasoning } : {}),
     toolPolicy: "workspace-write",
   });
 
   const rounds: SpecRound[] = [];
   let findings: Finding[] = [];
+  let followUp: CompletionSignal | undefined;
+  let manualExtraRounds = 0;
 
-  for (let round = 1; round <= maxRounds; round++) {
+  for (let round = 1; round <= maxRounds + manualExtraRounds; round++) {
+    const followUpForRound = followUp;
+    followUp = undefined;
     const creatorTimestamp = timestampFrom(ctx.now());
     ctx.phase(`Spec author ${creatorTimestamp}`);
+    const authorPrompt = followUpForRound
+      ? followUpPrompt(input, creatorIdentity, creatorTimestamp, followUpForRound)
+      : round === 1
+        ? draftPrompt(input, creatorIdentity, creatorTimestamp)
+        : revisePrompt(input, creatorIdentity, creatorTimestamp, findings);
     const author = await creator.turn({
       key: round === 1 ? "draft" : `revise-${round}`,
-      prompt:
-        round === 1
-          ? draftPrompt(input, creatorIdentity, creatorTimestamp)
-          : revisePrompt(input, creatorIdentity, creatorTimestamp, findings),
+      prompt: authorPrompt,
       schema: AuthorResultSchema,
       lenient: true,
     });
@@ -143,6 +164,15 @@ export default async function specAuthorReviewLoop(
     rounds.push({ creatorTimestamp, reviewerTimestamp, author, review });
     findings = review.findings;
     if (review.status === "clean" && findings.length === 0) {
+      if (completionMode === "park-before-complete") {
+        ctx.phase("Awaiting spec author completion");
+        const completion = await ctx.signal<CompletionSignal>(completionSignalName);
+        if (completion.action === "continue") {
+          followUp = completion;
+          if (round >= maxRounds + manualExtraRounds) manualExtraRounds += 1;
+          continue;
+        }
+      }
       return { status: "clean", rounds, remainingFindings: [] };
     }
   }
@@ -165,6 +195,26 @@ history if the file already exists.
 
 Append a creator correspondence entry under "## Correspondence", creating that
 section if needed. Use the exact header above.`;
+}
+
+function followUpPrompt(
+  input: SpecAuthorReviewInput,
+  identity: string,
+  timestamp: string,
+  followUp: CompletionSignal,
+): string {
+  const header = `### ${timestamp} - ${identity}`;
+  return `Revise the spec document for a human-requested follow-up after a clean review.
+
+Spec path: ${input.specPath}
+Request: ${input.request}
+Correspondence header to add exactly: ${header}
+Follow-up instructions:
+${followUp.instructions ?? "Make one more focused spec pass before completion."}
+
+Update the main spec content only as needed for the follow-up instructions.
+Preserve correspondence history. Append a creator response under
+"## Correspondence" using the exact header above.`;
 }
 
 function revisePrompt(

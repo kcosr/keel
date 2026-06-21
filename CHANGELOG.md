@@ -2,7 +2,23 @@
 
 ## [Unreleased]
 
+### Changed
+- Sample iterative review workflows now default to caller-controlled follow-up:
+  single-reviewer workflows keep waiting after a clean review unless
+  `stopWhenClean` is set, autonomous implement/spec-author workflows park before
+  completion by default, and all five default/cap review rounds at `10`.
+  ([#24](https://github.com/kcosr/keel/pull/24))
+- `bun run defaults:seed` now seeds conventional local profiles plus the five
+  reusable saved review workflows; `profiles:seed-defaults` and
+  `workflows:seed-defaults` are available for narrower seeding.
+  ([#24](https://github.com/kcosr/keel/pull/24))
+
 ### Fixed
+- Sample implement review workflows now validate
+  `completionCheckFailureAction: "park"` against the resolved
+  `completionMode` default, so callers can rely on the default
+  `"park-before-complete"` mode without restating it.
+  ([#24](https://github.com/kcosr/keel/pull/24))
 - Plain `ctx.agent` calls now include resolved execution controls in durable
   version/input identity, matching replay-visible runtime behavior when
   `maxRetries`, `lenient`, `onFailure`, `timeoutMs`, `stallRetries`, or their
@@ -154,6 +170,9 @@
   and docs review workflows as immutable saved workflow versions with per-entry
   `created`/`unchanged`/`conflict`/`failed` reporting. The package now includes
   a read-only docs review workflow and richer Keel-native review rubrics.
+- `scripts/seed-default-profiles.sh` and `bun run profiles:seed-defaults` seed
+  the conventional `codex-default`, `claude-default`, and work-prefixed Pi
+  catalog profiles with explicit provider/model/reasoning defaults.
 - Reusable `workflows/model-routing/` helper package for captured static or
   read-only-agent routing of profile/reasoning choices, with guardrails for
   allowlisted profiles, allowlisted reasoning levels, critical surface/risk
@@ -357,8 +376,8 @@
   review with `completionMode: "park-before-complete"`, allowing an orchestrator
   to request another round or explicitly signal final completion.
 - Reusable review/spec/implementation workflows now default to the
-  `codex-default` and `claude-default` agent profiles, exposing only reasoning
-  overrides for normal launches.
+  `codex-default` and `claude-default` agent profiles while exposing profile and
+  reasoning overrides for normal launches.
 - Long-lived waits/event streams re-check capability validity and fail when a
   presented capability is revoked or expires; each wait/subscription is bound to
   the credential presented when it was started.

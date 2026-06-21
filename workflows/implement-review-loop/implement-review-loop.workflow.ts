@@ -46,6 +46,8 @@ type ImplementReviewInput = {
   completionSignalName?: string;
   completionCheckFailureAction?: CompletionCheckFailureAction;
   completionChecks?: CompletionCheck[];
+  implementerProfile?: string;
+  reviewerProfile?: string;
   implementerReasoning?: string;
   reviewerReasoning?: string;
   reviewFocus?: string;
@@ -108,8 +110,10 @@ const ReviewSchema = jsonSchema<Review>({
   },
 });
 
-const DEFAULT_MAX_ROUNDS = 3;
+const DEFAULT_MAX_ROUNDS = 10;
 const HARD_MAX_ROUNDS = 10;
+const DEFAULT_COMPLETION_MODE: NonNullable<ImplementReviewInput["completionMode"]> =
+  "park-before-complete";
 const IMPLEMENTER_PROFILE = "codex-default";
 const REVIEWER_PROFILE = "claude-default";
 
@@ -126,10 +130,12 @@ export default async function implementReviewLoop(
   completion: CompletionSummary;
 }> {
   const repository = resolveRepository(input.repository, ctx.run.target);
-  const completionConfig = resolveCompletionConfig(input, "direct");
+  const completionMode = input.completionMode ?? DEFAULT_COMPLETION_MODE;
+  const completionConfig = resolveCompletionConfig({ ...input, completionMode }, "direct");
   const resolvedInput: ResolvedImplementReviewInput = {
     ...input,
     repository,
+    completionMode,
     completionChecks: completionConfig.checks,
   };
   const maxRounds = clampRounds(input.maxRounds ?? DEFAULT_MAX_ROUNDS);
@@ -143,12 +149,12 @@ export default async function implementReviewLoop(
   return await ctx.withWorkspace(workspace, async () => {
     const implementer = ctx.agentSession({
       key: "implementer",
-      profile: IMPLEMENTER_PROFILE,
+      profile: input.implementerProfile ?? IMPLEMENTER_PROFILE,
       ...(input.implementerReasoning ? { reasoning: input.implementerReasoning } : {}),
     });
     const reviewer = ctx.agentSession({
       key: "reviewer",
-      profile: REVIEWER_PROFILE,
+      profile: input.reviewerProfile ?? REVIEWER_PROFILE,
       ...(input.reviewerReasoning ? { reasoning: input.reviewerReasoning } : {}),
       toolPolicy: "read-only",
     });
@@ -228,7 +234,7 @@ export default async function implementReviewLoop(
       findings = review.findings;
       if (findings.length === 0) {
         if (completionConfig.checks.length > 0) {
-          const trigger = input.completionMode === "park-before-complete" ? "pre-park" : "auto";
+          const trigger = completionMode === "park-before-complete" ? "pre-park" : "auto";
           const attempt = await runCompletionAttempt(
             ctx,
             workspace,
@@ -254,21 +260,21 @@ export default async function implementReviewLoop(
               findings = [];
               continue;
             }
-            if (input.completionMode !== "park-before-complete") {
+            if (completionMode !== "park-before-complete") {
               return finish({
                 status: "blocked",
                 blockedReason: "completion-check-failed",
                 remainingFindings: [],
               });
             }
-          } else if (input.completionMode !== "park-before-complete") {
+          } else if (completionMode !== "park-before-complete") {
             return finish({ status: "clean", remainingFindings: [] });
           }
-        } else if (input.completionMode !== "park-before-complete") {
+        } else if (completionMode !== "park-before-complete") {
           return finish({ status: "clean", remainingFindings: [] });
         }
 
-        if (input.completionMode === "park-before-complete") {
+        if (completionMode === "park-before-complete") {
           let parkedFailureFeedback =
             completionAttempts[completionAttempts.length - 1]?.status === "failed"
               ? lastCompletionFailureFeedback

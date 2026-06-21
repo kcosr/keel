@@ -7,6 +7,9 @@
   single-reviewer workflows keep waiting after a clean review unless
   `stopWhenClean` is set, autonomous implement/spec-author workflows park before
   completion by default, and all five default/cap review rounds at `10`.
+- `bun run defaults:seed` now seeds conventional local profiles plus the five
+  reusable saved review workflows; `profiles:seed-defaults` and
+  `workflows:seed-defaults` are available for narrower seeding.
 
 ### Fixed
 - Sample implement review workflows now validate

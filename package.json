@@ -16,7 +16,9 @@
   },
   "scripts": {
     "build": "bun build src/cli/keel.ts --compile --outfile dist/keel",
-    "profiles:seed-defaults": "bash scripts/seed-default-profiles.sh",
+    "defaults:seed": "bash scripts/seed-default-profiles.sh --all",
+    "profiles:seed-defaults": "bash scripts/seed-default-profiles.sh --profiles",
+    "workflows:seed-defaults": "bash scripts/seed-default-profiles.sh --workflows",
     "test": "bun test --isolate ./src ./workflows ./fixtures",
     "typecheck": "tsc --noEmit && bun run web:typecheck",
     "lint": "biome check src web",

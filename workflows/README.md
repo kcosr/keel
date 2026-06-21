@@ -45,3 +45,15 @@ ordinary immutable saved workflow versions. Their `guidance/*.ts` modules are
 captured into the immutable saved bundle; editing a guidance file affects only
 newly launched path-based runs or newly saved versions, not existing saved
 versions.
+
+Seed the local default reusable review workflows with:
+
+```bash
+bun run workflows:seed-defaults
+```
+
+This saves or refreshes `iterative-review`, `implement-review-loop`,
+`branch-worktree-implement-review`, `spec-review-loop`, and
+`spec-author-review-loop` as saved workflow versions. Use `bun run
+defaults:seed` to seed both these workflows and the conventional local agent
+profiles.

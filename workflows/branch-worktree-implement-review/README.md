@@ -62,6 +62,10 @@ sees the implementer's uncommitted and committed changes. Prompts instruct both
 agents to use the current working directory rather than the source repository
 path.
 
+The implementer uses unrestricted tools. The reviewer uses read-only tools plus
+`Bash`, so it can inspect the worktree with shell commands but must not modify
+files.
+
 `completionChecks` are daemon-run gates after a clean review. In branch-backed
 mode, `has-commits` uses the generated worktree's persisted base commit,
 `git-clean` checks the generated worktree, and `branch-pushed` requires the

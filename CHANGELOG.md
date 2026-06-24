@@ -15,6 +15,7 @@
 - `bun run profiles:seed-defaults` now seeds `claude-default` with Claude
   `allowTools: ["Bash"]` so read-only reviewer sessions can inspect workspaces
   through shell commands while retaining their workflow-selected tool policy.
+  ([#27](https://github.com/kcosr/keel/pull/27))
 
 ### Fixed
 - The web event stream now disables Bun's per-request idle timeout for SSE

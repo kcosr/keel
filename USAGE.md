@@ -1220,14 +1220,14 @@ bun run workflows:seed-defaults
 
 The profile seed upserts:
 
-| Name | Provider | Model | Reasoning |
-|---|---|---|---|
-| `codex-default` | `codex` | `gpt-5.5` | `xhigh` |
-| `claude-default` | `claude` | `claude-opus-4-8` | `xhigh` |
-| `work-gemma-4-31b` | `pi` | `work-gemma-4-31b/gemma-4-31b` | `high` |
-| `work-gpt-oss-120b` | `pi` | `work-gpt-oss-120b//models/gpt-oss-120b` | `high` |
-| `work-nemotron-3-ultra` | `pi` | `work-nemotron-3-ultra/nemotron-3-ultra` | `high` |
-| `work-qwen-3-6-27b` | `pi` | `work-qwen-3-6-27b/qwen3.6-27b` | `high` |
+| Name | Provider | Model | Reasoning | Tool additions |
+|---|---|---|---|---|
+| `codex-default` | `codex` | `gpt-5.5` | `xhigh` | none |
+| `claude-default` | `claude` | `claude-opus-4-8` | `xhigh` | `allowTools: ["Bash"]` |
+| `work-gemma-4-31b` | `pi` | `work-gemma-4-31b/gemma-4-31b` | `high` | none |
+| `work-gpt-oss-120b` | `pi` | `work-gpt-oss-120b//models/gpt-oss-120b` | `high` | none |
+| `work-nemotron-3-ultra` | `pi` | `work-nemotron-3-ultra/nemotron-3-ultra` | `high` | none |
+| `work-qwen-3-6-27b` | `pi` | `work-qwen-3-6-27b/qwen3.6-27b` | `high` | none |
 
 The workflow seed saves or refreshes these reusable saved workflows:
 

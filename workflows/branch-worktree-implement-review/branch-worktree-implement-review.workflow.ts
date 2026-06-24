@@ -182,6 +182,7 @@ export default async function branchWorktreeImplementReview(
       profile: input.reviewerProfile ?? REVIEWER_PROFILE,
       ...(input.reviewerReasoning ? { reasoning: input.reviewerReasoning } : {}),
       toolPolicy: "read-only",
+      allowTools: ["Bash"],
     });
 
     const rounds: Round[] = [];

@@ -7,7 +7,10 @@ needed. `keel run` prints a structured JSON envelope by default.
 For reusable operational workflows, check `workflows/README.md` and launch the
 documented workflow file instead of copying fixture code. Once a workflow is
 stable, operators can save it with `keel workflow save <name> <workflow.ts>` and
-launch future pinned versions with `keel workflow run <name>`.
+launch future pinned versions with `keel workflow run <name>`. Use
+`keel workflow launch <name> --detach` when the caller needs the run id
+immediately; `--emit-capability` mirrors `keel launch` by printing the raw run
+capability instead of writing only a capability file reference.
 For Keel's curated one-shot review workflows, an operator with admin authority
 can install the package with `keel workflow install task-review-guidance`; this
 creates ordinary saved workflow versions for `task-code-review`,

@@ -31,6 +31,8 @@ import {
   parseTuiArgs,
   parseWatchArgs,
   parseWebArgs,
+  parseWorkflowLaunchArgs,
+  parseWorkflowRunArgs,
   resolveWorkflowPath,
   watchRun,
   workflowName,
@@ -517,6 +519,52 @@ describe("keel CLI", () => {
     });
     expect(() => parseRunArgs(["--json"])).toThrow("unknown flag --json");
     expect(() => parseRunArgs(['{"n":1}'])).toThrow("workflow input must use --input");
+  });
+
+  test("workflow launch args parse saved launch parity flags", () => {
+    expect(
+      parseWorkflowLaunchArgs([
+        "--detach",
+        "--emit-capability",
+        "--output",
+        "text",
+        "--version",
+        "2",
+        "--target",
+        ".",
+        "--input",
+        '{"n":1}',
+        "review-loop",
+      ]),
+    ).toMatchObject({
+      name: "review-loop",
+      version: 2,
+      detach: true,
+      emitCapability: true,
+      output: "text",
+      input: { n: 1 },
+    });
+    expect(parseWorkflowLaunchArgs(["review-loop"])).toMatchObject({
+      name: "review-loop",
+      detach: false,
+      emitCapability: false,
+      tools: false,
+      runSecrets: {},
+    });
+  });
+
+  test("workflow run args keep attached convenience semantics", () => {
+    expect(parseWorkflowRunArgs(["review-loop"])).toMatchObject({
+      name: "review-loop",
+      tools: false,
+      runSecrets: {},
+    });
+    expect(() => parseWorkflowRunArgs(["review-loop", "--detach"])).toThrow(
+      "unknown workflow run flag --detach",
+    );
+    expect(() => parseWorkflowRunArgs(["review-loop", "--emit-capability"])).toThrow(
+      "unknown workflow run flag --emit-capability",
+    );
   });
 
   test("execute args parse source, state, cap file, entry, and script args", () => {
@@ -1656,6 +1704,65 @@ describe("keel CLI", () => {
         expect(run.code).toBe(0);
         const runPayload = JSON.parse(run.stdout) as { runId: string; output: unknown };
         expect(runPayload.output).toBe(2);
+
+        const attachedLaunch = await runCli(["workflow", "launch", "review-loop"], dir, env);
+        expect(attachedLaunch.code).toBe(0);
+        const attachedLaunchEvents = attachedLaunch.stdout
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line) as { type: string; payload: Record<string, unknown> });
+        expect(attachedLaunchEvents[0]).toMatchObject({
+          type: "launch.started",
+          payload: {
+            capabilityRef: join(env.KEEL_CAP_DIR, `${attachedLaunchEvents[0]?.payload.runId}.cap`),
+          },
+        });
+        expect(attachedLaunchEvents.find((e) => e.type === "run.finished")?.payload).toEqual({
+          output: 2,
+        });
+
+        const detached = await runCli(["workflow", "launch", "review-loop", "--detach"], dir, env);
+        expect(detached.code).toBe(0);
+        expect(detached.stdout).not.toContain("kc_run_");
+        const detachedPayload = JSON.parse(detached.stdout) as {
+          runId: string;
+          capabilityRef: string;
+        };
+        expect(detachedPayload.capabilityRef).toBe(
+          join(env.KEEL_CAP_DIR, `${detachedPayload.runId}.cap`),
+        );
+        await waitForCliStatus(detachedPayload.runId, dir, {
+          ...env,
+          KEEL_CAP_FILE: detachedPayload.capabilityRef,
+        });
+
+        const rawDetached = await runCli(
+          ["workflow", "launch", "review-loop", "--detach", "--emit-capability"],
+          dir,
+          env,
+        );
+        expect(rawDetached.code).toBe(0);
+        const rawDetachedPayload = JSON.parse(rawDetached.stdout) as {
+          runId: string;
+          capability: string;
+        };
+        expect(rawDetachedPayload.capability.startsWith("kc_run_")).toBe(true);
+        expect(rawDetached.stdout).not.toContain("capabilityRef");
+        await waitForCliStatus(rawDetachedPayload.runId, dir, {
+          ...env,
+          KEEL_RUN_CAP: rawDetachedPayload.capability,
+        });
+
+        const invalidDetached = await runCli(
+          ["workflow", "launch", "review-loop", "--detach", "--output", "ndjson"],
+          dir,
+          env,
+        );
+        expect(invalidDetached.code).toBe(1);
+        expect(invalidDetached.stderr).toContain(
+          "--output ndjson is not available for workflow launch --detach",
+        );
+
         const runSource = await runCli(["workflow", "source", "--run", runPayload.runId], dir, env);
         expect(runSource.code).toBe(0);
         expect(runSource.stdout).toContain("export default async function chain");

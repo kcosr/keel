@@ -166,7 +166,7 @@ bun src/cli/keel.ts <command> [args]
 | `output <runId> [--output json\|text]` | Print the terminal workflow output. |
 | `report <runId> [--output json\|text]` | Print a journaled per-node result digest. |
 | `list [--output text\|json]` | List runs as an aligned table or JSON envelope. Requires admin. |
-| `workflow save/install/list/show/source/run/disable/enable/...` | Manage saved workflow names and immutable versions, install curated review workflows, and display retained workflow definition source. |
+| `workflow save/install/list/show/source/launch/run/disable/enable/...` | Manage saved workflow names and immutable versions, install curated review workflows, display retained workflow definition source, and launch saved definitions. |
 | `schedule put <name> [workflow.ts\|--workflow saved-name] --interval-ms ms [--target dir]` | Create or replace a pinned workflow schedule. Requires admin. |
 | `schedule list [--enabled-only] [--output text\|json]` | List pinned workflow schedules. Requires admin. |
 | `schedule show <name> [--output text\|json] [--source]` | Show one schedule projection, optionally including retained source. Requires admin. |
@@ -1694,6 +1694,8 @@ keel workflow show review-loop --output text
 keel workflow source review-loop --all
 keel workflow source --run run_123 --output json
 keel workflow source --definition wf_sha256_<64-hex-chars> --all
+keel workflow launch review-loop --detach --input '{"n":3}'
+keel workflow launch review-loop --detach --emit-capability --input '{"n":3}'
 keel workflow run review-loop --input '{"n":3}' --allow-deprecated
 keel workflow disable review-loop
 keel workflow enable review-loop
@@ -1702,7 +1704,10 @@ keel workflow delete-version review-loop 1 --yes
 ```
 
 `keel workflow run` accepts the same `--secret` and `--secret-env` flags as
-`keel run`; the raw values apply only to the launched run.
+`keel run`; the raw values apply only to the launched run. Use
+`keel workflow launch` when saved workflow callers need `keel launch` semantics
+such as attached event streaming, `--detach`, or `--emit-capability`; detached
+JSON output returns `runId` plus either `capabilityRef` or raw `capability`.
 
 Multi-file workflow packages are saved the same way. For the reusable task
 review guidance package:

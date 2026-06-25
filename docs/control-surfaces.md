@@ -160,7 +160,7 @@ versions, systemd state, logs, and restart controls are not inferred.
 | schedule list/show | implemented | implemented | implemented | implemented | not-applicable | deferred | not-applicable | `admin` |
 | saved workflow save/install | implemented | implemented | deferred | deferred | not-applicable | deferred | not-applicable | `admin`, `workflow:save` |
 | saved workflow list/show/source | implemented | implemented | deferred | implemented | not-applicable | deferred | not-applicable | `admin`, `workflow:read` |
-| saved workflow run | implemented | implemented | deferred | implemented | not-applicable | deferred | not-applicable | `workflow:run`; follow-up uses minted run capability |
+| saved workflow launch/run | implemented | implemented | deferred | implemented | not-applicable | deferred | not-applicable | `workflow:run`; follow-up uses minted run capability |
 | saved workflow enable/disable/deprecate/delete | implemented | implemented | deferred | deferred | not-applicable | deferred | not-applicable | `admin`, `workflow:save` for scoped non-delete metadata |
 | workflow definition preview/source | implemented | implemented | deferred | deferred | not-applicable | deferred | not-applicable | `admin`, `run:source` depending selector |
 | workflow definition GC | implemented | implemented | deferred | deferred | not-applicable | deferred | not-applicable | `admin` |
@@ -177,7 +177,7 @@ surface documentation.
 Run-secret delivery is part of existing launch/restart surfaces, not a separate
 operation. RPC accepts `runSecrets` on `launchRun`, `launchSavedWorkflow`,
 `retryRun`, `rewindRun`, and `rerunRun`; CLI exposes `--secret`/`--secret-env`
-on `launch`, `run`, `workflow run`, `retry`, and `rewind`; execute exposes
+on `launch`, `run`, `workflow launch`, `workflow run`, `retry`, and `rewind`; execute exposes
 `runSecrets` on `keel.launch`, `keel.retry`, and `keel.rewind`. The web
 transport rejects raw `runSecrets` until a browser-specific local secret
 authorization model exists.

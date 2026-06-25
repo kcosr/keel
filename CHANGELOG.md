@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### Changed
+- `keel workflow launch` now provides the saved-workflow counterpart to
+  `keel launch`, including attached event streaming, detached `runId` output,
+  capability-file output, and explicit raw capability emission.
+  ([#28](https://github.com/kcosr/keel/pull/28))
 - Sample iterative review workflows now default to caller-controlled follow-up:
   single-reviewer workflows keep waiting after a clean review unless
   `stopWhenClean` is set, autonomous implement/spec-author workflows park before

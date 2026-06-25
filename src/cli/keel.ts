@@ -45,6 +45,7 @@ import type {
   AgentProfileCheckResult,
   AgentProfileView,
   EventCursorInput,
+  RunLaunchResult,
   RunOutcome,
   RunSecrets,
   ScheduleSummary,
@@ -139,7 +140,11 @@ const COMMANDS: [string, string, string][] = [
   ["output", "<runId> [--output json|text]", "print a run's terminal output"],
   ["report", "<runId> [--output json|text]", "print a run's per-node result digest"],
   ["list", "[--output text|json]", "list runs"],
-  ["workflow", "save|install|list|show|source|run|disable|enable|...", "manage saved workflows"],
+  [
+    "workflow",
+    "save|install|list|show|source|launch|run|disable|enable|...",
+    "manage saved workflows",
+  ],
   [
     "tui",
     "[runId] [--status status] [--limit n] [--output text]",
@@ -308,14 +313,8 @@ async function dispatch(argv: string[]): Promise<number> {
     }
     case "launch": {
       const launchOpts = parseLaunchArgs(rest);
-      const output = launchOpts.output ?? (launchOpts.detach ? "json" : "ndjson");
+      const output = launchOutputMode("launch", launchOpts.output, launchOpts.detach);
       assertToolsAllowed("launch", launchOpts.tools, output, launchOpts.detach);
-      if (launchOpts.detach && output === "ndjson") {
-        throw new Error("--output ndjson is not available for launch --detach");
-      }
-      if (!launchOpts.detach && output === "json") {
-        throw new Error("--output json is not available for attached launch");
-      }
       const captured = await readWorkflowSource(launchOpts.file);
       const client = await openClient();
       const launched = await client.launchRun({
@@ -328,45 +327,12 @@ async function dispatch(argv: string[]): Promise<number> {
           ? { runSecrets: launchOpts.runSecrets }
           : {}),
       });
-      const { runId } = launched;
-      const capabilityRef =
-        launched.capability && !launchOpts.emitCapability
-          ? writeCapabilityFile(runId, launched.capability)
-          : null;
-      if (launched.capability) await client.authenticate(launched.capability);
-      if (launchOpts.detach) {
-        const payload = launchOpts.emitCapability
-          ? { runId, capability: launched.capability ?? null }
-          : { runId, capabilityRef };
-        process.stdout.write(
-          output === "json" ? `${JSON.stringify(payload)}\n` : formatLaunchText(payload),
-        );
-        return 0;
-      }
-      if (output === "text") {
-        process.stdout.write(formatRunHeader(runId));
-        if (capabilityRef) process.stdout.write(`capability ${capabilityRef}\n`);
-        if (launchOpts.emitCapability && launched.capability) {
-          process.stdout.write(`capability ${launched.capability}\n`);
-        }
-      } else if (output === "ndjson") {
-        process.stdout.write(
-          `${JSON.stringify({
-            seq: 0,
-            type: "launch.started",
-            payload: launchOpts.emitCapability
-              ? { runId, capability: launched.capability ?? null }
-              : { runId, capabilityRef },
-            atMs: Date.now(),
-          })}\n`,
-        );
-      }
-      const terminal = await watchRun(client, runId, {
+      return finishLaunchCommand(client, launched, {
         output,
+        detach: launchOpts.detach,
+        emitCapability: launchOpts.emitCapability,
         tools: launchOpts.tools,
-        cursor: launched.attachCursor,
       });
-      return statusExitCode(terminal);
     }
     case "run": {
       const runOpts = parseRunArgs(rest);
@@ -384,25 +350,7 @@ async function dispatch(argv: string[]): Promise<number> {
           ? { runSecrets: runOpts.runSecrets }
           : {}),
       });
-      const capabilityRef = launched.capability
-        ? writeCapabilityFile(launched.runId, launched.capability)
-        : null;
-      if (launched.capability) await client.authenticate(launched.capability);
-      if (output === "json") {
-        const outcome = await client.waitForRun(launched.runId);
-        const blockage = isParked(outcome.status) ? await client.getBlockage(launched.runId) : null;
-        process.stdout.write(`${JSON.stringify(runEnvelope(outcome, capabilityRef, blockage))}\n`);
-        return statusExitCode(outcome.status);
-      }
-      if (output === "text") {
-        process.stdout.write(`run ${launched.runId}\n`);
-      }
-      const terminal = await watchRun(client, launched.runId, {
-        output,
-        tools: runOpts.tools,
-        cursor: launched.attachCursor,
-      });
-      return statusExitCode(terminal);
+      return finishRunCommand(client, launched, { output, tools: runOpts.tools });
     }
     case "watch": {
       const parsed = parseWatchArgs(rest);
@@ -1245,6 +1193,79 @@ function assertToolsAllowed(
   }
 }
 
+function launchOutputMode(
+  command: string,
+  requested: OutputFormat | undefined,
+  detach: boolean,
+): OutputFormat {
+  const output = requested ?? (detach ? "json" : "ndjson");
+  if (detach && output === "ndjson") {
+    throw new Error(`--output ndjson is not available for ${command} --detach`);
+  }
+  if (!detach && output === "json") {
+    throw new Error(`--output json is not available for attached ${command}`);
+  }
+  return output;
+}
+
+async function finishLaunchCommand(
+  client: DaemonClient,
+  launched: RunLaunchResult,
+  opts: { output: OutputFormat; detach: boolean; emitCapability: boolean; tools: boolean },
+): Promise<number> {
+  const capability = prepareLaunchCapability(launched, opts.emitCapability);
+  if (launched.capability) await client.authenticate(launched.capability);
+  if (opts.detach) {
+    process.stdout.write(
+      opts.output === "json"
+        ? `${JSON.stringify(capability.payload)}\n`
+        : formatLaunchText(capability.payload),
+    );
+    return 0;
+  }
+  if (opts.output === "text") {
+    process.stdout.write(formatRunHeader(launched.runId));
+    process.stdout.write(formatLaunchCapabilityText(capability.payload));
+  } else if (opts.output === "ndjson") {
+    process.stdout.write(
+      `${JSON.stringify({
+        seq: 0,
+        type: "launch.started",
+        payload: capability.payload,
+        atMs: Date.now(),
+      })}\n`,
+    );
+  }
+  const terminal = await watchRun(client, launched.runId, {
+    output: opts.output,
+    tools: opts.tools,
+    cursor: launched.attachCursor,
+  });
+  return statusExitCode(terminal);
+}
+
+async function finishRunCommand(
+  client: DaemonClient,
+  launched: RunLaunchResult,
+  opts: { output: OutputFormat; tools: boolean },
+): Promise<number> {
+  const capability = prepareLaunchCapability(launched, false);
+  if (launched.capability) await client.authenticate(launched.capability);
+  if (opts.output === "json") {
+    const outcome = await client.waitForRun(launched.runId);
+    const blockage = isParked(outcome.status) ? await client.getBlockage(launched.runId) : null;
+    process.stdout.write(`${JSON.stringify(runEnvelope(outcome, capability.payload, blockage))}\n`);
+    return statusExitCode(outcome.status);
+  }
+  if (opts.output === "text") process.stdout.write(`run ${launched.runId}\n`);
+  const terminal = await watchRun(client, launched.runId, {
+    output: opts.output,
+    tools: opts.tools,
+    cursor: launched.attachCursor,
+  });
+  return statusExitCode(terminal);
+}
+
 export function resolveWorkflowPath(workflow: string, cwd = process.cwd()): string {
   if (workflow.startsWith("file:")) return fileURLToPath(workflow);
   return resolve(cwd, workflow);
@@ -1307,16 +1328,39 @@ function parkedStatus(payload: unknown): WatchStatus {
 
 function runEnvelope(
   outcome: RunOutcome,
-  capabilityRef: string | null,
+  capability: CapabilityOutput,
   blockage: unknown,
 ): Record<string, unknown> {
   return {
     runId: outcome.runId,
-    capabilityRef,
+    ...("capability" in capability
+      ? { capability: capability.capability }
+      : { capabilityRef: capability.capabilityRef }),
     status: outcome.status,
     ...(outcome.output !== undefined ? { output: outcome.output } : {}),
     ...(outcome.error ? { error: outcome.error } : {}),
     ...(blockage ? { blockage } : {}),
+  };
+}
+
+type CapabilityOutput = { capability: string | null } | { capabilityRef: string | null };
+
+type LaunchCapabilityPayload = { runId: string } & CapabilityOutput;
+
+function prepareLaunchCapability(
+  launched: RunLaunchResult,
+  emitCapability: boolean,
+): { payload: LaunchCapabilityPayload } {
+  if (emitCapability) {
+    return { payload: { runId: launched.runId, capability: launched.capability ?? null } };
+  }
+  return {
+    payload: {
+      runId: launched.runId,
+      capabilityRef: launched.capability
+        ? writeCapabilityFile(launched.runId, launched.capability)
+        : null,
+    },
   };
 }
 
@@ -1336,6 +1380,12 @@ function formatLaunchText(payload: {
     ...(payload.capability ? [`capability ${payload.capability}`] : []),
     "",
   ].join("\n");
+}
+
+function formatLaunchCapabilityText(payload: LaunchCapabilityPayload): string {
+  if ("capability" in payload)
+    return payload.capability ? `capability ${payload.capability}\n` : "";
+  return payload.capabilityRef ? `capability ${payload.capabilityRef}\n` : "";
 }
 
 export function formatRunReportText(report: RunReport): string {
@@ -1888,6 +1938,32 @@ async function handleWorkflow(args: string[]): Promise<number> {
       const client = await getClient();
       return printWorkflowSource(client, parsed.selector, parsed);
     }
+    case "launch": {
+      const parsed = parseWorkflowLaunchArgs(rest);
+      if (!parsed.name) return usage("workflow needs launch <name>");
+      const output = launchOutputMode("workflow launch", parsed.output, parsed.detach);
+      assertToolsAllowed("workflow launch", parsed.tools, output, parsed.detach);
+      const client = await getClient();
+      const launched = await client.launchSavedWorkflow({
+        ref: {
+          name: parsed.name,
+          version: parsed.version,
+          allowDeprecated: parsed.allowDeprecated,
+        },
+        ...(parsed.input !== undefined ? { input: parsed.input } : {}),
+        ...(parsed.target !== undefined ? { target: parsed.target } : {}),
+        name: parsed.runName ?? null,
+        ...(nonEmptyRunSecrets(parsed.runSecrets) !== undefined
+          ? { runSecrets: parsed.runSecrets }
+          : {}),
+      });
+      return finishLaunchCommand(client, launched, {
+        output,
+        detach: parsed.detach,
+        emitCapability: parsed.emitCapability,
+        tools: parsed.tools,
+      });
+    }
     case "run": {
       const parsed = parseWorkflowRunArgs(rest);
       if (!parsed.name) return usage("workflow needs run <name>");
@@ -1907,23 +1983,7 @@ async function handleWorkflow(args: string[]): Promise<number> {
           ? { runSecrets: parsed.runSecrets }
           : {}),
       });
-      const capabilityRef = launched.capability
-        ? writeCapabilityFile(launched.runId, launched.capability)
-        : null;
-      if (launched.capability) await client.authenticate(launched.capability);
-      if (output === "json") {
-        const outcome = await client.waitForRun(launched.runId);
-        const blockage = isParked(outcome.status) ? await client.getBlockage(launched.runId) : null;
-        process.stdout.write(`${JSON.stringify(runEnvelope(outcome, capabilityRef, blockage))}\n`);
-        return statusExitCode(outcome.status);
-      }
-      if (output === "text") process.stdout.write(`run ${launched.runId}\n`);
-      const terminal = await watchRun(client, launched.runId, {
-        output,
-        tools: parsed.tools,
-        cursor: launched.attachCursor,
-      });
-      return statusExitCode(terminal);
+      return finishRunCommand(client, launched, { output, tools: parsed.tools });
     }
     case "disable":
     case "enable": {
@@ -1979,7 +2039,7 @@ async function handleWorkflow(args: string[]): Promise<number> {
     }
     default:
       return usage(
-        "workflow needs save|install|list|show|source|run|disable|enable|deprecate|delete",
+        "workflow needs save|install|list|show|source|launch|run|disable|enable|deprecate|delete",
       );
   }
 }
@@ -2315,7 +2375,7 @@ function parseWorkflowSourceArgs(args: string[]): {
   };
 }
 
-function parseWorkflowRunArgs(args: string[]): {
+interface WorkflowStartArgs {
   name?: string;
   version?: number | "latest";
   input?: unknown;
@@ -2325,18 +2385,42 @@ function parseWorkflowRunArgs(args: string[]): {
   output?: OutputFormat;
   tools: boolean;
   runSecrets: RunSecrets;
+}
+
+interface WorkflowLaunchArgs extends WorkflowStartArgs {
+  detach: boolean;
+  emitCapability: boolean;
+}
+
+export function parseWorkflowLaunchArgs(args: string[]): WorkflowLaunchArgs {
+  return parseSavedWorkflowStartArgs(args, {
+    detach: true,
+    emitCapability: true,
+    command: "workflow launch",
+  }) as WorkflowLaunchArgs;
+}
+
+export function parseWorkflowRunArgs(args: string[]): WorkflowStartArgs {
+  return parseSavedWorkflowStartArgs(args, {
+    detach: false,
+    emitCapability: false,
+    command: "workflow run",
+  });
+}
+
+function parseSavedWorkflowStartArgs(
+  args: string[],
+  flags: { detach: boolean; emitCapability: boolean; command: string },
+): WorkflowStartArgs & {
+  detach?: boolean;
+  emitCapability?: boolean;
 } {
-  const out: {
-    name?: string;
-    version?: number | "latest";
-    input?: unknown;
-    target?: string;
-    runName?: string | null;
-    allowDeprecated?: boolean;
-    output?: OutputFormat;
-    tools: boolean;
-    runSecrets: RunSecrets;
-  } = { tools: false, runSecrets: {} };
+  const out: WorkflowStartArgs & { detach?: boolean; emitCapability?: boolean } = {
+    ...(flags.detach ? { detach: false } : {}),
+    ...(flags.emitCapability ? { emitCapability: false } : {}),
+    tools: false,
+    runSecrets: {},
+  };
   const positional: string[] = [];
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i] as string;
@@ -2348,6 +2432,8 @@ function parseWorkflowRunArgs(args: string[]): {
       out.target = resolve(cliTargetPath(requireFlagValue(args, i++, "--target")));
     else if (arg === "--name") out.runName = requireFlagValue(args, i++, "--name");
     else if (arg === "--allow-deprecated") out.allowDeprecated = true;
+    else if (arg === "--detach" && flags.detach) out.detach = true;
+    else if (arg === "--emit-capability" && flags.emitCapability) out.emitCapability = true;
     else if (arg === "--output")
       out.output = parseOutputFormat(requireFlagValue(args, i++, "--output"));
     else if (arg === "--tools") out.tools = true;
@@ -2355,7 +2441,7 @@ function parseWorkflowRunArgs(args: string[]): {
       addCliRunSecret(out.runSecrets, requireFlagValue(args, i++, arg), arg);
     else if (arg === "--secret-env")
       addCliRunSecretFromEnv(out.runSecrets, requireFlagValue(args, i++, arg), arg);
-    else if (arg.startsWith("--")) throw new Error(`unknown workflow run flag ${arg}`);
+    else if (arg.startsWith("--")) throw new Error(`unknown ${flags.command} flag ${arg}`);
     else positional.push(arg);
   }
   out.name = positional[0];

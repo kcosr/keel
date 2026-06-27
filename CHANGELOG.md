@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 ### Changed
+- Local `.agent-pack` state directories are now ignored by git.
+  ([#29](https://github.com/kcosr/keel/pull/29))
 - `keel workflow launch` now provides the saved-workflow counterpart to
   `keel launch`, including attached event streaming, detached `runId` output,
   capability-file output, and explicit raw capability emission.

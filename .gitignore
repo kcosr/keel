@@ -2,3 +2,4 @@
 node_modules/
 .cnvs/
 dist/
+.agent-pack/

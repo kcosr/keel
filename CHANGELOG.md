@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 ### Changed
+- The README now includes a fuller project introduction, system/replay diagrams,
+  tiny workflow examples, and direct routing to the event-stream documentation.
 - Local `.agent-pack` state directories are now ignored by git.
   ([#29](https://github.com/kcosr/keel/pull/29))
 - `keel workflow launch` now provides the saved-workflow counterpart to

@@ -1,4 +1,4 @@
-# Keel — Design v2 (working draft)
+# Keel - Design v2 Record
 
 > **Status:** architecture and design-history record for the current system.
 > **Codename:** *Keel* (placeholder, swap freely).
@@ -12,7 +12,11 @@
 
 ---
 
-## 0. Implementation status (2026-06-11)
+## 0. Implementation Snapshot (2026-06-11)
+
+This section records the implementation state when the design pipeline finished.
+It is not the live command reference or the current verification report; use
+`USAGE.md`, `README.md`, and the current branch checks for that.
 
 **All 19 phases of the §15 pipeline are built**, one commit each, every commit
 green (`bun test` + `tsc --noEmit` + biome), and two subsequent rounds of an

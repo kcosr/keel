@@ -174,6 +174,7 @@ seed_workflow() {
 if ((seed_profiles)); then
   seed_profile codex-default codex gpt-5.5 xhigh
   seed_profile claude-default claude claude-opus-4-8 xhigh Bash
+  seed_profile claude-fable-5 claude claude-fable-5 xhigh Bash
   seed_profile work-gemma-4-31b pi work-gemma-4-31b/gemma-4-31b high
   seed_profile work-gpt-oss-120b pi work-gpt-oss-120b//models/gpt-oss-120b high
   seed_profile work-nemotron-3-ultra pi work-nemotron-3-ultra/nemotron-3-ultra high

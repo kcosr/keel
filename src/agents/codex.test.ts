@@ -220,8 +220,9 @@ describe("Codex provider config", () => {
   });
 
   test("accepts serviceTier and maps Keel values to Codex app-server wire values", () => {
-    // openai/codex config_types.rs pins ServiceTier::Fast.request_value() as "priority".
-    expect(CODEX_FAST_SERVICE_TIER_WIRE_VALUE).toBe("priority");
+    // Codex app-server accepts the user-facing "fast" service tier value and
+    // normalizes it to the core/model request value it supports.
+    expect(CODEX_FAST_SERVICE_TIER_WIRE_VALUE).toBe("fast");
     // openai/codex model_switching.rs proves null suppresses catalog fast defaults.
     expect(CODEX_NORMAL_SERVICE_TIER_WIRE_VALUE).toBeNull();
     expect(
@@ -232,7 +233,7 @@ describe("Codex provider config", () => {
     ).toEqual({
       transport: { type: "stdio" },
       serviceTier: "fast",
-      codexServiceTierParam: "priority",
+      codexServiceTierParam: "fast",
     });
     expect(
       normalizeCodexProviderConfig({
@@ -329,12 +330,15 @@ describe("Codex JSON-RPC flow", () => {
   });
 
   for (const [name, transportConfig] of transportConfigs) {
-    test(`serviceTier fast is sent as priority on ${name} turn/start`, async () => {
+    test(`serviceTier fast is sent on ${name} thread/start and turn/start`, async () => {
       const transport = new ScriptedTransport(basicScript);
       const { factory } = await runWithTransport(transport, {
         providerConfig: { transport: transportConfig, serviceTier: "fast" },
       });
 
+      const threadStart = transport.sent.find((message) => message.method === "thread/start");
+      const threadParams = threadStart?.params as Record<string, unknown>;
+      expect(threadParams.serviceTier).toBe(CODEX_FAST_SERVICE_TIER_WIRE_VALUE);
       const turnStart = transport.sent.find((message) => message.method === "turn/start");
       const params = turnStart?.params as Record<string, unknown>;
       expect(params.serviceTier).toBe(CODEX_FAST_SERVICE_TIER_WIRE_VALUE);
@@ -344,12 +348,16 @@ describe("Codex JSON-RPC flow", () => {
       expect(factory.config).not.toHaveProperty("serviceTier");
     });
 
-    test(`serviceTier normal is sent as present null on ${name} turn/start`, async () => {
+    test(`serviceTier normal is sent as present null on ${name} thread/start and turn/start`, async () => {
       const transport = new ScriptedTransport(basicScript);
       await runWithTransport(transport, {
         providerConfig: { transport: transportConfig, serviceTier: "normal" },
       });
 
+      const threadStart = transport.sent.find((message) => message.method === "thread/start");
+      const threadParams = threadStart?.params as Record<string, unknown>;
+      expect(Object.hasOwn(threadParams, "serviceTier")).toBe(true);
+      expect(threadParams.serviceTier).toBe(CODEX_NORMAL_SERVICE_TIER_WIRE_VALUE);
       const turnStart = transport.sent.find((message) => message.method === "turn/start");
       const params = turnStart?.params as Record<string, unknown>;
       expect(Object.hasOwn(params, "serviceTier")).toBe(true);
@@ -357,13 +365,16 @@ describe("Codex JSON-RPC flow", () => {
     });
   }
 
-  test("omitted serviceTier does not send a turn/start serviceTier key", async () => {
+  test("omitted serviceTier does not send thread/start or turn/start serviceTier keys", async () => {
     const transport = new ScriptedTransport(basicScript);
 
     await runWithTransport(transport, {
       providerConfig: { transport: { type: "stdio" } },
     });
 
+    const threadStart = transport.sent.find((message) => message.method === "thread/start");
+    const threadParams = threadStart?.params as Record<string, unknown>;
+    expect(Object.hasOwn(threadParams, "serviceTier")).toBe(false);
     const turnStart = transport.sent.find((message) => message.method === "turn/start");
     const params = turnStart?.params as Record<string, unknown>;
     expect(Object.hasOwn(params, "serviceTier")).toBe(false);
@@ -595,6 +606,9 @@ describe("Codex JSON-RPC flow", () => {
         case "initialized":
           break;
         case "thread/resume":
+          expect(Object.hasOwn(message.params as Record<string, unknown>, "serviceTier")).toBe(
+            false,
+          );
           t.respond(message.id, {
             thread: { id: "thread-1", cwd: process.cwd(), status: { type: "idle" } },
           });
@@ -740,10 +754,16 @@ describe("Codex JSON-RPC flow", () => {
               break;
             case "thread/start":
               expect(attempt).toBe(1);
+              expect((message.params as Record<string, unknown>).serviceTier).toBe(
+                CODEX_NORMAL_SERVICE_TIER_WIRE_VALUE,
+              );
               t.respond(message.id, { thread: { id: "thread-1" } });
               break;
             case "thread/resume":
               expect(attempt).toBe(2);
+              expect((message.params as Record<string, unknown>).serviceTier).toBe(
+                CODEX_NORMAL_SERVICE_TIER_WIRE_VALUE,
+              );
               t.respond(message.id, {
                 thread: { id: "thread-1", cwd: context.cwd, status: { type: "idle" } },
               });

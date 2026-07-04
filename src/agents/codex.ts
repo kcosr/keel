@@ -24,7 +24,7 @@ export const CODEX_TURN_COMPLETION_TIMEOUT_MS = DEFAULT_AGENT_TIMEOUT_MS;
 export const CODEX_CLOSE_GRACE_MS = 1_000;
 export const CODEX_INTERRUPT_CONFIRM_MS = 2_000;
 export const CODEX_DEFAULT_TRANSPORT = Object.freeze({ type: "stdio" as const });
-export const CODEX_FAST_SERVICE_TIER_WIRE_VALUE = "priority";
+export const CODEX_FAST_SERVICE_TIER_WIRE_VALUE = "fast";
 export const CODEX_NORMAL_SERVICE_TIER_WIRE_VALUE: null = null;
 
 const CODEX_CLIENT_INFO = Object.freeze({ name: "keel", title: "Keel", version: "0.0.0" });
@@ -272,7 +272,18 @@ export class CodexProvider implements AgentProvider {
 
       if (invocation.resumeToken) {
         await raceAbort(
-          resumeThread(client, invocation, codexCaps.thread, state, resetTurnWaiters),
+          resumeThread(
+            client,
+            invocation,
+            {
+              ...(config.codexServiceTierParam !== undefined
+                ? { serviceTier: config.codexServiceTierParam }
+                : {}),
+              ...codexCaps.thread,
+            },
+            state,
+            resetTurnWaiters,
+          ),
         );
         noteSessionToken(invocation.resumeToken);
       } else {
@@ -281,6 +292,9 @@ export class CodexProvider implements AgentProvider {
             cwd,
             ...(invocation.model ? { model: invocation.model } : {}),
             ...(invocation.reasoning ? { reasoning: invocation.reasoning } : {}),
+            ...(config.codexServiceTierParam !== undefined
+              ? { serviceTier: config.codexServiceTierParam }
+              : {}),
             ...codexCaps.thread,
           }),
         );

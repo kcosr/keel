@@ -1,5 +1,10 @@
 # Keel
 
+> **Warning**
+> Keel is experimental personal software. APIs, workflow semantics, CLI output,
+> storage formats, and operational behavior may change without a compatibility
+> guarantee.
+
 **Keel** is a durable agent-workflow orchestrator: workflows are plain
 `async (ctx, input) => output` TypeScript functions; every `ctx.*` effect is
 journaled to SQLite by a single-writer Bun daemon; resume re-runs the body with a

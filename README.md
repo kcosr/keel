@@ -5,12 +5,12 @@
 > storage formats, and operational behavior may change without a compatibility
 > guarantee.
 
-**Keel** is a local-first durable workflow runtime for agent-heavy work. A
-workflow is a plain TypeScript function, but every external effect goes through
-`ctx.*` and is journaled by a single-writer Bun daemon. When a process crashes or
-a run is resumed later, Keel re-runs the workflow body with a memoizing `ctx`:
-completed effects replay from the journal, and only incomplete or invalidated
-work runs again.
+**Keel** is an experiment in durable TypeScript agent workflows. A workflow is a
+plain TypeScript function, but every external effect goes through `ctx.*` and is
+journaled by a single-writer Bun daemon. When a process crashes or a run is
+resumed later, Keel re-runs the workflow body with a memoizing `ctx`: completed
+effects replay from the journal, and only incomplete or invalidated work runs
+again.
 
 That gives you imperative code for orchestration, durable execution for long
 agent jobs, and one canonical run projection for CLI, TUI, web, and future agent
@@ -162,7 +162,7 @@ but not the authoritative command/API lookup.
 
 ## Status
 
-Keel is active local-first infrastructure for durable agent workflows. It has a
+Keel is active experimental infrastructure for durable agent workflows. It has a
 working daemon, CLI, workflow SDK, journal, replay model, durable waits,
 agent-provider integrations, reusable workflow registry, run workspaces, and
 operator controls. A local React web console is available through `keel web`

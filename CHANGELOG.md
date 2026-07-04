@@ -24,11 +24,13 @@
   ([#27](https://github.com/kcosr/keel/pull/27))
 - `bun run profiles:seed-defaults` now seeds a `claude-fable-5` Claude profile
   matching the local conventional `xhigh` + Bash-enabled setup.
+  ([#30](https://github.com/kcosr/keel/pull/30))
 
 ### Fixed
 - Codex provider `serviceTier: "fast"` now sends Codex app-server's
   user-facing `"fast"` service-tier value, applies configured service tier
   during thread start/resume as well as turn start.
+  ([#30](https://github.com/kcosr/keel/pull/30))
 - The web event stream now disables Bun's per-request idle timeout for SSE
   watch requests, preventing live run views from failing with incomplete
   chunked responses while waiting for sparse agent events.

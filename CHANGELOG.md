@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### Changed
+- The README now includes a fuller project introduction, system/replay diagrams,
+  tiny workflow examples, and direct routing to the event-stream documentation.
+  ([#30](https://github.com/kcosr/keel/pull/30))
 - Local `.agent-pack` state directories are now ignored by git.
   ([#29](https://github.com/kcosr/keel/pull/29))
 - `keel workflow launch` now provides the saved-workflow counterpart to
@@ -22,8 +25,15 @@
   `allowTools: ["Bash"]` so read-only reviewer sessions can inspect workspaces
   through shell commands while retaining their workflow-selected tool policy.
   ([#27](https://github.com/kcosr/keel/pull/27))
+- `bun run profiles:seed-defaults` now seeds a `claude-fable-5` Claude profile
+  matching the local conventional `xhigh` + Bash-enabled setup.
+  ([#30](https://github.com/kcosr/keel/pull/30))
 
 ### Fixed
+- Codex provider `serviceTier: "fast"` now sends Codex app-server's
+  user-facing `"fast"` service-tier value, applies configured service tier
+  during thread start/resume as well as turn start.
+  ([#30](https://github.com/kcosr/keel/pull/30))
 - The web event stream now disables Bun's per-request idle timeout for SSE
   watch requests, preventing live run views from failing with incomplete
   chunked responses while waiting for sparse agent events.

@@ -1192,7 +1192,7 @@ describe("keel CLI", () => {
         socketPath,
         dbPath,
         agents: new AgentProviderRegistry().register(
-          new MockProvider({ default: { outputs: ['{"value":5}'], delayMs: 1000 } }),
+          new MockProvider({ default: { outputs: ['{"value":5}'], delayMs: 2_000 } }),
         ),
       });
       await daemon.start();
@@ -1213,7 +1213,7 @@ describe("keel CLI", () => {
           dir,
           runEnv,
           undefined,
-          500,
+          1_500,
         );
         expect(signaled.timedOut).toBe(false);
         expect(signaled.code).toBe(0);

@@ -1,4 +1,5 @@
 .specs/
+.scratch/
 node_modules/
 .cnvs/
 dist/

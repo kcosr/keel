@@ -62,7 +62,7 @@ sequenceDiagram
   C-->>W: return result
 ```
 
-## Tiny Workflow
+## Workflow Examples
 
 ```ts
 import { jsonSchema, type Ctx } from "@kcosr/keel";
@@ -87,22 +87,56 @@ Run it:
 keel launch ./double.workflow.ts --input '{"n":3}'
 ```
 
-Agent work uses the same durable effect model:
+Agent workflows can fan out to multiple reviewers, then pass their structured
+outputs into a follow-up agent call:
 
 ```ts
 import { jsonSchema, type Ctx } from "@kcosr/keel";
 
-export default async function workflow(ctx: Ctx, input: { path: string }) {
-  return ctx.agent({
-    key: "review",
-    profile: "codex-default",
-    prompt: `Review ${input.path} and return the highest-risk issue.`,
-    schema: jsonSchema<{ issue: string }>({
-      type: "object",
-      properties: { issue: { type: "string" } },
-      required: ["issue"],
-      additionalProperties: false,
+const Review = jsonSchema<{ summary: string; risks: string[] }>({
+  type: "object",
+  properties: {
+    summary: { type: "string" },
+    risks: { type: "array", items: { type: "string" } },
+  },
+  required: ["summary", "risks"],
+  additionalProperties: false,
+});
+
+const Decision = jsonSchema<{ highestRisk: string; recommendation: string }>({
+  type: "object",
+  properties: {
+    highestRisk: { type: "string" },
+    recommendation: { type: "string" },
+  },
+  required: ["highestRisk", "recommendation"],
+  additionalProperties: false,
+});
+
+export default async function workflow(ctx: Ctx, input: { diff: string }) {
+  const [correctness, maintainability] = await Promise.all([
+    ctx.agent({
+      key: "correctness-review",
+      profile: "codex-default",
+      prompt: `Review this diff for correctness bugs:\n\n${input.diff}`,
+      schema: Review,
     }),
+    ctx.agent({
+      key: "maintainability-review",
+      profile: "claude-default",
+      prompt: `Review this diff for maintainability risks:\n\n${input.diff}`,
+      schema: Review,
+    }),
+  ]);
+
+  return ctx.agent({
+    key: "synthesize-review",
+    profile: "codex-default",
+    prompt: [
+      "Choose the highest-risk issue and recommend the next action.",
+      JSON.stringify({ correctness, maintainability }, null, 2),
+    ].join("\n\n"),
+    schema: Decision,
   });
 }
 ```

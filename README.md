@@ -186,3 +186,7 @@ bun run web:test
 
 Live backend smokes are gated behind `KEEL_LIVE=1`; see `USAGE.md` for provider
 setup and operational details.
+
+## Inspiration
+
+Keel is inspired by tools like Claude Code Workflows and [smithers.sh](https://smithers.sh).

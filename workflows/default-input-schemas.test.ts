@@ -22,4 +22,30 @@ describe("default workflow input schemas", () => {
       await expect(validateWorkflowInput(schema, { unexpected: true })).rejects.toThrow();
     });
   }
+
+  test("completion check contracts enforce type-specific fields", async () => {
+    const directSchema = JSON.parse(
+      readFileSync(join(import.meta.dir, "implement-review-loop", "input-schema.json"), "utf8"),
+    );
+    const worktreeSchema = JSON.parse(
+      readFileSync(
+        join(import.meta.dir, "branch-worktree-implement-review", "input-schema.json"),
+        "utf8",
+      ),
+    );
+
+    await expect(
+      validateWorkflowInput(directSchema, {
+        spec: ".specs/change.md",
+        completionChecks: [{ key: "tests", type: "command" }],
+      }),
+    ).rejects.toThrow();
+    await expect(
+      validateWorkflowInput(worktreeSchema, {
+        spec: ".specs/change.md",
+        retention: "retain",
+        completionChecks: [{ key: "commits", type: "has-commits", baseRef: "main" }],
+      }),
+    ).rejects.toThrow();
+  });
 });

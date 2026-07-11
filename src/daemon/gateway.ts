@@ -12,6 +12,7 @@ import type {
   EventCursor,
   EventEnvelope,
   EventStreamFrame,
+  PutScheduleRequest,
   RunStart,
   SaveWorkflowRequest,
   SavedWorkflowRef,
@@ -31,8 +32,6 @@ import { requireRunTarget } from "../target.ts";
 import {
   evictWorkflowDefinitionCache,
   isUnsupportedWorkflowSdkAbiError,
-  materializeWorkflowDefinition,
-  snapshotWorkflowSource,
 } from "../workflow-definitions/snapshot.ts";
 import type { WorkflowSourceInput } from "../workflow-definitions/source.ts";
 
@@ -440,51 +439,7 @@ export class KeelOperationGateway {
       kind: "core",
       handle: (_session, p, credential) => {
         this.authorizeAdmin(credential);
-        const hasSource = p.source !== undefined;
-        const hasSavedRef = p.savedRef !== undefined;
-        if (hasSource === hasSavedRef) {
-          throw new Error("putSchedule requires exactly one of source or savedRef");
-        }
-        let workflowRef: string;
-        const scheduleName = (p.workflowName as string | null | undefined) ?? (p.name as string);
-        let defaultTarget: string | null = null;
-        if (hasSavedRef) {
-          if (p.workflowName !== undefined) {
-            throw new Error("putSchedule workflowName is only valid with source");
-          }
-          const saved = this.opts.store.resolveSavedWorkflowRef(p.savedRef as SavedWorkflowRef);
-          materializeWorkflowDefinition(
-            this.opts.store,
-            saved.definitionHash,
-            this.opts.definitionCacheRoot,
-          );
-          workflowRef = saved.definitionHash;
-          defaultTarget = saved.defaultTarget;
-        } else {
-          const snapshot = snapshotWorkflowSource(
-            this.opts.store,
-            p.source as WorkflowSourceInput,
-            {
-              name: scheduleName,
-              nowMs: this.opts.clock(),
-              cacheRoot: this.opts.definitionCacheRoot,
-            },
-          ).snapshot;
-          workflowRef = snapshot.hash;
-        }
-        const target = requireRunTarget(
-          (p.target as string | undefined) ?? defaultTarget,
-          "putSchedule",
-        );
-        this.opts.store.putSchedule({
-          name: p.name as string,
-          workflowRef,
-          inputJson: p.input != null ? JSON.stringify(p.input) : null,
-          scheduleTarget: target,
-          intervalMs: p.intervalMs as number,
-          nextFireMs: (p.firstFireMs as number) ?? this.opts.clock(),
-        });
-        return { ok: true };
+        return this.opts.api.putSchedule(p as unknown as PutScheduleRequest);
       },
     },
     setScheduleEnabled: {

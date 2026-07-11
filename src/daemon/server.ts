@@ -206,6 +206,7 @@ export class KeelDaemon {
       clock: this.clock,
       ownerStaleWindowMs: ownerStaleWindowMs(this.heartbeatMs),
       agentConcurrency,
+      definitionCacheRoot: this.definitionCacheRoot,
     });
     this.supervisor = new Supervisor({
       store: this.store,

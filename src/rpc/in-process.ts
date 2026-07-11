@@ -146,6 +146,7 @@ export class InProcessKeel implements KeelApi {
       clock?: () => number;
       ownerStaleWindowMs?: number;
       agentConcurrency?: AgentConcurrencyLimiter;
+      definitionCacheRoot?: string;
     } = {},
   ) {
     this.kernel.setLiveEventSink((runId, type, payload, atMs) =>
@@ -396,7 +397,11 @@ export class InProcessKeel implements KeelApi {
         throw new Error("putSchedule workflowName is only valid with source");
       }
       const saved = this.store.resolveSavedWorkflowRef(req.savedRef);
-      materializeWorkflowDefinition(this.store, saved.definitionHash);
+      materializeWorkflowDefinition(
+        this.store,
+        saved.definitionHash,
+        this.opts.definitionCacheRoot,
+      );
       workflowRef = saved.definitionHash;
       defaultTarget = saved.defaultTarget;
       inputSchema = saved.inputSchemaSet ? saved.inputSchema : null;
@@ -412,6 +417,7 @@ export class InProcessKeel implements KeelApi {
       const snapshot = snapshotWorkflowSource(this.store, req.source, {
         name: req.workflowName ?? req.name,
         nowMs: this.opts.clock?.() ?? Date.now(),
+        cacheRoot: this.opts.definitionCacheRoot,
       }).snapshot;
       workflowRef = snapshot.hash;
     }

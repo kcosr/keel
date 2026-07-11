@@ -69,17 +69,62 @@ describe("WorkflowInputEditor", () => {
     expect(screen.getByText(/expected property name/i)).toBeInTheDocument();
   });
 
-  test("uses JSON mode for schemas the form cannot represent", () => {
+  test("keeps typed form mode and isolates complex properties as JSON fields", () => {
     render(
       <WorkflowInputEditor
-        schema={{ type: "object", properties: { choice: { oneOf: [] } } }}
+        schema={{
+          type: "object",
+          properties: {
+            task: { type: "string" },
+            completionChecks: { type: "array", items: { oneOf: [] } },
+          },
+        }}
         value={{}}
         onChange={vi.fn()}
         onValidityChange={vi.fn()}
       />,
     );
-    expect(screen.getByLabelText("Input JSON")).toBeInTheDocument();
-    expect(screen.queryByRole("group", { name: "Input editor mode" })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Task")).toBeInTheDocument();
+    expect(screen.getByLabelText(/completion checks/i)).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Input editor mode" })).toBeInTheDocument();
+  });
+
+  test("preserves scalar array input focus and does not coerce a cleared number to zero", () => {
+    const arraySchema = {
+      type: "object",
+      properties: {
+        names: { type: "array", items: { type: "string" } },
+        counts: { type: "array", items: { type: "integer" } },
+      },
+    };
+
+    function Harness() {
+      const [value, setValue] = useState<unknown>({ names: [""], counts: [1] });
+      return (
+        <>
+          <WorkflowInputEditor
+            schema={arraySchema}
+            value={value}
+            onChange={setValue}
+            onValidityChange={vi.fn()}
+          />
+          <output>{JSON.stringify(value)}</output>
+        </>
+      );
+    }
+
+    render(<Harness />);
+    const arrayInputs = screen.getAllByLabelText("Array item");
+    expect(arrayInputs).toHaveLength(2);
+    const nameInput = arrayInputs[0];
+    const countInput = arrayInputs[1];
+    if (!nameInput || !countInput) throw new Error("expected both array inputs");
+    nameInput.focus();
+    fireEvent.change(nameInput, { target: { value: "review" } });
+    expect(document.activeElement).toBe(nameInput);
+    expect(screen.getByLabelText("Array item", { selector: "input[type=number]" })).toBeRequired();
+    fireEvent.change(countInput, { target: { value: "" } });
+    expect(screen.getByText('{"names":["review"],"counts":[""]}')).toBeInTheDocument();
   });
 
   test("renders repeatable object rows and free-form object values", () => {

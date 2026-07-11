@@ -24,6 +24,7 @@ interface InputSchema {
   exclusiveMinimum?: number;
   exclusiveMaximum?: number;
   multipleOf?: number;
+  oneOf?: unknown[];
 }
 
 export function WorkflowInputEditor({
@@ -144,6 +145,18 @@ function SchemaField({
 }) {
   const id = useId();
   const label = schema.title?.trim() || humanize(name);
+
+  if (!renderableFieldSchema(schema)) {
+    return (
+      <JsonValueField
+        id={id}
+        label={label}
+        required={required}
+        value={value}
+        onChange={(nextValue, remove) => onChange(path, nextValue, remove)}
+      />
+    );
+  }
 
   if (schema.type === "object") {
     if (!schema.properties) {
@@ -310,10 +323,19 @@ function ArrayField({
 }) {
   const itemSchema = schema.items as InputSchema;
   const atMaximum = schema.maxItems !== undefined && value.length >= schema.maxItems;
+  const nextRowId = useRef(0);
+  const rowIds = useRef<number[]>([]);
+  while (rowIds.current.length < value.length) rowIds.current.push(nextRowId.current++);
+  if (rowIds.current.length > value.length) rowIds.current.length = value.length;
+  const rows = value.map((item, index) => {
+    const id = rowIds.current[index];
+    if (id === undefined) throw new Error("array row identity is missing");
+    return { id, index, item };
+  });
   return (
     <div className="workflow-array-field" aria-labelledby={labelledBy}>
-      {value.map((item, index) => (
-        <div className="workflow-array-row" key={`${index}-${String(item)}`}>
+      {rows.map(({ id, index, item }) => (
+        <div className="workflow-array-row" key={id}>
           {arrayItemControl(itemSchema, item, index, (nextItem) => {
             const next = [...value];
             next[index] = nextItem;
@@ -323,7 +345,10 @@ function ArrayField({
             icon={Trash2}
             label={`Remove item ${index + 1}`}
             disabled={schema.minItems !== undefined && value.length <= schema.minItems}
-            onClick={() => onChange(value.filter((_, itemIndex) => itemIndex !== index))}
+            onClick={() => {
+              rowIds.current.splice(index, 1);
+              onChange(value.filter((_, itemIndex) => itemIndex !== index));
+            }}
           />
         </div>
       ))}
@@ -331,7 +356,10 @@ function ArrayField({
         className="workflow-array-add"
         type="button"
         disabled={atMaximum}
-        onClick={() => onChange([...value, initialArrayItem(itemSchema)])}
+        onClick={() => {
+          rowIds.current.push(nextRowId.current++);
+          onChange([...value, initialArrayItem(itemSchema)]);
+        }}
       >
         <Plus size={14} />
         Add item
@@ -405,7 +433,8 @@ function arrayItemControl(
         min={schema.minimum}
         max={schema.maximum}
         step={schema.type === "integer" ? 1 : (schema.multipleOf ?? "any")}
-        onChange={(event) => onChange(Number(event.target.value))}
+        required
+        onChange={(event) => onChange(event.target.value === "" ? "" : Number(event.target.value))}
       />
     );
   }
@@ -420,9 +449,7 @@ function arrayItemControl(
 
 function renderableObjectSchema(value: unknown): InputSchema | null {
   if (!isRecord(value) || value.type !== "object" || !isRecord(value.properties)) return null;
-  return Object.values(value.properties).every(renderableFieldSchema)
-    ? (value as InputSchema)
-    : null;
+  return value as InputSchema;
 }
 
 function orderedProperties(schema: InputSchema): Array<[string, unknown]> {
@@ -510,6 +537,65 @@ function JsonObjectField({
         className="field-textarea workflow-object-json"
         required={required}
         placeholder="{}"
+        value={text}
+        onChange={(event) => update(event.target.value)}
+        aria-invalid={error !== null}
+      />
+      {error ? <small className="form-error">{error}</small> : null}
+    </label>
+  );
+}
+
+function JsonValueField({
+  id,
+  label,
+  required,
+  value,
+  onChange,
+}: {
+  id: string;
+  label: string;
+  required: boolean;
+  value: unknown;
+  onChange(value: unknown, remove?: boolean): void;
+}) {
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const [text, setText] = useState(() =>
+    value === undefined ? "" : JSON.stringify(value, null, 2),
+  );
+  const [error, setError] = useState<string | null>(null);
+
+  const update = (nextText: string) => {
+    setText(nextText);
+    if (!required && nextText.trim() === "") {
+      setError(null);
+      textareaRef.current?.setCustomValidity("");
+      onChange(undefined, true);
+      return;
+    }
+    try {
+      const parsed = JSON.parse(nextText);
+      setError(null);
+      textareaRef.current?.setCustomValidity("");
+      onChange(parsed);
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      setError(message);
+      textareaRef.current?.setCustomValidity(message);
+    }
+  };
+
+  return (
+    <label className="workflow-schema-field" htmlFor={id}>
+      <span className={`workflow-schema-label ${required ? "" : "is-optional"}`}>
+        <strong>{label}</strong>
+      </span>
+      <textarea
+        ref={textareaRef}
+        id={id}
+        className="field-textarea workflow-object-json"
+        required={required}
+        placeholder="JSON value"
         value={text}
         onChange={(event) => update(event.target.value)}
         aria-invalid={error !== null}

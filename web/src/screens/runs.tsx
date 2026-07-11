@@ -128,14 +128,16 @@ export function RunsScreen({
   return (
     <div className="content-split runs-screen">
       <div className="content-scroll runs-main">
-        <div className="toolbar">
-          <div className="toolbar-left">
-            <TextInput
-              value={localSearch}
-              onChange={(event) => setLocalSearch(event.target.value)}
-              placeholder="Filter runs"
-              aria-label="Filter runs"
-            />
+        <div className="toolbar runs-toolbar">
+          <div className="toolbar-left runs-filters">
+            <div className="runs-search-field">
+              <TextInput
+                value={localSearch}
+                onChange={(event) => setLocalSearch(event.target.value)}
+                placeholder="Filter runs"
+                aria-label="Filter runs"
+              />
+            </div>
             <Select
               value={status}
               onChange={(event) => setStatus(event.target.value as RunStatus | "all")}
@@ -161,10 +163,12 @@ export function RunsScreen({
             </Select>
             <Toggle label="Blocked" checked={blockedOnly} onChange={setBlockedOnly} />
           </div>
-          <div className="toolbar-right">
-            <StatusPill tone="running" dot>
-              Live
-            </StatusPill>
+          <div className="toolbar-right runs-summary">
+            <span className="runs-live-state">
+              <StatusPill tone="running" dot>
+                Live
+              </StatusPill>
+            </span>
             <StatusPill tone="running">
               {counts.active} active{countScopeLabel}
             </StatusPill>
@@ -174,9 +178,11 @@ export function RunsScreen({
             <StatusPill tone={page?.truncated ? "waiting" : "neutral"}>
               {page?.truncated ? `${page.returned} shown` : `${counts.total} total`}
             </StatusPill>
-            <Button icon={RefreshCw} size="sm" onClick={runsState.reload}>
-              {runsState.refreshing ? "Refreshing" : "Refresh"}
-            </Button>
+            <span className="runs-local-refresh">
+              <Button icon={RefreshCw} size="sm" onClick={runsState.reload}>
+                {runsState.refreshing ? "Refreshing" : "Refresh"}
+              </Button>
+            </span>
           </div>
         </div>
         {page?.truncated ? (

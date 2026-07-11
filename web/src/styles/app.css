@@ -1320,6 +1320,55 @@ h3 {
   gap: 18px;
 }
 
+.runs-main {
+  container-name: runs-main;
+  container-type: inline-size;
+}
+
+@container runs-main (max-width: 850px) {
+  .runs-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .runs-filters {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+  }
+
+  .runs-search-field {
+    grid-column: 1 / -1;
+  }
+
+  .runs-filters .field-input,
+  .runs-search-field .field-input {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .runs-filters .toggle {
+    min-height: 31px;
+  }
+
+  .runs-summary {
+    justify-content: flex-start;
+    margin-left: 0;
+    width: 100%;
+  }
+}
+
+@container runs-main (max-width: 460px) {
+  .runs-live-state,
+  .runs-local-refresh {
+    display: none;
+  }
+
+  .runs-summary {
+    gap: 6px;
+  }
+}
+
 .run-group {
   container-type: inline-size;
   display: grid;

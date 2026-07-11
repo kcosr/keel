@@ -1,5 +1,5 @@
-import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, test, vi } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import type { HealthResponse } from "../api/types";
 import { AppShell } from "./shell";
 
@@ -11,6 +11,8 @@ const HEALTH: HealthResponse = {
 };
 
 describe("AppShell", () => {
+  afterEach(cleanup);
+
   test("renders navigation and applies credentials explicitly", () => {
     const onCredentialApply = vi.fn();
     render(
@@ -40,5 +42,29 @@ describe("AppShell", () => {
     expect(onCredentialApply).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Apply credential" }));
     expect(onCredentialApply).toHaveBeenCalledWith("kc_test");
+  });
+
+  test("traps and restores focus for access credential management", () => {
+    render(
+      <AppShell
+        route="runs"
+        title="Runs"
+        health={HEALTH}
+        credentialSet={false}
+        onCredentialApply={vi.fn()}
+        onCredentialClear={vi.fn()}
+        onRefresh={vi.fn()}
+      >
+        <button type="button">Background action</button>
+      </AppShell>,
+    );
+
+    const trigger = screen.getByRole("button", { name: /^access credential/i });
+    fireEvent.click(trigger);
+    expect(screen.getByLabelText("Bearer credential")).toHaveFocus();
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
   });
 });

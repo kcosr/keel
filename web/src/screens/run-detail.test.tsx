@@ -105,6 +105,30 @@ describe("RunDetailScreen", () => {
     expect(screen.getAllByText("caught up").length).toBeGreaterThan(0);
   });
 
+  test("waits for the initial projection before starting a current-cursor watch", async () => {
+    let resolveDetail: (value: RunDetailResponse) => void = () => undefined;
+    const initialDetail = new Promise<RunDetailResponse>((resolve) => {
+      resolveDetail = resolve;
+    });
+    const watched: WatchRunEventsOptions[] = [];
+    const client = {
+      getRun: vi.fn(() => initialDetail),
+      watchRunEvents: vi.fn((_runId: string, opts: WatchRunEventsOptions) => {
+        watched.push(opts);
+        return vi.fn();
+      }),
+    } as unknown as KeelWebClient;
+
+    render(<RunDetailScreen client={client} runId="run_1" refreshKey={0} />);
+    fireEvent.click(screen.getByRole("button", { name: "Watch live" }));
+    expect(client.watchRunEvents).not.toHaveBeenCalled();
+
+    await act(async () => resolveDetail(detail(7)));
+
+    await waitFor(() => expect(client.watchRunEvents).toHaveBeenCalledTimes(1));
+    expect(watched[0]?.cursor).toEqual({ kind: "after-seq", seq: 7 });
+  });
+
   test("uses the latest loaded detail cursor after manual refresh", async () => {
     let seq = 5;
     const watched: WatchRunEventsOptions[] = [];

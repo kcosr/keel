@@ -84,6 +84,7 @@ export function RunDetailScreen({
   const latestSeqRef = useRef<number | null>(null);
   const detailRef = useRef<RunDetailResponse | null>(null);
   detailRef.current = detailState.data;
+  const currentCursorReady = cursorMode !== "current" || detailState.data !== null;
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: runId must clear live buffers even when a new run has the same cursor sequence.
   useEffect(() => {
@@ -102,7 +103,7 @@ export function RunDetailScreen({
   }, [detailState.data?.eventCursor?.seq]);
 
   useEffect(() => {
-    if (!live) return;
+    if (!live || !currentCursorReady) return;
     const stop = client.watchRunEvents(runId, {
       cursor: cursorInputForMode(cursorMode, detailRef.current, latestSeqRef.current),
       onFrame: (frame) => {
@@ -149,7 +150,7 @@ export function RunDetailScreen({
       },
     });
     return stop;
-  }, [client, cursorMode, detailState.reload, live, runId]);
+  }, [client, currentCursorReady, cursorMode, detailState.reload, live, runId]);
 
   const detail = detailState.data;
   const displayDetail = useMemo(

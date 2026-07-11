@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { KeelWebClient } from "../api/client";
 import type { SavedWorkflowSummary, ScheduleSummary, ScheduleView } from "../api/types";
@@ -176,6 +176,34 @@ describe("SchedulesScreen", () => {
         }),
       ),
     );
+  });
+
+  test("hydrates an edit selection when the workflow catalog loads later", async () => {
+    let resolveWorkflows: (workflows: SavedWorkflowSummary[]) => void = () => undefined;
+    const workflows = new Promise<SavedWorkflowSummary[]>((resolve) => {
+      resolveWorkflows = resolve;
+    });
+    const client = {
+      listSchedules: vi.fn(async () => [scheduleSummary()]),
+      listSavedWorkflows: vi.fn(() => workflows),
+      getSchedule: vi.fn(async () => scheduleDetail()),
+    } as unknown as KeelWebClient;
+
+    render(<SchedulesScreen client={client} refreshKey={0} />);
+    fireEvent.click(await screen.findByRole("tab", { name: /configure/i }));
+    expect(await screen.findByLabelText("Saved workflow")).toHaveValue("");
+
+    const lateWorkflow = workflowSummary();
+    lateWorkflow.versions = [
+      { ...workflowVersion(1), definitionHash: lateWorkflow.latestDefinitionHash as string },
+    ];
+    await act(async () => resolveWorkflows([lateWorkflow]));
+
+    await waitFor(() =>
+      expect(screen.getByLabelText("Saved workflow")).toHaveValue("hourly-workflow"),
+    );
+    expect(screen.getByLabelText("Workflow version")).toHaveValue("1");
+    expect(screen.getByRole("button", { name: /save and enable/i })).toBeEnabled();
   });
 });
 

@@ -13,8 +13,17 @@ import {
   Workflow,
   X,
 } from "lucide-react";
-import { type FormEvent, type ReactNode, useEffect, useRef, useState } from "react";
+import {
+  type FormEvent,
+  type MouseEvent,
+  type ReactNode,
+  type RefObject,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import type { HealthResponse } from "../api/types";
+import { useModalFocus } from "../hooks/use-modal-focus";
 import { Button, IconButton, StatusPill } from "./controls";
 
 export type NavRoute =
@@ -61,7 +70,13 @@ export function AppShell({
 }) {
   const [navOpen, setNavOpen] = useState(false);
   const [accessOpen, setAccessOpen] = useState(false);
+  const accessTriggerRef = useRef<HTMLButtonElement | null>(null);
   const daemonReachable = health?.daemon.reachable === true;
+
+  const openAccess = (event: MouseEvent<HTMLButtonElement>) => {
+    accessTriggerRef.current = event.currentTarget;
+    setAccessOpen(true);
+  };
 
   useEffect(() => {
     const closeNav = () => setNavOpen(false);
@@ -115,7 +130,7 @@ export function AppShell({
               <span className="realm-sub">{daemonReachable ? "Reachable" : "Unreachable"}</span>
             </span>
           </div>
-          <button className="access-button" type="button" onClick={() => setAccessOpen(true)}>
+          <button className="access-button" type="button" onClick={openAccess}>
             <KeyRound size={16} />
             <span>
               <strong>Access credential</strong>
@@ -144,11 +159,7 @@ export function AppShell({
           <a className="mobile-brand" href="#/runs">
             <Brand compact />
           </a>
-          <IconButton
-            icon={KeyRound}
-            label="Manage access credential"
-            onClick={() => setAccessOpen(true)}
-          />
+          <IconButton icon={KeyRound} label="Manage access credential" onClick={openAccess} />
         </div>
         <header className="topbar">
           <div className="topbar-main">
@@ -168,6 +179,7 @@ export function AppShell({
       <AccessDialog
         open={accessOpen}
         credentialSet={credentialSet}
+        returnFocusRef={accessTriggerRef}
         onClose={() => setAccessOpen(false)}
         onApply={onCredentialApply}
         onClear={onCredentialClear}
@@ -220,29 +232,31 @@ function NavItem({
 function AccessDialog({
   open,
   credentialSet,
+  returnFocusRef,
   onClose,
   onApply,
   onClear,
 }: {
   open: boolean;
   credentialSet: boolean;
+  returnFocusRef: RefObject<HTMLElement | null>;
   onClose(): void;
   onApply(value: string): void;
   onClear(): void;
 }) {
   const [draft, setDraft] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useModalFocus<HTMLDialogElement>({
+    open,
+    initialFocusRef: inputRef,
+    returnFocusRef,
+    onClose,
+  });
 
   useEffect(() => {
     if (!open) return;
     setDraft("");
-    inputRef.current?.focus();
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [open, onClose]);
+  }, [open]);
 
   if (!open) return null;
 
@@ -257,10 +271,12 @@ function AccessDialog({
   return (
     <div className="dialog-backdrop" role="presentation" onMouseDown={onClose}>
       <dialog
+        ref={dialogRef}
         open
         className="dialog access-dialog"
         aria-modal="true"
         aria-labelledby="access-dialog-title"
+        tabIndex={-1}
         onMouseDown={(event) => event.stopPropagation()}
       >
         <div className="dialog-header">

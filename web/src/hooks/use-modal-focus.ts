@@ -12,20 +12,24 @@ const FOCUSABLE_SELECTOR = [
 export function useModalFocus<T extends HTMLElement>({
   open,
   closeDisabled = false,
+  initialFocusRef,
   returnFocusRef,
   onClose,
 }: {
   open: boolean;
   closeDisabled?: boolean;
+  initialFocusRef?: RefObject<HTMLElement | null>;
   returnFocusRef?: RefObject<HTMLElement | null>;
   onClose(): void;
 }) {
   const containerRef = useRef<T>(null);
   const onCloseRef = useRef(onClose);
   const closeDisabledRef = useRef(closeDisabled);
+  const explicitInitialFocusRef = useRef(initialFocusRef);
   const explicitReturnFocusRef = useRef(returnFocusRef);
   onCloseRef.current = onClose;
   closeDisabledRef.current = closeDisabled;
+  explicitInitialFocusRef.current = initialFocusRef;
   explicitReturnFocusRef.current = returnFocusRef;
 
   useEffect(() => {
@@ -37,6 +41,7 @@ export function useModalFocus<T extends HTMLElement>({
 
     if (!container.contains(document.activeElement)) {
       (
+        explicitInitialFocusRef.current?.current ??
         container.querySelector<HTMLElement>("[autofocus]") ??
         container.querySelector<HTMLElement>(FOCUSABLE_SELECTOR) ??
         container

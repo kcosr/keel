@@ -215,6 +215,12 @@ function ScheduleEditor({
     if (!schedule && !workflowName && workflows[0]) setWorkflowName(workflows[0].name);
   }, [schedule, workflowName, workflows]);
 
+  useEffect(() => {
+    if (!schedule || workflowName || !inferredWorkflow) return;
+    setWorkflowName(inferredWorkflow.name);
+    setWorkflowVersion(inferredVersion === null ? "latest" : String(inferredVersion));
+  }, [inferredVersion, inferredWorkflow, schedule, workflowName]);
+
   const save = async (event: FormEvent) => {
     event.preventDefault();
     setBusy(true);

@@ -166,6 +166,46 @@ describe("cron schedules", () => {
     expect(store.listRuns().map((run) => run.workflowName)).toEqual(["good-target"]);
   });
 
+  test("invalid persisted schedule input disables only the offending due schedule", async () => {
+    const store = JournalStore.memory();
+    const t = 1000;
+    let n = 0;
+    const kernel = new RealmKernel(store, { idgen: () => `cron-${n++}`, clock: () => t });
+    const definition = snapshotWorkflowSource(store, chainUrl.source, {
+      name: "validated",
+      nowMs: t,
+    }).snapshot.hash;
+    const inputSchemaJson = JSON.stringify({
+      type: "object",
+      required: ["n"],
+      properties: { n: { type: "integer", minimum: 1 } },
+    });
+    store.putSchedule({
+      name: "invalid-input",
+      workflowRef: definition,
+      inputJson: JSON.stringify({ n: 0 }),
+      inputSchemaJson,
+      scheduleTarget: process.cwd(),
+      intervalMs: 60_000,
+      nextFireMs: 500,
+    });
+    store.putSchedule({
+      name: "valid-input",
+      workflowRef: definition,
+      inputJson: JSON.stringify({ n: 1 }),
+      inputSchemaJson,
+      scheduleTarget: process.cwd(),
+      intervalMs: 60_000,
+      nextFireMs: 500,
+    });
+
+    const result = await new Supervisor({ store, kernel, clock: () => t }).tick();
+    expect(result.fired).toEqual(["valid-input"]);
+    const invalid = store.getSchedule("invalid-input");
+    expect(invalid?.enabled).toBe(false);
+    expect(JSON.parse(invalid?.lastErrorJson ?? "{}").message).toContain("$.n must be >= 1");
+  });
+
   test("unsupported workflow SDK ABI disables only the offending due schedule", async () => {
     const store = JournalStore.memory();
     const t = 1000;

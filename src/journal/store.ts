@@ -1121,6 +1121,11 @@ export class JournalStore {
     assertValidSavedWorkflowName(req.name);
     const definitionHash = req.definition?.hash ?? req.definitionHash;
     if (!definitionHash) throw new Error("saved workflow version requires definitionHash");
+    const inputSchemaJson = req.inputSchema === undefined ? null : canonicalJson(req.inputSchema);
+    const defaultInputJson =
+      req.defaultInput === undefined ? null : canonicalJson(req.defaultInput);
+    const workflowName = req.workflowName ?? null;
+    const defaultTarget = req.defaultTarget ?? null;
     return this.transaction(() => {
       if (req.definition) this.putWorkflowDefinition(req.definition);
       if (!this.getWorkflowDefinition(definitionHash)) {
@@ -1164,12 +1169,29 @@ export class JournalStore {
           );
       }
       const duplicate = this.db
-        .query<{ version: number }, [string, string]>(
-          `SELECT version FROM saved_workflow_versions
+        .query<
+          {
+            version: number;
+            workflow_name: string | null;
+            input_schema_json: string | null;
+            default_input_json: string | null;
+            default_target: string | null;
+          },
+          [string, string]
+        >(
+          `SELECT version, workflow_name, input_schema_json, default_input_json, default_target
+           FROM saved_workflow_versions
            WHERE name = ? AND definition_hash = ? AND deleted_at_ms IS NULL
-           ORDER BY version ASC LIMIT 1`,
+           ORDER BY version ASC`,
         )
-        .get(req.name, definitionHash);
+        .all(req.name, definitionHash)
+        .find(
+          (candidate) =>
+            candidate.workflow_name === workflowName &&
+            candidate.input_schema_json === inputSchemaJson &&
+            candidate.default_input_json === defaultInputJson &&
+            candidate.default_target === defaultTarget,
+        );
       if (duplicate && !req.allowDuplicateDefinition) {
         throw new Error(
           `saved workflow "${req.name}" already has definition ${definitionHash} at version ${duplicate.version}`,
@@ -1202,10 +1224,10 @@ export class JournalStore {
           req.name,
           version,
           definitionHash,
-          req.workflowName ?? null,
-          req.inputSchema === undefined ? null : canonicalJson(req.inputSchema),
-          req.defaultInput === undefined ? null : canonicalJson(req.defaultInput),
-          req.defaultTarget ?? null,
+          workflowName,
+          inputSchemaJson,
+          defaultInputJson,
+          defaultTarget,
           req.metadata === undefined ? null : canonicalJson(req.metadata),
           req.sourceProvenance === undefined ? null : canonicalJson(req.sourceProvenance),
           req.createdBy ?? null,
@@ -1517,6 +1539,7 @@ export class JournalStore {
     name: string;
     workflowRef: string;
     inputJson: string | null;
+    inputSchemaJson?: string | null;
     scheduleTarget?: string | null;
     intervalMs: number;
     nextFireMs: number;
@@ -1524,12 +1547,13 @@ export class JournalStore {
     this.db
       .query(
         `INSERT INTO schedules (
-           name, workflow_ref, input_json, schedule_target, interval_ms, next_fire_ms, enabled, last_error_json, last_failed_at_ms
+           name, workflow_ref, input_json, input_schema_json, schedule_target, interval_ms, next_fire_ms, enabled, last_error_json, last_failed_at_ms
          )
-         VALUES ($name, $ref, $input, $target, $interval, $next, 1, NULL, NULL)
+         VALUES ($name, $ref, $input, $schema, $target, $interval, $next, 1, NULL, NULL)
          ON CONFLICT(name) DO UPDATE SET
            workflow_ref = $ref,
            input_json = $input,
+           input_schema_json = $schema,
            schedule_target = $target,
            interval_ms = $interval,
            next_fire_ms = $next,
@@ -1541,6 +1565,7 @@ export class JournalStore {
         $name: s.name,
         $ref: s.workflowRef,
         $input: s.inputJson,
+        $schema: s.inputSchemaJson ?? null,
         $target: s.scheduleTarget ?? null,
         $interval: s.intervalMs,
         $next: s.nextFireMs,
@@ -1551,6 +1576,7 @@ export class JournalStore {
     name: string;
     workflowRef: string;
     inputJson: string | null;
+    inputSchemaJson: string | null;
     scheduleTarget: string | null;
     intervalMs: number;
     nextFireMs: number;
@@ -1561,6 +1587,7 @@ export class JournalStore {
           name: string;
           workflow_ref: string;
           input_json: string | null;
+          input_schema_json: string | null;
           schedule_target: string | null;
           interval_ms: number;
           next_fire_ms: number;
@@ -1572,6 +1599,7 @@ export class JournalStore {
         name: r.name,
         workflowRef: r.workflow_ref,
         inputJson: r.input_json,
+        inputSchemaJson: r.input_schema_json,
         scheduleTarget: r.schedule_target,
         intervalMs: r.interval_ms,
         nextFireMs: r.next_fire_ms,
@@ -2492,6 +2520,7 @@ interface RawScheduleRow {
   name: string;
   workflow_ref: string;
   input_json: string | null;
+  input_schema_json: string | null;
   schedule_target: string | null;
   interval_ms: number;
   next_fire_ms: number;
@@ -2755,6 +2784,7 @@ function mapSchedule(r: RawScheduleRow): ScheduleRow {
     name: r.name,
     workflowRef: r.workflow_ref,
     inputJson: r.input_json,
+    inputSchemaJson: r.input_schema_json,
     scheduleTarget: r.schedule_target,
     intervalMs: r.interval_ms,
     nextFireMs: r.next_fire_ms,

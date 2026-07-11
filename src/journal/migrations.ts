@@ -20,7 +20,8 @@
 // → v19 branch-backed worktree checkout metadata
 // → v20 saved workflow registry tables
 // → v21 normalize legacy workflow definition source manifests
-// → v22 workspace setup metadata.
+// → v22 workspace setup metadata
+// → v23 schedule input schema snapshots.
 
 import type { Database } from "bun:sqlite";
 import { parse } from "acorn";
@@ -362,6 +363,9 @@ export function applyMigration(db: Database, fromVersion: number): void {
       addColumn(db, "agent_workspaces", "setup_started_at_ms", "INTEGER");
       addColumn(db, "agent_workspaces", "setup_finished_at_ms", "INTEGER");
       addColumn(db, "agent_workspaces", "setup_error_json", "TEXT");
+      break;
+    case 22: // → v23: saved-workflow input contract pinned to each schedule.
+      addColumn(db, "schedules", "input_schema_json", "TEXT");
       break;
     default:
       throw new Error(`no migration defined from schema version ${fromVersion}`);

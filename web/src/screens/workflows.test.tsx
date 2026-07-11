@@ -63,6 +63,57 @@ describe("WorkflowsScreen", () => {
     expect(await screen.findByText("run_launched")).toBeInTheDocument();
   });
 
+  test("launches schema-declared inputs from typed controls", async () => {
+    const launchSavedWorkflow = vi.fn<KeelWebClient["launchSavedWorkflow"]>(async () => ({
+      runId: "run_typed",
+      attachCursor: { kind: "after-seq", runId: "run_typed", seq: 0 },
+    }));
+    const typedVersion = {
+      ...workflowVersion(2),
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        required: ["task", "mode"],
+        properties: {
+          task: { type: "string", title: "Task" },
+          mode: { type: "string", enum: ["review", "apply"] },
+          maxFindings: { type: "integer", minimum: 1 },
+          focus: { type: "array", items: { type: "string" } },
+        },
+      },
+      inputSchemaSet: true,
+      defaultInput: { task: "Review changes", mode: "review", maxFindings: 5 },
+    };
+    const detail = { ...workflowDetail(), versions: [typedVersion] };
+    const summary = { ...workflowSummary(), versions: [typedVersion] };
+    const client = {
+      listSavedWorkflows: vi.fn(async () => [summary]),
+      getSavedWorkflow: vi.fn(async () => detail),
+      getSavedWorkflowSource: vi.fn(async () => workflowSource()),
+      launchSavedWorkflow,
+    } as unknown as KeelWebClient;
+
+    render(<WorkflowsScreen client={client} refreshKey={0} />);
+    fireEvent.click(await screen.findByRole("tab", { name: /launch/i }));
+    fireEvent.change(screen.getByLabelText("Task"), { target: { value: "Review API" } });
+    fireEvent.change(screen.getByLabelText("Mode"), { target: { value: "1" } });
+    fireEvent.change(screen.getByLabelText(/max findings/i), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add item" }));
+    fireEvent.change(screen.getByLabelText("Array item"), { target: { value: "validation" } });
+    const launchButtons = screen.getAllByRole("button", { name: "Launch" });
+    fireEvent.click(launchButtons.at(-1) as HTMLButtonElement);
+
+    await waitFor(() =>
+      expect(launchSavedWorkflow).toHaveBeenCalledWith({
+        name: "review-loop",
+        version: 2,
+        input: { task: "Review API", mode: "apply", focus: ["validation"] },
+        target: "/tmp/work",
+        runName: null,
+      }),
+    );
+  });
+
   test("groups concise lifecycle commands under one actions menu", async () => {
     const setSavedWorkflowVersionEnabled = vi.fn(async () => workflowVersion(2));
     const client = {

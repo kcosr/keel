@@ -134,7 +134,9 @@ daemon-backed target directory selection, and system views. Browser mutations
 are wired through bearer-authorized `/rpc` calls and the daemon remains the
 authorization boundary. Destructive resource
 controls require browser confirmation; profile and setting writes include
-generation preconditions. The current workspace browser projection fans out over per-run
+generation preconditions. Saved workflow launch renders supported Draft 7 input
+schemas as typed controls with JSON fallback, while the daemon validates the
+same schema for every saved-workflow launch. The current workspace browser projection fans out over per-run
 workspace RPCs instead of a daemon-native aggregate. The system view uses only
 `/health` and `/api/system`; daemon internals such as journal paths, schema
 versions, systemd state, logs, and restart controls are not inferred.

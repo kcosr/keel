@@ -1,0 +1,57 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["spec"],
+  "properties": {
+    "repository": { "type": "string", "title": "Repository" },
+    "spec": { "type": "string", "title": "Spec", "minLength": 1 },
+    "task": { "type": "string", "title": "Task" },
+    "maxRounds": { "type": "integer", "title": "Maximum rounds", "minimum": 1, "maximum": 10 },
+    "completionMode": {
+      "type": "string",
+      "title": "Completion mode",
+      "enum": ["auto", "park-before-complete"]
+    },
+    "completionSignalName": { "type": "string", "title": "Completion signal name" },
+    "completionCheckFailureAction": {
+      "type": "string",
+      "title": "Check failure action",
+      "enum": ["continue-loop", "park", "block"]
+    },
+    "completionChecks": {
+      "type": "array",
+      "title": "Completion checks",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["key", "type"],
+        "properties": {
+          "key": { "type": "string", "title": "Key", "pattern": "^[A-Za-z0-9_-]+$" },
+          "type": {
+            "type": "string",
+            "title": "Type",
+            "enum": ["command", "git-clean", "has-commits", "branch-pushed"]
+          },
+          "command": { "type": "string", "title": "Command" },
+          "args": { "type": "array", "title": "Arguments", "items": { "type": "string" } },
+          "shell": { "type": "boolean", "title": "Use shell" },
+          "cwd": { "type": "string", "title": "Working directory" },
+          "timeoutMs": { "type": "integer", "title": "Timeout (ms)", "minimum": 1, "maximum": 1800000 },
+          "maxStdoutBytes": { "type": "integer", "title": "Maximum stdout bytes", "minimum": 1, "maximum": 262144 },
+          "maxStderrBytes": { "type": "integer", "title": "Maximum stderr bytes", "minimum": 1, "maximum": 262144 },
+          "env": { "type": "object", "title": "Environment", "additionalProperties": { "type": "string" } },
+          "minCount": { "type": "integer", "title": "Minimum commits", "minimum": 1 },
+          "baseRef": { "type": "string", "title": "Base ref" },
+          "remote": { "type": "string", "title": "Remote" },
+          "remoteRef": { "type": "string", "title": "Remote ref" }
+        }
+      }
+    },
+    "implementerProfile": { "type": "string", "title": "Implementer profile" },
+    "reviewerProfile": { "type": "string", "title": "Reviewer profile" },
+    "implementerReasoning": { "type": "string", "title": "Implementer reasoning" },
+    "reviewerReasoning": { "type": "string", "title": "Reviewer reasoning" },
+    "reviewFocus": { "type": "string", "title": "Review focus" }
+  }
+}

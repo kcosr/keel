@@ -123,12 +123,14 @@ seed_profile() {
 seed_workflow() {
   local name="$1"
   local file="$2"
-  local title="$3"
-  local description="$4"
-  shift 4
+  local input_schema="$3"
+  local title="$4"
+  local description="$5"
+  shift 5
   local tags=("$@")
   local save_args=(
     workflow save "$name" "$repo_root/$file"
+    --input-schema "$repo_root/$input_schema"
     --title "$title"
     --description "$description"
   )
@@ -185,30 +187,35 @@ if ((seed_workflows)); then
   seed_workflow \
     iterative-review \
     workflows/iterative-review/iterative-review.workflow.ts \
+    workflows/iterative-review/input-schema.json \
     "Iterative review" \
     "Durable read-only reviewer session for iterative human or agent follow-up. Parks for review-cycle signals until clean, stopped, or max rounds." \
     review iterative
   seed_workflow \
     implement-review-loop \
     workflows/implement-review-loop/implement-review-loop.workflow.ts \
+    workflows/implement-review-loop/input-schema.json \
     "Implement review loop" \
     "Autonomous direct-workspace implementation loop with a write-capable implementer, read-only reviewer, bounded rounds, and optional completion checks." \
     implement review
   seed_workflow \
     branch-worktree-implement-review \
     workflows/branch-worktree-implement-review/branch-worktree-implement-review.workflow.ts \
+    workflows/branch-worktree-implement-review/input-schema.json \
     "Branch worktree implement review" \
     "Autonomous implementation and review loop in a generated branch worktree, retaining or removing the workspace according to input retention." \
     implement review worktree
   seed_workflow \
     spec-review-loop \
     workflows/spec-review-loop/spec-review-loop.workflow.ts \
+    workflows/spec-review-loop/input-schema.json \
     "Spec review loop" \
     "Durable spec reviewer session that appends timestamped correspondence and waits for creator update signals until clean, stopped, or max reviews." \
     spec review
   seed_workflow \
     spec-author-review-loop \
     workflows/spec-author-review-loop/spec-author-review-loop.workflow.ts \
+    workflows/spec-author-review-loop/input-schema.json \
     "Spec author review loop" \
     "Autonomous spec author and correspondence reviewer loop for drafting or revising a spec until clean, blocked, or max rounds." \
     spec author review

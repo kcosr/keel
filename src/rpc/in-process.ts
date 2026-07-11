@@ -18,7 +18,7 @@ import {
 } from "../agents/profiles.ts";
 import type { AgentProviderRegistry } from "../agents/types.ts";
 import { canonicalJson } from "../hash.ts";
-import type { JournalStore } from "../journal/store.ts";
+import type { JournalStore, SavedWorkflowVersionView } from "../journal/store.ts";
 import type { AgentProfileCatalogRow, AgentWorkspaceRow, RunStatus } from "../journal/types.ts";
 import { ownerStaleWindowMs } from "../kernel/liveness.ts";
 import type { RealmKernel, RunHandle } from "../kernel/realm/realm-host.ts";
@@ -42,6 +42,7 @@ import {
 } from "../workflow-definitions/snapshot.ts";
 import { workflowDefinitionSourceSelection } from "../workflow-definitions/source-view.ts";
 import type { WorkflowSourceInput } from "../workflow-definitions/source.ts";
+import { assertValidWorkflowInputSchema, validateWorkflowInput } from "../workflow-input.ts";
 import { cleanupTerminalRunWorkspaces } from "../workspace/retention.ts";
 import {
   diffCopyWorkspace,
@@ -177,7 +178,38 @@ export class InProcessKeel implements KeelApi {
     return { runId, attachCursor: cursorAfterSeq(runId, 0) };
   }
 
-  saveWorkflow(req: SaveWorkflowRequest) {
+  saveWorkflow(
+    req: SaveWorkflowRequest & { inputSchema: unknown },
+  ): Promise<SavedWorkflowVersionView>;
+  saveWorkflow(req: SaveWorkflowRequest & { inputSchema?: undefined }): SavedWorkflowVersionView;
+  saveWorkflow(
+    req: SaveWorkflowRequest,
+  ): Promise<SavedWorkflowVersionView> | SavedWorkflowVersionView;
+  saveWorkflow(
+    req: SaveWorkflowRequest,
+  ): Promise<SavedWorkflowVersionView> | SavedWorkflowVersionView {
+    if (req.inputSchema !== undefined) {
+      return this.saveValidatedWorkflow(req);
+    }
+    return this.persistSavedWorkflow(req);
+  }
+
+  private async saveValidatedWorkflow(req: SaveWorkflowRequest) {
+    await assertValidWorkflowInputSchema(
+      req.inputSchema,
+      `Saved workflow "${req.name}" has an invalid input schema`,
+    );
+    if (req.defaultInput !== undefined) {
+      await validateWorkflowInput(
+        req.inputSchema,
+        req.defaultInput,
+        `Default input for saved workflow "${req.name}" is invalid`,
+      );
+    }
+    return this.persistSavedWorkflow(req);
+  }
+
+  private persistSavedWorkflow(req: SaveWorkflowRequest) {
     const at = this.opts.clock?.() ?? Date.now();
     const snapshot = createWorkflowDefinitionSnapshot(req.source, {
       name: req.workflowName ?? req.name,
@@ -303,6 +335,13 @@ export class InProcessKeel implements KeelApi {
     const target = requireRunTarget(req.target ?? saved.defaultTarget, "launchSavedWorkflow");
     const input =
       req.input !== undefined ? req.input : saved.defaultInputSet ? saved.defaultInput : {};
+    if (saved.inputSchemaSet) {
+      await validateWorkflowInput(
+        saved.inputSchema,
+        input,
+        `Input for saved workflow "${saved.name}" is invalid`,
+      );
+    }
     const name = req.name ?? saved.workflowName ?? saved.name;
     const { runId, done } = this.kernel.launchDefinition(saved.definitionHash, input, {
       name,
@@ -342,7 +381,7 @@ export class InProcessKeel implements KeelApi {
     return this.store.deleteSavedWorkflowVersion(name, version, this.opts.clock?.() ?? Date.now());
   }
 
-  putSchedule(req: PutScheduleRequest): { ok: boolean } {
+  putSchedule(req: PutScheduleRequest): Promise<{ ok: boolean }> | { ok: boolean } {
     const hasSource = "source" in req && req.source !== undefined;
     const hasSavedRef = "savedRef" in req && req.savedRef !== undefined;
     if (hasSource === hasSavedRef) {
@@ -350,6 +389,8 @@ export class InProcessKeel implements KeelApi {
     }
     let workflowRef: string;
     let defaultTarget: string | null = null;
+    let inputSchema: unknown | null = null;
+    let input: unknown = req.input;
     if (hasSavedRef) {
       if ("workflowName" in req && req.workflowName !== undefined) {
         throw new Error("putSchedule workflowName is only valid with source");
@@ -358,6 +399,15 @@ export class InProcessKeel implements KeelApi {
       materializeWorkflowDefinition(this.store, saved.definitionHash);
       workflowRef = saved.definitionHash;
       defaultTarget = saved.defaultTarget;
+      inputSchema = saved.inputSchemaSet ? saved.inputSchema : null;
+      input = req.input !== undefined ? req.input : saved.defaultInputSet ? saved.defaultInput : {};
+      if (saved.inputSchemaSet) {
+        return validateWorkflowInput(
+          saved.inputSchema,
+          input,
+          `Input for schedule "${req.name}" is invalid`,
+        ).then(() => this.persistSchedule(req, workflowRef, input, inputSchema, defaultTarget));
+      }
     } else {
       const snapshot = snapshotWorkflowSource(this.store, req.source, {
         name: req.workflowName ?? req.name,
@@ -365,11 +415,22 @@ export class InProcessKeel implements KeelApi {
       }).snapshot;
       workflowRef = snapshot.hash;
     }
+    return this.persistSchedule(req, workflowRef, input, inputSchema, defaultTarget);
+  }
+
+  private persistSchedule(
+    req: PutScheduleRequest,
+    workflowRef: string,
+    input: unknown,
+    inputSchema: unknown | null,
+    defaultTarget: string | null,
+  ): { ok: boolean } {
     const target = requireRunTarget(req.target ?? defaultTarget, "putSchedule");
     this.store.putSchedule({
       name: req.name,
       workflowRef,
-      inputJson: req.input != null ? JSON.stringify(req.input) : null,
+      inputJson: input === undefined ? null : canonicalJson(input),
+      inputSchemaJson: inputSchema === null ? null : canonicalJson(inputSchema),
       scheduleTarget: target,
       intervalMs: req.intervalMs,
       nextFireMs: req.firstFireMs ?? this.opts.clock?.() ?? Date.now(),

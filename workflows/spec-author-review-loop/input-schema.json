@@ -1,0 +1,23 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["specPath", "request"],
+  "properties": {
+    "specPath": { "type": "string", "title": "Spec path", "minLength": 1 },
+    "request": { "type": "string", "title": "Request", "minLength": 1 },
+    "creatorIdentity": { "type": "string", "title": "Creator identity" },
+    "reviewerIdentity": { "type": "string", "title": "Reviewer identity" },
+    "creatorProfile": { "type": "string", "title": "Creator profile" },
+    "reviewerProfile": { "type": "string", "title": "Reviewer profile" },
+    "creatorReasoning": { "type": "string", "title": "Creator reasoning" },
+    "reviewerReasoning": { "type": "string", "title": "Reviewer reasoning" },
+    "maxRounds": { "type": "integer", "title": "Maximum rounds", "minimum": 1, "maximum": 10 },
+    "completionMode": {
+      "type": "string",
+      "title": "Completion mode",
+      "enum": ["auto", "park-before-complete"]
+    },
+    "completionSignalName": { "type": "string", "title": "Completion signal name" }
+  }
+}

@@ -1,0 +1,135 @@
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { useState } from "react";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import { WorkflowInputEditor } from "./workflow-input-editor";
+
+afterEach(() => cleanup());
+
+const schema = {
+  type: "object",
+  required: ["task", "mode"],
+  properties: {
+    task: { type: "string", title: "Task", minLength: 1 },
+    mode: { type: "string", enum: ["review", "apply"] },
+    maxFindings: { type: "integer", minimum: 1 },
+    includeDrafts: { type: "boolean" },
+    focus: { type: "array", items: { type: "string" } },
+  },
+};
+
+describe("WorkflowInputEditor", () => {
+  test("renders typed controls and omits cleared optional values", () => {
+    let value: unknown = { task: "review", mode: "review", maxFindings: 5 };
+    const onChange = vi.fn((nextValue: unknown) => {
+      value = nextValue;
+    });
+    const { rerender } = render(
+      <WorkflowInputEditor
+        schema={schema}
+        value={value}
+        onChange={onChange}
+        onValidityChange={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByLabelText("Task")).toHaveValue("review");
+    expect(screen.getByLabelText("Mode")).toHaveValue("0");
+    fireEvent.change(screen.getByLabelText(/max findings/i), { target: { value: "" } });
+    rerender(
+      <WorkflowInputEditor
+        schema={schema}
+        value={value}
+        onChange={onChange}
+        onValidityChange={vi.fn()}
+      />,
+    );
+    expect(value).toEqual({ task: "review", mode: "review" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Add item" }));
+    expect(onChange).toHaveBeenLastCalledWith({ task: "review", mode: "review", focus: [""] });
+  });
+
+  test("keeps JSON mode synchronized and reports invalid JSON", () => {
+    const onChange = vi.fn();
+    const onValidityChange = vi.fn();
+    render(
+      <WorkflowInputEditor
+        schema={schema}
+        value={{ task: "review", mode: "review" }}
+        onChange={onChange}
+        onValidityChange={onValidityChange}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "JSON" }));
+    const input = screen.getByLabelText("Input JSON");
+    expect(input).toHaveValue('{\n  "task": "review",\n  "mode": "review"\n}');
+    fireEvent.change(input, { target: { value: "{" } });
+    expect(onValidityChange).toHaveBeenLastCalledWith(false);
+    expect(screen.getByText(/expected property name/i)).toBeInTheDocument();
+  });
+
+  test("uses JSON mode for schemas the form cannot represent", () => {
+    render(
+      <WorkflowInputEditor
+        schema={{ type: "object", properties: { choice: { oneOf: [] } } }}
+        value={{}}
+        onChange={vi.fn()}
+        onValidityChange={vi.fn()}
+      />,
+    );
+    expect(screen.getByLabelText("Input JSON")).toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "Input editor mode" })).not.toBeInTheDocument();
+  });
+
+  test("renders repeatable object rows and free-form object values", () => {
+    const structuredSchema = {
+      type: "object",
+      properties: {
+        checks: {
+          type: "array",
+          title: "Checks",
+          items: {
+            type: "object",
+            required: ["key", "type"],
+            properties: {
+              key: { type: "string", title: "Key" },
+              type: { type: "string", title: "Type", enum: ["command", "git-clean"] },
+              env: {
+                type: "object",
+                title: "Environment",
+                additionalProperties: { type: "string" },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    function Harness() {
+      const [value, setValue] = useState<unknown>({});
+      return (
+        <>
+          <WorkflowInputEditor
+            schema={structuredSchema}
+            value={value}
+            onChange={setValue}
+            onValidityChange={vi.fn()}
+          />
+          <output>{JSON.stringify(value)}</output>
+        </>
+      );
+    }
+
+    render(<Harness />);
+    fireEvent.click(screen.getByRole("button", { name: "Add item" }));
+    fireEvent.change(screen.getByLabelText("Key"), { target: { value: "lint" } });
+    fireEvent.change(screen.getByLabelText("Type"), { target: { value: "1" } });
+    fireEvent.change(screen.getByLabelText("Environment"), {
+      target: { value: '{"CI":"true"}' },
+    });
+    expect(
+      screen.getByText('{"checks":[{"key":"lint","type":"git-clean","env":{"CI":"true"}}]}'),
+    ).toBeInTheDocument();
+  });
+});

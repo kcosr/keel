@@ -1247,15 +1247,21 @@ The profile seed upserts:
 | `work-nemotron-3-ultra` | `pi` | `work-nemotron-3-ultra/nemotron-3-ultra` | `high` | none |
 | `work-qwen-3-6-27b` | `pi` | `work-qwen-3-6-27b/qwen3.6-27b` | `high` | none |
 
-The workflow seed saves or refreshes these reusable saved workflows:
+The workflow seed saves or refreshes these reusable saved workflows together
+with their adjacent Draft 7 input schemas:
 
-| Name | Source |
-|---|---|
-| `iterative-review` | `workflows/iterative-review/iterative-review.workflow.ts` |
-| `implement-review-loop` | `workflows/implement-review-loop/implement-review-loop.workflow.ts` |
-| `branch-worktree-implement-review` | `workflows/branch-worktree-implement-review/branch-worktree-implement-review.workflow.ts` |
-| `spec-review-loop` | `workflows/spec-review-loop/spec-review-loop.workflow.ts` |
-| `spec-author-review-loop` | `workflows/spec-author-review-loop/spec-author-review-loop.workflow.ts` |
+| Name | Source | Input schema |
+|---|---|---|
+| `iterative-review` | `workflows/iterative-review/iterative-review.workflow.ts` | `workflows/iterative-review/input-schema.json` |
+| `implement-review-loop` | `workflows/implement-review-loop/implement-review-loop.workflow.ts` | `workflows/implement-review-loop/input-schema.json` |
+| `branch-worktree-implement-review` | `workflows/branch-worktree-implement-review/branch-worktree-implement-review.workflow.ts` | `workflows/branch-worktree-implement-review/input-schema.json` |
+| `spec-review-loop` | `workflows/spec-review-loop/spec-review-loop.workflow.ts` | `workflows/spec-review-loop/input-schema.json` |
+| `spec-author-review-loop` | `workflows/spec-author-review-loop/spec-author-review-loop.workflow.ts` | `workflows/spec-author-review-loop/input-schema.json` |
+
+The seed is idempotent against the complete saved execution contract. Changing
+only a workflow's input schema or default input creates a new immutable version
+even when captured workflow source is unchanged; reseeding the same source and
+contract reports `unchanged`.
 
 ### Persistent Daemon Settings
 
@@ -1714,7 +1720,8 @@ definition hash.
 
 ```bash
 keel workflow save review-loop ./review.workflow.ts \
-  --title "Review loop" --tag review --default-input '{"n":2}' --default-target "$PWD"
+  --title "Review loop" --tag review --input-schema ./review-input.schema.json \
+  --default-input '{"n":2}' --default-target "$PWD"
 keel workflow list --output json
 keel workflow show review-loop --output text
 keel workflow source review-loop --all
@@ -1728,6 +1735,29 @@ keel workflow enable review-loop
 keel workflow deprecate review-loop 2 "use v3"
 keel workflow delete-version review-loop 1 --yes
 ```
+
+Saved workflow `inputSchema` values use JSON Schema Draft 7. Keel compiles the
+schema and validates any declared `defaultInput` before writing a new immutable
+version. `workflow launch`, `workflow run`, daemon RPC launches, and schedules
+created from a saved workflow validate the effective input before starting a
+run. Validation failures are reported with JSON field paths, for example
+`$.maxFindings must be >= 1`. An explicit launch input continues to replace the
+complete saved default; Keel does not merge individual default fields into an
+explicit input.
+
+Schedules created from a saved workflow snapshot both the effective input and
+that saved version's input schema. The supervisor validates the snapshot before
+every fire and disables a schedule with a persisted error if its stored input no
+longer satisfies the contract. Source-based schedules have no saved input schema
+and retain their existing untyped input behavior.
+
+The web workflow launch panel renders object properties as typed controls when
+the schema uses supported scalar, enum, nested-object, and scalar-array shapes.
+Optional blank values are omitted, optional booleans retain an explicit unset
+state, and schema titles/descriptions are used when present. Operators can switch
+between the form and synchronized JSON input. Schemas using composition,
+references, or other shapes the form cannot represent open directly in JSON
+mode; daemon validation remains authoritative in either mode.
 
 `keel workflow run` accepts the same `--secret` and `--secret-env` flags as
 `keel run`; the raw values apply only to the launched run. Use

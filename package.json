@@ -32,6 +32,8 @@
   "dependencies": {
     "acorn": "^8.16.0",
     "acorn-walk": "^8.3.5",
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1",
     "typescript": "^5.7.2",
     "zod": "^3.23.8"
   },

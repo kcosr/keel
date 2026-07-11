@@ -388,6 +388,69 @@ describe("settings RPC", () => {
 });
 
 describe("saved workflow RPC", () => {
+  test("enforces saved input schemas for defaults, launches, and schedules", async () => {
+    const store = JournalStore.memory();
+    const api = keel(store);
+    const inputSchema = {
+      type: "object",
+      additionalProperties: false,
+      required: ["n", "mode"],
+      properties: {
+        n: { type: "integer", minimum: 1 },
+        mode: { type: "string", enum: ["review", "apply"] },
+      },
+    } as const;
+
+    await expect(
+      api.saveWorkflow({
+        name: "bad-schema",
+        source: chainUrl.source,
+        inputSchema: { type: "invalid" },
+        defaultTarget: process.cwd(),
+      }),
+    ).rejects.toThrow(/invalid input schema/);
+    await expect(
+      api.saveWorkflow({
+        name: "bad-default",
+        source: chainUrl.source,
+        inputSchema,
+        defaultInput: { n: 0, mode: "review" },
+        defaultTarget: process.cwd(),
+      }),
+    ).rejects.toThrow(/\$\.n must be >= 1/);
+
+    await api.saveWorkflow({
+      name: "validated",
+      source: chainUrl.source,
+      inputSchema,
+      defaultInput: { n: 2, mode: "review" },
+      defaultTarget: process.cwd(),
+    });
+    await expect(
+      api.launchSavedWorkflow({
+        ref: { name: "validated" },
+        input: { n: 1, mode: "invalid" },
+      }),
+    ).rejects.toThrow(/\$\.mode must be equal to one of the allowed values/);
+    await expect(
+      api.putSchedule({
+        name: "invalid-scheduled-input",
+        savedRef: { name: "validated" },
+        input: { n: 0, mode: "review" },
+        intervalMs: 60_000,
+      }),
+    ).rejects.toThrow(/\$\.n must be >= 1/);
+
+    await api.putSchedule({
+      name: "validated-schedule",
+      savedRef: { name: "validated" },
+      intervalMs: 60_000,
+    });
+    const schedule = store.getSchedule("validated-schedule");
+    expect(JSON.parse(schedule?.inputJson ?? "null")).toEqual({ n: 2, mode: "review" });
+    expect(JSON.parse(schedule?.inputSchemaJson ?? "null")).toEqual(inputSchema);
+  });
+
   test("previews workflow definitions without mutating saved workflow registry", () => {
     const store = JournalStore.memory();
     const api = keel(store);

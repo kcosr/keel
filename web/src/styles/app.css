@@ -2460,6 +2460,167 @@ h3 {
   min-height: 180px;
 }
 
+.workflow-object-json {
+  font-family: var(--mono);
+  min-height: 76px;
+}
+
+.workflow-input-editor {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.workflow-input-mode {
+  align-items: center;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  display: inline-flex;
+  justify-self: start;
+  overflow: hidden;
+  padding: 0;
+}
+
+.workflow-input-mode legend {
+  height: 1px;
+  overflow: hidden;
+  position: absolute;
+  width: 1px;
+  clip: rect(0 0 0 0);
+}
+
+.workflow-input-mode button {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: var(--text-3);
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 700;
+  gap: 5px;
+  height: 30px;
+  padding: 0 10px;
+}
+
+.workflow-input-mode button + button {
+  border-left: 1px solid var(--border);
+}
+
+.workflow-input-mode button[aria-pressed="true"] {
+  background: var(--surface);
+  color: var(--accent);
+}
+
+.workflow-input-fields {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.workflow-schema-field {
+  align-content: start;
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.workflow-schema-field > .field-input {
+  min-width: 0;
+  width: 100%;
+}
+
+.workflow-schema-label {
+  align-items: baseline;
+  color: var(--text-2);
+  display: flex;
+  gap: 7px;
+}
+
+.workflow-schema-label strong {
+  font-size: 12px;
+}
+
+.workflow-schema-description {
+  color: var(--text-3);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.workflow-schema-label.is-optional::after {
+  color: var(--text-3);
+  content: "Optional";
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.workflow-input-group {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  grid-column: 1 / -1;
+  margin: 0;
+  min-width: 0;
+  padding: 11px;
+}
+
+.workflow-input-group legend {
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 750;
+  padding: 0 4px;
+}
+
+.workflow-input-group > p {
+  color: var(--text-3);
+  font-size: 11px;
+  margin: 0 0 9px;
+}
+
+.workflow-array-field {
+  display: grid;
+  gap: 6px;
+}
+
+.workflow-array-row {
+  align-items: start;
+  display: grid;
+  gap: 6px;
+  grid-template-columns: minmax(0, 1fr) 31px;
+}
+
+.workflow-array-object {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  margin: 0;
+  min-width: 0;
+  padding: 9px;
+}
+
+.workflow-array-object legend {
+  color: var(--text-3);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 0 4px;
+}
+
+.workflow-array-row .field-input {
+  min-width: 0;
+  width: 100%;
+}
+
+.workflow-array-add {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: var(--accent);
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 700;
+  gap: 4px;
+  justify-self: start;
+  padding: 3px 0;
+}
+
 .diagnostic-list {
   display: grid;
   gap: 7px;
@@ -3047,6 +3208,10 @@ h3 {
   .resource-form-grid,
   .system-grid,
   .resource-action-bar .kv-list {
+    grid-template-columns: 1fr;
+  }
+
+  .workflow-input-fields {
     grid-template-columns: 1fr;
   }
 

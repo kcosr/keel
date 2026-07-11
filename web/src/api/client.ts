@@ -4,6 +4,7 @@ import type {
   AgentProfileCheckResult,
   AgentProfileView,
   ApprovalsResponse,
+  BrowseDirectoriesResult,
   EventCursorInput,
   HealthResponse,
   InterruptRunResult,
@@ -72,6 +73,10 @@ export class KeelWebClient {
 
   health(): Promise<HealthResponse> {
     return this.getJson("/health", { includeAuth: false });
+  }
+
+  browseDirectories(path: string): Promise<BrowseDirectoriesResult> {
+    return this.rpc("browseDirectories", { path });
   }
 
   listRuns(opts: { limit?: number } = {}): Promise<RunsResponse> {

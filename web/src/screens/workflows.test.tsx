@@ -20,6 +20,12 @@ describe("WorkflowsScreen", () => {
       listSavedWorkflows: vi.fn(async () => [workflowSummary()]),
       getSavedWorkflow: vi.fn(async () => workflowDetail()),
       getSavedWorkflowSource: vi.fn(async () => workflowSource()),
+      browseDirectories: vi.fn(async (path: string) => ({
+        path,
+        parentPath: "/tmp",
+        entries: path === "/tmp/work" ? [{ name: "project", path: "/tmp/work/project" }] : [],
+        truncated: false,
+      })),
       launchSavedWorkflow,
     } as unknown as KeelWebClient;
 
@@ -38,6 +44,10 @@ describe("WorkflowsScreen", () => {
     expect(await screen.findByText(/export default async function review/)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("tab", { name: /launch/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Browse target" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Open project" }));
+    await waitFor(() => expect(screen.getByText("/tmp/work/project")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Select" }));
     const launchButtons = screen.getAllByRole("button", { name: "Launch" });
     fireEvent.click(launchButtons[launchButtons.length - 1] as HTMLButtonElement);
     await waitFor(() =>
@@ -45,7 +55,7 @@ describe("WorkflowsScreen", () => {
         name: "review-loop",
         version: 2,
         input: { n: 2 },
-        target: "/tmp/work",
+        target: "/tmp/work/project",
         runName: null,
       }),
     );

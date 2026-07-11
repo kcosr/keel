@@ -220,7 +220,27 @@ export interface DeleteSettingRequest {
   ifGeneration?: number;
 }
 
+export interface BrowseDirectoriesRequest {
+  path: string;
+}
+
+export interface DirectoryBrowseEntry {
+  name: string;
+  path: string;
+}
+
+export interface BrowseDirectoriesResult {
+  path: string;
+  parentPath: string | null;
+  entries: DirectoryBrowseEntry[];
+  truncated: boolean;
+}
+
 export interface KeelApi {
+  /** List directories on the daemon host. Requires admin authority at the gateway. */
+  browseDirectories(
+    req: BrowseDirectoriesRequest,
+  ): Promise<BrowseDirectoriesResult> | BrowseDirectoriesResult;
   /** Start a run; returns its id immediately (the run executes in the background). */
   launchRun(req: LaunchRequest): Promise<RunLaunchResult>;
   saveWorkflow(

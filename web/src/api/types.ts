@@ -59,6 +59,18 @@ export interface GatewayErrorEnvelope {
   resource?: unknown;
 }
 
+export interface DirectoryBrowseEntry {
+  name: string;
+  path: string;
+}
+
+export interface BrowseDirectoriesResult {
+  path: string;
+  parentPath: string | null;
+  entries: DirectoryBrowseEntry[];
+  truncated: boolean;
+}
+
 export interface HealthResponse {
   ok: boolean;
   web: { ok: boolean; apiOnly: boolean };

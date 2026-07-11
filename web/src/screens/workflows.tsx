@@ -22,6 +22,7 @@ import {
   formatTime,
 } from "../components/controls";
 import { type Column, DenseTable } from "../components/dense-table";
+import { DirectoryPickerField } from "../components/directory-picker";
 import { useAsync } from "../hooks/use-async";
 
 type WorkflowTab = "versions" | "source" | "launch";
@@ -361,15 +362,14 @@ function WorkflowLaunchForm({
         the web surface.
       </div>
       {launchBlockedReason ? <div className="form-error">{launchBlockedReason}</div> : null}
-      <label className="form-field" htmlFor={`${formId}-target`}>
-        <span>Target</span>
-        <TextInput
-          id={`${formId}-target`}
-          value={target}
-          onChange={(event) => setTarget(event.target.value)}
-          placeholder="/path/to/workspace"
-        />
-      </label>
+      <DirectoryPickerField
+        client={client}
+        id={`${formId}-target`}
+        label="Target"
+        value={target}
+        onChange={setTarget}
+        placeholder="/path/to/workspace"
+      />
       <label className="form-field" htmlFor={`${formId}-run-name`}>
         <span>Run name</span>
         <TextInput

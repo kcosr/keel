@@ -106,6 +106,7 @@ describe("KeelWebClient", () => {
       fetchImpl,
     });
 
+    await client.browseDirectories("/srv/work");
     await client.getSavedWorkflow("review-loop");
     await client.getSavedWorkflowSource({ name: "review-loop", version: 3 });
     await client.launchSavedWorkflow({
@@ -125,6 +126,7 @@ describe("KeelWebClient", () => {
       ([, init]) => JSON.parse(String(init?.body)) as { method: string; params: unknown },
     );
     expect(bodies).toEqual([
+      { method: "browseDirectories", params: { path: "/srv/work" } },
       { method: "getSavedWorkflow", params: { name: "review-loop" } },
       {
         method: "getSavedWorkflowSource",

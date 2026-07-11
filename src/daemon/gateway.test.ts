@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -212,6 +212,26 @@ async function waitFor(check: () => boolean, message: string): Promise<void> {
 }
 
 describe("KeelOperationGateway", () => {
+  test("requires admin authority to browse daemon directories", async () => {
+    const harness = createHarness();
+    const session = new FakeGatewaySession("directory-browser");
+    mkdirSync(join(dir, "project-a"));
+    try {
+      await expect(
+        fail(harness, session, "browseDirectories", { path: dir }, null),
+      ).resolves.toMatch(/admin .* not authorized/);
+
+      await expect(
+        ok(harness, session, "browseDirectories", { path: dir }, ADMIN_TOKEN),
+      ).resolves.toMatchObject({
+        path: dir,
+        entries: [{ name: "project-a", path: join(dir, "project-a") }],
+      });
+    } finally {
+      harness.close();
+    }
+  });
+
   test("handles session auth, health, admin auth, open launch, and run-scoped reads without a socket", async () => {
     const harness = createHarness();
     const session = new FakeGatewaySession("session-auth");

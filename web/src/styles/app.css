@@ -412,6 +412,139 @@ h3 {
   width: 100%;
 }
 
+.directory-dialog {
+  display: flex;
+  flex-direction: column;
+  max-height: min(720px, calc(100dvh - 40px));
+  width: 680px;
+}
+
+.directory-dialog-title {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.directory-dialog-title svg {
+  color: var(--accent);
+}
+
+.directory-dialog-body {
+  display: grid;
+  gap: 12px;
+  min-height: 0;
+  padding: 14px 16px 16px;
+}
+
+.directory-address-row {
+  display: grid;
+  gap: 7px;
+  grid-template-columns: 31px minmax(0, 1fr) auto 31px;
+}
+
+.directory-address-row .field-input {
+  font-family: var(--mono);
+  min-width: 0;
+  width: 100%;
+}
+
+.directory-filter-row {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+}
+
+.directory-filter-input {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+}
+
+.directory-filter-input > svg {
+  color: var(--text-3);
+  left: 9px;
+  pointer-events: none;
+  position: absolute;
+  top: 9px;
+  z-index: 1;
+}
+
+.directory-filter-input .field-input {
+  padding-left: 29px;
+  width: 100%;
+}
+
+.directory-list {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  min-height: 250px;
+  overflow: auto;
+}
+
+.directory-list .state {
+  min-height: 248px;
+}
+
+.directory-entry {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+  display: flex;
+  gap: 9px;
+  min-height: 40px;
+  padding: 7px 11px;
+  text-align: left;
+  width: 100%;
+}
+
+.directory-entry:last-child {
+  border-bottom: 0;
+}
+
+.directory-entry:hover {
+  background: var(--surface-3);
+}
+
+.directory-entry svg {
+  color: var(--accent);
+  flex: 0 0 auto;
+}
+
+.directory-entry span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.directory-entry:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.directory-limit-note {
+  color: var(--text-3);
+  font-size: 11.5px;
+}
+
+.directory-dialog-actions {
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+
+.directory-selection-path {
+  color: var(--text-2);
+  flex: 1;
+  font-size: 11.5px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .dialog-note {
   font-size: 12px;
 }
@@ -481,6 +614,17 @@ h3 {
 
 .field-select {
   min-width: 145px;
+}
+
+.directory-field-row {
+  display: grid;
+  gap: 6px;
+  grid-template-columns: minmax(0, 1fr) 31px;
+}
+
+.directory-field-row .field-input {
+  min-width: 0;
+  width: 100%;
 }
 
 .field-textarea {
@@ -2798,6 +2942,35 @@ h3 {
     border-radius: 8px 8px 0 0;
     border-right: 0;
     width: 100%;
+  }
+
+  .directory-dialog {
+    max-height: calc(100dvh - 12px);
+  }
+
+  .directory-dialog-header {
+    padding: 14px;
+  }
+
+  .directory-dialog-body {
+    padding: 12px 14px 14px;
+  }
+
+  .directory-filter-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .directory-list {
+    min-height: 210px;
+  }
+
+  .directory-list .state {
+    min-height: 208px;
+  }
+
+  .directory-selection-path {
+    flex-basis: 100%;
   }
 
   .dialog-actions {

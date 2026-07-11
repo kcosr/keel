@@ -124,6 +124,14 @@ export class KeelOperationGateway {
         return { ok: true };
       },
     },
+    browseDirectories: {
+      kind: "core",
+      webRequiresAdmin: true,
+      handle: (_session, p, credential) => {
+        this.authorizeAdmin(credential);
+        return this.opts.api.browseDirectories({ path: p.path as string });
+      },
+    },
     launchRun: {
       kind: "core",
       webRequiresAdmin: true,

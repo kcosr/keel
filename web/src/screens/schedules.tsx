@@ -25,6 +25,7 @@ import {
   toneForStatus,
 } from "../components/controls";
 import { type Column, DenseTable } from "../components/dense-table";
+import { DirectoryPickerField } from "../components/directory-picker";
 import { useAsync } from "../hooks/use-async";
 
 type ScheduleTab = "detail" | "configure" | "source";
@@ -328,15 +329,14 @@ function ScheduleEditor({
             onChange={(event) => setIntervalSeconds(event.target.value)}
           />
         </label>
-        <label className="form-field" htmlFor={`${formId}-target`}>
-          <span>Target</span>
-          <TextInput
-            id={`${formId}-target`}
-            value={target}
-            placeholder="Use workflow default"
-            onChange={(event) => setTarget(event.target.value)}
-          />
-        </label>
+        <DirectoryPickerField
+          client={client}
+          id={`${formId}-target`}
+          label="Target"
+          value={target}
+          onChange={setTarget}
+          placeholder="Use workflow default"
+        />
         <label className="form-field form-field-wide">
           <span>Input JSON</span>
           <textarea

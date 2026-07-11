@@ -130,8 +130,9 @@ new operation boundary. Current UI coverage includes runs, run detail with
 static workflow flow and capability-aware lifecycle actions, approval decisions,
 workspace diff/review controls, saved workflow lifecycle and launch, schedule
 lifecycle management, catalog profile management, mutable setting management,
-and system views. Browser mutations are wired through bearer-authorized `/rpc`
-calls and the daemon remains the authorization boundary. Destructive resource
+daemon-backed target directory selection, and system views. Browser mutations
+are wired through bearer-authorized `/rpc` calls and the daemon remains the
+authorization boundary. Destructive resource
 controls require browser confirmation; profile and setting writes include
 generation preconditions. The current workspace browser projection fans out over per-run
 workspace RPCs instead of a daemon-native aggregate. The system view uses only
@@ -170,6 +171,7 @@ versions, systemd state, logs, and restart controls are not inferred.
 | settings catalog set/unset | implemented | implemented | deferred | implemented | not-applicable | deferred | not-applicable | `admin` |
 | workspace list/show/diff | implemented | implemented | implemented | implemented | deferred | deferred | not-applicable | `run:read` |
 | workspace merge/discard/gc | implemented | implemented | implemented | implemented | deferred | deferred | not-applicable | `admin` |
+| daemon directory browse | implemented | deferred | deferred | implemented for target fields | not-applicable | deferred | not-applicable | `admin` |
 
 Keep this table descriptive until the API stabilizes enough to justify generated
 surface documentation.

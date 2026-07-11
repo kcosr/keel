@@ -11,6 +11,8 @@
   managed directly from the web console with validation, generation
   preconditions, and confirmations for destructive operations. Schedule state
   now has canonical admin RPC operations for pause/resume and deletion.
+- Workflow launch and schedule target fields in the web console now include an
+  admin-authorized directory picker backed by the daemon host filesystem.
 - The README now includes a fuller project introduction, system/replay diagrams,
   tiny workflow examples, and direct routing to the event-stream documentation.
   ([#30](https://github.com/kcosr/keel/pull/30))
@@ -87,9 +89,8 @@
   profile and setting editors, and system status cards backed by `/health` and
   `/api/system`.
 - The production web UI now includes final console polish: container-responsive
-  runs tables, keyboard row navigation, copyable CLI equivalents for approval,
-  run, and workspace actions, and a denser workspace review panel with explicit
-  disabled-state explanations.
+  runs tables, keyboard row navigation, consolidated action menus, and a denser
+  workspace review panel with explicit disabled-state explanations.
 - The web runs projection now defaults to a bounded latest-run page, accepts an
   explicit `limit` up to the documented maximum, uses a bounded daemon
   `listRunsPage` RPC before per-run enrichment, enforces the same maximum on

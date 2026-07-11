@@ -245,6 +245,27 @@ describe("web transport", () => {
         daemon: { reachable: true, ok: true, ownerId: daemon.ownerId },
       });
 
+      mkdirSync(join(dir, "browse-target"));
+      const browseBody = {
+        method: "browseDirectories",
+        params: { path: dir },
+      };
+      const browseDenied = await jsonFetch(`${web.url}/rpc`, {
+        method: "POST",
+        body: JSON.stringify(browseBody),
+      });
+      expect(browseDenied.status).toBe(401);
+      const browsed = await jsonFetch(`${web.url}/rpc`, {
+        method: "POST",
+        headers: auth(ADMIN_TOKEN),
+        body: JSON.stringify(browseBody),
+      });
+      expect(browsed.status).toBe(200);
+      expect(browsed.body.result.entries).toContainEqual({
+        name: "browse-target",
+        path: join(dir, "browse-target"),
+      });
+
       const launchBody = {
         method: "launchRun",
         params: { ...chainUrl, input: { n: 1 }, target: dir, name: "web-launch" },

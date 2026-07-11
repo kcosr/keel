@@ -56,6 +56,16 @@ describe("SchedulesScreen", () => {
       listSchedules: vi.fn(async () => []),
       listSavedWorkflows: vi.fn(async () => [workflowSummary()]),
       getSchedule: vi.fn(async () => null),
+      browseDirectories: vi.fn(async (path: string) =>
+        path === "~"
+          ? {
+              path: "/srv",
+              parentPath: "/",
+              entries: [{ name: "work", path: "/srv/work" }],
+              truncated: false,
+            }
+          : { path, parentPath: "/srv", entries: [], truncated: false },
+      ),
       putSchedule,
     } as unknown as KeelWebClient;
 
@@ -63,7 +73,10 @@ describe("SchedulesScreen", () => {
     fireEvent.click(await screen.findByRole("button", { name: /new schedule/i }));
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "daily" } });
     fireEvent.change(screen.getByLabelText("Interval seconds"), { target: { value: "86400" } });
-    fireEvent.change(screen.getByLabelText("Target"), { target: { value: "/tmp/work" } });
+    fireEvent.click(screen.getByRole("button", { name: "Browse target" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Open work" }));
+    await waitFor(() => expect(screen.getByText("/srv/work")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Select" }));
     fireEvent.click(screen.getByRole("button", { name: /create schedule/i }));
 
     await waitFor(() =>
@@ -72,7 +85,7 @@ describe("SchedulesScreen", () => {
         workflowName: "hourly-workflow",
         intervalMs: 86_400_000,
         input: {},
-        target: "/tmp/work",
+        target: "/srv/work",
       }),
     );
   });

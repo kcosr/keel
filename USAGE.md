@@ -254,6 +254,10 @@ saved-workflow RPCs for list, detail, exact stored source, launch, enable/disabl
 deprecation, and deletion without browser-supplied raw secrets. Schedules use
 `listSchedules`/`getSchedule` including source when available and provide
 create/replace, pause/resume, and delete controls for saved-workflow schedules.
+Workflow launch and schedule target inputs remain manually editable and also
+provide a directory picker. The picker calls the admin-only
+`browseDirectories({ path })` daemon RPC, so it browses the daemon host rather
+than the browser device.
 Catalog profiles support validation, create/update, and delete with generation
 preconditions; programmatic profiles remain read-only. Mutable settings support
 validation, generation-checked writes, and reset to their default. The system
@@ -293,6 +297,12 @@ Routes:
 - Saved workflow, schedule, profile, and setting browser views call current
   daemon RPC methods through `POST /rpc`; there are no fixture-backed web data
   paths.
+- `browseDirectories({ path })` is an admin-only daemon RPC used by target
+  pickers. It accepts an absolute path, a path beginning with `~`, or a relative
+  path resolved against the daemon process cwd. It returns the resolved current
+  path, its parent, sorted child directories, and a `truncated` flag. Listings
+  contain directories only, are capped at 1,000 entries, and report invalid,
+  missing, non-directory, or unreadable paths as explicit RPC errors.
 - `GET /assets/*` serves files from `--assets`; other non-API paths fall back to
   `index.html` when a bundle is present.
 

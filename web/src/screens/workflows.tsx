@@ -315,14 +315,16 @@ function WorkflowLaunchForm({
   const [error, setError] = useState<Error | null>(null);
   const [launched, setLaunched] = useState<RunLaunchResult | null>(null);
   const formId = useId();
+  const versionKey = version ? `${version.name}:${version.version}` : "none";
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reset only when the selected catalog version changes, not when a refetch replaces its object values.
   useEffect(() => {
     setInputText(JSON.stringify(version?.defaultInputSet ? version.defaultInput : {}, null, 2));
     setTarget(version?.defaultTarget ?? "");
     setRunName("");
     setError(null);
     setLaunched(null);
-  }, [version?.defaultTarget, version?.defaultInputSet, version?.defaultInput]);
+  }, [versionKey]);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -431,6 +433,7 @@ function WorkflowLifecycleActions({
   const [error, setError] = useState<Error | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
+  const menuButtonRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -472,6 +475,7 @@ function WorkflowLifecycleActions({
       setPending(null);
       onMutated();
     } catch (err) {
+      setPending(null);
       setError(err instanceof Error ? err : new Error(String(err)));
     } finally {
       setBusy(false);
@@ -488,6 +492,7 @@ function WorkflowLifecycleActions({
   return (
     <div className="action-menu-wrap workflow-actions" ref={menuRef}>
       <IconButton
+        ref={menuButtonRef}
         icon={MoreHorizontal}
         label="Workflow actions"
         aria-haspopup="menu"
@@ -568,6 +573,7 @@ function WorkflowLifecycleActions({
         detail={confirmation.detail}
         confirmLabel={confirmation.label}
         busy={busy}
+        returnFocusRef={menuButtonRef}
         onClose={() => setPending(null)}
         onConfirm={() => pending && void execute(pending)}
       />

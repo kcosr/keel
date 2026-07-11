@@ -430,9 +430,12 @@ h3 {
 }
 
 .directory-dialog-body {
-  display: grid;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
   gap: 12px;
   min-height: 0;
+  overflow: hidden;
   padding: 14px 16px 16px;
 }
 
@@ -478,7 +481,8 @@ h3 {
   background: var(--surface-2);
   border: 1px solid var(--border);
   border-radius: 7px;
-  min-height: 250px;
+  flex: 1 1 250px;
+  min-height: 0;
   overflow: auto;
 }
 
@@ -2522,7 +2526,7 @@ h3 {
   position: absolute;
   right: 0;
   top: calc(100% + 6px);
-  width: 280px;
+  width: min(280px, calc(100vw - 32px));
   z-index: 20;
 }
 
@@ -2580,6 +2584,7 @@ h3 {
 }
 
 .action-dialog-meta code {
+  min-width: 0;
   font-family: var(--mono);
   font-size: 11.5px;
   overflow: hidden;
@@ -2974,6 +2979,11 @@ h3 {
 
   .content-scroll {
     padding: 14px 14px 22px;
+  }
+
+  .activity-grid,
+  .diagnostics-grid {
+    grid-template-columns: 1fr;
   }
 
   .toolbar {

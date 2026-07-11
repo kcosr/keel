@@ -42,7 +42,9 @@ describe("ApprovalsScreen", () => {
     await screen.findByText("first prompt");
     expect(screen.queryByText("keel approve run_a gate_a")).not.toBeInTheDocument();
 
-    fireEvent.change(screen.getByLabelText("Decision note"), { target: { value: "ship it" } });
+    fireEvent.change(await screen.findByLabelText("Decision note"), {
+      target: { value: "ship it" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "Approve" }));
 
     await waitFor(() => {

@@ -3,6 +3,7 @@ import { type FormEvent, useCallback, useEffect, useId, useMemo, useRef, useStat
 import { createPortal } from "react-dom";
 import type { KeelWebClient } from "../api/client";
 import type { BrowseDirectoriesResult } from "../api/types";
+import { useModalFocus } from "../hooks/use-modal-focus";
 import {
   Button,
   EmptyState,
@@ -31,6 +32,7 @@ export function DirectoryPickerField({
   onChange(value: string): void;
 }) {
   const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
   return (
     <div className="form-field">
       <label htmlFor={id}>
@@ -46,6 +48,7 @@ export function DirectoryPickerField({
           onChange={(event) => onChange(event.target.value)}
         />
         <IconButton
+          ref={triggerRef}
           icon={FolderOpen}
           label={`Browse ${label.toLowerCase()}`}
           disabled={disabled}
@@ -56,6 +59,7 @@ export function DirectoryPickerField({
         client={client}
         open={open}
         initialPath={value.trim() || "~"}
+        returnFocusRef={triggerRef}
         onClose={() => setOpen(false)}
         onSelect={(path) => {
           onChange(path);
@@ -70,12 +74,14 @@ export function DirectoryPickerDialog({
   client,
   open,
   initialPath,
+  returnFocusRef,
   onClose,
   onSelect,
 }: {
   client: KeelWebClient;
   open: boolean;
   initialPath: string;
+  returnFocusRef?: React.RefObject<HTMLElement | null>;
   onClose(): void;
   onSelect(path: string): void;
 }) {
@@ -87,6 +93,7 @@ export function DirectoryPickerDialog({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
   const requestId = useRef(0);
+  const dialogRef = useModalFocus<HTMLDialogElement>({ open, returnFocusRef, onClose });
 
   const browse = useCallback(
     async (path: string) => {
@@ -119,15 +126,6 @@ export function DirectoryPickerDialog({
     void browse(initialPath);
   }, [browse, initialPath, open]);
 
-  useEffect(() => {
-    if (!open) return;
-    const handleKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", handleKey);
-    return () => window.removeEventListener("keydown", handleKey);
-  }, [onClose, open]);
-
   const entries = useMemo(() => {
     const needle = filter.trim().toLowerCase();
     return (result?.entries ?? []).filter(
@@ -146,8 +144,10 @@ export function DirectoryPickerDialog({
   return createPortal(
     <div className="dialog-backdrop" role="presentation" onMouseDown={onClose}>
       <dialog
+        ref={dialogRef}
         open
         className="dialog directory-dialog"
+        tabIndex={-1}
         aria-modal="true"
         aria-labelledby={titleId}
         onMouseDown={(event) => event.stopPropagation()}

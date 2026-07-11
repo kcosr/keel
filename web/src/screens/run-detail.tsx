@@ -82,6 +82,8 @@ export function RunDetailScreen({
     cursorSeq: null,
   });
   const latestSeqRef = useRef<number | null>(null);
+  const detailRef = useRef<RunDetailResponse | null>(null);
+  detailRef.current = detailState.data;
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: runId must clear live buffers even when a new run has the same cursor sequence.
   useEffect(() => {
@@ -102,7 +104,7 @@ export function RunDetailScreen({
   useEffect(() => {
     if (!live) return;
     const stop = client.watchRunEvents(runId, {
-      cursor: cursorInputForMode(cursorMode, detailState.data, latestSeqRef.current),
+      cursor: cursorInputForMode(cursorMode, detailRef.current, latestSeqRef.current),
       onFrame: (frame) => {
         setRawLiveFrames((frames) => [
           ...frames.slice(-499),
@@ -147,7 +149,7 @@ export function RunDetailScreen({
       },
     });
     return stop;
-  }, [client, cursorMode, detailState.data, detailState.reload, live, runId]);
+  }, [client, cursorMode, detailState.reload, live, runId]);
 
   const detail = detailState.data;
   const displayDetail = useMemo(
@@ -487,8 +489,12 @@ function ApprovalPanel({
             Approval decisions require admin authority and a refreshed run projection.
           </p>
         ) : null}
-        {error ? <p className="form-error">{error}</p> : null}
-        {message ? <p className="form-success">{message}</p> : null}
+        {error ? (
+          <p className="form-error" role="alert">
+            {error}
+          </p>
+        ) : null}
+        {message ? <output className="form-success">{message}</output> : null}
         <div className="btn-row">
           <Button
             icon={X}

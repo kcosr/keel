@@ -1,5 +1,5 @@
 import { AlertCircle, Loader2, type LucideIcon } from "lucide-react";
-import type { ReactNode } from "react";
+import { type ReactNode, forwardRef } from "react";
 
 export type Tone = "success" | "running" | "waiting" | "failed" | "info" | "neutral" | "future";
 
@@ -83,39 +83,46 @@ export function StatusPill({
   );
 }
 
-export function Button({
-  icon: Icon,
-  children,
-  variant = "secondary",
-  size = "md",
-  ...props
-}: React.ButtonHTMLAttributes<HTMLButtonElement> & {
+type ButtonProps = React.ButtonHTMLAttributes<HTMLButtonElement> & {
   icon?: LucideIcon;
   variant?: "primary" | "secondary" | "subtle" | "danger";
   size?: "sm" | "md";
-}) {
+};
+
+export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button(
+  { icon: Icon, children, variant = "secondary", size = "md", ...props },
+  ref,
+) {
   return (
-    <button className={`btn btn-${variant} btn-${size}`} type="button" {...props}>
+    <button ref={ref} className={`btn btn-${variant} btn-${size}`} type="button" {...props}>
       {Icon ? <Icon size={15} /> : null}
       {children}
     </button>
   );
-}
+});
 
-export function IconButton({
-  icon: Icon,
-  label,
-  ...props
-}: React.ButtonHTMLAttributes<HTMLButtonElement> & {
+type IconButtonProps = React.ButtonHTMLAttributes<HTMLButtonElement> & {
   icon: LucideIcon;
   label: string;
-}) {
+};
+
+export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(function IconButton(
+  { icon: Icon, label, ...props },
+  ref,
+) {
   return (
-    <button className="icon-btn" type="button" aria-label={label} title={label} {...props}>
+    <button
+      ref={ref}
+      className="icon-btn"
+      type="button"
+      aria-label={label}
+      title={label}
+      {...props}
+    >
       <Icon size={16} />
     </button>
   );
-}
+});
 
 export async function copyTextToClipboard(value: string): Promise<boolean> {
   if (!navigator.clipboard) return false;

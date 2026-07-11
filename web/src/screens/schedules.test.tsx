@@ -91,7 +91,11 @@ describe("SchedulesScreen", () => {
   });
 
   test("requires an explicit workflow choice when a pinned definition has no catalog match", async () => {
-    const orphaned = { ...scheduleDetail(), workflowName: "materialized-only" };
+    const orphaned = {
+      ...scheduleDetail(),
+      workflowRef: "wf_sha256_materialized_only",
+      workflowName: "materialized-only",
+    };
     const client = {
       listSchedules: vi.fn(async () => [orphaned]),
       listSavedWorkflows: vi.fn(async () => [workflowSummary()]),
@@ -131,6 +135,44 @@ describe("SchedulesScreen", () => {
           name: "pinned",
           workflowName: "hourly-workflow",
           workflowVersion: 1,
+        }),
+      ),
+    );
+  });
+
+  test("preserves the pinned workflow version and next fire time when editing", async () => {
+    const putSchedule = vi.fn(async () => ({ ok: true }));
+    const workflow = workflowSummary();
+    workflow.latestVersion = 2;
+    workflow.latestDefinitionHash = "wf_sha256_hourly_2";
+    workflow.versions = [workflowVersion(2), workflowVersion(1)];
+    const detail = {
+      ...scheduleDetail(),
+      workflowRef: "wf_sha256_hourly_1",
+      nextFireMs: 123_456,
+    };
+    const client = {
+      listSchedules: vi.fn(async () => [detail]),
+      listSavedWorkflows: vi.fn(async () => [workflow]),
+      getSchedule: vi.fn(async () => detail),
+      putSchedule,
+    } as unknown as KeelWebClient;
+
+    render(<SchedulesScreen client={client} refreshKey={0} />);
+    fireEvent.click(await screen.findByRole("tab", { name: /configure/i }));
+
+    expect(await screen.findByLabelText("Workflow version")).toHaveValue("1");
+    fireEvent.submit(
+      screen.getByRole("button", { name: /save and enable/i }).closest("form") as HTMLFormElement,
+    );
+
+    await waitFor(() =>
+      expect(putSchedule).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: "hourly",
+          workflowName: "hourly-workflow",
+          workflowVersion: 1,
+          firstFireMs: 123_456,
         }),
       ),
     );

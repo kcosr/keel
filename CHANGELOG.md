@@ -40,6 +40,10 @@
   ([#30](https://github.com/kcosr/keel/pull/30))
 
 ### Fixed
+- Web schedule edits now preserve the pinned saved-workflow version and next
+  fire time. Long directory listings remain scrollable inside their dialog,
+  run-event watches stay connected across projection refreshes, and workflow
+  forms and action dialogs preserve or surface transient state correctly.
 - Codex provider `serviceTier: "fast"` now sends Codex app-server's
   user-facing `"fast"` service-tier value, applies configured service tier
   during thread start/resume as well as turn start.

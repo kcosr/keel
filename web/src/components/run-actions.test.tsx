@@ -44,6 +44,44 @@ describe("RunActions", () => {
     expect(screen.getByRole("menuitem", { name: /resume/i })).toBeDisabled();
     expect(screen.getByText("Resume is available only for interrupted runs.")).toBeInTheDocument();
   });
+
+  test("closes the fork dialog before navigating to the child run", async () => {
+    const client = {
+      forkRun: vi.fn(async () => ({ runId: "run_child" })),
+    } as unknown as KeelWebClient;
+    render(
+      <RunActions
+        client={client}
+        run={failedRun()}
+        authorization={authorization()}
+        onChanged={() => undefined}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Actions" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /fork/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Fork" }));
+
+    await waitFor(() => expect(client.forkRun).toHaveBeenCalledWith("run_1", "plan"));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(window.location.hash).toBe("#/runs/run_child");
+  });
+
+  test("dismisses the action dialog with Escape", () => {
+    render(
+      <RunActions
+        client={{} as KeelWebClient}
+        run={failedRun()}
+        authorization={authorization()}
+        onChanged={() => undefined}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry failed step" }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
 });
 
 function failedRun(): RunProjection {

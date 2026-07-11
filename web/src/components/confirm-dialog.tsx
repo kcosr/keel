@@ -1,5 +1,6 @@
 import { AlertTriangle, X } from "lucide-react";
-import { useEffect, useId } from "react";
+import { type RefObject, useEffect, useId, useRef } from "react";
+import { useModalFocus } from "../hooks/use-modal-focus";
 import { Button, IconButton } from "./controls";
 
 export function ConfirmDialog({
@@ -9,6 +10,7 @@ export function ConfirmDialog({
   confirmLabel,
   busy = false,
   danger = true,
+  returnFocusRef,
   onConfirm,
   onClose,
 }: {
@@ -18,27 +20,38 @@ export function ConfirmDialog({
   confirmLabel: string;
   busy?: boolean;
   danger?: boolean;
+  returnFocusRef?: RefObject<HTMLElement | null>;
   onConfirm(): void;
   onClose(): void;
 }) {
   const titleId = useId();
   const detailId = useId();
+  const confirmPendingRef = useRef(false);
+  const dialogRef = useModalFocus<HTMLElement>({
+    open,
+    closeDisabled: busy,
+    returnFocusRef,
+    onClose,
+  });
 
   useEffect(() => {
-    if (!open) return;
-    const handleKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !busy) onClose();
-    };
-    window.addEventListener("keydown", handleKey);
-    return () => window.removeEventListener("keydown", handleKey);
-  }, [busy, onClose, open]);
+    if (!busy) confirmPendingRef.current = false;
+  }, [busy]);
+
+  const confirm = () => {
+    if (confirmPendingRef.current || busy) return;
+    confirmPendingRef.current = true;
+    onConfirm();
+  };
 
   if (!open) return null;
   return (
     <div className="dialog-backdrop" role="presentation" onMouseDown={() => !busy && onClose()}>
       <section
+        ref={dialogRef}
         className="dialog confirm-dialog"
         role="alertdialog"
+        tabIndex={-1}
         aria-modal="true"
         aria-labelledby={titleId}
         aria-describedby={detailId}
@@ -61,7 +74,7 @@ export function ConfirmDialog({
               variant={danger ? "danger" : "primary"}
               disabled={busy}
               autoFocus
-              onClick={onConfirm}
+              onClick={confirm}
             >
               {busy ? "Working..." : confirmLabel}
             </Button>

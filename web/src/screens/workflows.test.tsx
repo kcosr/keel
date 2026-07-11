@@ -89,6 +89,54 @@ describe("WorkflowsScreen", () => {
       expect(setSavedWorkflowVersionEnabled).toHaveBeenCalledWith("review-loop", 2, false),
     );
   });
+
+  test("keeps typed launch values across a background detail refetch", async () => {
+    const client = {
+      listSavedWorkflows: vi.fn(async () => [{ ...workflowSummary() }]),
+      getSavedWorkflow: vi.fn(async () => ({
+        ...workflowDetail(),
+        versions: workflowDetail().versions.map((version) => ({
+          ...version,
+          defaultInput: { ...(version.defaultInput as object) },
+        })),
+      })),
+      getSavedWorkflowSource: vi.fn(async () => workflowSource()),
+    } as unknown as KeelWebClient;
+
+    const { rerender } = render(<WorkflowsScreen client={client} refreshKey={0} />);
+    fireEvent.click(await screen.findByRole("tab", { name: /launch/i }));
+    fireEvent.change(await screen.findByLabelText("Target"), {
+      target: { value: "/tmp/typed-target" },
+    });
+    fireEvent.change(screen.getByLabelText("Run name"), { target: { value: "typed-name" } });
+    fireEvent.change(screen.getByLabelText("Input JSON"), { target: { value: '{"typed":true}' } });
+
+    rerender(<WorkflowsScreen client={client} refreshKey={1} />);
+    await waitFor(() => expect(client.getSavedWorkflow).toHaveBeenCalledTimes(2));
+
+    expect(screen.getByLabelText("Target")).toHaveValue("/tmp/typed-target");
+    expect(screen.getByLabelText("Run name")).toHaveValue("typed-name");
+    expect(screen.getByLabelText("Input JSON")).toHaveValue('{"typed":true}');
+  });
+
+  test("closes a confirmation and exposes an action failure", async () => {
+    const client = {
+      listSavedWorkflows: vi.fn(async () => [workflowSummary()]),
+      getSavedWorkflow: vi.fn(async () => workflowDetail()),
+      getSavedWorkflowSource: vi.fn(async () => workflowSource()),
+      setSavedWorkflowVersionEnabled: vi.fn(async () => {
+        throw new Error("mutation failed");
+      }),
+    } as unknown as KeelWebClient;
+
+    render(<WorkflowsScreen client={client} refreshKey={0} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Workflow actions" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Disable selected version" }));
+    fireEvent.click(screen.getByRole("button", { name: "Disable version" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("mutation failed");
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  });
 });
 
 function workflowSummary(): SavedWorkflowSummary {

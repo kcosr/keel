@@ -124,8 +124,12 @@ export function ApprovalsScreen({
               {selected.gateId ? null : (
                 <p className="muted">The daemon did not expose a gate key for this approval.</p>
               )}
-              {actionError ? <p className="form-error">{actionError}</p> : null}
-              {actionMessage ? <p className="form-success">{actionMessage}</p> : null}
+              {actionError ? (
+                <p className="form-error" role="alert">
+                  {actionError}
+                </p>
+              ) : null}
+              {actionMessage ? <output className="form-success">{actionMessage}</output> : null}
               <div className="btn-row">
                 <Button
                   icon={X}

@@ -10,9 +10,10 @@ import {
   StepBack,
   X,
 } from "lucide-react";
-import { type FormEvent, useMemo, useState } from "react";
+import { type FormEvent, useMemo, useRef, useState } from "react";
 import type { KeelWebClient } from "../api/client";
 import type { RunActionName, RunProjection } from "../api/types";
+import { useModalFocus } from "../hooks/use-modal-focus";
 import { Button, IconButton, Select, StatusPill, TextInput } from "./controls";
 
 type RunActionId = "resume" | "interrupt" | "retry" | "rerun" | "rewind" | "fork" | "signal";
@@ -41,6 +42,7 @@ export function RunActions({
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [selected, setSelected] = useState<RunActionId | null>(null);
+  const actionsButtonRef = useRef<HTMLButtonElement>(null);
   const actions = useMemo(() => actionDefinitions(run, authorization), [run, authorization]);
   const primary = primaryAction(actions, run);
 
@@ -58,6 +60,7 @@ export function RunActions({
       ) : null}
       <div className="action-menu-wrap">
         <Button
+          ref={actionsButtonRef}
           icon={MoreHorizontal}
           size="sm"
           aria-haspopup="menu"
@@ -100,6 +103,7 @@ export function RunActions({
           action={actions.find((action) => action.id === selected) as RunActionDefinition}
           client={client}
           run={run}
+          returnFocusRef={actionsButtonRef}
           onClose={() => setSelected(null)}
           onChanged={onChanged}
         />
@@ -112,12 +116,14 @@ function RunActionDialog({
   action,
   client,
   run,
+  returnFocusRef,
   onClose,
   onChanged,
 }: {
   action: RunActionDefinition;
   client: KeelWebClient;
   run: RunProjection;
+  returnFocusRef: React.RefObject<HTMLElement | null>;
   onClose(): void;
   onChanged(): void;
 }) {
@@ -127,6 +133,12 @@ function RunActionDialog({
   const [payloadText, setPayloadText] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const dialogRef = useModalFocus<HTMLDialogElement>({
+    open: true,
+    closeDisabled: pending,
+    returnFocusRef,
+    onClose,
+  });
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -153,6 +165,7 @@ function RunActionDialog({
           break;
         case "fork": {
           const result = await client.forkRun(run.runId, stableKey || undefined);
+          onClose();
           window.location.hash = `#/runs/${encodeURIComponent(result.runId)}`;
           return;
         }
@@ -177,14 +190,12 @@ function RunActionDialog({
   return (
     <div className="dialog-backdrop" role="presentation" onMouseDown={() => !pending && onClose()}>
       <dialog
+        ref={dialogRef}
         open
         className="dialog run-action-dialog"
         aria-modal="true"
         aria-labelledby="run-action-title"
-        onCancel={(event) => {
-          event.preventDefault();
-          if (!pending) onClose();
-        }}
+        tabIndex={-1}
         onMouseDown={(event) => event.stopPropagation()}
       >
         <div className="dialog-header">

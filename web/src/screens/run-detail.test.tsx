@@ -129,6 +129,37 @@ describe("RunDetailScreen", () => {
     expect(watched[0]?.cursor).toEqual({ kind: "after-seq", seq: 9 });
   });
 
+  test("keeps the live event subscription open when a projection reloads", async () => {
+    const stops: ReturnType<typeof vi.fn>[] = [];
+    const watched: WatchRunEventsOptions[] = [];
+    const client = {
+      getRun: vi.fn(async () => ({ ...detail(), run: { ...detail().run } })),
+      watchRunEvents: vi.fn((_runId: string, opts: WatchRunEventsOptions) => {
+        watched.push(opts);
+        const stop = vi.fn();
+        stops.push(stop);
+        return stop;
+      }),
+    } as unknown as KeelWebClient;
+
+    render(<RunDetailScreen client={client} runId="run_1" refreshKey={0} />);
+    await screen.findByText("cursor 5");
+    fireEvent.click(screen.getByRole("button", { name: "Watch live" }));
+    await waitFor(() => expect(client.watchRunEvents).toHaveBeenCalledTimes(1));
+
+    act(() => {
+      watched[0]?.onFrame({
+        event: "event",
+        data: durable(6, "run.finished"),
+        raw: "event: event",
+      });
+    });
+    await waitFor(() => expect(client.getRun).toHaveBeenCalledTimes(2));
+
+    expect(client.watchRunEvents).toHaveBeenCalledTimes(1);
+    expect(stops[0]).not.toHaveBeenCalled();
+  });
+
   test("projects human approval parks from live events without refetching detail", async () => {
     const watched: WatchRunEventsOptions[] = [];
     const client = {

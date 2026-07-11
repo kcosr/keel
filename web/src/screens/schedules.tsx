@@ -180,13 +180,27 @@ function ScheduleEditor({
   onCancel?(): void;
   onMutated(name?: string): void;
 }) {
-  const inferredWorkflow =
-    workflows.find((workflow) => workflow.name === schedule?.workflowName)?.name ?? "";
+  const inferredWorkflow = schedule
+    ? workflows.find(
+        (workflow) =>
+          workflow.latestDefinitionHash === schedule.workflowRef ||
+          workflow.versions.some((version) => version.definitionHash === schedule.workflowRef),
+      )
+    : undefined;
+  const inferredVersion = schedule
+    ? (inferredWorkflow?.versions.find((version) => version.definitionHash === schedule.workflowRef)
+        ?.version ??
+      (inferredWorkflow?.latestDefinitionHash === schedule.workflowRef
+        ? inferredWorkflow.latestVersion
+        : null))
+    : null;
   const [name, setName] = useState(schedule?.name ?? "");
   const [workflowName, setWorkflowName] = useState(
-    schedule ? inferredWorkflow : workflows[0]?.name || "",
+    schedule ? (inferredWorkflow?.name ?? "") : workflows[0]?.name || "",
   );
-  const [workflowVersion, setWorkflowVersion] = useState<"latest" | string>("latest");
+  const [workflowVersion, setWorkflowVersion] = useState<"latest" | string>(
+    inferredVersion === null ? "latest" : String(inferredVersion),
+  );
   const [intervalSeconds, setIntervalSeconds] = useState(
     String((schedule?.intervalMs ?? 3_600_000) / 1000),
   );
@@ -207,8 +221,8 @@ function ScheduleEditor({
     setError(null);
     try {
       const seconds = Number(intervalSeconds);
-      if (!Number.isFinite(seconds) || seconds <= 0)
-        throw new Error("Interval must be greater than zero seconds.");
+      if (!Number.isInteger(seconds) || seconds < 1)
+        throw new Error("Interval must be a whole number of at least one second.");
       const input = JSON.parse(inputText);
       await client.putSchedule({
         name: name.trim(),
@@ -217,6 +231,7 @@ function ScheduleEditor({
         intervalMs: seconds * 1000,
         input,
         target: target.trim() || undefined,
+        ...(schedule ? { firstFireMs: schedule.nextFireMs } : {}),
       });
       onMutated(name.trim());
     } catch (err) {

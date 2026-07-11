@@ -97,14 +97,36 @@ describe("RunDetailScreen", () => {
     render(<RunDetailScreen client={client} runId="run_1" refreshKey={0} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Watch live" }));
-    const transcriptTab = screen.getAllByRole("button", { name: /transcript/i })[0];
-    expect(transcriptTab).toBeDefined();
-    fireEvent.click(transcriptTab as HTMLElement);
+    fireEvent.click(screen.getByRole("tab", { name: /activity/i }));
 
     await waitFor(() => expect(client.watchRunEvents).toHaveBeenCalledTimes(1));
     expect(watched[0]?.cursor).toEqual({ kind: "after-seq", seq: 5 });
     expect((await screen.findAllByText("Hello live")).length).toBeGreaterThan(0);
     expect(screen.getAllByText("caught up").length).toBeGreaterThan(0);
+  });
+
+  test("waits for the initial projection before starting a current-cursor watch", async () => {
+    let resolveDetail: (value: RunDetailResponse) => void = () => undefined;
+    const initialDetail = new Promise<RunDetailResponse>((resolve) => {
+      resolveDetail = resolve;
+    });
+    const watched: WatchRunEventsOptions[] = [];
+    const client = {
+      getRun: vi.fn(() => initialDetail),
+      watchRunEvents: vi.fn((_runId: string, opts: WatchRunEventsOptions) => {
+        watched.push(opts);
+        return vi.fn();
+      }),
+    } as unknown as KeelWebClient;
+
+    render(<RunDetailScreen client={client} runId="run_1" refreshKey={0} />);
+    fireEvent.click(screen.getByRole("button", { name: "Watch live" }));
+    expect(client.watchRunEvents).not.toHaveBeenCalled();
+
+    await act(async () => resolveDetail(detail(7)));
+
+    await waitFor(() => expect(client.watchRunEvents).toHaveBeenCalledTimes(1));
+    expect(watched[0]?.cursor).toEqual({ kind: "after-seq", seq: 7 });
   });
 
   test("uses the latest loaded detail cursor after manual refresh", async () => {
@@ -129,6 +151,37 @@ describe("RunDetailScreen", () => {
 
     await waitFor(() => expect(client.watchRunEvents).toHaveBeenCalledTimes(1));
     expect(watched[0]?.cursor).toEqual({ kind: "after-seq", seq: 9 });
+  });
+
+  test("keeps the live event subscription open when a projection reloads", async () => {
+    const stops: ReturnType<typeof vi.fn>[] = [];
+    const watched: WatchRunEventsOptions[] = [];
+    const client = {
+      getRun: vi.fn(async () => ({ ...detail(), run: { ...detail().run } })),
+      watchRunEvents: vi.fn((_runId: string, opts: WatchRunEventsOptions) => {
+        watched.push(opts);
+        const stop = vi.fn();
+        stops.push(stop);
+        return stop;
+      }),
+    } as unknown as KeelWebClient;
+
+    render(<RunDetailScreen client={client} runId="run_1" refreshKey={0} />);
+    await screen.findByText("cursor 5");
+    fireEvent.click(screen.getByRole("button", { name: "Watch live" }));
+    await waitFor(() => expect(client.watchRunEvents).toHaveBeenCalledTimes(1));
+
+    act(() => {
+      watched[0]?.onFrame({
+        event: "event",
+        data: durable(6, "run.finished"),
+        raw: "event: event",
+      });
+    });
+    await waitFor(() => expect(client.getRun).toHaveBeenCalledTimes(2));
+
+    expect(client.watchRunEvents).toHaveBeenCalledTimes(1);
+    expect(stops[0]).not.toHaveBeenCalled();
   });
 
   test("projects human approval parks from live events without refetching detail", async () => {
@@ -157,10 +210,10 @@ describe("RunDetailScreen", () => {
     });
 
     await waitFor(() => expect(client.getRun).toHaveBeenCalledTimes(1));
-    fireEvent.click(screen.getByRole("button", { name: /approvals/i }));
+    fireEvent.click(screen.getByRole("tab", { name: /approvals/i }));
 
     expect((await screen.findAllByText("approve-review")).length).toBeGreaterThan(0);
-    expect(screen.getByText("keel approve run_1 approve-review")).toBeInTheDocument();
+    expect(screen.queryByText(/keel approve/)).not.toBeInTheDocument();
     expect(
       screen.getByText(
         "Approval decisions require admin authority and a refreshed run projection.",
@@ -253,9 +306,9 @@ describe("RunDetailScreen", () => {
 
     render(<RunDetailScreen client={client} runId="run_1" refreshKey={0} />);
 
-    fireEvent.click(await screen.findByRole("button", { name: /workspaces/i }));
+    fireEvent.click(await screen.findByRole("tab", { name: /workspaces/i }));
     expect(screen.getByText("default")).toBeInTheDocument();
-    expect(screen.getAllByText("target").length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/target/i).length).toBeGreaterThan(0);
     expect(screen.queryByText("Default target")).not.toBeInTheDocument();
     expect(screen.queryByText("__default")).not.toBeInTheDocument();
     expect(screen.getByText("fake-app-change")).toBeInTheDocument();
@@ -305,7 +358,16 @@ function detail(seq = 5): RunDetailResponse {
     events: [],
     eventCursor: { kind: "after-seq", runId: "run_1", seq },
     rawEvents: { href: "/runs/run_1/events" },
-    availableCommands: [{ name: "watchEvents", requiredAuthority: "run:events" }],
+    actionAuthorization: {
+      resume: true,
+      interrupt: true,
+      retry: true,
+      rerun: true,
+      rewind: true,
+      fork: true,
+      signal: true,
+      decideApproval: false,
+    },
   };
 }
 

@@ -39,7 +39,7 @@ const TITLES: Record<NavRoute, { title: string; subtitle: string }> = {
   },
   schedules: {
     title: "Schedules",
-    subtitle: "Read-only schedule projections through RPC",
+    subtitle: "Recurring saved workflow operations",
   },
   profiles: {
     title: "Profiles",
@@ -60,7 +60,6 @@ export function App() {
   const [credential, setCredential] = useState(
     () => sessionStorage.getItem(CREDENTIAL_SESSION_KEY) ?? "",
   );
-  const [search, setSearch] = useState("");
   const [refreshKey, setRefreshKey] = useState(0);
 
   const client = useMemo(
@@ -78,11 +77,13 @@ export function App() {
     return () => window.removeEventListener("hashchange", onHashChange);
   }, []);
 
-  const updateCredential = (value: string) => {
+  const applyCredential = (value: string) => {
     setCredential(value);
-    if (value.trim()) sessionStorage.setItem(CREDENTIAL_SESSION_KEY, value);
+    if (value.trim()) sessionStorage.setItem(CREDENTIAL_SESSION_KEY, value.trim());
     else sessionStorage.removeItem(CREDENTIAL_SESSION_KEY);
   };
+
+  const clearCredential = () => applyCredential("");
 
   const nav = route.nav;
   const title = route.kind === "run-detail" ? "Run Detail" : TITLES[nav].title;
@@ -94,14 +95,12 @@ export function App() {
       title={title}
       subtitle={subtitle}
       health={healthState.data}
-      credential={credential}
-      search={search}
-      searchEnabled={route.kind === "runs"}
-      onCredentialChange={updateCredential}
-      onSearchChange={setSearch}
+      credentialSet={credential.trim().length > 0}
+      onCredentialApply={applyCredential}
+      onCredentialClear={clearCredential}
       onRefresh={() => setRefreshKey((value) => value + 1)}
     >
-      {renderRoute(route, client, search, refreshKey, healthState.data)}
+      {renderRoute(route, client, refreshKey, healthState.data)}
     </AppShell>
   );
 }
@@ -109,13 +108,12 @@ export function App() {
 function renderRoute(
   route: AppRoute,
   client: KeelWebClient,
-  search: string,
   refreshKey: number,
   health: HealthResponse | null,
 ) {
   switch (route.kind) {
     case "runs":
-      return <RunsScreen client={client} globalSearch={search} refreshKey={refreshKey} />;
+      return <RunsScreen client={client} refreshKey={refreshKey} />;
     case "run-detail":
       return <RunDetailScreen client={client} runId={route.runId} refreshKey={refreshKey} />;
     case "approvals":
@@ -136,7 +134,7 @@ function renderRoute(
 }
 
 function parseRoute(hash: string): AppRoute {
-  const path = hash.replace(/^#\/?/, "");
+  const path = hash.replace(/^#\/?/, "").split("?", 1)[0] ?? "";
   const [section, detail] = path.split("/");
   if (section === "runs" && detail) {
     return { kind: "run-detail", nav: "runs", runId: decodeURIComponent(detail) };

@@ -245,6 +245,27 @@ describe("web transport", () => {
         daemon: { reachable: true, ok: true, ownerId: daemon.ownerId },
       });
 
+      mkdirSync(join(dir, "browse-target"));
+      const browseBody = {
+        method: "browseDirectories",
+        params: { path: dir },
+      };
+      const browseDenied = await jsonFetch(`${web.url}/rpc`, {
+        method: "POST",
+        body: JSON.stringify(browseBody),
+      });
+      expect(browseDenied.status).toBe(401);
+      const browsed = await jsonFetch(`${web.url}/rpc`, {
+        method: "POST",
+        headers: auth(ADMIN_TOKEN),
+        body: JSON.stringify(browseBody),
+      });
+      expect(browsed.status).toBe(200);
+      expect(browsed.body.result.entries).toContainEqual({
+        name: "browse-target",
+        path: join(dir, "browse-target"),
+      });
+
       const launchBody = {
         method: "launchRun",
         params: { ...chainUrl, input: { n: 1 }, target: dir, name: "web-launch" },
@@ -334,7 +355,11 @@ describe("web transport", () => {
         "return",
       ]);
       expect(JSON.stringify(detail.body)).not.toContain("kc_run_projection_secret");
-      expect(Array.isArray(detail.body.availableCommands)).toBe(true);
+      expect(detail.body.actionAuthorization).toMatchObject({
+        resume: true,
+        interrupt: true,
+        retry: true,
+      });
 
       const redactedProjectionError = await jsonFetch(
         `${web.url}/api/runs/kc_run_projection_error_secret`,
@@ -851,18 +876,13 @@ describe("web transport", () => {
         headers: auth(launched.capability as string),
       });
       expect(scopedDetail.status).toBe(200);
-      expect(
-        scopedDetail.body.availableCommands.map((command: { name: string }) => command.name),
-      ).not.toContain("decideApproval");
+      expect(scopedDetail.body.actionAuthorization.decideApproval).toBe(false);
 
       const adminDetail = await jsonFetch(`${web.url}/api/runs/${launched.runId}`, {
         headers: auth(ADMIN_TOKEN),
       });
       expect(adminDetail.status).toBe(200);
-      expect(adminDetail.body.availableCommands).toContainEqual({
-        name: "decideApproval",
-        requiredAuthority: "admin",
-      });
+      expect(adminDetail.body.actionAuthorization.decideApproval).toBe(true);
 
       const asset = await fetch(`${web.url}/assets/app.js`);
       expect(asset.status).toBe(200);

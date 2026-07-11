@@ -220,7 +220,27 @@ export interface DeleteSettingRequest {
   ifGeneration?: number;
 }
 
+export interface BrowseDirectoriesRequest {
+  path: string;
+}
+
+export interface DirectoryBrowseEntry {
+  name: string;
+  path: string;
+}
+
+export interface BrowseDirectoriesResult {
+  path: string;
+  parentPath: string | null;
+  entries: DirectoryBrowseEntry[];
+  truncated: boolean;
+}
+
 export interface KeelApi {
+  /** List directories on the daemon host. Requires admin authority at the gateway. */
+  browseDirectories(
+    req: BrowseDirectoriesRequest,
+  ): Promise<BrowseDirectoriesResult> | BrowseDirectoriesResult;
   /** Start a run; returns its id immediately (the run executes in the background). */
   launchRun(req: LaunchRequest): Promise<RunLaunchResult>;
   saveWorkflow(
@@ -266,6 +286,13 @@ export interface KeelApi {
     version: number,
   ): Promise<SavedWorkflowVersionView> | SavedWorkflowVersionView;
   putSchedule(req: PutScheduleRequest): Promise<{ ok: boolean }> | { ok: boolean };
+  setScheduleEnabled(
+    name: string,
+    enabled: boolean,
+  ): Promise<{ name: string; enabled: boolean }> | { name: string; enabled: boolean };
+  deleteSchedule(
+    name: string,
+  ): Promise<{ name: string; deleted: boolean }> | { name: string; deleted: boolean };
   listSchedules(req?: ListSchedulesRequest): Promise<ScheduleSummary[]> | ScheduleSummary[];
   getSchedule(req: GetScheduleRequest): Promise<ScheduleView | null> | ScheduleView | null;
   /** Resume a non-terminal run in the background. */

@@ -42,6 +42,8 @@ describe("WorkspacesScreen", () => {
     expect(client.discardRunWorkspace).not.toHaveBeenCalled();
     expect(client.gcWorkspaces).not.toHaveBeenCalled();
     expect(screen.getByText(/workspace mutation requires admin authority/i)).toBeInTheDocument();
+    expect(screen.queryByText(/CLI Equivalents/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/keel workspace/)).not.toBeInTheDocument();
   });
 
   test("loads retained diffs and confirms admin workspace mutations", async () => {
@@ -63,7 +65,7 @@ describe("WorkspacesScreen", () => {
 
     await screen.findByText("src/app.ts");
     expect(screen.getByText("+new line")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Split" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Split" }));
     expect(screen.getByText("git-patch from HEAD to /tmp/ws")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Merge" }));

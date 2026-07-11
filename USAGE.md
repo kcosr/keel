@@ -221,16 +221,18 @@ The production React UI is a browser client over the same web transport routes
 listed below. It stores a manually entered bearer token in `sessionStorage` for
 the current browser session only, not `localStorage`, and sends it as
 `Authorization: Bearer <capability>`. Event watching uses `fetch()` plus a
-readable stream parser so credentials stay in headers.
+readable stream parser so credentials stay in headers. The credential is edited
+through the shell's access dialog and is only applied when the operator confirms
+the change.
 
 The UI opens on the runs inbox, grouped by decision, active, and recently
 finished runs from `GET /api/runs?limit=100`. The runs projection uses the
 bounded daemon `listRunsPage` RPC before per-run enrichment and returns `page`
 metadata with the requested limit, default limit, maximum limit, total known
-runs, returned rows, and a `truncated` flag. When the browser list is truncated,
-the UI says so and points
-operators to `keel list` or a bounded `GET /api/runs?limit=n` request up to the
-documented maximum. Run detail views use `GET /api/runs/:runId` for overview,
+runs, returned rows, and a `truncated` flag. Run filters are represented in the
+hash URL, the inbox refreshes while the page is visible, and a truncated list
+can load older bounded pages up to the documented maximum. Run detail views use
+`GET /api/runs/:runId` for overview,
 workflow flow, timeline, transcript, report, source, workspaces, approvals, and
 events. The detail projection includes a `flow` object when retained workflow
 source can be parsed into a static operation IR; the browser overlays that IR
@@ -242,15 +244,24 @@ approvals view lists current workflow-authored `ctx.human` gates and uses
 admin-authorized `decideApproval` calls for approve/deny decisions. The
 workspaces view lists retained run workspaces, loads detail/diff through daemon
 RPC, and requires admin authority plus browser confirmation for merge, discard,
-and workspace GC. Mutating browser controls expose the required authority and
-copyable CLI equivalents; disabled controls explain the missing authority or
-unsupported workspace state. Tables support row selection with Enter/Space and
+and workspace GC. Run lifecycle controls cover resume, interrupt, retry, rerun,
+rewind, fork, and signal; the detail projection reports which actions the
+presented credential may invoke, while the daemon remains the enforcement
+boundary. Disabled controls explain missing authority or unsupported resource
+state. Tables support row selection with Enter/Space and
 Arrow/Home/End navigation where a row action exists. The workflows view uses
-saved-workflow RPCs for list, detail, exact stored source, and launch without
-browser-supplied raw secrets. Schedules are read-only and use
-`listSchedules`/`getSchedule` including source when available. Profiles and
-settings expose current catalog list/get/check state; set/delete/unset controls
-are not part of the browser UI at this baseline. The system view uses only
+saved-workflow RPCs for list, detail, exact stored source, launch, enable/disable,
+deprecation, and deletion without browser-supplied raw secrets. Schedules use
+`listSchedules`/`getSchedule` including source when available and provide
+create/replace, pause/resume, and delete controls for saved-workflow schedules.
+Workflow launch and schedule target inputs remain manually editable and also
+provide a directory picker. The picker calls the admin-only
+`browseDirectories({ path })` daemon RPC, so it browses the daemon host rather
+than the browser device.
+Catalog profiles support validation, create/update, and delete with generation
+preconditions; programmatic profiles remain read-only. Mutable settings support
+validation, generation-checked writes, and reset to their default. The system
+view uses only
 `/health` and `/api/system`; it does not infer journal paths, schema versions,
 systemd state, daemon logs, or restart controls.
 
@@ -286,6 +297,12 @@ Routes:
 - Saved workflow, schedule, profile, and setting browser views call current
   daemon RPC methods through `POST /rpc`; there are no fixture-backed web data
   paths.
+- `browseDirectories({ path })` is an admin-only daemon RPC used by target
+  pickers. It accepts an absolute path, a path beginning with `~`, or a relative
+  path resolved against the daemon process cwd. It returns the resolved current
+  path, its parent, sorted child directories, and a `truncated` flag. Listings
+  contain directories only, are capped at 1,000 entries, and report invalid,
+  missing, non-directory, or unreadable paths as explicit RPC errors.
 - `GET /assets/*` serves files from `--assets`; other non-API paths fall back to
   `index.html` when a bundle is present.
 
@@ -1662,6 +1679,14 @@ keel schedule put hourly-review --workflow review-loop --version 3 --interval-ms
 The daemon resolves the saved ref at creation time, stores the resolved
 definition hash, and does not track later `latest` versions. Creating or
 replacing schedules is admin-only for both source and saved-ref forms.
+
+The canonical admin RPC also exposes
+`setScheduleEnabled(name, enabled)` and `deleteSchedule(name)`. The web console
+uses these operations for pause/resume and delete. The current CLI continues to
+own put/list/show only; use the web console or RPC for the additional lifecycle
+operations. `setScheduleEnabled` returns `{ name, enabled }` and fails when the
+schedule does not exist. `deleteSchedule` returns `{ name, deleted }`; `deleted`
+is `false` when no row existed.
 
 Schedules are inspectable without reading the journal directly:
 

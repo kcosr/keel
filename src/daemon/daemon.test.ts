@@ -650,6 +650,16 @@ describe("daemon multi-client over the socket", () => {
         )
         .get("hourly-review");
       expect(row?.workflow_ref).toBe(saved.definitionHash);
+      expect(await admin.setScheduleEnabled("hourly-review", false)).toEqual({
+        name: "hourly-review",
+        enabled: false,
+      });
+      expect((await admin.getSchedule({ name: "hourly-review" }))?.enabled).toBe(false);
+      expect(await admin.deleteSchedule("hourly-review")).toEqual({
+        name: "hourly-review",
+        deleted: true,
+      });
+      expect(await admin.getSchedule({ name: "hourly-review" })).toBeNull();
       await admin.deprecateSavedWorkflowVersion({
         name: "review-loop",
         version: 1,
@@ -685,6 +695,13 @@ describe("daemon multi-client over the socket", () => {
         intervalMs: 60_000,
       });
       expect(neither.error?.message).toMatch(/exactly one/);
+      const invalidEnabled = await rawAdminRpc(socketPath, "setScheduleEnabled", {
+        name: "bad",
+        enabled: "yes",
+      });
+      expect(invalidEnabled.error?.message).toMatch(/boolean enabled/);
+      const invalidDelete = await rawAdminRpc(socketPath, "deleteSchedule", { name: "" });
+      expect(invalidDelete.error?.message).toMatch(/non-empty schedule name/);
       const count = new Database(dbPath)
         .query<{ count: number }, []>("SELECT count(*) AS count FROM schedules")
         .get();

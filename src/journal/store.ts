@@ -1594,6 +1594,17 @@ export class JournalStore {
       .run(errorJson, atMs, name);
   }
 
+  setScheduleEnabled(name: string, enabled: boolean): void {
+    const result = this.db
+      .query("UPDATE schedules SET enabled = ? WHERE name = ?")
+      .run(enabled ? 1 : 0, name);
+    if (result.changes === 0) throw new Error(`schedule "${name}" does not exist`);
+  }
+
+  deleteSchedule(name: string): boolean {
+    return this.db.query("DELETE FROM schedules WHERE name = ?").run(name).changes > 0;
+  }
+
   listSchedules(opts: { includeDisabled?: boolean } = {}): ScheduleRow[] {
     const sql =
       opts.includeDisabled === false

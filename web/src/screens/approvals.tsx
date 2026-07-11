@@ -1,11 +1,10 @@
-import { Check, X } from "lucide-react";
+import { Check, RefreshCw, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { ApiError } from "../api/client";
 import type { KeelWebClient } from "../api/client";
 import type { ApprovalView } from "../api/types";
 import {
   Button,
-  CommandCopyButton,
   EmptyState,
   ErrorState,
   LoadingState,
@@ -13,7 +12,6 @@ import {
   formatTime,
 } from "../components/controls";
 import { type Column, DenseTable } from "../components/dense-table";
-import { Inspector } from "../components/inspector";
 import { useAsync } from "../hooks/use-async";
 
 export function ApprovalsScreen({
@@ -59,6 +57,18 @@ export function ApprovalsScreen({
   return (
     <div className="content-split">
       <div className="content-scroll">
+        <div className="toolbar">
+          <div className="toolbar-left">
+            <StatusPill tone={approvals.length > 0 ? "waiting" : "neutral"}>
+              {approvals.length} waiting
+            </StatusPill>
+          </div>
+          <div className="toolbar-right">
+            <Button icon={RefreshCw} size="sm" onClick={state.reload}>
+              {state.refreshing ? "Refreshing" : "Refresh"}
+            </Button>
+          </div>
+        </div>
         <div className="notice-panel">
           Current workflow-authored <code>ctx.human</code> gates only. Provider-native tool,
           sandbox, and network approvals are not shown here.
@@ -76,97 +86,82 @@ export function ApprovalsScreen({
           />
         ) : null}
       </div>
-      <Inspector title="Decision" subtitle={selected?.runName ?? selected?.runId ?? "No approval"}>
-        {selected ? (
-          <>
-            <p>{selected.prompt}</p>
-            <dl className="kv-list">
-              <div className="kv-row">
-                <dt>Run</dt>
-                <dd className="mono">{selected.runId}</dd>
-              </div>
-              <div className="kv-row">
-                <dt>Gate</dt>
-                <dd className="mono">{selected.gateId ?? "-"}</dd>
-              </div>
-              <div className="kv-row">
-                <dt>Authority</dt>
-                <dd>{selected.requiredAuthority}</dd>
-              </div>
-            </dl>
-            <div className="command-copy-grid">
-              <CommandCopyButton
-                label="Copy approve command"
-                command={selected.cli ?? approveCliFallback(selected)}
-                disabled={!selected.gateId}
-                detail={selected.gateId ? null : "Gate key unavailable"}
+      <aside className="decision-panel" aria-label="Approval decision">
+        <div className="decision-panel-header">
+          <div>
+            <h2>Decision</h2>
+            <span>{selected?.runName ?? selected?.runId ?? "No approval selected"}</span>
+          </div>
+          {selected ? <StatusPill tone="waiting">Awaiting decision</StatusPill> : null}
+        </div>
+        <div className="decision-panel-body">
+          {selected ? (
+            <>
+              <p>{selected.prompt}</p>
+              <dl className="kv-list">
+                <div className="kv-row">
+                  <dt>Run</dt>
+                  <dd className="mono">{selected.runId}</dd>
+                </div>
+                <div className="kv-row">
+                  <dt>Gate</dt>
+                  <dd className="mono">{selected.gateId ?? "-"}</dd>
+                </div>
+                <div className="kv-row">
+                  <dt>Authority</dt>
+                  <dd>{selected.requiredAuthority}</dd>
+                </div>
+              </dl>
+              <textarea
+                className="field-textarea"
+                rows={3}
+                value={note}
+                onChange={(event) => setNote(event.target.value)}
+                placeholder="Decision note"
+                aria-label="Decision note"
               />
-              <CommandCopyButton
-                label="Copy deny command"
-                command={denyCli(selected) ?? `keel deny ${selected.runId} <gate>`}
-                disabled={!selected.gateId}
-                detail={selected.gateId ? null : "Gate key unavailable"}
-              />
-            </div>
-            <textarea
-              className="field-textarea"
-              rows={3}
-              value={note}
-              onChange={(event) => setNote(event.target.value)}
-              placeholder="Decision note"
-              aria-label="Decision note"
-            />
-            {!decisionAuthorized ? (
-              <p className="muted">
-                Requires admin authority. Use the copied CLI equivalent with an admin credential.
-              </p>
-            ) : null}
-            {selected.gateId ? null : (
-              <p className="muted">The daemon did not expose a gate key for this approval.</p>
-            )}
-            {actionError ? <p className="form-error">{actionError}</p> : null}
-            {actionMessage ? <p className="form-success">{actionMessage}</p> : null}
-            <div className="btn-row">
-              <Button
-                icon={X}
-                variant="danger"
-                disabled={!canDecide || actionPending !== null}
-                title={decisionTitle(canDecide, "deny")}
-                onClick={() => void decide("denied")}
-              >
-                {actionPending === "denied" ? "Denying" : "Deny"}
-              </Button>
-              <Button
-                icon={Check}
-                variant="primary"
-                disabled={!canDecide || actionPending !== null}
-                title={decisionTitle(canDecide, "approve")}
-                onClick={() => void decide("approved")}
-              >
-                {actionPending === "approved" ? "Approving" : "Approve"}
-              </Button>
-            </div>
-          </>
-        ) : (
-          <EmptyState title="No approval selected" />
-        )}
-      </Inspector>
+              {!decisionAuthorized ? <p className="muted">Requires admin authority.</p> : null}
+              {selected.gateId ? null : (
+                <p className="muted">The daemon did not expose a gate key for this approval.</p>
+              )}
+              {actionError ? (
+                <p className="form-error" role="alert">
+                  {actionError}
+                </p>
+              ) : null}
+              {actionMessage ? <output className="form-success">{actionMessage}</output> : null}
+              <div className="btn-row">
+                <Button
+                  icon={X}
+                  variant="danger"
+                  disabled={!canDecide || actionPending !== null}
+                  title={decisionTitle(canDecide, "deny")}
+                  onClick={() => void decide("denied")}
+                >
+                  {actionPending === "denied" ? "Denying" : "Deny"}
+                </Button>
+                <Button
+                  icon={Check}
+                  variant="primary"
+                  disabled={!canDecide || actionPending !== null}
+                  title={decisionTitle(canDecide, "approve")}
+                  onClick={() => void decide("approved")}
+                >
+                  {actionPending === "approved" ? "Approving" : "Approve"}
+                </Button>
+              </div>
+            </>
+          ) : (
+            <EmptyState title="No approval selected" />
+          )}
+        </div>
+      </aside>
     </div>
   );
 }
 
 function approvalKey(approval: ApprovalView): string {
   return `${approval.runId}:${approval.gateId ?? "gate"}`;
-}
-
-function denyCli(approval: ApprovalView): string | null {
-  return approval.gateId ? `keel deny ${approval.runId} ${approval.gateId}` : null;
-}
-
-function approveCliFallback(approval: ApprovalView): string {
-  return approval.gateId
-    ? `keel approve ${approval.runId} ${approval.gateId}`
-    : `keel approve ${approval.runId} <gate>`;
 }
 
 function decisionTitle(canDecide: boolean, action: "approve" | "deny"): string {

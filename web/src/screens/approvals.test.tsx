@@ -40,10 +40,11 @@ describe("ApprovalsScreen", () => {
     render(<ApprovalsScreen client={client} refreshKey={0} />);
 
     await screen.findByText("first prompt");
-    expect(await screen.findByText("keel approve run_a gate_a")).toBeInTheDocument();
-    expect(screen.getByText("keel deny run_a gate_a")).toBeInTheDocument();
+    expect(screen.queryByText("keel approve run_a gate_a")).not.toBeInTheDocument();
 
-    fireEvent.change(screen.getByLabelText("Decision note"), { target: { value: "ship it" } });
+    fireEvent.change(await screen.findByLabelText("Decision note"), {
+      target: { value: "ship it" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "Approve" }));
 
     await waitFor(() => {
@@ -55,9 +56,7 @@ describe("ApprovalsScreen", () => {
 
     fireEvent.click(screen.getByText("second prompt"));
 
-    await waitFor(() => {
-      expect(screen.getByText("keel approve run_b gate_b")).toBeInTheDocument();
-    });
+    await waitFor(() => expect(screen.getAllByText("second prompt").length).toBeGreaterThan(1));
   });
 
   test("does not call approval RPC when decision authority is absent", async () => {
@@ -90,5 +89,6 @@ describe("ApprovalsScreen", () => {
 
     expect(client.decideApproval).not.toHaveBeenCalled();
     expect(screen.getByText(/requires admin authority/i)).toBeInTheDocument();
+    expect(screen.queryByText(/keel approve/)).not.toBeInTheDocument();
   });
 });

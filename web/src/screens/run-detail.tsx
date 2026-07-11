@@ -12,7 +12,6 @@ import type {
 import { CodeViewer } from "../components/code-viewer";
 import {
   Button,
-  CommandCopyButton,
   EmptyState,
   ErrorState,
   JsonBlock,
@@ -22,14 +21,14 @@ import {
   StatusPill,
   Tabs,
   type Tone,
-  copyTextToClipboard,
   formatDuration,
   formatTime,
+  statusLabel,
   toneForStatus,
 } from "../components/controls";
 import { type Column, DenseTable } from "../components/dense-table";
 import { NodeTimeline, RunGraph } from "../components/graph";
-import { Inspector } from "../components/inspector";
+import { RunActions } from "../components/run-actions";
 import { type RawEventFrame, RawEventList, Transcript } from "../components/transcript";
 import { WorkflowFlow } from "../components/workflow-flow";
 import { useAsync } from "../hooks/use-async";
@@ -38,14 +37,12 @@ import { flowPhaseFromEvents, flowRuntimeFromEvents } from "../lib/workflow-flow
 
 type RunTab =
   | "overview"
+  | "activity"
   | "flow"
-  | "timeline"
-  | "transcript"
-  | "report"
   | "source"
   | "workspaces"
   | "approvals"
-  | "events";
+  | "diagnostics";
 
 type CursorMode = "current" | "tail" | "beginning" | "now";
 
@@ -57,14 +54,12 @@ interface StreamState {
 
 const TABS: Array<{ id: RunTab; label: string }> = [
   { id: "overview", label: "Overview" },
+  { id: "activity", label: "Activity" },
   { id: "flow", label: "Flow" },
-  { id: "timeline", label: "Timeline" },
-  { id: "transcript", label: "Transcript" },
-  { id: "report", label: "Report" },
-  { id: "source", label: "Source" },
   { id: "workspaces", label: "Workspaces" },
   { id: "approvals", label: "Approvals" },
-  { id: "events", label: "Events" },
+  { id: "source", label: "Source" },
+  { id: "diagnostics", label: "Diagnostics" },
 ];
 
 export function RunDetailScreen({
@@ -87,6 +82,9 @@ export function RunDetailScreen({
     cursorSeq: null,
   });
   const latestSeqRef = useRef<number | null>(null);
+  const detailRef = useRef<RunDetailResponse | null>(null);
+  detailRef.current = detailState.data;
+  const currentCursorReady = cursorMode !== "current" || detailState.data !== null;
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: runId must clear live buffers even when a new run has the same cursor sequence.
   useEffect(() => {
@@ -105,9 +103,9 @@ export function RunDetailScreen({
   }, [detailState.data?.eventCursor?.seq]);
 
   useEffect(() => {
-    if (!live) return;
+    if (!live || !currentCursorReady) return;
     const stop = client.watchRunEvents(runId, {
-      cursor: cursorInputForMode(cursorMode, detailState.data, latestSeqRef.current),
+      cursor: cursorInputForMode(cursorMode, detailRef.current, latestSeqRef.current),
       onFrame: (frame) => {
         setRawLiveFrames((frames) => [
           ...frames.slice(-499),
@@ -152,7 +150,7 @@ export function RunDetailScreen({
       },
     });
     return stop;
-  }, [client, cursorMode, detailState.data, detailState.reload, live, runId]);
+  }, [client, currentCursorReady, cursorMode, detailState.reload, live, runId]);
 
   const detail = detailState.data;
   const displayDetail = useMemo(
@@ -175,8 +173,8 @@ export function RunDetailScreen({
   );
 
   return (
-    <div className="content-split run-detail-screen">
-      <div className="content-scroll">
+    <div className="run-detail-screen">
+      <div className="content-scroll run-detail-main">
         <div className="toolbar run-detail-toolbar">
           <div className="toolbar-left">
             <a className="inline-link" href="#/runs">
@@ -186,8 +184,17 @@ export function RunDetailScreen({
             <StatusPill tone={streamTone(streamState, live)} dot>
               {streamLabel(streamState, live)}
             </StatusPill>
+            <span className="mono stream-cursor">cursor {streamState.cursorSeq ?? "-"}</span>
           </div>
           <div className="toolbar-right">
+            {renderedDetail?.run ? (
+              <RunActions
+                client={client}
+                run={renderedDetail.run}
+                authorization={renderedDetail.actionAuthorization}
+                onChanged={detailState.reload}
+              />
+            ) : null}
             <Select
               value={cursorMode}
               onChange={(event) => setCursorMode(event.target.value as CursorMode)}
@@ -211,6 +218,19 @@ export function RunDetailScreen({
             </Button>
           </div>
         </div>
+        {renderedDetail?.blockage ? (
+          <div className="run-blockage-banner">
+            <StatusPill tone={toneForStatus(renderedDetail.blockage.reason)} dot>
+              {statusLabel(renderedDetail.blockage.reason)}
+            </StatusPill>
+            <span>{renderedDetail.blockage.context}</span>
+            {renderedDetail.blockage.reason === "waiting_human" ? (
+              <button className="inline-link" type="button" onClick={() => setTab("approvals")}>
+                Review approval
+              </button>
+            ) : null}
+          </div>
+        ) : null}
         {detailState.loading ? <LoadingState label="Loading run" /> : null}
         {detailState.error ? (
           <ErrorState error={detailState.error} onRetry={detailState.reload} />
@@ -239,12 +259,6 @@ export function RunDetailScreen({
           </>
         ) : null}
       </div>
-      <RunDetailInspector
-        detail={displayDetail}
-        live={live}
-        streamState={streamState}
-        events={allEvents}
-      />
     </div>
   );
 }
@@ -274,7 +288,7 @@ function renderTab(
             </div>
             <RunGraph nodes={detail.run.nodes} />
           </section>
-          <section className="panel">
+          <section className="panel panel-wide">
             <h2>Summary</h2>
             <KeyValueList
               rows={[
@@ -293,8 +307,8 @@ function renderTab(
           <section className="panel">
             <div className="panel-heading">
               <h2>Recent Transcript</h2>
-              <button className="inline-link" type="button" onClick={() => setTab("transcript")}>
-                Open transcript
+              <button className="inline-link" type="button" onClick={() => setTab("activity")}>
+                Open activity
               </button>
             </div>
             <Transcript events={events} compact maxRows={8} />
@@ -316,25 +330,48 @@ function renderTab(
           detail="The run did not capture parseable workflow source for a structural view."
         />
       );
-    case "timeline":
+    case "activity":
       return (
-        <div className="timeline-grid">
-          <NodeTimeline nodes={detail.run.nodes} />
-          <NodeTable nodes={detail.run.nodes} />
+        <div className="activity-grid">
+          <section className="panel panel-wide">
+            <div className="panel-heading">
+              <h2>Transcript</h2>
+              <StatusPill tone="neutral">{events.length} events</StatusPill>
+            </div>
+            <Transcript events={events} />
+          </section>
+          <section className="panel panel-wide">
+            <div className="panel-heading">
+              <h2>Step timeline</h2>
+              <StatusPill tone="neutral">{detail.run.nodes.length} steps</StatusPill>
+            </div>
+            <NodeTimeline nodes={detail.run.nodes} />
+            <NodeTable nodes={detail.run.nodes} />
+          </section>
         </div>
       );
-    case "transcript":
-      return <Transcript events={events} />;
-    case "report":
-      return <JsonBlock value={detail.report ?? detail.run} />;
     case "source":
       return <CodeViewer source={detail.source} />;
     case "workspaces":
       return <WorkspacesTable detail={detail} />;
     case "approvals":
       return <ApprovalPanel detail={detail} client={client} onChanged={reload} />;
-    case "events":
-      return <RawEventList frames={rawFrames} />;
+    case "diagnostics":
+      return (
+        <div className="diagnostics-grid">
+          <section className="panel">
+            <h2>Run report</h2>
+            <JsonBlock value={detail.report ?? detail.run} />
+          </section>
+          <section className="panel panel-wide">
+            <div className="panel-heading">
+              <h2>Raw event stream</h2>
+              <StatusPill tone="neutral">{rawFrames.length} frames</StatusPill>
+            </div>
+            <RawEventList frames={rawFrames} />
+          </section>
+        </div>
+      );
   }
 }
 
@@ -366,7 +403,7 @@ function WorkspacesTable({ detail }: { detail: RunDetailResponse }) {
             <StatusPill
               tone={isDefaultWorkspace(workspace) ? "neutral" : toneForStatus(workspace.status)}
             >
-              {isDefaultWorkspace(workspace) ? "target" : workspace.status}
+              {isDefaultWorkspace(workspace) ? "Target" : statusLabel(workspace.status)}
             </StatusPill>
           ),
         },
@@ -408,9 +445,7 @@ function ApprovalPanel({
 
   const gate = blockage.blockedOn?.stableKey ?? "<gate>";
   const prompt = blockage.context.replace(/^awaiting decision: /, "");
-  const approve = `keel approve ${run.runId} ${gate}`;
-  const deny = `keel deny ${run.runId} ${gate}`;
-  const canDecide = detail.availableCommands.some((command) => command.name === "decideApproval");
+  const canDecide = detail.actionAuthorization.decideApproval === true;
   const decide = async (status: "approved" | "denied") => {
     if (!canDecide || gate === "<gate>" || pending) return;
     setPending(status);
@@ -442,20 +477,6 @@ function ApprovalPanel({
             { label: "Authority", value: "admin" },
           ]}
         />
-        <div className="command-copy-grid">
-          <CommandCopyButton
-            label="Copy approve command"
-            command={approve}
-            disabled={gate === "<gate>"}
-            detail={gate === "<gate>" ? "Gate key unavailable" : null}
-          />
-          <CommandCopyButton
-            label="Copy deny command"
-            command={deny}
-            disabled={gate === "<gate>"}
-            detail={gate === "<gate>" ? "Gate key unavailable" : null}
-          />
-        </div>
         <textarea
           className="field-textarea"
           rows={3}
@@ -469,8 +490,12 @@ function ApprovalPanel({
             Approval decisions require admin authority and a refreshed run projection.
           </p>
         ) : null}
-        {error ? <p className="form-error">{error}</p> : null}
-        {message ? <p className="form-success">{message}</p> : null}
+        {error ? (
+          <p className="form-error" role="alert">
+            {error}
+          </p>
+        ) : null}
+        {message ? <output className="form-success">{message}</output> : null}
         <div className="btn-row">
           <Button
             icon={X}
@@ -506,7 +531,9 @@ function NodeTable({ nodes }: { nodes: NodeView[] }) {
       key: "status",
       header: "Status",
       width: "130px",
-      render: (node) => <StatusPill tone={toneForStatus(node.status)}>{node.status}</StatusPill>,
+      render: (node) => (
+        <StatusPill tone={toneForStatus(node.status)}>{statusLabel(node.status)}</StatusPill>
+      ),
     },
     {
       key: "started",
@@ -538,103 +565,15 @@ function NodeTable({ nodes }: { nodes: NodeView[] }) {
   );
 }
 
-function RunDetailInspector({
-  detail,
-  live,
-  streamState,
-  events,
-}: {
-  detail: RunDetailResponse | null;
-  live: boolean;
-  streamState: StreamState;
-  events: EventStreamFrame[];
-}) {
-  const run = detail?.run ?? null;
-  const commands = detail?.availableCommands ?? [];
-  return (
-    <Inspector
-      title={run ? <span className="mono">{run.runId}</span> : "Run detail"}
-      subtitle={run?.workflowName ?? "No run loaded"}
-      status={
-        run ? (
-          <StatusPill tone={toneForStatus(run.status)} dot>
-            {run.status}
-          </StatusPill>
-        ) : null
-      }
-    >
-      {run ? (
-        <>
-          <KeyValueList
-            rows={[
-              { label: "Created", value: formatTime(run.createdAtMs) },
-              { label: "Duration", value: formatDuration(run.createdAtMs, run.finishedAtMs) },
-              { label: "Target", value: run.runTarget ?? "-", mono: true },
-              { label: "Steps", value: run.stats.steps },
-              { label: "Agents", value: run.stats.agents },
-              { label: "Artifacts", value: run.stats.artifacts },
-            ]}
-          />
-          {detail?.blockage ? (
-            <section className="inspector-section">
-              <h3>Blockage</h3>
-              <p>{detail.blockage.context}</p>
-              <StatusPill tone={toneForStatus(detail.blockage.reason)}>
-                {detail.blockage.reason}
-              </StatusPill>
-            </section>
-          ) : null}
-          <section className="inspector-section">
-            <h3>Live Watch</h3>
-            <div className="live-watch-box">
-              <StatusPill tone={streamTone(streamState, live)} dot>
-                {streamLabel(streamState, live)}
-              </StatusPill>
-              <span className="mono">cursor {streamState.cursorSeq ?? "-"}</span>
-              {streamState.message ? <span className="muted">{streamState.message}</span> : null}
-            </div>
-          </section>
-          <section className="inspector-section">
-            <h3>Commands</h3>
-            <div className="command-list">
-              {commands.map((command) => (
-                <button
-                  className="command-row"
-                  key={command.name}
-                  type="button"
-                  title={`Copy ${cliForCommand(command.name, run.runId)}`}
-                  onClick={() => void copyTextToClipboard(cliForCommand(command.name, run.runId))}
-                >
-                  <span className="command-row-main">
-                    <strong>{command.name}</strong>
-                    <code>{cliForCommand(command.name, run.runId)}</code>
-                  </span>
-                  <StatusPill tone="info">{command.requiredAuthority}</StatusPill>
-                </button>
-              ))}
-            </div>
-          </section>
-          <section className="inspector-section">
-            <h3>Latest Transcript</h3>
-            <Transcript events={events} compact maxRows={6} />
-          </section>
-        </>
-      ) : (
-        <EmptyState title="No run loaded" />
-      )}
-    </Inspector>
-  );
-}
-
 function tabCount(
   tab: RunTab,
   detail: RunDetailResponse,
   events: EventStreamFrame[],
 ): number | undefined {
   if (tab === "flow") return detail.flow?.operations.length ?? 0;
-  if (tab === "timeline") return detail.run?.nodes.length ?? 0;
+  if (tab === "activity") return events.length;
   if (tab === "workspaces") return detail.workspaces.length;
-  if (tab === "events" || tab === "transcript") return events.length;
+  if (tab === "diagnostics") return events.length;
   if (tab === "approvals") return detail.blockage?.reason === "waiting_human" ? 1 : 0;
   return undefined;
 }
@@ -970,11 +909,4 @@ function isHumanParkFrame(data: unknown): boolean {
   return Boolean(
     payload && typeof payload === "object" && "kind" in payload && payload.kind === "human",
   );
-}
-
-function cliForCommand(command: string, runId: string): string {
-  if (command === "watchEvents") return `keel watch ${runId}`;
-  if (command === "viewSource") return `keel workflow source --run ${runId}`;
-  if (command === "decideApproval") return `keel approve ${runId} <gate>`;
-  return `keel ${command} ${runId}`;
 }

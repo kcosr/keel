@@ -59,6 +59,18 @@ export interface GatewayErrorEnvelope {
   resource?: unknown;
 }
 
+export interface DirectoryBrowseEntry {
+  name: string;
+  path: string;
+}
+
+export interface BrowseDirectoriesResult {
+  path: string;
+  parentPath: string | null;
+  entries: DirectoryBrowseEntry[];
+  truncated: boolean;
+}
+
 export interface HealthResponse {
   ok: boolean;
   web: { ok: boolean; apiOnly: boolean };
@@ -104,8 +116,18 @@ export interface RunDetailResponse {
   events: EventStreamFrame[];
   eventCursor: EventCursor | null;
   rawEvents: { href: string };
-  availableCommands: Array<{ name: string; requiredAuthority: string }>;
+  actionAuthorization: Record<RunActionName, boolean>;
 }
+
+export type RunActionName =
+  | "resume"
+  | "interrupt"
+  | "retry"
+  | "rerun"
+  | "rewind"
+  | "fork"
+  | "signal"
+  | "decideApproval";
 
 export type WorkflowOperationKind =
   | "phase"

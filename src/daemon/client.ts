@@ -5,6 +5,8 @@ import { type Socket, connect } from "bun";
 import type {
   AgentProfileCheckResult,
   AgentProfileView,
+  BrowseDirectoriesRequest,
+  BrowseDirectoriesResult,
   CheckAgentProfileRequest,
   DeleteAgentProfileRequest,
   DeleteSettingRequest,
@@ -141,6 +143,10 @@ export class DaemonClient {
       this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
       this.socket?.write(`${JSON.stringify({ id, method, params })}\n`);
     });
+  }
+
+  browseDirectories(req: BrowseDirectoriesRequest): Promise<BrowseDirectoriesResult> {
+    return this.rpc("browseDirectories", req);
   }
 
   launchRun(req: LaunchRequest): Promise<RunLaunchResult> {
@@ -290,6 +296,12 @@ export class DaemonClient {
       ...req,
       ...(target !== undefined ? { target } : {}),
     });
+  }
+  setScheduleEnabled(name: string, enabled: boolean): Promise<{ name: string; enabled: boolean }> {
+    return this.rpc("setScheduleEnabled", { name, enabled });
+  }
+  deleteSchedule(name: string): Promise<{ name: string; deleted: boolean }> {
+    return this.rpc("deleteSchedule", { name });
   }
   listSchedules(req: { includeDisabled?: boolean } = {}): Promise<ScheduleSummary[]> {
     return this.rpc("listSchedules", req);

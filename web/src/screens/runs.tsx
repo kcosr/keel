@@ -1,6 +1,6 @@
-import { Copy, ExternalLink, RefreshCw } from "lucide-react";
+import { Copy, ExternalLink, Plus, RefreshCw } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import type { KeelWebClient } from "../api/client";
+import { type KeelWebClient, WEB_RUNS_DEFAULT_LIMIT } from "../api/client";
 import type { RunListItem, RunStatus } from "../api/types";
 import {
   Button,
@@ -14,11 +14,16 @@ import {
   copyTextToClipboard,
   formatDuration,
   formatTime,
+  statusLabel,
   toneForStatus,
 } from "../components/controls";
 import { type Column, DenseTable } from "../components/dense-table";
 import { Inspector } from "../components/inspector";
 import { useAsync } from "../hooks/use-async";
+import { useNow } from "../hooks/use-now";
+
+const RUNS_AUTO_REFRESH_MS = 10_000;
+const RUNS_PAGE_INCREMENT = 100;
 
 const STATUS_FILTERS: Array<RunStatus | "all"> = [
   "all",
@@ -40,26 +45,54 @@ interface RunGroup {
   rows: RunListItem[];
 }
 
+interface RunFilters {
+  status: RunStatus | "all";
+  target: string;
+  blockedOnly: boolean;
+  query: string;
+  limit: number;
+}
+
 export function RunsScreen({
   client,
-  globalSearch,
   refreshKey,
 }: {
   client: KeelWebClient;
-  globalSearch: string;
   refreshKey: number;
 }) {
-  const [status, setStatus] = useState<RunStatus | "all">("all");
-  const [target, setTarget] = useState("all");
-  const [blockedOnly, setBlockedOnly] = useState(false);
-  const [localSearch, setLocalSearch] = useState("");
+  const initialFilters = useMemo(readRunFilters, []);
+  const [status, setStatus] = useState<RunStatus | "all">(initialFilters.status);
+  const [target, setTarget] = useState(initialFilters.target);
+  const [blockedOnly, setBlockedOnly] = useState(initialFilters.blockedOnly);
+  const [localSearch, setLocalSearch] = useState(initialFilters.query);
+  const [pageLimit, setPageLimit] = useState(initialFilters.limit);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const runsState = useAsync(() => client.listRuns(), [client, refreshKey]);
+  const runsState = useAsync(
+    () => client.listRuns({ limit: pageLimit }),
+    [client, pageLimit, refreshKey],
+  );
+  const nowMs = useNow();
+
+  useEffect(() => {
+    const refresh = () => {
+      if (document.visibilityState === "visible") runsState.reload();
+    };
+    const timer = window.setInterval(refresh, RUNS_AUTO_REFRESH_MS);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [runsState.reload]);
+
+  useEffect(() => {
+    writeRunFilters({ status, target, blockedOnly, query: localSearch, limit: pageLimit });
+  }, [status, target, blockedOnly, localSearch, pageLimit]);
 
   const targetOptions = useMemo(() => targetValues(runsState.data?.runs ?? []), [runsState.data]);
 
   const rows = useMemo(() => {
-    const query = [globalSearch, localSearch].join(" ").trim().toLowerCase();
+    const query = localSearch.trim().toLowerCase();
     return (runsState.data?.runs ?? [])
       .slice()
       .sort((a, b) => b.createdAtMs - a.createdAtMs)
@@ -79,7 +112,7 @@ export function RunsScreen({
           .filter((value): value is string => typeof value === "string")
           .some((value) => value.toLowerCase().includes(query));
       });
-  }, [runsState.data, status, target, blockedOnly, globalSearch, localSearch]);
+  }, [runsState.data, status, target, blockedOnly, localSearch]);
 
   useEffect(() => {
     if (selectedId && rows.some((run) => run.runId === selectedId)) return;
@@ -95,14 +128,16 @@ export function RunsScreen({
   return (
     <div className="content-split runs-screen">
       <div className="content-scroll runs-main">
-        <div className="toolbar">
-          <div className="toolbar-left">
-            <TextInput
-              value={localSearch}
-              onChange={(event) => setLocalSearch(event.target.value)}
-              placeholder="Filter runs"
-              aria-label="Filter runs"
-            />
+        <div className="toolbar runs-toolbar">
+          <div className="toolbar-left runs-filters">
+            <div className="runs-search-field">
+              <TextInput
+                value={localSearch}
+                onChange={(event) => setLocalSearch(event.target.value)}
+                placeholder="Filter runs"
+                aria-label="Filter runs"
+              />
+            </div>
             <Select
               value={status}
               onChange={(event) => setStatus(event.target.value as RunStatus | "all")}
@@ -110,7 +145,7 @@ export function RunsScreen({
             >
               {STATUS_FILTERS.map((value) => (
                 <option value={value} key={value}>
-                  {value}
+                  {value === "all" ? "All statuses" : statusLabel(value)}
                 </option>
               ))}
             </Select>
@@ -128,7 +163,12 @@ export function RunsScreen({
             </Select>
             <Toggle label="Blocked" checked={blockedOnly} onChange={setBlockedOnly} />
           </div>
-          <div className="toolbar-right">
+          <div className="toolbar-right runs-summary">
+            <span className="runs-live-state">
+              <StatusPill tone="running" dot>
+                Live
+              </StatusPill>
+            </span>
             <StatusPill tone="running">
               {counts.active} active{countScopeLabel}
             </StatusPill>
@@ -138,27 +178,53 @@ export function RunsScreen({
             <StatusPill tone={page?.truncated ? "waiting" : "neutral"}>
               {page?.truncated ? `${page.returned} shown` : `${counts.total} total`}
             </StatusPill>
-            <Button icon={RefreshCw} size="sm" onClick={runsState.reload}>
-              Refresh
-            </Button>
+            <span className="runs-local-refresh">
+              <Button icon={RefreshCw} size="sm" onClick={runsState.reload}>
+                {runsState.refreshing ? "Refreshing" : "Refresh"}
+              </Button>
+            </span>
           </div>
         </div>
         {page?.truncated ? (
           <div className="notice-panel">
-            Showing the latest {page.returned} of {page.total} runs. Older runs are not enriched in
-            this browser list; use <code>keel list</code> or <code>GET /api/runs?limit=n</code> up
-            to {page.maxLimit} when you need a deeper history.
+            <span>
+              Showing the latest {page.returned} of {page.total} runs.
+            </span>
+            {pageLimit < page.maxLimit ? (
+              <Button
+                icon={Plus}
+                size="sm"
+                onClick={() =>
+                  setPageLimit(Math.min(page.maxLimit, pageLimit + RUNS_PAGE_INCREMENT))
+                }
+              >
+                Load older runs
+              </Button>
+            ) : (
+              <span>The browser limit of {page.maxLimit} runs has been reached.</span>
+            )}
           </div>
         ) : null}
-        {runsState.loading ? <LoadingState label="Loading runs" /> : null}
-        {runsState.error ? <ErrorState error={runsState.error} onRetry={runsState.reload} /> : null}
-        {!runsState.loading && !runsState.error ? (
+        {runsState.loading && !runsState.data ? <LoadingState label="Loading runs" /> : null}
+        {runsState.error && !runsState.data ? (
+          <ErrorState error={runsState.error} onRetry={runsState.reload} />
+        ) : null}
+        {runsState.error && runsState.data ? (
+          <div className="form-error" role="alert">
+            Refresh failed: {runsState.error.message}
+          </div>
+        ) : null}
+        {runsState.data ? (
           <div className="run-groups">
             {groups.map((group) => (
               <RunGroupTable
                 group={group}
                 selectedId={selectedId}
-                onSelect={setSelectedId}
+                onSelect={(runId) => {
+                  if (window.matchMedia?.("(max-width: 980px)").matches) navigateToRun(runId);
+                  else setSelectedId(runId);
+                }}
+                nowMs={nowMs}
                 key={group.id}
               />
             ))}
@@ -171,7 +237,7 @@ export function RunsScreen({
           </div>
         ) : null}
       </div>
-      <RunInspector run={selected} />
+      <RunInspector run={selected} nowMs={nowMs} />
     </div>
   );
 }
@@ -180,10 +246,12 @@ function RunGroupTable({
   group,
   selectedId,
   onSelect,
+  nowMs,
 }: {
   group: RunGroup;
   selectedId: string | null;
   onSelect(runId: string): void;
+  nowMs: number;
 }) {
   if (group.rows.length === 0) return null;
 
@@ -202,13 +270,13 @@ function RunGroupTable({
         rowKey={(run) => run.runId}
         selectedKey={selectedId}
         onRowClick={(run) => onSelect(run.runId)}
-        columns={columns()}
+        columns={columns(nowMs)}
       />
     </section>
   );
 }
 
-function RunInspector({ run }: { run: RunListItem | null }) {
+function RunInspector({ run, nowMs }: { run: RunListItem | null; nowMs: number }) {
   if (!run) {
     return (
       <Inspector title="Run inspector" subtitle="No run selected">
@@ -228,7 +296,7 @@ function RunInspector({ run }: { run: RunListItem | null }) {
       subtitle={run.workflowName ?? "unnamed workflow"}
       status={
         <StatusPill tone={toneForStatus(run.status)} dot>
-          {run.status}
+          {statusLabel(run.status)}
         </StatusPill>
       }
       footer={
@@ -242,7 +310,7 @@ function RunInspector({ run }: { run: RunListItem | null }) {
         </div>
       }
     >
-      <KeyFacts run={run} />
+      <KeyFacts run={run} nowMs={nowMs} />
       <section className="inspector-section">
         <h3>Progress</h3>
         <div className="progress-bar" aria-label="Run node progress">
@@ -256,7 +324,9 @@ function RunInspector({ run }: { run: RunListItem | null }) {
         <section className="inspector-section">
           <h3>Blockage</h3>
           <p>{run.blockage.context}</p>
-          <StatusPill tone={toneForStatus(run.blockage.reason)}>{run.blockage.reason}</StatusPill>
+          <StatusPill tone={toneForStatus(run.blockage.reason)}>
+            {statusLabel(run.blockage.reason)}
+          </StatusPill>
         </section>
       ) : null}
       <section className="inspector-section">
@@ -265,7 +335,7 @@ function RunInspector({ run }: { run: RunListItem | null }) {
           {(run.run?.nodes ?? []).slice(-6).map((node) => (
             <span className="mini-node-row" key={`${node.stableKey}:${node.attempt}`}>
               <span className="mono">{node.stableKey}</span>
-              <StatusPill tone={toneForStatus(node.status)}>{node.status}</StatusPill>
+              <StatusPill tone={toneForStatus(node.status)}>{statusLabel(node.status)}</StatusPill>
             </span>
           ))}
           {(run.run?.nodes.length ?? 0) === 0 ? <span className="muted">No nodes yet.</span> : null}
@@ -275,7 +345,7 @@ function RunInspector({ run }: { run: RunListItem | null }) {
   );
 }
 
-function KeyFacts({ run }: { run: RunListItem }) {
+function KeyFacts({ run, nowMs }: { run: RunListItem; nowMs: number }) {
   return (
     <dl className="kv-list">
       <div className="kv-row">
@@ -284,7 +354,7 @@ function KeyFacts({ run }: { run: RunListItem }) {
       </div>
       <div className="kv-row">
         <dt>Duration</dt>
-        <dd>{formatDuration(run.createdAtMs, run.finishedAtMs)}</dd>
+        <dd>{formatDuration(run.createdAtMs, run.finishedAtMs, nowMs)}</dd>
       </div>
       <div className="kv-row">
         <dt>Target</dt>
@@ -306,7 +376,7 @@ function KeyFacts({ run }: { run: RunListItem }) {
   );
 }
 
-function columns(): Array<Column<RunListItem>> {
+function columns(nowMs: number): Array<Column<RunListItem>> {
   return [
     {
       key: "run",
@@ -366,7 +436,7 @@ function columns(): Array<Column<RunListItem>> {
       className: "run-table-compact-hidden",
       render: (run) => (
         <StatusPill tone={toneForStatus(run.status)} dot>
-          {run.status}
+          {statusLabel(run.status)}
         </StatusPill>
       ),
     },
@@ -382,7 +452,7 @@ function columns(): Array<Column<RunListItem>> {
       key: "age",
       header: "Duration",
       width: "96px",
-      render: (run) => formatDuration(run.createdAtMs, run.finishedAtMs),
+      render: (run) => formatDuration(run.createdAtMs, run.finishedAtMs, nowMs),
     },
     {
       key: "actions",
@@ -499,4 +569,35 @@ function navigateToRun(runId: string): void {
 
 function copyText(value: string): void {
   void copyTextToClipboard(value);
+}
+
+function readRunFilters(): RunFilters {
+  const queryText = window.location.hash.split("?", 2)[1] ?? "";
+  const params = new URLSearchParams(queryText);
+  const statusValue = params.get("status");
+  const status = STATUS_FILTERS.includes(statusValue as RunStatus | "all")
+    ? (statusValue as RunStatus | "all")
+    : "all";
+  const limitValue = Number(params.get("limit"));
+  return {
+    status,
+    target: params.get("target") || "all",
+    blockedOnly: params.get("blocked") === "1",
+    query: params.get("q") ?? "",
+    limit:
+      Number.isSafeInteger(limitValue) && limitValue >= WEB_RUNS_DEFAULT_LIMIT
+        ? limitValue
+        : WEB_RUNS_DEFAULT_LIMIT,
+  };
+}
+
+function writeRunFilters(filters: RunFilters): void {
+  const params = new URLSearchParams();
+  if (filters.query.trim()) params.set("q", filters.query.trim());
+  if (filters.status !== "all") params.set("status", filters.status);
+  if (filters.target !== "all") params.set("target", filters.target);
+  if (filters.blockedOnly) params.set("blocked", "1");
+  if (filters.limit !== WEB_RUNS_DEFAULT_LIMIT) params.set("limit", String(filters.limit));
+  const query = params.toString();
+  window.history.replaceState(null, "", `#/runs${query ? `?${query}` : ""}`);
 }

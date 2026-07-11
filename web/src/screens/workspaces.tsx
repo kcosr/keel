@@ -5,9 +5,9 @@ import { ApiError, type KeelWebClient } from "../api/client";
 import type { RunWorkspaceDiff, RunWorkspaceView } from "../api/types";
 import {
   Button,
-  CommandCopyButton,
   EmptyState,
   ErrorState,
+  IconButton,
   LoadingState,
   Select,
   StatusPill,
@@ -15,6 +15,7 @@ import {
   TextInput,
   copyTextToClipboard,
   formatTime,
+  statusLabel,
   toneForStatus,
 } from "../components/controls";
 import { type Column, DenseTable } from "../components/dense-table";
@@ -200,8 +201,8 @@ export function WorkspacesScreen({
             disabled={!mutationAuthorized || pendingAction !== null}
             title={
               mutationAuthorized
-                ? "Garbage collect eligible workspaces. CLI: keel workspace gc"
-                : "Requires admin authority. CLI: keel workspace gc"
+                ? "Garbage collect eligible workspaces"
+                : "Requires admin authority"
             }
             onClick={() => void runGc()}
           >
@@ -216,7 +217,7 @@ export function WorkspacesScreen({
       {!mutationAuthorized && !listState.loading && !listState.error ? (
         <div className="notice-panel">
           Workspace mutation requires admin authority. Merge, discard, and GC controls stay disabled
-          without it; use the CLI equivalents below with an admin credential.
+          without it.
         </div>
       ) : null}
       <div className="workspace-layout">
@@ -256,7 +257,6 @@ export function WorkspacesScreen({
                 <ErrorState error={detailState.error} onRetry={detailState.reload} />
               ) : null}
               <WorkspaceMetadata workspace={detail} />
-              <WorkspaceCommands workspace={detail} mutationAuthorized={mutationAuthorized} />
               {!detail.diffSupported ? (
                 <EmptyState
                   title="Diff unavailable"
@@ -308,6 +308,11 @@ function WorkspaceDetailHeader({
         </span>
       </div>
       <div className="btn-row">
+        <IconButton
+          icon={Copy}
+          label="Copy workspace ID"
+          onClick={() => void copyTextToClipboard(workspace.workspaceId)}
+        />
         <Button
           icon={GitMerge}
           variant="primary"
@@ -335,7 +340,9 @@ function WorkspaceMetadata({ workspace }: { workspace: RunWorkspaceView }) {
   return (
     <section className="panel workspace-metadata">
       <div className="workspace-meta-strip">
-        <StatusPill tone={toneForStatus(workspace.status)}>{workspace.status}</StatusPill>
+        <StatusPill tone={toneForStatus(workspace.status)}>
+          {statusLabel(workspace.status)}
+        </StatusPill>
         <StatusPill tone="neutral">{workspace.mode}</StatusPill>
         <StatusPill tone={workspace.diffSupported ? "info" : "neutral"}>
           {workspace.diffSupported ? "diffable" : "no diff"}
@@ -392,64 +399,6 @@ function MetadataItem({
       <span>{label}</span>
       <strong className={mono ? "mono" : undefined}>{value}</strong>
     </div>
-  );
-}
-
-function WorkspaceCommands({
-  workspace,
-  mutationAuthorized,
-}: {
-  workspace: RunWorkspaceView;
-  mutationAuthorized: boolean;
-}) {
-  return (
-    <section className="panel workspace-command-panel">
-      <div className="panel-heading">
-        <h2>CLI Equivalents</h2>
-        <button
-          className="inline-link workspace-copy-id"
-          type="button"
-          onClick={() => void copyTextToClipboard(workspace.workspaceId)}
-        >
-          <Copy size={13} />
-          Copy workspace id
-        </button>
-      </div>
-      <div className="command-copy-grid">
-        <CommandCopyButton
-          label="Copy show command"
-          command={`keel workspace show ${workspace.runId} ${workspace.workspaceId}`}
-        />
-        <CommandCopyButton
-          label="Copy diff command"
-          command={`keel workspace diff ${workspace.runId} ${workspace.workspaceId}`}
-          detail={workspace.diffSupported ? null : "This workspace does not support diff."}
-        />
-        <CommandCopyButton
-          label="Copy merge command"
-          command={`keel workspace merge ${workspace.runId} ${workspace.workspaceId}`}
-          detail={
-            !mutationAuthorized
-              ? "Requires admin authority."
-              : !workspace.mergeSupported
-                ? "Workspace is not currently mergeable."
-                : null
-          }
-        />
-        <CommandCopyButton
-          label="Copy discard command"
-          command={`keel workspace discard ${workspace.runId} ${workspace.workspaceId}`}
-          detail={
-            !mutationAuthorized
-              ? "Requires admin authority."
-              : !workspace.discardSupported
-                ? "Workspace is not currently discardable."
-                : null
-          }
-        />
-        <CommandCopyButton label="Copy GC command" command="keel workspace gc" />
-      </div>
-    </section>
   );
 }
 
@@ -532,7 +481,9 @@ function workspaceColumns(): Array<Column<RunWorkspaceView>> {
       header: "Status",
       width: "145px",
       render: (workspace) => (
-        <StatusPill tone={toneForStatus(workspace.status)}>{workspace.status}</StatusPill>
+        <StatusPill tone={toneForStatus(workspace.status)}>
+          {statusLabel(workspace.status)}
+        </StatusPill>
       ),
     },
   ];
@@ -602,12 +553,12 @@ function workspaceMutationTitle(
   action: "merge" | "discard",
 ): string {
   if (!mutationAuthorized) {
-    return `Requires admin authority. CLI: keel workspace ${action} ${workspace.runId} ${workspace.workspaceId}`;
+    return "Requires admin authority";
   }
   const supported = action === "merge" ? workspace.mergeSupported : workspace.discardSupported;
   if (!supported)
     return `Workspace is not currently ${action === "merge" ? "mergeable" : "discardable"}`;
-  return `${titleCase(action)} retained workspace ${workspace.workspaceId}. CLI: keel workspace ${action} ${workspace.runId} ${workspace.workspaceId}`;
+  return `${titleCase(action)} retained workspace ${workspace.workspaceId}`;
 }
 
 function workspaceConfirmation(action: "merge" | "discard", workspace: RunWorkspaceView): string {

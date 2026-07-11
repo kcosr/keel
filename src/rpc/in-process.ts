@@ -51,6 +51,8 @@ import {
   removeManagedWorkspace,
 } from "../workspace/worktree.ts";
 import type {
+  BrowseDirectoriesRequest,
+  BrowseDirectoriesResult,
   EventEnvelope,
   GetScheduleRequest,
   GetWorkflowDefinitionSourceRequest,
@@ -72,6 +74,7 @@ import type {
   WorkflowProvenance,
   WorkspaceGcResult,
 } from "./contract.ts";
+import { browseDirectoriesOnHost } from "./directory-browser.ts";
 import { cursorAfterSeq } from "./event-cursor.ts";
 import { EventHub } from "./event-hub.ts";
 import {
@@ -150,6 +153,10 @@ export class InProcessKeel implements KeelApi {
     this.unsubscribeStoreEvents = this.store.onEventAppended((event) =>
       this.eventHub.publishDurable(event),
     );
+  }
+
+  browseDirectories(req: BrowseDirectoriesRequest): Promise<BrowseDirectoriesResult> {
+    return browseDirectoriesOnHost(req);
   }
 
   async launchRun(req: LaunchRequest): Promise<RunLaunchResult> {
@@ -368,6 +375,15 @@ export class InProcessKeel implements KeelApi {
       nextFireMs: req.firstFireMs ?? this.opts.clock?.() ?? Date.now(),
     });
     return { ok: true };
+  }
+
+  setScheduleEnabled(name: string, enabled: boolean): { name: string; enabled: boolean } {
+    this.store.setScheduleEnabled(name, enabled);
+    return { name, enabled };
+  }
+
+  deleteSchedule(name: string): { name: string; deleted: boolean } {
+    return { name, deleted: this.store.deleteSchedule(name) };
   }
 
   listSchedules(req: ListSchedulesRequest = {}): ScheduleSummary[] {

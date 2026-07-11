@@ -1,5 +1,5 @@
-import { Rocket } from "lucide-react";
-import { type FormEvent, useEffect, useId, useMemo, useState } from "react";
+import { Ban, MoreHorizontal, Power, Rocket, Trash2 } from "lucide-react";
+import { type FormEvent, type ReactNode, useEffect, useId, useMemo, useRef, useState } from "react";
 import type { KeelWebClient } from "../api/client";
 import type {
   RunLaunchResult,
@@ -9,12 +9,12 @@ import type {
   SavedWorkflowView,
 } from "../api/types";
 import { CodeViewer } from "../components/code-viewer";
+import { ConfirmDialog } from "../components/confirm-dialog";
 import {
   Button,
   EmptyState,
   ErrorState,
-  JsonBlock,
-  KeyValueList,
+  IconButton,
   LoadingState,
   StatusPill,
   Tabs,
@@ -22,7 +22,7 @@ import {
   formatTime,
 } from "../components/controls";
 import { type Column, DenseTable } from "../components/dense-table";
-import { Inspector } from "../components/inspector";
+import { DirectoryPickerField } from "../components/directory-picker";
 import { useAsync } from "../hooks/use-async";
 
 type WorkflowTab = "versions" | "source" | "launch";
@@ -31,7 +31,8 @@ export function WorkflowsScreen({
   client,
   refreshKey,
 }: { client: KeelWebClient; refreshKey: number }) {
-  const state = useAsync(() => client.listSavedWorkflows(), [client, refreshKey]);
+  const [mutationKey, setMutationKey] = useState(0);
+  const state = useAsync(() => client.listSavedWorkflows(), [client, refreshKey, mutationKey]);
   const workflows = state.data ?? [];
   const [selectedName, setSelectedName] = useState<string | null>(null);
   const [selectedVersion, setSelectedVersion] = useState<number | "latest">("latest");
@@ -46,7 +47,7 @@ export function WorkflowsScreen({
   const selectedSummary = workflows.find((workflow) => workflow.name === selectedName) ?? null;
   const detailState = useAsync(
     () => (selectedName ? client.getSavedWorkflow(selectedName) : Promise.resolve(null)),
-    [client, selectedName, refreshKey],
+    [client, selectedName, refreshKey, mutationKey],
   );
   const detail = detailState.data ?? null;
   const versions = detail?.versions ?? selectedSummary?.versions ?? [];
@@ -60,7 +61,7 @@ export function WorkflowsScreen({
       selectedName
         ? client.getSavedWorkflowSource({ name: selectedName, version: sourceVersion })
         : Promise.resolve(null),
-    [client, selectedName, sourceVersion, refreshKey],
+    [client, selectedName, sourceVersion, refreshKey, mutationKey],
   );
   const source = sourceState.data ?? null;
 
@@ -70,88 +71,94 @@ export function WorkflowsScreen({
   };
 
   return (
-    <div className="content-split">
-      <div className="content-scroll workflow-screen">
-        {state.loading ? <LoadingState label="Loading workflows" /> : null}
-        {state.error ? <ErrorState error={state.error} onRetry={state.reload} /> : null}
-        {!state.loading && !state.error ? (
-          <DenseTable
-            rows={workflows}
-            rowKey={(workflow) => workflow.name}
-            selectedKey={selectedName}
-            onRowClick={selectWorkflow}
-            empty={
-              <EmptyState
-                title="No saved workflows"
-                detail="Saved workflows are loaded through daemon RPC."
-              />
-            }
-            columns={workflowColumns()}
-          />
-        ) : null}
+    <div className="content-scroll workflow-screen resource-screen">
+      {state.loading ? <LoadingState label="Loading workflows" /> : null}
+      {state.error ? <ErrorState error={state.error} onRetry={state.reload} /> : null}
+      {!state.loading && !state.error ? (
+        <DenseTable
+          rows={workflows}
+          rowKey={(workflow) => workflow.name}
+          selectedKey={selectedName}
+          onRowClick={selectWorkflow}
+          empty={
+            <EmptyState
+              title="No saved workflows"
+              detail="Saved workflows are loaded through daemon RPC."
+            />
+          }
+          columns={workflowColumns()}
+        />
+      ) : null}
 
-        {selectedName ? (
-          <section className="panel workflow-detail-panel">
-            <div className="panel-heading">
-              <div>
-                <h2>{selectedName}</h2>
-                <div className="muted">
-                  {detail?.title ?? selectedSummary?.title ?? detail?.description ?? "-"}
-                </div>
+      {selectedName ? (
+        <section className="workflow-detail-panel">
+          <div className="workflow-detail-header">
+            <div className="workflow-detail-title">
+              <h2>{selectedName}</h2>
+              <div className="muted">
+                {detail?.title ?? selectedSummary?.title ?? detail?.description ?? "-"}
               </div>
+              <div className="workflow-detail-meta">
+                <span>
+                  Version <strong>{selectedVersionView?.version ?? "-"}</strong>
+                </span>
+                <span>Updated {formatTime((detail ?? selectedSummary)?.updatedAtMs)}</span>
+              </div>
+            </div>
+            <div className="workflow-detail-controls">
               <StatusPill tone={workflowStateTone(detail ?? selectedSummary)}>
                 {workflowState(detail ?? selectedSummary)}
               </StatusPill>
+              <WorkflowLifecycleActions
+                client={client}
+                workflow={detail ?? selectedSummary}
+                version={selectedVersionView}
+                onMutated={() => setMutationKey((value) => value + 1)}
+              />
             </div>
-            <Tabs<WorkflowTab>
-              tabs={[
-                { id: "versions", label: "Versions", count: versions.length },
-                { id: "source", label: "Source", count: source?.files.length },
-                { id: "launch", label: "Launch" },
-              ]}
-              active={activeTab}
-              onChange={setActiveTab}
-            />
-            <div className="tab-panel">
-              {activeTab === "versions" ? (
-                <WorkflowVersions
-                  versions={versions}
-                  selectedVersion={selectedVersion}
-                  onSelectVersion={(version) => {
-                    setSelectedVersion(version);
-                    setActiveTab("source");
-                  }}
-                  loading={detailState.loading}
-                  error={detailState.error}
-                  onRetry={detailState.reload}
-                />
-              ) : null}
-              {activeTab === "source" ? (
-                <WorkflowSource
-                  source={source}
-                  loading={sourceState.loading}
-                  error={sourceState.error}
-                  onRetry={sourceState.reload}
-                />
-              ) : null}
-              {activeTab === "launch" ? (
-                <WorkflowLaunchForm
-                  key={`${selectedName}:${selectedVersionView?.version ?? "latest"}`}
-                  client={client}
-                  workflow={detail ?? selectedSummary}
-                  version={selectedVersionView}
-                />
-              ) : null}
-            </div>
-          </section>
-        ) : null}
-      </div>
-      <WorkflowInspector
-        workflow={detail ?? selectedSummary}
-        loading={detailState.loading}
-        error={detailState.error}
-        onRetry={detailState.reload}
-      />
+          </div>
+          <Tabs<WorkflowTab>
+            tabs={[
+              { id: "versions", label: "Versions", count: versions.length },
+              { id: "source", label: "Source", count: source?.files.length },
+              { id: "launch", label: "Launch" },
+            ]}
+            active={activeTab}
+            onChange={setActiveTab}
+          />
+          <div className="tab-panel">
+            {activeTab === "versions" ? (
+              <WorkflowVersions
+                versions={versions}
+                selectedVersion={selectedVersion}
+                onSelectVersion={(version) => {
+                  setSelectedVersion(version);
+                  setActiveTab("source");
+                }}
+                loading={detailState.loading}
+                error={detailState.error}
+                onRetry={detailState.reload}
+              />
+            ) : null}
+            {activeTab === "source" ? (
+              <WorkflowSource
+                source={source}
+                loading={sourceState.loading}
+                error={sourceState.error}
+                onRetry={sourceState.reload}
+              />
+            ) : null}
+            {activeTab === "launch" ? (
+              <WorkflowLaunchForm
+                key={`${selectedName}:${selectedVersionView?.version ?? "latest"}`}
+                client={client}
+                workflow={detail ?? selectedSummary}
+                version={selectedVersionView}
+              />
+            ) : null}
+          </div>
+        </section>
+      ) : null}
     </div>
   );
 }
@@ -308,14 +315,16 @@ function WorkflowLaunchForm({
   const [error, setError] = useState<Error | null>(null);
   const [launched, setLaunched] = useState<RunLaunchResult | null>(null);
   const formId = useId();
+  const versionKey = version ? `${version.name}:${version.version}` : "none";
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reset only when the selected catalog version changes, not when a refetch replaces its object values.
   useEffect(() => {
     setInputText(JSON.stringify(version?.defaultInputSet ? version.defaultInput : {}, null, 2));
     setTarget(version?.defaultTarget ?? "");
     setRunName("");
     setError(null);
     setLaunched(null);
-  }, [version?.defaultTarget, version?.defaultInputSet, version?.defaultInput]);
+  }, [versionKey]);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -355,15 +364,14 @@ function WorkflowLaunchForm({
         the web surface.
       </div>
       {launchBlockedReason ? <div className="form-error">{launchBlockedReason}</div> : null}
-      <label className="form-field" htmlFor={`${formId}-target`}>
-        <span>Target</span>
-        <TextInput
-          id={`${formId}-target`}
-          value={target}
-          onChange={(event) => setTarget(event.target.value)}
-          placeholder="/path/to/workspace"
-        />
-      </label>
+      <DirectoryPickerField
+        client={client}
+        id={`${formId}-target`}
+        label="Target"
+        value={target}
+        onChange={setTarget}
+        placeholder="/path/to/workspace"
+      />
       <label className="form-field" htmlFor={`${formId}-run-name`}>
         <span>Run name</span>
         <TextInput
@@ -402,47 +410,242 @@ function WorkflowLaunchForm({
   );
 }
 
-function WorkflowInspector({
+type WorkflowAction =
+  | "toggle-workflow"
+  | "toggle-version"
+  | "deprecate"
+  | "delete-version"
+  | "delete-workflow";
+
+function WorkflowLifecycleActions({
+  client,
   workflow,
-  loading,
-  error,
-  onRetry,
+  version,
+  onMutated,
 }: {
+  client: KeelWebClient;
   workflow: SavedWorkflowView | SavedWorkflowSummary | null;
-  loading: boolean;
-  error: Error | null;
-  onRetry(): void;
+  version: SavedWorkflowVersionView | null;
+  onMutated(): void;
+}) {
+  const [pending, setPending] = useState<WorkflowAction | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<Error | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const menuButtonRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const closeOutside = (event: PointerEvent) => {
+      if (!menuRef.current?.contains(event.target as Node)) setMenuOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOutside);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOutside);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [menuOpen]);
+
+  if (!workflow) return null;
+  const workflowDisabled = workflow.disabledAtMs !== null;
+
+  const execute = async (action: WorkflowAction) => {
+    setBusy(true);
+    setError(null);
+    try {
+      if (action === "toggle-workflow")
+        await client.setSavedWorkflowDisabled(workflow.name, !workflowDisabled);
+      if (action === "toggle-version" && version)
+        await client.setSavedWorkflowVersionEnabled(
+          workflow.name,
+          version.version,
+          !version.enabled,
+        );
+      if (action === "deprecate" && version)
+        await client.deprecateSavedWorkflowVersion(workflow.name, version.version);
+      if (action === "delete-version" && version)
+        await client.deleteSavedWorkflowVersion(workflow.name, version.version);
+      if (action === "delete-workflow") await client.deleteSavedWorkflow(workflow.name);
+      setMenuOpen(false);
+      setPending(null);
+      onMutated();
+    } catch (err) {
+      setPending(null);
+      setError(err instanceof Error ? err : new Error(String(err)));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const immediateOrConfirm = (action: WorkflowAction, confirming: boolean) => {
+    setMenuOpen(false);
+    if (confirming) setPending(action);
+    else void execute(action);
+  };
+  const confirmation = workflowConfirmation(pending, workflow.name, version?.version);
+
+  return (
+    <div className="action-menu-wrap workflow-actions" ref={menuRef}>
+      <IconButton
+        ref={menuButtonRef}
+        icon={MoreHorizontal}
+        label="Workflow actions"
+        aria-haspopup="menu"
+        aria-expanded={menuOpen}
+        disabled={busy}
+        onClick={() => setMenuOpen((open) => !open)}
+      />
+      {menuOpen ? (
+        <div className="action-menu workflow-action-menu" role="menu">
+          {version ? (
+            <>
+              <div className="action-menu-label">Version {version.version}</div>
+              <WorkflowMenuItem
+                icon={<Power size={15} />}
+                label={version.enabled ? "Disable" : "Enable"}
+                detail="Control whether this version can be selected for new launches."
+                ariaLabel={`${version.enabled ? "Disable" : "Enable"} selected version`}
+                disabled={version.deletedAtMs !== null}
+                onClick={() => immediateOrConfirm("toggle-version", version.enabled)}
+              />
+              {version.deprecatedAtMs === null ? (
+                <WorkflowMenuItem
+                  icon={<Ban size={15} />}
+                  label="Deprecate"
+                  detail="Keep this version visible but exclude it from normal selection."
+                  disabled={version.deletedAtMs !== null}
+                  onClick={() => {
+                    setMenuOpen(false);
+                    setPending("deprecate");
+                  }}
+                />
+              ) : null}
+              <WorkflowMenuItem
+                icon={<Trash2 size={15} />}
+                label="Delete"
+                detail="Remove this version from future use."
+                ariaLabel="Delete selected version"
+                danger
+                disabled={version.deletedAtMs !== null}
+                onClick={() => {
+                  setMenuOpen(false);
+                  setPending("delete-version");
+                }}
+              />
+            </>
+          ) : null}
+          <div className="action-menu-label action-menu-label-divider">Registry</div>
+          <WorkflowMenuItem
+            icon={<Power size={15} />}
+            label={workflowDisabled ? "Enable" : "Disable"}
+            detail="Control whether this saved entry can be launched or scheduled."
+            ariaLabel={`${workflowDisabled ? "Enable" : "Disable"} registry entry`}
+            disabled={workflow.deletedAtMs !== null}
+            onClick={() => immediateOrConfirm("toggle-workflow", !workflowDisabled)}
+          />
+          <WorkflowMenuItem
+            icon={<Trash2 size={15} />}
+            label="Delete"
+            detail="Remove this entry and all of its versions."
+            ariaLabel="Delete registry entry"
+            danger
+            disabled={workflow.deletedAtMs !== null}
+            onClick={() => {
+              setMenuOpen(false);
+              setPending("delete-workflow");
+            }}
+          />
+        </div>
+      ) : null}
+      {error ? (
+        <div className="form-error workflow-action-error" role="alert">
+          {error.message}
+        </div>
+      ) : null}
+      <ConfirmDialog
+        open={pending !== null}
+        title={confirmation.title}
+        detail={confirmation.detail}
+        confirmLabel={confirmation.label}
+        busy={busy}
+        returnFocusRef={menuButtonRef}
+        onClose={() => setPending(null)}
+        onConfirm={() => pending && void execute(pending)}
+      />
+    </div>
+  );
+}
+
+function WorkflowMenuItem({
+  icon,
+  label,
+  detail,
+  ariaLabel,
+  danger = false,
+  disabled = false,
+  onClick,
+}: {
+  icon: ReactNode;
+  label: string;
+  detail: string;
+  ariaLabel?: string;
+  danger?: boolean;
+  disabled?: boolean;
+  onClick(): void;
 }) {
   return (
-    <Inspector
-      title="Workflow"
-      subtitle={workflow?.name ?? "No workflow"}
-      status={
-        workflow ? (
-          <StatusPill tone={workflowStateTone(workflow)}>{workflowState(workflow)}</StatusPill>
-        ) : null
-      }
+    <button
+      type="button"
+      role="menuitem"
+      className={`action-menu-item ${danger ? "is-danger" : ""}`}
+      aria-label={ariaLabel}
+      disabled={disabled}
+      onClick={onClick}
     >
-      {loading ? <LoadingState label="Loading workflow" /> : null}
-      {error ? <ErrorState error={error} onRetry={onRetry} /> : null}
-      {!loading && !error && workflow ? (
-        <>
-          <KeyValueList
-            rows={[
-              { label: "Title", value: workflow.title ?? "-" },
-              { label: "Description", value: workflow.description ?? "-" },
-              { label: "Tags", value: workflow.tags.join(", ") || "-" },
-              { label: "Created", value: formatTime(workflow.createdAtMs) },
-              { label: "Updated", value: formatTime(workflow.updatedAtMs) },
-              { label: "Versions", value: workflow.versions.length },
-            ]}
-          />
-          <JsonBlock value={workflow} />
-        </>
-      ) : null}
-      {!loading && !error && !workflow ? <EmptyState title="No workflow selected" /> : null}
-    </Inspector>
+      {icon}
+      <span>
+        <strong>{label}</strong>
+        <small>{detail}</small>
+      </span>
+    </button>
   );
+}
+
+function workflowConfirmation(action: WorkflowAction | null, name: string, version?: number) {
+  if (action === "delete-workflow")
+    return {
+      title: "Delete workflow?",
+      detail: `Delete ${name} and all of its versions. Existing runs are not affected.`,
+      label: "Delete workflow",
+    };
+  if (action === "delete-version")
+    return {
+      title: "Delete version?",
+      detail: `Delete ${name} version ${version}. Existing runs are not affected.`,
+      label: "Delete version",
+    };
+  if (action === "deprecate")
+    return {
+      title: "Deprecate version?",
+      detail: `Mark ${name} version ${version} as deprecated so new launches do not select it.`,
+      label: "Deprecate version",
+    };
+  if (action === "toggle-version")
+    return {
+      title: "Disable version?",
+      detail: `Disable ${name} version ${version} for new launches.`,
+      label: "Disable version",
+    };
+  return {
+    title: "Disable workflow?",
+    detail: `Disable ${name} for new launches and schedules.`,
+    label: "Disable workflow",
+  };
 }
 
 function workflowLaunchBlockedReason(version: SavedWorkflowVersionView | null): string | null {

@@ -6,8 +6,10 @@ import type {
   ApprovalsResponse,
   EventCursorInput,
   HealthResponse,
+  InterruptRunResult,
   RunDetailResponse,
   RunLaunchResult,
+  RunStart,
   RunWorkspaceDiff,
   RunWorkspaceView,
   RunsResponse,
@@ -93,6 +95,37 @@ export class KeelWebClient {
     return this.rpc("decideApproval", { runId, key, decision });
   }
 
+  resumeRun(runId: string): Promise<RunStart> {
+    return this.rpc("resumeRun", { runId });
+  }
+
+  interruptRun(runId: string, reason?: string): Promise<InterruptRunResult> {
+    return this.rpc("interruptRun", { runId, ...(reason ? { reason } : {}) });
+  }
+
+  retryRun(runId: string): Promise<RunStart> {
+    return this.rpc("retryRun", { runId });
+  }
+
+  rerunRun(runId: string): Promise<RunStart> {
+    return this.rpc("rerunRun", { runId, opts: {} });
+  }
+
+  rewindRun(runId: string, toStableKey: string): Promise<RunStart> {
+    return this.rpc("rewindRun", { runId, toStableKey });
+  }
+
+  forkRun(runId: string, atStableKey?: string): Promise<RunLaunchResult> {
+    return this.rpc("forkRun", {
+      runId,
+      opts: { ...(atStableKey ? { atStableKey } : {}) },
+    });
+  }
+
+  sendSignal(runId: string, name: string, payload: unknown): Promise<RunStart> {
+    return this.rpc("sendSignal", { runId, name, payload });
+  }
+
   listWorkspaces(): Promise<WorkspacesResponse> {
     return this.getJson("/api/workspaces");
   }
@@ -135,6 +168,36 @@ export class KeelWebClient {
     return this.rpc("getSchedule", { name, includeSource: true });
   }
 
+  putSchedule(req: {
+    name: string;
+    workflowName: string;
+    workflowVersion?: number | "latest";
+    intervalMs: number;
+    input?: unknown;
+    target?: string;
+    firstFireMs?: number;
+  }): Promise<{ ok: boolean }> {
+    return this.rpc("putSchedule", {
+      name: req.name,
+      savedRef: {
+        name: req.workflowName,
+        version: req.workflowVersion ?? "latest",
+      },
+      intervalMs: req.intervalMs,
+      ...(req.input !== undefined ? { input: req.input } : {}),
+      ...(req.target ? { target: req.target } : {}),
+      ...(req.firstFireMs !== undefined ? { firstFireMs: req.firstFireMs } : {}),
+    });
+  }
+
+  setScheduleEnabled(name: string, enabled: boolean): Promise<{ name: string; enabled: boolean }> {
+    return this.rpc("setScheduleEnabled", { name, enabled });
+  }
+
+  deleteSchedule(name: string): Promise<{ name: string; deleted: boolean }> {
+    return this.rpc("deleteSchedule", { name });
+  }
+
   listSavedWorkflows(): Promise<SavedWorkflowSummary[]> {
     return this.rpc("listSavedWorkflows", {
       includeDisabled: true,
@@ -151,6 +214,41 @@ export class KeelWebClient {
     version?: number | "latest";
   }): Promise<SavedWorkflowSourceView> {
     return this.rpc("getSavedWorkflowSource", { ...req, all: true, allowDeprecated: true });
+  }
+
+  setSavedWorkflowDisabled(name: string, disabled: boolean): Promise<SavedWorkflowView> {
+    return this.rpc("setSavedWorkflowDisabled", { name, disabled });
+  }
+
+  setSavedWorkflowVersionEnabled(
+    name: string,
+    version: number,
+    enabled: boolean,
+  ): Promise<SavedWorkflowView["versions"][number]> {
+    return this.rpc("setSavedWorkflowVersionEnabled", { name, version, enabled });
+  }
+
+  deprecateSavedWorkflowVersion(
+    name: string,
+    version: number,
+    message?: string,
+  ): Promise<SavedWorkflowView["versions"][number]> {
+    return this.rpc("deprecateSavedWorkflowVersion", {
+      name,
+      version,
+      ...(message ? { message } : {}),
+    });
+  }
+
+  deleteSavedWorkflow(name: string): Promise<SavedWorkflowView> {
+    return this.rpc("deleteSavedWorkflow", { name });
+  }
+
+  deleteSavedWorkflowVersion(
+    name: string,
+    version: number,
+  ): Promise<SavedWorkflowView["versions"][number]> {
+    return this.rpc("deleteSavedWorkflowVersion", { name, version });
   }
 
   launchSavedWorkflow(req: {
@@ -187,6 +285,29 @@ export class KeelWebClient {
     return this.rpc("checkAgentProfile", { name });
   }
 
+  checkAgentProfileConfig(config: Record<string, unknown>): Promise<AgentProfileCheckResult> {
+    return this.rpc("checkAgentProfile", { config });
+  }
+
+  putAgentProfile(req: {
+    name: string;
+    config: Record<string, unknown>;
+    ifGeneration?: number;
+    createOnly?: boolean;
+  }): Promise<AgentProfileView> {
+    return this.rpc("putAgentProfile", req);
+  }
+
+  deleteAgentProfile(
+    name: string,
+    ifGeneration?: number,
+  ): Promise<{ name: string; deleted: true }> {
+    return this.rpc("deleteAgentProfile", {
+      name,
+      ...(ifGeneration !== undefined ? { ifGeneration } : {}),
+    });
+  }
+
   listSettings(): Promise<SettingView[]> {
     return this.rpc("listSettings", {});
   }
@@ -197,6 +318,21 @@ export class KeelWebClient {
 
   checkSetting(key: string, value: unknown): Promise<SettingCheckResult> {
     return this.rpc("checkSetting", { key, value });
+  }
+
+  putSetting(key: string, value: unknown, ifGeneration?: number): Promise<SettingView> {
+    return this.rpc("putSetting", {
+      key,
+      value,
+      ...(ifGeneration !== undefined ? { ifGeneration } : {}),
+    });
+  }
+
+  deleteSetting(key: string, ifGeneration?: number): Promise<{ key: string; deleted: boolean }> {
+    return this.rpc("deleteSetting", {
+      key,
+      ...(ifGeneration !== undefined ? { ifGeneration } : {}),
+    });
   }
 
   async rpc<T>(method: string, params: unknown = {}): Promise<T> {

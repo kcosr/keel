@@ -3,6 +3,14 @@
 ## [Unreleased]
 
 ### Changed
+- The web console is now a responsive operator workspace with a mobile drawer,
+  session-scoped credential dialog, URL-backed live run filters, bounded older-run
+  loading, readable status labels, consolidated run-detail views, and
+  capability-aware lifecycle actions.
+- Saved workflows, schedules, catalog profiles, and mutable settings can now be
+  managed directly from the web console with validation, generation
+  preconditions, and confirmations for destructive operations. Schedule state
+  now has canonical admin RPC operations for pause/resume and deletion.
 - The README now includes a fuller project introduction, system/replay diagrams,
   tiny workflow examples, and direct routing to the event-stream documentation.
   ([#30](https://github.com/kcosr/keel/pull/30))
@@ -75,9 +83,9 @@
   retained workspace list/detail/diff views with admin-confirmed merge, discard,
   and workspace GC controls.
 - The production web UI now includes saved workflow list/detail/source views, a
-  browser-secret-free saved workflow launch form, read-only schedule
-  list/detail/source inspection, profile and setting get/check inspection, and
-  system status cards backed by `/health` and `/api/system`.
+  browser-secret-free saved workflow launch form, schedule lifecycle management,
+  profile and setting editors, and system status cards backed by `/health` and
+  `/api/system`.
 - The production web UI now includes final console polish: container-responsive
   runs tables, keyboard row navigation, copyable CLI equivalents for approval,
   run, and workspace actions, and a denser workspace review panel with explicit

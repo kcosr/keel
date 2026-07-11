@@ -291,6 +291,12 @@ export class DaemonClient {
       ...(target !== undefined ? { target } : {}),
     });
   }
+  setScheduleEnabled(name: string, enabled: boolean): Promise<{ name: string; enabled: boolean }> {
+    return this.rpc("setScheduleEnabled", { name, enabled });
+  }
+  deleteSchedule(name: string): Promise<{ name: string; deleted: boolean }> {
+    return this.rpc("deleteSchedule", { name });
+  }
   listSchedules(req: { includeDisabled?: boolean } = {}): Promise<ScheduleSummary[]> {
     return this.rpc("listSchedules", req);
   }

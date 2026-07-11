@@ -97,9 +97,7 @@ describe("RunDetailScreen", () => {
     render(<RunDetailScreen client={client} runId="run_1" refreshKey={0} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Watch live" }));
-    const transcriptTab = screen.getAllByRole("button", { name: /transcript/i })[0];
-    expect(transcriptTab).toBeDefined();
-    fireEvent.click(transcriptTab as HTMLElement);
+    fireEvent.click(screen.getByRole("tab", { name: /activity/i }));
 
     await waitFor(() => expect(client.watchRunEvents).toHaveBeenCalledTimes(1));
     expect(watched[0]?.cursor).toEqual({ kind: "after-seq", seq: 5 });
@@ -157,10 +155,10 @@ describe("RunDetailScreen", () => {
     });
 
     await waitFor(() => expect(client.getRun).toHaveBeenCalledTimes(1));
-    fireEvent.click(screen.getByRole("button", { name: /approvals/i }));
+    fireEvent.click(screen.getByRole("tab", { name: /approvals/i }));
 
     expect((await screen.findAllByText("approve-review")).length).toBeGreaterThan(0);
-    expect(screen.getByText("keel approve run_1 approve-review")).toBeInTheDocument();
+    expect(screen.queryByText(/keel approve/)).not.toBeInTheDocument();
     expect(
       screen.getByText(
         "Approval decisions require admin authority and a refreshed run projection.",
@@ -253,9 +251,9 @@ describe("RunDetailScreen", () => {
 
     render(<RunDetailScreen client={client} runId="run_1" refreshKey={0} />);
 
-    fireEvent.click(await screen.findByRole("button", { name: /workspaces/i }));
+    fireEvent.click(await screen.findByRole("tab", { name: /workspaces/i }));
     expect(screen.getByText("default")).toBeInTheDocument();
-    expect(screen.getAllByText("target").length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/target/i).length).toBeGreaterThan(0);
     expect(screen.queryByText("Default target")).not.toBeInTheDocument();
     expect(screen.queryByText("__default")).not.toBeInTheDocument();
     expect(screen.getByText("fake-app-change")).toBeInTheDocument();
@@ -305,7 +303,16 @@ function detail(seq = 5): RunDetailResponse {
     events: [],
     eventCursor: { kind: "after-seq", runId: "run_1", seq },
     rawEvents: { href: "/runs/run_1/events" },
-    availableCommands: [{ name: "watchEvents", requiredAuthority: "run:events" }],
+    actionAuthorization: {
+      resume: true,
+      interrupt: true,
+      retry: true,
+      rerun: true,
+      rewind: true,
+      fork: true,
+      signal: true,
+      decideApproval: false,
+    },
   };
 }
 

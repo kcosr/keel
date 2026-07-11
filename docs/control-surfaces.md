@@ -127,14 +127,13 @@ daemon gateway, not a second operation dispatcher:
 The React UI foundation lives under `web/` and is served by `keel web` from the
 `web/dist` bundle when present. It is a browser client over this same API, not a
 new operation boundary. Current UI coverage includes runs, run detail with
-static workflow flow, approval decisions, workspace diff/review controls, saved
-workflow list/detail/source/run,
-read-only schedule list/detail/source, profile and setting list/get/check
-inspection, and system views. Browser mutations remain disabled or deferred
-unless a screen explicitly wires the operation through bearer-authorized `/rpc`
-calls. Wired mutation controls show the required authority and copyable CLI
-equivalent; disabled controls explain the missing authority or unsupported
-resource state. The current workspace browser projection fans out over per-run
+static workflow flow and capability-aware lifecycle actions, approval decisions,
+workspace diff/review controls, saved workflow lifecycle and launch, schedule
+lifecycle management, catalog profile management, mutable setting management,
+and system views. Browser mutations are wired through bearer-authorized `/rpc`
+calls and the daemon remains the authorization boundary. Destructive resource
+controls require browser confirmation; profile and setting writes include
+generation preconditions. The current workspace browser projection fans out over per-run
 workspace RPCs instead of a daemon-native aggregate. The system view uses only
 `/health` and `/api/system`; daemon internals such as journal paths, schema
 versions, systemd state, logs, and restart controls are not inferred.
@@ -156,18 +155,19 @@ versions, systemd state, logs, and restart controls are not inferred.
 | workflow command effect | existing run projection/events | watch text and NDJSON implemented | existing run report/output paths | visible through run events/projection | partial | deferred | `ctx.command` implemented | workflow launch authority plus normal run read/watch/output authority |
 | workflow completion checks | existing run projection/events/output | watch text and NDJSON implemented | existing run report/output paths | visible through run events/projection | partial | deferred | `ctx.completionCheck` implemented for curated workflows | workflow launch authority plus normal run read/watch/output authority |
 | workspace setup status | implemented in workspace views/events | visible through workspace JSON and watch events | visible through workspace view methods | visible through run/workspace projections | partial | deferred | `ctx.workspace({ setup })` implemented | `run:read` for status/events |
-| schedule put | implemented | implemented | deferred | deferred | not-applicable | deferred | not-applicable | `admin` |
+| schedule put | implemented | implemented | deferred | implemented | not-applicable | deferred | not-applicable | `admin` |
 | schedule list/show | implemented | implemented | implemented | implemented | not-applicable | deferred | not-applicable | `admin` |
+| schedule enable/disable/delete | implemented | deferred | deferred | implemented | not-applicable | deferred | not-applicable | `admin` |
 | saved workflow save/install | implemented | implemented | deferred | deferred | not-applicable | deferred | not-applicable | `admin`, `workflow:save` |
 | saved workflow list/show/source | implemented | implemented | deferred | implemented | not-applicable | deferred | not-applicable | `admin`, `workflow:read` |
 | saved workflow launch/run | implemented | implemented | deferred | implemented | not-applicable | deferred | not-applicable | `workflow:run`; follow-up uses minted run capability |
-| saved workflow enable/disable/deprecate/delete | implemented | implemented | deferred | deferred | not-applicable | deferred | not-applicable | `admin`, `workflow:save` for scoped non-delete metadata |
+| saved workflow enable/disable/deprecate/delete | implemented | implemented | deferred | implemented | not-applicable | deferred | not-applicable | `admin`, `workflow:save` for scoped non-delete metadata |
 | workflow definition preview/source | implemented | implemented | deferred | deferred | not-applicable | deferred | not-applicable | `admin`, `run:source` depending selector |
 | workflow definition GC | implemented | implemented | deferred | deferred | not-applicable | deferred | not-applicable | `admin` |
 | profile catalog list/get/check | implemented | implemented | deferred | implemented | not-applicable | deferred | `profile` field consumes snapshots | `admin` |
-| profile catalog set/delete | implemented | implemented | deferred | deferred | not-applicable | deferred | not-applicable | `admin` |
+| profile catalog set/delete | implemented | implemented | deferred | implemented | not-applicable | deferred | not-applicable | `admin` |
 | settings catalog list/get/check | implemented | implemented | deferred | implemented | not-applicable | deferred | workflow-visible settings snapshot; daemon-operational agent concurrency limits are not SDK-visible | `admin` |
-| settings catalog set/unset | implemented | implemented | deferred | deferred | not-applicable | deferred | not-applicable | `admin` |
+| settings catalog set/unset | implemented | implemented | deferred | implemented | not-applicable | deferred | not-applicable | `admin` |
 | workspace list/show/diff | implemented | implemented | implemented | implemented | deferred | deferred | not-applicable | `run:read` |
 | workspace merge/discard/gc | implemented | implemented | implemented | implemented | deferred | deferred | not-applicable | `admin` |
 

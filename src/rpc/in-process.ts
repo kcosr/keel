@@ -370,6 +370,15 @@ export class InProcessKeel implements KeelApi {
     return { ok: true };
   }
 
+  setScheduleEnabled(name: string, enabled: boolean): { name: string; enabled: boolean } {
+    this.store.setScheduleEnabled(name, enabled);
+    return { name, enabled };
+  }
+
+  deleteSchedule(name: string): { name: string; deleted: boolean } {
+    return { name, deleted: this.store.deleteSchedule(name) };
+  }
+
   listSchedules(req: ListSchedulesRequest = {}): ScheduleSummary[] {
     return listScheduleSummaries(this.store, req);
   }

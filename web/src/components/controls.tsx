@@ -1,5 +1,4 @@
-import { AlertCircle, Check, Copy, Loader2, type LucideIcon } from "lucide-react";
-import { useState } from "react";
+import { AlertCircle, Loader2, type LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
 
 export type Tone = "success" | "running" | "waiting" | "failed" | "info" | "neutral" | "future";
@@ -18,9 +17,13 @@ export function toneForStatus(status: string | null | undefined): Tone {
     case "creating":
       return "running";
     case "waiting-human":
+    case "waiting_human":
     case "waiting-signal":
+    case "waiting_signal":
     case "waiting-timer":
+    case "waiting_timer":
     case "waiting-approval":
+    case "waiting_approval":
     case "interrupted":
     case "agent_concurrency":
     case "pending_review":
@@ -39,6 +42,28 @@ export function toneForStatus(status: string | null | undefined): Tone {
     default:
       return "neutral";
   }
+}
+
+const STATUS_LABELS: Record<string, string> = {
+  "waiting-human": "Waiting for approval",
+  waiting_human: "Waiting for approval",
+  "waiting-signal": "Waiting for signal",
+  waiting_signal: "Waiting for signal",
+  "waiting-timer": "Waiting for timer",
+  waiting_timer: "Waiting for timer",
+  "waiting-approval": "Waiting for approval",
+  waiting_approval: "Waiting for approval",
+  agent_concurrency: "Queued",
+  stalled_no_heartbeat: "Stalled",
+  pending_review: "Pending review",
+  "parse-error": "Parse error",
+  diff_error: "Diff error",
+  cleanup_error: "Cleanup error",
+};
+
+export function statusLabel(status: string | null | undefined): string {
+  if (!status) return "Unknown";
+  return STATUS_LABELS[status] ?? status.replaceAll(/[-_]+/g, " ");
 }
 
 export function StatusPill({
@@ -88,41 +113,6 @@ export function IconButton({
   return (
     <button className="icon-btn" type="button" aria-label={label} title={label} {...props}>
       <Icon size={16} />
-    </button>
-  );
-}
-
-export function CommandCopyButton({
-  label,
-  command,
-  detail,
-  disabled = false,
-}: {
-  label: string;
-  command: string;
-  detail?: ReactNode;
-  disabled?: boolean;
-}) {
-  const [copied, setCopied] = useState(false);
-  return (
-    <button
-      className="command-copy-button"
-      type="button"
-      disabled={disabled}
-      title={disabled ? undefined : `Copy ${label}`}
-      onClick={async () => {
-        const ok = await copyTextToClipboard(command);
-        if (!ok) return;
-        setCopied(true);
-        window.setTimeout(() => setCopied(false), 1400);
-      }}
-    >
-      <span className="command-copy-label">
-        {copied ? <Check size={14} /> : <Copy size={14} />}
-        <span>{copied ? "Copied" : label}</span>
-      </span>
-      <code>{command}</code>
-      {detail ? <small>{detail}</small> : null}
     </button>
   );
 }
@@ -177,11 +167,13 @@ export function Tabs<T extends string>({
   onChange(id: T): void;
 }) {
   return (
-    <div className="tabs tabs-line">
+    <div className="tabs tabs-line" role="tablist">
       {tabs.map((tab) => (
         <button
           className={`tab ${active === tab.id ? "is-active" : ""}`}
           type="button"
+          role="tab"
+          aria-selected={active === tab.id}
           key={tab.id}
           onClick={() => onChange(tab.id)}
         >
@@ -256,9 +248,10 @@ export function formatTime(value: number | null | undefined): string {
 export function formatDuration(
   start: number | null | undefined,
   end: number | null | undefined,
+  nowMs = Date.now(),
 ): string {
   if (!start) return "-";
-  const duration = Math.max(0, (end ?? Date.now()) - start);
+  const duration = Math.max(0, (end ?? nowMs) - start);
   const seconds = Math.floor(duration / 1000);
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);

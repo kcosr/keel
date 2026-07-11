@@ -475,6 +475,13 @@ describe("saved workflow RPC", () => {
       )
       .get("hourly");
     expect(row?.workflow_ref).toBe(saved.definitionHash);
+    expect(api.setScheduleEnabled("hourly", false)).toEqual({
+      name: "hourly",
+      enabled: false,
+    });
+    expect(api.listSchedules()[0]?.enabled).toBe(false);
+    expect(api.deleteSchedule("hourly")).toEqual({ name: "hourly", deleted: true });
+    expect(api.getSchedule({ name: "hourly" })).toBeNull();
 
     api.saveWorkflow({
       name: "null-default",

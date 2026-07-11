@@ -497,14 +497,14 @@ async function projectionRoute(
     }
     if (kind === "run") {
       if (!runId) throw new HttpError(400, { message: "run id is required" });
-      const [run, report, blockage, workspaces, source, eventTail, hasAdmin] = await Promise.all([
+      const [run, report, blockage, workspaces, source, eventTail, access] = await Promise.all([
         call("getRun", { runId }),
         call("getRunReport", { runId }),
         call("getBlockage", { runId }),
         call("listRunWorkspaces", { runId, includeRemoved: true }),
         call("getWorkflowDefinitionSource", { lookup: { kind: "run", runId }, all: true }),
         collectEventsOn(conn, runId, { kind: "tail", count: 100 }, credential),
-        hasAdminAuthorityOn(conn, credential),
+        call<{ actions: Record<string, boolean> }>("inspectRunAccess", { runId }),
       ]);
       return projectionJson({
         run,
@@ -516,7 +516,7 @@ async function projectionRoute(
         events: eventTail.events,
         eventCursor: eventTail.cursor,
         rawEvents: { href: `/runs/${encodeURIComponent(runId)}/events` },
-        availableCommands: availableRunCommands(run, blockage, hasAdmin),
+        actionAuthorization: access.actions,
       });
     }
     if (kind === "approvals") {
@@ -1006,26 +1006,6 @@ function bundleStatus(assetsDir: string | undefined, apiOnly: boolean): Record<s
     indexMtimeMs: stat.mtimeMs,
     indexSizeBytes: stat.size,
   };
-}
-
-function availableRunCommands(
-  run: unknown,
-  blockage: unknown,
-  hasAdmin: boolean,
-): Array<{ name: string; requiredAuthority: string }> {
-  const commands = [
-    { name: "watchEvents", requiredAuthority: "run:events" },
-    { name: "viewSource", requiredAuthority: "run:source" },
-  ];
-  const status = run && typeof run === "object" ? (run as { status?: unknown }).status : undefined;
-  const reason =
-    blockage && typeof blockage === "object"
-      ? (blockage as { reason?: unknown }).reason
-      : undefined;
-  if (hasAdmin && status === "waiting-human" && reason === "waiting_human") {
-    commands.push({ name: "decideApproval", requiredAuthority: "admin" });
-  }
-  return commands;
 }
 
 function statusForGatewayError(error: GatewayErrorEnvelope): number {

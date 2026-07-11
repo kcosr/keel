@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, test } from "vitest";
 import type { KeelWebClient } from "../api/client";
 import type { RunListItem, RunStatus } from "../api/types";
@@ -18,7 +18,7 @@ describe("RunsScreen", () => {
       }),
     } as KeelWebClient;
 
-    render(<RunsScreen client={client} globalSearch="" refreshKey={0} />);
+    render(<RunsScreen client={client} refreshKey={0} />);
 
     await screen.findByText("Needs Decision");
     expect(screen.getByText("Recently Finished")).toBeInTheDocument();
@@ -49,13 +49,14 @@ describe("RunsScreen", () => {
       }),
     } as KeelWebClient;
 
-    render(<RunsScreen client={client} globalSearch="" refreshKey={0} />);
+    render(<RunsScreen client={client} refreshKey={0} />);
 
     expect(await screen.findByText(/Showing the latest 2 of 150 runs/i)).toBeInTheDocument();
     expect(screen.getByText(/2 active on page/)).toBeInTheDocument();
     expect(screen.getByText(/1 blocked on page/)).toBeInTheDocument();
     expect(screen.getByText("2 shown")).toBeInTheDocument();
-    expect(screen.getByText("keel list")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /load older runs/i }));
+    expect(window.location.hash).toContain("limit=200");
   });
 });
 

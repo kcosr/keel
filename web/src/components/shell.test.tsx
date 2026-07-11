@@ -11,19 +11,17 @@ const HEALTH: HealthResponse = {
 };
 
 describe("AppShell", () => {
-  test("renders persistent navigation and credential controls", () => {
-    const onCredentialChange = vi.fn();
-    const onSearchChange = vi.fn();
+  test("renders navigation and applies credentials explicitly", () => {
+    const onCredentialApply = vi.fn();
     render(
       <AppShell
         route="runs"
         title="Runs"
         subtitle="Test subtitle"
         health={HEALTH}
-        credential=""
-        search=""
-        onCredentialChange={onCredentialChange}
-        onSearchChange={onSearchChange}
+        credentialSet={false}
+        onCredentialApply={onCredentialApply}
+        onCredentialClear={vi.fn()}
         onRefresh={vi.fn()}
       >
         <div>content</div>
@@ -32,16 +30,15 @@ describe("AppShell", () => {
 
     expect(screen.getByRole("link", { name: /runs/i })).toHaveClass("is-active");
     expect(screen.getByRole("link", { name: /approvals/i })).toBeInTheDocument();
-    expect(screen.getByText("daemon")).toBeInTheDocument();
+    expect(screen.getByText("Daemon online")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /runs/i })).toHaveAttribute("aria-current", "page");
 
-    fireEvent.change(screen.getByLabelText("Bearer token"), {
+    fireEvent.click(screen.getByRole("button", { name: /^access credential/i }));
+    fireEvent.change(screen.getByLabelText("Bearer credential"), {
       target: { value: "kc_test" },
     });
-    expect(onCredentialChange).toHaveBeenCalledWith("kc_test");
-
-    fireEvent.change(screen.getByLabelText("Search"), {
-      target: { value: "run_1" },
-    });
-    expect(onSearchChange).toHaveBeenCalledWith("run_1");
+    expect(onCredentialApply).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Apply credential" }));
+    expect(onCredentialApply).toHaveBeenCalledWith("kc_test");
   });
 });

@@ -266,6 +266,13 @@ export interface KeelApi {
     version: number,
   ): Promise<SavedWorkflowVersionView> | SavedWorkflowVersionView;
   putSchedule(req: PutScheduleRequest): Promise<{ ok: boolean }> | { ok: boolean };
+  setScheduleEnabled(
+    name: string,
+    enabled: boolean,
+  ): Promise<{ name: string; enabled: boolean }> | { name: string; enabled: boolean };
+  deleteSchedule(
+    name: string,
+  ): Promise<{ name: string; deleted: boolean }> | { name: string; deleted: boolean };
   listSchedules(req?: ListSchedulesRequest): Promise<ScheduleSummary[]> | ScheduleSummary[];
   getSchedule(req: GetScheduleRequest): Promise<ScheduleView | null> | ScheduleView | null;
   /** Resume a non-terminal run in the background. */

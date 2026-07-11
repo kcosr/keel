@@ -104,8 +104,18 @@ export interface RunDetailResponse {
   events: EventStreamFrame[];
   eventCursor: EventCursor | null;
   rawEvents: { href: string };
-  availableCommands: Array<{ name: string; requiredAuthority: string }>;
+  actionAuthorization: Record<RunActionName, boolean>;
 }
+
+export type RunActionName =
+  | "resume"
+  | "interrupt"
+  | "retry"
+  | "rerun"
+  | "rewind"
+  | "fork"
+  | "signal"
+  | "decideApproval";
 
 export type WorkflowOperationKind =
   | "phase"

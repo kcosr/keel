@@ -103,6 +103,15 @@ interface ActiveDeliveryWake {
 
 const AUTH_RECHECK_MS = 100;
 const DEFAULT_DEFINITION_CACHE_MIN_AGE_MS = 60_000;
+const INSPECTED_RUN_ACTIONS = {
+  resume: "run:resume",
+  interrupt: "run:interrupt",
+  retry: "run:retry",
+  rerun: "run:retry",
+  rewind: "run:rewind",
+  fork: "run:fork",
+  signal: "run:signal",
+} as const satisfies Record<string, CapabilityAction>;
 
 export class KeelOperationGateway {
   private readonly activeDeliveryWakes = new Map<string, ActiveDeliveryWake>();
@@ -254,6 +263,23 @@ export class KeelOperationGateway {
       handle: (_session, p, credential) => {
         this.authorizeAdmin(credential);
         return this.opts.api.deleteSavedWorkflowVersion(p.name as string, p.version as number);
+      },
+    },
+    inspectRunAccess: {
+      kind: "daemon",
+      handle: (_session, p, credential) => {
+        const runId = p.runId as string;
+        this.authorizeRunCredential(credential, runId, "run:read");
+        const actions = Object.fromEntries(
+          Object.entries(INSPECTED_RUN_ACTIONS).map(([name, action]) => [
+            name,
+            this.isRunActionAuthorized(credential, runId, action),
+          ]),
+        );
+        return {
+          runId,
+          actions: { ...actions, decideApproval: this.isAdminAuthorized(credential) },
+        };
       },
     },
     resumeRun: {
@@ -451,6 +477,33 @@ export class KeelOperationGateway {
           nextFireMs: (p.firstFireMs as number) ?? this.opts.clock(),
         });
         return { ok: true };
+      },
+    },
+    setScheduleEnabled: {
+      kind: "core",
+      handle: (_session, p, credential) => {
+        this.authorizeAdmin(credential);
+        if (typeof p.name !== "string" || p.name.trim().length === 0) {
+          throw new Error("setScheduleEnabled requires a non-empty schedule name");
+        }
+        if (typeof p.enabled !== "boolean") {
+          throw new Error("setScheduleEnabled requires a boolean enabled value");
+        }
+        const name = p.name;
+        const enabled = p.enabled;
+        this.opts.store.setScheduleEnabled(name, enabled);
+        return { name, enabled };
+      },
+    },
+    deleteSchedule: {
+      kind: "core",
+      handle: (_session, p, credential) => {
+        this.authorizeAdmin(credential);
+        if (typeof p.name !== "string" || p.name.trim().length === 0) {
+          throw new Error("deleteSchedule requires a non-empty schedule name");
+        }
+        const name = p.name;
+        return { name, deleted: this.opts.store.deleteSchedule(name) };
       },
     },
     listSchedules: {
@@ -667,6 +720,30 @@ export class KeelOperationGateway {
       { action, resource: { kind: "run", runId } },
       this.opts.clock(),
     );
+  }
+
+  private isRunActionAuthorized(
+    credential: string | null,
+    runId: string,
+    action: CapabilityAction,
+  ): boolean {
+    try {
+      this.authorizeRunCredential(credential, runId, action);
+      return true;
+    } catch (err) {
+      if (err instanceof AuthorizationError) return false;
+      throw err;
+    }
+  }
+
+  private isAdminAuthorized(credential: string | null): boolean {
+    try {
+      this.authorizeAdmin(credential);
+      return true;
+    } catch (err) {
+      if (err instanceof AuthorizationError) return false;
+      throw err;
+    }
   }
 
   private authorizeAdmin(credential: string | null): void {

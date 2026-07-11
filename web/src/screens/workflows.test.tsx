@@ -1,5 +1,5 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { describe, expect, test, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import type { KeelWebClient } from "../api/client";
 import type {
   SavedWorkflowSourceView,
@@ -7,6 +7,8 @@ import type {
   SavedWorkflowView,
 } from "../api/types";
 import { WorkflowsScreen } from "./workflows";
+
+afterEach(() => cleanup());
 
 describe("WorkflowsScreen", () => {
   test("loads saved workflow detail, source, and launch through RPC client methods", async () => {
@@ -32,10 +34,10 @@ describe("WorkflowsScreen", () => {
       }),
     );
 
-    fireEvent.click(screen.getByRole("button", { name: /source/i }));
+    fireEvent.click(screen.getByRole("tab", { name: /source/i }));
     expect(await screen.findByText(/export default async function review/)).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /launch/i }));
+    fireEvent.click(screen.getByRole("tab", { name: /launch/i }));
     const launchButtons = screen.getAllByRole("button", { name: "Launch" });
     fireEvent.click(launchButtons[launchButtons.length - 1] as HTMLButtonElement);
     await waitFor(() =>
@@ -49,6 +51,33 @@ describe("WorkflowsScreen", () => {
     );
     expect(JSON.stringify(launchSavedWorkflow.mock.calls[0]?.[0])).not.toContain("runSecrets");
     expect(await screen.findByText("run_launched")).toBeInTheDocument();
+  });
+
+  test("groups concise lifecycle commands under one actions menu", async () => {
+    const setSavedWorkflowVersionEnabled = vi.fn(async () => workflowVersion(2));
+    const client = {
+      listSavedWorkflows: vi.fn(async () => [workflowSummary()]),
+      getSavedWorkflow: vi.fn(async () => workflowDetail()),
+      getSavedWorkflowSource: vi.fn(async () => workflowSource()),
+      setSavedWorkflowVersionEnabled,
+    } as unknown as KeelWebClient;
+
+    render(<WorkflowsScreen client={client} refreshKey={0} />);
+    await waitFor(() => expect(client.getSavedWorkflow).toHaveBeenCalled());
+    const actions = await screen.findByRole("button", { name: "Workflow actions" });
+
+    expect(screen.queryByRole("button", { name: "Disable workflow" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Delete workflow" })).not.toBeInTheDocument();
+    fireEvent.click(actions);
+
+    expect(screen.getByText("Version 2")).toBeInTheDocument();
+    expect(screen.getByText("Registry")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Disable selected version" }));
+    fireEvent.click(screen.getByRole("button", { name: "Disable version" }));
+
+    await waitFor(() =>
+      expect(setSavedWorkflowVersionEnabled).toHaveBeenCalledWith("review-loop", 2, false),
+    );
   });
 });
 

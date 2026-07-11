@@ -148,6 +148,113 @@ describe("KeelWebClient", () => {
     for (const body of bodies) expect(JSON.stringify(body)).not.toContain("runSecrets");
   });
 
+  test("uses browser-safe RPC shapes for run mutations", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () => jsonResponse({ result: {} }));
+    const client = new KeelWebClient({ baseUrl: "http://keel.test", fetchImpl });
+
+    await client.resumeRun("run_1");
+    await client.interruptRun("run_1", "operator review");
+    await client.retryRun("run_1");
+    await client.rerunRun("run_1");
+    await client.rewindRun("run_1", "plan");
+    await client.forkRun("run_1", "plan");
+    await client.sendSignal("run_1", "continue", { approved: true });
+
+    const bodies = fetchImpl.mock.calls.map(
+      ([, init]) => JSON.parse(String(init?.body)) as { method: string; params: unknown },
+    );
+    expect(bodies).toEqual([
+      { method: "resumeRun", params: { runId: "run_1" } },
+      { method: "interruptRun", params: { runId: "run_1", reason: "operator review" } },
+      { method: "retryRun", params: { runId: "run_1" } },
+      { method: "rerunRun", params: { runId: "run_1", opts: {} } },
+      { method: "rewindRun", params: { runId: "run_1", toStableKey: "plan" } },
+      { method: "forkRun", params: { runId: "run_1", opts: { atStableKey: "plan" } } },
+      {
+        method: "sendSignal",
+        params: { runId: "run_1", name: "continue", payload: { approved: true } },
+      },
+    ]);
+    for (const body of bodies) expect(JSON.stringify(body)).not.toContain("runSecrets");
+  });
+
+  test("uses current RPC shapes for resource mutations", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () => jsonResponse({ result: {} }));
+    const client = new KeelWebClient({ baseUrl: "http://keel.test", fetchImpl });
+
+    await client.setSavedWorkflowDisabled("review-loop", true);
+    await client.setSavedWorkflowVersionEnabled("review-loop", 3, false);
+    await client.deprecateSavedWorkflowVersion("review-loop", 3, "Use version 4");
+    await client.deleteSavedWorkflowVersion("review-loop", 2);
+    await client.deleteSavedWorkflow("review-loop");
+    await client.putSchedule({
+      name: "hourly",
+      workflowName: "review-loop",
+      workflowVersion: 3,
+      intervalMs: 3_600_000,
+      input: { n: 1 },
+      target: "/tmp/work",
+    });
+    await client.setScheduleEnabled("hourly", false);
+    await client.deleteSchedule("hourly");
+    await client.checkAgentProfileConfig({ provider: "codex" });
+    await client.putAgentProfile({
+      name: "codex-default",
+      config: { provider: "codex" },
+      ifGeneration: 4,
+    });
+    await client.deleteAgentProfile("codex-default", 4);
+    await client.putSetting("agent.timeoutMs", 120_000, 2);
+    await client.deleteSetting("agent.timeoutMs", 2);
+
+    const bodies = fetchImpl.mock.calls.map(
+      ([, init]) => JSON.parse(String(init?.body)) as { method: string; params: unknown },
+    );
+    expect(bodies).toEqual([
+      { method: "setSavedWorkflowDisabled", params: { name: "review-loop", disabled: true } },
+      {
+        method: "setSavedWorkflowVersionEnabled",
+        params: { name: "review-loop", version: 3, enabled: false },
+      },
+      {
+        method: "deprecateSavedWorkflowVersion",
+        params: { name: "review-loop", version: 3, message: "Use version 4" },
+      },
+      { method: "deleteSavedWorkflowVersion", params: { name: "review-loop", version: 2 } },
+      { method: "deleteSavedWorkflow", params: { name: "review-loop" } },
+      {
+        method: "putSchedule",
+        params: {
+          name: "hourly",
+          savedRef: { name: "review-loop", version: 3 },
+          intervalMs: 3_600_000,
+          input: { n: 1 },
+          target: "/tmp/work",
+        },
+      },
+      { method: "setScheduleEnabled", params: { name: "hourly", enabled: false } },
+      { method: "deleteSchedule", params: { name: "hourly" } },
+      { method: "checkAgentProfile", params: { config: { provider: "codex" } } },
+      {
+        method: "putAgentProfile",
+        params: {
+          name: "codex-default",
+          config: { provider: "codex" },
+          ifGeneration: 4,
+        },
+      },
+      {
+        method: "deleteAgentProfile",
+        params: { name: "codex-default", ifGeneration: 4 },
+      },
+      {
+        method: "putSetting",
+        params: { key: "agent.timeoutMs", value: 120000, ifGeneration: 2 },
+      },
+      { method: "deleteSetting", params: { key: "agent.timeoutMs", ifGeneration: 2 } },
+    ]);
+  });
+
   test("watches run events with cursor query and authorization header", async () => {
     const encoder = new TextEncoder();
     const fetchImpl = vi.fn<typeof fetch>(

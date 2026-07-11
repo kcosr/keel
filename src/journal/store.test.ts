@@ -376,6 +376,11 @@ describe("JournalStore (in-memory)", () => {
       lastFailedAtMs: 30,
     });
     expect(store.getSchedule("missing")).toBeNull();
+    store.setScheduleEnabled("alpha", true);
+    expect(store.getSchedule("alpha")?.enabled).toBe(true);
+    expect(() => store.setScheduleEnabled("missing", false)).toThrow(/does not exist/);
+    expect(store.deleteSchedule("alpha")).toBe(true);
+    expect(store.deleteSchedule("alpha")).toBe(false);
   });
 
   test("agent workspaces insert, update, and list deterministically", () => {

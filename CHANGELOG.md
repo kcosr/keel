@@ -7,12 +7,15 @@
   session-scoped credential dialog, URL-backed live run filters, bounded older-run
   loading, readable status labels, consolidated run-detail views, and
   capability-aware lifecycle actions.
+  ([#31](https://github.com/kcosr/keel/pull/31))
 - Saved workflows, schedules, catalog profiles, and mutable settings can now be
   managed directly from the web console with validation, generation
   preconditions, and confirmations for destructive operations. Schedule state
   now has canonical admin RPC operations for pause/resume and deletion.
+  ([#31](https://github.com/kcosr/keel/pull/31))
 - Workflow launch and schedule target fields in the web console now include an
   admin-authorized directory picker backed by the daemon host filesystem.
+  ([#31](https://github.com/kcosr/keel/pull/31))
 - The README now includes a fuller project introduction, system/replay diagrams,
   tiny workflow examples, and direct routing to the event-stream documentation.
   ([#30](https://github.com/kcosr/keel/pull/30))
@@ -44,6 +47,7 @@
   fire time. Long directory listings remain scrollable inside their dialog,
   run-event watches stay connected across projection refreshes, and workflow
   forms and action dialogs preserve or surface transient state correctly.
+  ([#31](https://github.com/kcosr/keel/pull/31))
 - Codex provider `serviceTier: "fast"` now sends Codex app-server's
   user-facing `"fast"` service-tier value, applies configured service tier
   during thread start/resume as well as turn start.

@@ -126,7 +126,8 @@ seed_workflow() {
   local input_schema="$3"
   local title="$4"
   local description="$5"
-  shift 5
+  local default_target="$6"
+  shift 6
   local tags=("$@")
   local save_args=(
     workflow save "$name" "$repo_root/$file"
@@ -135,6 +136,10 @@ seed_workflow() {
     --description "$description"
   )
   local tag
+
+  if [[ -n "$default_target" ]]; then
+    save_args+=(--default-target "$default_target")
+  fi
 
   for tag in "${tags[@]}"; do
     save_args+=(--tag "$tag")
@@ -185,11 +190,20 @@ fi
 
 if ((seed_workflows)); then
   seed_workflow \
+    oracle \
+    workflows/oracle/oracle.workflow.ts \
+    workflows/oracle/input-schema.json \
+    "Oracle" \
+    "Durable artifact-free consultation with a configurable read-oriented reasoning agent. Answers in plain text and parks for validated follow-up questions." \
+    "$PWD" \
+    oracle advisory iterative
+  seed_workflow \
     iterative-review \
     workflows/iterative-review/iterative-review.workflow.ts \
     workflows/iterative-review/input-schema.json \
     "Iterative review" \
     "Durable read-only reviewer session for iterative human or agent follow-up. Parks for review-cycle signals until clean, stopped, or max rounds." \
+    "" \
     review iterative
   seed_workflow \
     implement-review-loop \
@@ -197,6 +211,7 @@ if ((seed_workflows)); then
     workflows/implement-review-loop/input-schema.json \
     "Implement review loop" \
     "Autonomous direct-workspace implementation loop with a write-capable implementer, read-only reviewer, bounded rounds, and optional completion checks." \
+    "" \
     implement review
   seed_workflow \
     branch-worktree-implement-review \
@@ -204,6 +219,7 @@ if ((seed_workflows)); then
     workflows/branch-worktree-implement-review/input-schema.json \
     "Branch worktree implement review" \
     "Autonomous implementation and review loop in a generated branch worktree, retaining or removing the workspace according to input retention." \
+    "" \
     implement review worktree
   seed_workflow \
     spec-review-loop \
@@ -211,6 +227,7 @@ if ((seed_workflows)); then
     workflows/spec-review-loop/input-schema.json \
     "Spec review loop" \
     "Durable spec reviewer session that appends timestamped correspondence and waits for creator update signals until clean, stopped, or max reviews." \
+    "" \
     spec review
   seed_workflow \
     spec-author-review-loop \
@@ -218,5 +235,6 @@ if ((seed_workflows)); then
     workflows/spec-author-review-loop/input-schema.json \
     "Spec author review loop" \
     "Autonomous spec author and correspondence reviewer loop for drafting or revising a spec until clean, blocked, or max rounds." \
+    "" \
     spec author review
 fi

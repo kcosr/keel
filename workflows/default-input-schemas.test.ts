@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { assertValidWorkflowInputSchema, validateWorkflowInput } from "../src/workflow-input.ts";
 
 const cases = [
+  ["oracle", { question: "Compare the available designs" }],
   ["iterative-review", { task: "Review the change" }],
   ["implement-review-loop", { spec: ".specs/change.md" }],
   ["branch-worktree-implement-review", { spec: ".specs/change.md", retention: "retain" }],

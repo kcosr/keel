@@ -1252,6 +1252,7 @@ with their adjacent Draft 7 input schemas:
 
 | Name | Source | Input schema |
 |---|---|---|
+| `oracle` | `workflows/oracle/oracle.workflow.ts` | `workflows/oracle/input-schema.json` |
 | `iterative-review` | `workflows/iterative-review/iterative-review.workflow.ts` | `workflows/iterative-review/input-schema.json` |
 | `implement-review-loop` | `workflows/implement-review-loop/implement-review-loop.workflow.ts` | `workflows/implement-review-loop/input-schema.json` |
 | `branch-worktree-implement-review` | `workflows/branch-worktree-implement-review/branch-worktree-implement-review.workflow.ts` | `workflows/branch-worktree-implement-review/input-schema.json` |

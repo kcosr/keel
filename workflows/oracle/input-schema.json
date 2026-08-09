@@ -1,0 +1,14 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["question"],
+  "properties": {
+    "question": { "type": "string", "title": "Question", "minLength": 1 },
+    "context": { "type": "string", "title": "Context" },
+    "profile": { "type": "string", "title": "Oracle profile" },
+    "reasoning": { "type": "string", "title": "Oracle reasoning" },
+    "maxTurns": { "type": "integer", "title": "Maximum turns", "minimum": 1, "maximum": 10 },
+    "signalName": { "type": "string", "title": "Question signal name" }
+  }
+}

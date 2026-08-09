@@ -241,6 +241,7 @@ export interface ScheduleRow {
   name: string;
   workflowRef: string;
   inputJson: string | null;
+  inputSchemaJson: string | null;
   scheduleTarget: string | null;
   intervalMs: number;
   nextFireMs: number;

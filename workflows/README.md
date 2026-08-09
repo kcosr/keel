@@ -15,6 +15,7 @@ development-only database surgery.
 | Workflow | Use When |
 |---|---|
 | [`fixtures/`](./fixtures/) | Small runnable examples, tests, and synthetic workloads that should not be treated as stable operational workflows. |
+| [`oracle/`](./oracle/) | A caller wants durable, artifact-free advice or design feedback with follow-up questions in the same agent conversation. |
 | [`iterative-review/`](./iterative-review/) | An implementer or human owns fixes, while a durable reviewer session waits for follow-up signals. |
 | [`implement-review-loop/`](./implement-review-loop/) | Keel should autonomously loop a write-capable implementer with a read-only code reviewer. |
 | [`branch-worktree-implement-review/`](./branch-worktree-implement-review/) | Keel should create a generated-branch worktree, then autonomously loop a write-capable implementer with a read-only code reviewer in that shared worktree. |
@@ -52,7 +53,7 @@ Seed the local default reusable review workflows with:
 bun run workflows:seed-defaults
 ```
 
-This saves or refreshes `iterative-review`, `implement-review-loop`,
+This saves or refreshes `oracle`, `iterative-review`, `implement-review-loop`,
 `branch-worktree-implement-review`, `spec-review-loop`, and
 `spec-author-review-loop` as saved workflow versions. Use `bun run
 defaults:seed` to seed both these workflows and the conventional local agent

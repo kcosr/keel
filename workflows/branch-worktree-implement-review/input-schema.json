@@ -1,0 +1,89 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["spec"],
+  "properties": {
+    "repository": { "type": "string", "title": "Repository" },
+    "ref": { "type": "string", "title": "Source ref" },
+    "retention": {
+      "type": "string",
+      "title": "Workspace retention",
+      "enum": ["remove", "retain-on-failure", "retain"]
+    },
+    "spec": { "type": "string", "title": "Spec", "minLength": 1 },
+    "task": { "type": "string", "title": "Task" },
+    "maxRounds": { "type": "integer", "title": "Maximum rounds", "minimum": 1, "maximum": 10 },
+    "completionMode": {
+      "type": "string",
+      "title": "Completion mode",
+      "enum": ["auto", "park-before-complete"]
+    },
+    "completionSignalName": { "type": "string", "title": "Completion signal name" },
+    "completionCheckFailureAction": {
+      "type": "string",
+      "title": "Check failure action",
+      "enum": ["continue-loop", "park", "block"]
+    },
+    "completionChecks": {
+      "type": "array",
+      "title": "Completion checks",
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["key", "type", "command"],
+            "properties": {
+              "key": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" },
+              "type": { "const": "command" },
+              "command": { "type": "string", "minLength": 1 },
+              "args": { "type": "array", "items": { "type": "string" } },
+              "shell": { "type": "boolean" },
+              "cwd": { "type": "string" },
+              "timeoutMs": { "type": "integer", "minimum": 1, "maximum": 1800000 },
+              "maxStdoutBytes": { "type": "integer", "minimum": 1, "maximum": 262144 },
+              "maxStderrBytes": { "type": "integer", "minimum": 1, "maximum": 262144 },
+              "env": { "type": "object", "additionalProperties": { "type": "string" } }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["key", "type"],
+            "properties": {
+              "key": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" },
+              "type": { "const": "git-clean" }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["key", "type"],
+            "properties": {
+              "key": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" },
+              "type": { "const": "has-commits" },
+              "minCount": { "type": "integer", "minimum": 1 }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["key", "type"],
+            "properties": {
+              "key": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" },
+              "type": { "const": "branch-pushed" },
+              "remote": { "type": "string", "minLength": 1 },
+              "remoteRef": { "type": "string", "pattern": "^refs/" }
+            }
+          }
+        ]
+      }
+    },
+    "implementerProfile": { "type": "string", "title": "Implementer profile" },
+    "reviewerProfile": { "type": "string", "title": "Reviewer profile" },
+    "implementerReasoning": { "type": "string", "title": "Implementer reasoning" },
+    "reviewerReasoning": { "type": "string", "title": "Reviewer reasoning" },
+    "reviewFocus": { "type": "string", "title": "Review focus" }
+  }
+}

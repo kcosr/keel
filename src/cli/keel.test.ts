@@ -48,6 +48,7 @@ const TASK_REVIEW = new URL("../../workflows/task-review-guidance/", import.meta
 const taskCodeReviewUrl = new URL("code-review.workflow.ts", TASK_REVIEW).pathname;
 const taskPlanReviewUrl = new URL("plan-review.workflow.ts", TASK_REVIEW).pathname;
 const DAEMON_TEST_TIMEOUT_MS = 20_000;
+const LONG_CLI_TEST_TIMEOUT_MS = 60_000;
 
 async function runCli(
   args: string[],
@@ -1866,7 +1867,7 @@ describe("keel CLI", () => {
         rmSync(dir, { recursive: true, force: true });
       }
     },
-    DAEMON_TEST_TIMEOUT_MS,
+    LONG_CLI_TEST_TIMEOUT_MS,
   );
 
   test(

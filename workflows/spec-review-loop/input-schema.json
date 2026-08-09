@@ -1,0 +1,22 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["specPath", "task"],
+  "properties": {
+    "specPath": { "type": "string", "title": "Spec path", "minLength": 1 },
+    "task": { "type": "string", "title": "Task", "minLength": 1 },
+    "reviewerIdentity": { "type": "string", "title": "Reviewer identity" },
+    "reviewerProfile": { "type": "string", "title": "Reviewer profile" },
+    "reviewerReasoning": { "type": "string", "title": "Reviewer reasoning" },
+    "maxReviews": { "type": "integer", "title": "Maximum reviews", "minimum": 1, "maximum": 10 },
+    "signalName": { "type": "string", "title": "Review signal name" },
+    "completionMode": {
+      "type": "string",
+      "title": "Completion mode",
+      "enum": ["auto", "park-before-complete"]
+    },
+    "completionSignalName": { "type": "string", "title": "Completion signal name" },
+    "stopWhenClean": { "type": "boolean", "title": "Stop when clean" }
+  }
+}

@@ -23,6 +23,7 @@ import {
 } from "../components/controls";
 import { type Column, DenseTable } from "../components/dense-table";
 import { DirectoryPickerField } from "../components/directory-picker";
+import { WorkflowInputEditor } from "../components/workflow-input-editor";
 import { useAsync } from "../hooks/use-async";
 
 type WorkflowTab = "versions" | "source" | "launch";
@@ -308,7 +309,8 @@ function WorkflowLaunchForm({
   workflow: SavedWorkflowView | SavedWorkflowSummary | null;
   version: SavedWorkflowVersionView | null;
 }) {
-  const [inputText, setInputText] = useState("{}");
+  const [input, setInput] = useState<unknown>({});
+  const [inputValid, setInputValid] = useState(true);
   const [target, setTarget] = useState("");
   const [runName, setRunName] = useState("");
   const [launching, setLaunching] = useState(false);
@@ -319,7 +321,8 @@ function WorkflowLaunchForm({
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: reset only when the selected catalog version changes, not when a refetch replaces its object values.
   useEffect(() => {
-    setInputText(JSON.stringify(version?.defaultInputSet ? version.defaultInput : {}, null, 2));
+    setInput(version?.defaultInputSet ? version.defaultInput : {});
+    setInputValid(true);
     setTarget(version?.defaultTarget ?? "");
     setRunName("");
     setError(null);
@@ -338,7 +341,6 @@ function WorkflowLaunchForm({
     setError(null);
     setLaunched(null);
     try {
-      const input = inputText.trim() ? JSON.parse(inputText) : undefined;
       const result = await client.launchSavedWorkflow({
         name: workflow.name,
         version: version?.version ?? "latest",
@@ -381,15 +383,12 @@ function WorkflowLaunchForm({
           placeholder={version?.workflowName ?? workflow.name}
         />
       </label>
-      <label className="form-field form-field-wide" htmlFor={`${formId}-input`}>
-        <span>Input JSON</span>
-        <textarea
-          id={`${formId}-input`}
-          className="field-textarea workflow-input-json"
-          value={inputText}
-          onChange={(event) => setInputText(event.target.value)}
-        />
-      </label>
+      <WorkflowInputEditor
+        schema={version?.inputSchemaSet ? version.inputSchema : null}
+        value={input}
+        onChange={setInput}
+        onValidityChange={setInputValid}
+      />
       {error ? <div className="form-error">{error.message}</div> : null}
       {launched ? (
         <div className="form-success">
@@ -400,7 +399,7 @@ function WorkflowLaunchForm({
         <Button
           icon={Rocket}
           variant="primary"
-          disabled={launching || launchBlockedReason !== null}
+          disabled={launching || launchBlockedReason !== null || !inputValid}
           type="submit"
         >
           {launching ? "Launching" : "Launch"}

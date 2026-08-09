@@ -93,7 +93,10 @@ function createHarness(): GatewayHarness {
     definitionCacheRoot: join(dir, "definitions"),
     clock,
   });
-  const api = new InProcessKeel(kernel, store, eventHub, { clock });
+  const api = new InProcessKeel(kernel, store, eventHub, {
+    clock,
+    definitionCacheRoot: join(dir, "definitions"),
+  });
   const harness: GatewayHarness = {
     store,
     eventHub,
@@ -395,6 +398,64 @@ describe("KeelOperationGateway", () => {
           runV1Token,
         ),
       ).resolves.toMatch(/different resource/);
+    } finally {
+      harness.close();
+    }
+  });
+
+  test("validates and snapshots saved workflow inputs when scheduling through the gateway", async () => {
+    const harness = createHarness();
+    const session = new FakeGatewaySession("schedule-input-contract");
+    const inputSchema = {
+      type: "object",
+      additionalProperties: false,
+      required: ["n"],
+      properties: { n: { type: "integer", minimum: 1 } },
+    } as const;
+    try {
+      await ok(
+        harness,
+        session,
+        "saveWorkflow",
+        {
+          name: "scheduled-contract",
+          source: chainUrl.source,
+          inputSchema,
+          defaultInput: { n: 2 },
+          defaultTarget: dir,
+        },
+        ADMIN_TOKEN,
+      );
+
+      await expect(
+        fail(
+          harness,
+          session,
+          "putSchedule",
+          {
+            name: "invalid-contract-schedule",
+            savedRef: { name: "scheduled-contract" },
+            input: { n: 0 },
+            intervalMs: 60_000,
+          },
+          ADMIN_TOKEN,
+        ),
+      ).resolves.toContain("$.n");
+
+      await ok(
+        harness,
+        session,
+        "putSchedule",
+        {
+          name: "valid-contract-schedule",
+          savedRef: { name: "scheduled-contract" },
+          intervalMs: 60_000,
+        },
+        ADMIN_TOKEN,
+      );
+      const schedule = harness.store.getSchedule("valid-contract-schedule");
+      expect(JSON.parse(schedule?.inputJson ?? "null")).toEqual({ n: 2 });
+      expect(JSON.parse(schedule?.inputSchemaJson ?? "null")).toEqual(inputSchema);
     } finally {
       harness.close();
     }

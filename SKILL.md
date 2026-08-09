@@ -15,6 +15,12 @@ For Keel's curated one-shot review workflows, an operator with admin authority
 can install the package with `keel workflow install task-review-guidance`; this
 creates ordinary saved workflow versions for `task-code-review`,
 `task-plan-review`, and `task-docs-review`.
+Use the saved `oracle` workflow for durable, artifact-free consultation. It
+returns plain-text answers, preserves one backend conversation across
+`oracle-question` signals, defaults to `claude-fable-5` with `xhigh` reasoning,
+and grants the consulting agent read-oriented target-worktree tools. The local
+Claude profile adds Bash, which is not OS-sandboxed; the workflow prohibits
+writes through its prompt rather than a host-filesystem boundary.
 
 Assume the daemon is already running and the `keel` CLI is already configured to
 reach it. Do not start the daemon, restart systemd, or use admin credentials from

@@ -3,6 +3,13 @@
 ## [Unreleased]
 
 ### Changed
+- Saved workflow input schemas are now enforced as JSON Schema Draft 7 contracts.
+  Keel rejects invalid schemas and defaults when saving, validates interactive
+  and scheduled saved-workflow inputs before execution, and snapshots the schema
+  with scheduled inputs. The web launch panel renders supported object schemas
+  as typed controls with a synchronized JSON editor for advanced schemas. The
+  default saved workflows now seed explicit input schemas, so reseeding
+  creates schema-bearing immutable versions that use the form immediately.
 - The web console is now a responsive operator workspace with a mobile drawer,
   session-scoped credential dialog, URL-backed live run filters, bounded older-run
   loading, readable status labels, consolidated run-detail views, and
@@ -30,7 +37,7 @@
   `stopWhenClean` is set, autonomous implement/spec-author workflows park before
   completion by default, and all five default/cap review rounds at `10`.
   ([#24](https://github.com/kcosr/keel/pull/24))
-- `bun run defaults:seed` now seeds conventional local profiles plus the five
+- `bun run defaults:seed` now seeds conventional local profiles plus the
   reusable saved review workflows; `profiles:seed-defaults` and
   `workflows:seed-defaults` are available for narrower seeding.
   ([#24](https://github.com/kcosr/keel/pull/24))
@@ -76,6 +83,10 @@
   ([#22](https://github.com/kcosr/keel/pull/22))
 
 ### Added
+- The new `oracle` saved workflow provides durable, artifact-free consultation
+  with plain-text answers, configurable profile and reasoning, read-oriented
+  target-worktree access, and validated signal-driven follow-up questions in the
+  same backend conversation.
 - The web console now has opt-in browser diagnostics for run-event streaming
   and transcript coalescing via `localStorage.keelDebug`.
   ([#26](https://github.com/kcosr/keel/pull/26))

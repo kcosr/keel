@@ -22,6 +22,43 @@ import {
 import { DDL, SCHEMA_VERSION } from "./schema.ts";
 import { JournalStore } from "./store.ts";
 
+test("v22 to v23 adds schedule input schema snapshots", () => {
+  const db = new Database(":memory:");
+  db.exec(`
+    CREATE TABLE schedules (
+      name TEXT PRIMARY KEY,
+      workflow_ref TEXT NOT NULL,
+      input_json TEXT,
+      schedule_target TEXT,
+      interval_ms INTEGER NOT NULL,
+      next_fire_ms INTEGER NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      last_run_id TEXT,
+      last_error_json TEXT,
+      last_failed_at_ms INTEGER
+    );
+    INSERT INTO schedules (
+      name, workflow_ref, input_json, interval_ms, next_fire_ms
+    ) VALUES ('existing', 'wf_sha256_existing', '{}', 60000, 1);
+  `);
+
+  applyMigration(db, 22);
+
+  const columns = db
+    .query<{ name: string }, []>("PRAGMA table_info(schedules)")
+    .all()
+    .map((column) => column.name);
+  expect(columns).toContain("input_schema_json");
+  expect(
+    db
+      .query<{ input_schema_json: string | null }, []>(
+        "SELECT input_schema_json FROM schedules WHERE name = 'existing'",
+      )
+      .get()?.input_schema_json,
+  ).toBeNull();
+  db.close();
+});
+
 /** Build a minimal v4-era DB by hand: journal WITHOUT seq, approvals WITHOUT
  * prompt/requested_caps_json, schema_version = 4. */
 function makeV4Db(path: string): void {
@@ -1297,6 +1334,13 @@ describe("schema migrations", () => {
           createdAtMs: 11,
         }),
       ).toThrow(/already has definition/);
+      const v2 = store.putSavedWorkflowVersion({
+        name: "review-loop",
+        definitionHash: definition.hash,
+        inputSchema: { type: "object" },
+        createdAtMs: 11,
+      });
+      expect(v2.version).toBe(2);
       const v3 = store.putSavedWorkflowVersion({
         name: "review-loop",
         version: 3,
@@ -1307,7 +1351,7 @@ describe("schema migrations", () => {
       expect(v3.version).toBe(3);
       expect(store.resolveSavedWorkflowRef({ name: "review-loop" }).version).toBe(3);
       store.deprecateSavedWorkflowVersion("review-loop", 3, "old", 20);
-      expect(store.resolveSavedWorkflowRef({ name: "review-loop" }).version).toBe(1);
+      expect(store.resolveSavedWorkflowRef({ name: "review-loop" }).version).toBe(2);
       expect(
         store.resolveSavedWorkflowRef({ name: "review-loop", allowDeprecated: true }).version,
       ).toBe(3);
@@ -1322,6 +1366,8 @@ describe("schema migrations", () => {
         }).version,
       ).toBe(3);
       store.deleteSavedWorkflowVersion("review-loop", 1, 30);
+      expect(store.resolveSavedWorkflowRef({ name: "review-loop" }).version).toBe(2);
+      store.deleteSavedWorkflowVersion("review-loop", 2, 31);
       expect(() => store.resolveSavedWorkflowRef({ name: "review-loop" })).toThrow(/matching/);
       expect(store.getWorkflowDefinition(definition.hash)).not.toBeNull();
       expect(store.pruneWorkflowDefinitions({ nowMs: 100_000, ttlMs: 1 })).toBe(0);

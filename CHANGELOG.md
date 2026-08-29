@@ -48,6 +48,8 @@
 - `bun run profiles:seed-defaults` now seeds a `claude-fable-5` Claude profile
   matching the local conventional `xhigh` + Bash-enabled setup.
   ([#30](https://github.com/kcosr/keel/pull/30))
+- `bun run profiles:seed-defaults` now seeds `pi-grok` through the Pi
+  provider with the native xAI `grok-4.6` model and `high` reasoning.
 
 ### Fixed
 - Web schedule edits now preserve the pinned saved-workflow version and next

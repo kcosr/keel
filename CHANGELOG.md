@@ -50,6 +50,8 @@
   ([#30](https://github.com/kcosr/keel/pull/30))
 - `bun run profiles:seed-defaults` now seeds `pi-grok` through the Pi
   provider with the native xAI `grok-4.6` model and `high` reasoning.
+- Default profile seeding no longer includes environment-specific `work-*` Pi
+  model profiles.
 
 ### Fixed
 - Web schedule edits now preserve the pinned saved-workflow version and next

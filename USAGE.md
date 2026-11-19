@@ -1379,7 +1379,7 @@ await ctx.agent({
   providerConfig: {
     codex: {
       transport: { type: "uds", path: "/tmp/codex.sock" },
-      serviceTier: "fast",
+      serviceTier: "priority",
     },
   },
   prompt: "Make the requested change.",
@@ -1391,20 +1391,39 @@ that supplies it):
 
 ```ts
 { codex: { transport: { type: "stdio" } } }
-{ codex: { transport: { type: "stdio" }, serviceTier: "normal" } }
-{ codex: { transport: { type: "ws", url: "ws://127.0.0.1:1455/rpc" }, serviceTier: "fast" } }
-{ codex: { transport: { type: "uds", path: "/tmp/codex.sock" }, serviceTier: "fast" } }
+{ codex: { transport: { type: "stdio" }, serviceTier: null } }
+{ codex: { transport: { type: "ws", url: "ws://127.0.0.1:1455/rpc" }, serviceTier: "priority" } }
+{ codex: { transport: { type: "uds", path: "/tmp/codex.sock" }, serviceTier: "ultrafast" } }
 ```
 
 If `providerConfig.codex` is omitted, the runtime default is stdio and Keel
 spawns `${KEEL_CODEX_BIN:-codex} app-server` in the resolved workspace cwd.
 Omitted config and explicit `{ codex: { transport: { type: "stdio" } } }` are
-intentional distinct replay identities; choose one style and keep it stable.
-`serviceTier` is optional and accepts only `"fast"` or `"normal"`. Omitted
-`serviceTier` leaves Codex/user defaults in control, `"fast"` requests Codex
-priority service, and `"normal"` explicitly requests standard routing even when
-a Codex model catalog or app-server default would otherwise choose fast service.
-Omitted, `"normal"`, and `"fast"` are distinct replay identities.
+distinct replay identities. An explicit `providerConfig.codex` block requires
+`transport`, including when it selects stdio.
+
+`serviceTier` is optional. Use `"priority"` to request Fast, `"ultrafast"` to
+request Ultrafast, or explicit `null` to select Standard. Omitting the field
+leaves the tier to Codex configuration or the resumed thread's selection.
+Codex determines whether the model catalog, account, and policy allow the
+requested speed. All four choices are distinct replay identities.
+
+Replace `"fast"` with `"priority"` and `"normal"` with `null` in workflow
+source and saved profiles. Inspect `config.providerConfig.codex.serviceTier`
+across all saved profiles, since a workflow can select Codex when it uses a
+profile. To list profiles with either old value, run:
+
+```bash
+keel profiles list --source catalog --output json |
+  jq -r '.[] | select(.config.providerConfig.codex.serviceTier |
+    . == "fast" or . == "normal") | .name'
+```
+
+Take the `config` object from `keel profiles get <name> --output json`, update
+the tier, and save it with `keel profiles set <name> --file <path> --update`.
+`keel profiles check <name>` validates provider-specific config for the
+provider named by the profile.
+
 `ws.url` must be an absolute `ws://` or `wss://` URL. `uds.path` must be an
 absolute socket path and uses WebSocket over the Unix stream with request URL
 `ws://localhost/rpc`.

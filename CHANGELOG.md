@@ -59,9 +59,8 @@
   run-event watches stay connected across projection refreshes, and workflow
   forms and action dialogs preserve or surface transient state correctly.
   ([#31](https://github.com/kcosr/keel/pull/31))
-- Codex provider `serviceTier: "fast"` now sends Codex app-server's
-  user-facing `"fast"` service-tier value, applies configured service tier
-  during thread start/resume as well as turn start.
+- Codex applies the configured service tier during thread start and resume
+  as well as turn start.
   ([#30](https://github.com/kcosr/keel/pull/30))
 - The web event stream now disables Bun's per-request idle timeout for SSE
   watch requests, preventing live run views from failing with incomplete
@@ -80,7 +79,7 @@
   version/input identity, matching replay-visible runtime behavior when
   `maxRetries`, `lenient`, `onFailure`, `timeoutMs`, `stallRetries`, or their
   workflow-visible defaults change. `ctx.agentSession` turns now also include
-  resolved timeout/stall defaults. The workflow SDK ABI is now 12.
+  resolved timeout/stall defaults. This change bumped the workflow SDK ABI to 12.
 - Resuming a parked run now immediately projects as `running` through `keel get`
   and related surfaces while resumed provider work is still active, instead of
   retaining the old `waiting-*` status until the next park or terminal event.
@@ -128,9 +127,14 @@
   on `launch`, `run`, `workflow run`, `retry`, and `rewind`.
 - Programmatic embedders can import `SecretStore` from `@kcosr/keel/secrets`;
   the workflow authoring SDK exports the `AgentEnvironmentSpec` type.
-- Codex `providerConfig.codex.serviceTier` now lets workflows and agent
-  profiles request `"fast"` priority service or force `"normal"` standard
-  routing as replay-visible agent identity.
+- Workflows and agent profiles can request Codex Fast with
+  `providerConfig.codex.serviceTier: "priority"`, Ultrafast with `"ultrafast"`,
+  and Standard with `null`. Replace `"fast"` with `"priority"` and `"normal"`
+  with `null` in workflow source and saved catalog profiles. See the
+  [Codex profile upgrade steps](USAGE.md#codex-provider). The workflow SDK ABI
+  moves to 13. Drain older-ABI runs before upgrading. Recapture saved workflows
+  and update schedules pinned to older definitions before running them on the
+  new daemon.
 - Run blockage diagnostics now reserve `stalled_no_heartbeat` for stale
   daemon-owner heartbeats instead of long pending step age. Reports and web/TUI
   projections hide diagnostic `running` as a visible blockage, while node views

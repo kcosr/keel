@@ -53,6 +53,14 @@ export interface ReportNodeView extends NodeView {
   resultByteLength?: number;
 }
 
+export interface ReportLatestResult
+  extends Pick<
+    ReportNodeView,
+    "stableKey" | "attempt" | "result" | "resultOmitted" | "resultByteLength"
+  > {
+  finishedAtMs: number;
+}
+
 export interface RunReport {
   runId: string;
   workflowName: string | null;
@@ -62,6 +70,8 @@ export interface RunReport {
   output?: unknown;
   outputOmitted?: true;
   outputByteLength?: number;
+  /** Most recent completed result available while the run is parked. */
+  latestResult?: ReportLatestResult;
   error: { name: string; message: string } | null;
   blockage?: Blockage;
   nodes: ReportNodeView[];

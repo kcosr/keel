@@ -463,6 +463,10 @@ export class InProcessKeel implements KeelApi {
     });
   }
 
+  assertCanResume(runId: string): void {
+    this.kernel.assertCanResume(runId);
+  }
+
   async resumeRun(runId: string): Promise<RunStart> {
     const attachAfterSeq = this.store.eventHighWater(runId);
     this.start(this.kernel.startResume<unknown>(runId));

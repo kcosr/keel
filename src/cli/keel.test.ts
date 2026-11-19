@@ -43,6 +43,7 @@ const FIX = new URL("../kernel/realm/fixtures/", import.meta.url);
 const chainUrl = new URL("chain.workflow.ts", FIX).pathname;
 const flakyUrl = new URL("flaky.workflow.ts", FIX).pathname;
 const gateUrl = new URL("gate.workflow.ts", FIX).pathname;
+const multiSignalUrl = new URL("multi-signal.workflow.ts", FIX).pathname;
 const signalThenAgentUrl = new URL("signal-then-agent.workflow.ts", FIX).pathname;
 const TASK_REVIEW = new URL("../../workflows/task-review-guidance/", import.meta.url);
 const taskCodeReviewUrl = new URL("code-review.workflow.ts", TASK_REVIEW).pathname;
@@ -338,6 +339,29 @@ describe("keel CLI", () => {
     expect(text).toContain("output out\\nnext «redacted-capability»");
     expect(text).toContain("error Error: bad\\rthing");
     expect(text).toContain("step.one\\nkey failed effectful attempt=1 result resultvalue");
+  });
+
+  test("report text shows the latest parked result", () => {
+    const text = formatRunReportText({
+      runId: "run_1",
+      workflowName: "oracle.workflow.ts",
+      status: "waiting-signal",
+      createdAtMs: 1,
+      finishedAtMs: null,
+      error: null,
+      stats: { steps: 0, agents: 1, artifacts: 0 },
+      nodes: [],
+      latestResult: {
+        stableKey: "__session.oracle.question-1",
+        attempt: 1,
+        finishedAtMs: 2,
+        result: "A consultation answer.",
+      },
+    });
+
+    expect(text).toContain(
+      "latestResult __session.oracle.question-1 attempt=1 A consultation answer.",
+    );
   });
 
   test("tui args parse direct run, filters, and reject non-text output", () => {
@@ -1221,7 +1245,76 @@ describe("keel CLI", () => {
         expect(signaled.stdout).toBe("running\n");
         const immediate = await runCli(["get", payload.runId], dir, runEnv);
         expect(JSON.parse(immediate.stdout).status).toBe("running");
-        await waitForCliStatus(payload.runId, dir, runEnv);
+        const waited = await runCli(["wait", payload.runId], dir, runEnv, undefined, 4_000);
+        expect(waited.code).toBe(0);
+        expect(JSON.parse(waited.stdout)).toEqual({ runId: payload.runId, status: "finished" });
+      } finally {
+        daemon.stop();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    DAEMON_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "wait reports parked and closed runs and signal --wait follows the next outcome",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "keel-cli-signal-wait-"));
+      const socketPath = join(dir, "keel.sock");
+      const dbPath = join(dir, "keel.db");
+      const adminToken = "kc_admin_cli_signal_wait_test";
+      const daemon = new KeelDaemon({ socketPath, dbPath, adminToken });
+      await daemon.start();
+      try {
+        const env = { KEEL_SOCKET: socketPath, KEEL_DB: dbPath, KEEL_DIR: dir };
+        const launched = await runCli(["launch", "--detach", multiSignalUrl], dir, env);
+        expect(launched.code).toBe(0);
+        const { runId, capabilityRef } = JSON.parse(launched.stdout) as {
+          runId: string;
+          capabilityRef: string;
+        };
+        const runEnv = { ...env, KEEL_CAP_FILE: capabilityRef };
+        await waitForCliStatus(runId, dir, runEnv, "waiting-signal");
+
+        const parked = await runCli(["wait", runId], dir, runEnv, undefined, 4_000);
+        expect(parked.code).toBe(3);
+        expect(JSON.parse(parked.stdout)).toEqual({ runId, status: "waiting-signal" });
+
+        for (const [name, payload, status, code] of [
+          ["event", "11", "waiting-signal", 3],
+          ["event", "22", "waiting-signal", 3],
+          ["other", "33", "finished", 0],
+        ] as const) {
+          const out = await runCli(
+            ["signal", runId, name, payload, "--wait"],
+            dir,
+            runEnv,
+            undefined,
+            4_000,
+          );
+          expect(out.code).toBe(code);
+          expect(out.stderr).toBe("");
+          expect(JSON.parse(out.stdout)).toEqual({ runId, status });
+        }
+
+        const closed = await runCli(["wait", runId], dir, runEnv, undefined, 4_000);
+        expect(closed.code).toBe(0);
+        expect(JSON.parse(closed.stdout)).toEqual({ runId, status: "finished" });
+        const output = await runCli(["output", runId], dir, runEnv);
+        expect(JSON.parse(output.stdout)).toEqual([11, 22, 33]);
+
+        const missingRun = "run_missing";
+        const missing = await runCli(
+          ["wait", missingRun],
+          dir,
+          { ...env, KEEL_ADMIN_TOKEN: adminToken },
+          undefined,
+          4_000,
+        );
+        expect(missing.timedOut).toBe(false);
+        expect(missing.code).toBe(1);
+        expect(missing.stdout).toBe("");
+        expect(missing.stderr).toContain(`run ${missingRun} not found`);
       } finally {
         daemon.stop();
         rmSync(dir, { recursive: true, force: true });

@@ -4,6 +4,7 @@ import type {
   EventCursor,
   EventCursorInput,
   EventEnvelope,
+  EventStreamFrame,
   LaunchRequest,
   RunOutcome,
   RunSecrets,
@@ -312,20 +313,21 @@ async function* eventIterable(
   authenticate: () => Promise<void>,
 ): AsyncIterable<EventEnvelope> {
   await authenticate();
-  const queue: Array<EventEnvelope | null> = [];
+  type Item = EventStreamFrame | { kind: "error"; error: unknown };
+  const queue: Item[] = [];
   let notify: (() => void) | null = null;
-  const push = (item: EventEnvelope | null): void => {
+  let caughtUp = false;
+  const push = (item: Item): void => {
     queue.push(item);
     notify?.();
     notify = null;
   };
   const unsub = client.subscribeEvents(
-    { runId, cursor },
-    (event) => push(event),
+    { runId, cursor, includeControlFrames: true },
+    push,
+    (error) => push({ kind: "error", error }),
     undefined,
-    (result) => {
-      if (result.closedStatus) push(null);
-    },
+    push,
   );
   try {
     while (true) {
@@ -334,15 +336,23 @@ async function* eventIterable(
           notify = resolve;
         });
       }
-      const event = queue.shift();
-      if (!event) return;
-      yield event;
+      const item = queue.shift();
+      if (!item) return;
+      if (item.kind === "error") throw item.error;
+      if (item.kind === "control") {
+        if (item.type === "closed") return;
+        if (item.type === "authorization.failed") throw new Error(item.payload.message);
+        caughtUp = true;
+        continue;
+      }
+      yield item;
       if (
-        event.type === "run.finished" ||
-        event.type === "run.failed" ||
-        event.type === "run.continued" ||
-        event.type === "run.parked" ||
-        event.type === "run.interrupted"
+        caughtUp &&
+        (item.type === "run.finished" ||
+          item.type === "run.failed" ||
+          item.type === "run.continued" ||
+          item.type === "run.parked" ||
+          item.type === "run.interrupted")
       ) {
         return;
       }

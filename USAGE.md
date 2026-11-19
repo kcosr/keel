@@ -162,6 +162,7 @@ bun src/cli/keel.ts <command> [args]
 | `launch [workflow.ts] [--name n] [--input json] [--target dir] [--secret NAME=VALUE] [--secret-env NAME[=ENV]] [--output json\|text\|ndjson] [--tools] [--detach] [--emit-capability]` | Start a run from client-captured workflow source. Attached launch streams NDJSON by default; detached launch prints JSON. |
 | `run [workflow.ts] [--name n] [--input json] [--target dir] [--secret NAME=VALUE] [--secret-env NAME[=ENV]] [--output json\|text\|ndjson] [--tools]` | Launch a run and print a JSON envelope, text transcript, or NDJSON events. |
 | `watch <runId> [--output ndjson\|text] [--from beginning\|now \| --after-seq n \| --tail n] [--tools]` | Stream run events until terminal or parked. |
+| `wait <runId>` | Wait for a terminal, parked, or interrupted status and print it as JSON. |
 | `get <runId>` | Print the canonical run projection as JSON. |
 | `output <runId> [--output json\|text]` | Print the terminal workflow output. |
 | `report <runId> [--output json\|text]` | Print a journaled per-node result digest. |
@@ -184,7 +185,7 @@ bun src/cli/keel.ts <command> [args]
 | `execute [file] [--entry name] [--state file] [--cap-file file] [--output json] [--emit-capability] [-- args...]` | Run a stateless TypeScript control script over the daemon API. Omit `file` to read stdin. |
 | `approve <runId> <key> [note]` | Approve a `ctx.human` gate and acknowledge delivery/wake start. |
 | `deny <runId> <key> [note]` | Deny a `ctx.human` gate and acknowledge delivery/wake start. |
-| `signal <runId> <name> [json]` | Deliver a payload to `ctx.signal(name)` and acknowledge delivery/wake start. |
+| `signal <runId> <name> [json] [--wait]` | Deliver a payload to `ctx.signal(name)`. Use `--wait` to observe the next run outcome. |
 
 ### Local Web API Transport
 
@@ -446,11 +447,25 @@ keel run --output ndjson ./workflow.ts --input '{"n":3}'
 output. `keel output <runId> --output text` prints string outputs directly and
 other JSON values compactly.
 
-`keel report <runId>` defaults to JSON and prints a post-run digest derived from
-journaled node results, not raw event transcripts. `--output text` prints a
-compact per-node status/result summary. Interrupted runs include an `interrupted`
-blockage with the redacted reason, previous status, last phase, and last known
-wait metadata when available. `--output ndjson` is invalid for `report`.
+`keel wait <runId>` waits for an existing run to finish, park, or be interrupted.
+It returns immediately if the run is already in one of those states.
+`keel signal <runId> <name> [json] --wait` delivers the signal and observes the
+run from the delivery cursor. Without `--wait`, `signal` prints the delivery
+acknowledgement status and exits. Both wait forms print one JSON object with
+`runId` and `status`. Exit codes are `0` for `finished` or `continued`, `3` for a
+park or interruption, and `1` for failure or a subscription error. Both wait
+forms require `run:events`. Signal delivery requires `run:signal`. The returned
+status describes the run. A signal can remain queued for a later turn.
+
+`keel report <runId>` defaults to JSON and prints a digest derived from
+journaled node results. `--output text` prints a compact status/result summary.
+On a parked or interrupted run, `latestResult` describes the most recently
+completed reportable step or agent-session turn. It includes `stableKey`,
+`attempt`, and `finishedAtMs`. Results within the report's 8 KiB limit appear
+as `result`. Larger values carry `resultOmitted` and `resultByteLength`.
+Interrupted runs include an `interrupted` blockage with the redacted reason,
+previous status, last phase, and last known wait metadata when available.
+`--output ndjson` is invalid for `report`.
 
 `getBlockage`, `keel report`, TUI detail, and web projections distinguish
 diagnostic state from actionable blockage. `running` means the run is actively
@@ -896,8 +911,9 @@ needs the final status or output.
 `keel.events({ runId, cursor })` returns an async iterable of raw event
 envelopes. The cursor shape matches `keel watch`: `{ kind: "beginning" }`,
 `{ kind: "now" }`, `{ kind: "after-seq", seq }`, or `{ kind: "tail", count }`.
-When a cursor skips an already-closed run status, iteration completes after
-catch-up instead of waiting for a skipped terminal event.
+It drains historical events before using the current run state at catch-up.
+Iteration ends if that state is parked, terminal, or interrupted, or when the
+run next reaches one of those states. Subscription errors reject iteration.
 
 `execute` can also manage run workspaces without shelling out to the CLI:
 `keel.listRunWorkspaces`, `keel.getRunWorkspace`, `keel.getRunWorkspaceDiff`,
@@ -1237,18 +1253,20 @@ bun run workflows:seed-defaults
 
 The profile seed upserts:
 
-| Name | Provider | Model | Reasoning | Tool additions |
-|---|---|---|---|---|
-| `codex-default` | `codex` | `gpt-5.5` | `xhigh` | none |
-| `claude-default` | `claude` | `claude-opus-4-8` | `xhigh` | `allowTools: ["Bash"]` |
-| `claude-fable-5` | `claude` | `claude-fable-5` | `xhigh` | `allowTools: ["Bash"]` |
-| `pi-grok` | `pi` | `xai/grok-4.6` | `high` | none |
+| Name | Provider | Model | Reasoning | Service tier | Tool additions |
+|---|---|---|---|---|---|
+| `codex-default` | `codex` | `gpt-6-astra` | `xhigh` | Codex default | none |
+| `codex-fast` | `codex` | `gpt-6.2-sol` | `xhigh` | `priority` | none |
+| `codex-ultrafast` | `codex` | `gpt-6.2-sol` | `xhigh` | `ultrafast` | none |
+| `claude-default` | `claude` | `claude-opus-5-5` | `xhigh` | — | `allowTools: ["Bash"]` |
+| `claude-fable` | `claude` | `claude-fable-5-2` | `xhigh` | — | `allowTools: ["Bash"]` |
 
 The workflow seed saves or refreshes these reusable saved workflows together
 with their adjacent Draft 7 input schemas:
 
 | Name | Source | Input schema |
 |---|---|---|
+| `codex-one-shot` | `workflows/codex-one-shot/codex-one-shot.workflow.ts` | `workflows/codex-one-shot/input-schema.json` |
 | `oracle` | `workflows/oracle/oracle.workflow.ts` | `workflows/oracle/input-schema.json` |
 | `iterative-review` | `workflows/iterative-review/iterative-review.workflow.ts` | `workflows/iterative-review/input-schema.json` |
 | `implement-review-loop` | `workflows/implement-review-loop/implement-review-loop.workflow.ts` | `workflows/implement-review-loop/input-schema.json` |
@@ -1391,22 +1409,24 @@ that supplies it):
 
 ```ts
 { codex: { transport: { type: "stdio" } } }
-{ codex: { transport: { type: "stdio" }, serviceTier: null } }
+{ codex: { serviceTier: null } }
 { codex: { transport: { type: "ws", url: "ws://127.0.0.1:1455/rpc" }, serviceTier: "priority" } }
 { codex: { transport: { type: "uds", path: "/tmp/codex.sock" }, serviceTier: "ultrafast" } }
 ```
 
-If `providerConfig.codex` is omitted, the runtime default is stdio and Keel
-spawns `${KEEL_CODEX_BIN:-codex} app-server` in the resolved workspace cwd.
-Omitted config and explicit `{ codex: { transport: { type: "stdio" } } }` are
-distinct replay identities. An explicit `providerConfig.codex` block requires
-`transport`, including when it selects stdio.
+Omitting `transport` selects stdio. Keel spawns
+`${KEEL_CODEX_BIN:-codex} app-server` in the resolved workspace cwd. Omitted
+config, an explicit config block, and an explicit transport all participate in
+replay identity as supplied.
 
 `serviceTier` is optional. Use `"priority"` to request Fast, `"ultrafast"` to
 request Ultrafast, or explicit `null` to select Standard. Omitting the field
 leaves the tier to Codex configuration or the resumed thread's selection.
 Codex determines whether the model catalog, account, and policy allow the
 requested speed. All four choices are distinct replay identities.
+
+Keel sends the resolved `reasoning` effort on every turn when configured.
+Omitting `reasoning` leaves the effort to Codex.
 
 Replace `"fast"` with `"priority"` and `"normal"` with `null` in workflow
 source and saved profiles. Inspect `config.providerConfig.codex.serviceTier`
@@ -1917,11 +1937,12 @@ operation-family map.
 Lifecycle methods start work in the background and return a `RunStart` or run
 id. `interruptRun` persists `status: "interrupted"`, appends
 `run.interrupted`, and aborts active in-process work best-effort; only
-`resumeRun` leaves that status. Signal delivery and approval decisions
+`resumeRun` leaves that status. A resume request for a live execution fails
+with an already-running error. Signal delivery and approval decisions
 acknowledge durable delivery and wake-start handling; they do not imply the
 resumed workflow reached a parked or terminal status. Use `waitForRun`,
-`subscribeEvents`, `keel watch`, or the TUI to observe progress. The daemon
-returns a raw run capability on launch/fork so clients can establish authority
+`subscribeEvents`, `keel wait`, `keel watch`, or the TUI to observe progress. The
+daemon returns a raw run capability on launch/fork so clients can establish authority
 for follow-up operations. The CLI writes that capability to a local cap file by
 default and only prints raw tokens with `--emit-capability`.
 

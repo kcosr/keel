@@ -17,7 +17,7 @@ creates ordinary saved workflow versions for `task-code-review`,
 `task-plan-review`, and `task-docs-review`.
 Use the saved `oracle` workflow for durable, artifact-free consultation. It
 returns plain-text answers, preserves one backend conversation across
-`oracle-question` signals, defaults to `claude-fable-5` with `xhigh` reasoning,
+`oracle-question` signals, defaults to `claude-fable` with `xhigh` reasoning,
 and grants the consulting agent read-oriented target-worktree tools. The local
 Claude profile adds Bash, which is not OS-sandboxed; the workflow prohibits
 writes through its prompt rather than a host-filesystem boundary.
@@ -143,10 +143,11 @@ environment: { secrets: ["TOKEN"] },
 
 Codex is available as `provider: "codex"` with default/read-only,
 workspace-write, or unrestricted tool policies in an explicit workspace cwd.
-When supplying `providerConfig.codex`, include `transport` (`stdio`, `ws`, or
-`uds`). Set `serviceTier` to `"priority"` for Fast, `"ultrafast"` for Ultrafast,
+`providerConfig.codex.transport` defaults to stdio and also supports `ws` and
+`uds`. Set `serviceTier` to `"priority"` for Fast, `"ultrafast"` for Ultrafast,
 or `null` for Standard. Omit the tier to leave it to Codex configuration or the
-resumed thread's selection. Codex read-only/workspace-write use Codex's
+resumed thread's selection. Keel sends the resolved `reasoning` effort on each
+turn when configured. Codex read-only/workspace-write use Codex's
 sandbox with network disabled, but may still run sandboxed commands;
 unrestricted Codex can access outside the cwd according to the host runtime.
 Keep raw secrets out of workflow source and `providerConfig`; remote Codex

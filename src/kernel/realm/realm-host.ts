@@ -332,6 +332,7 @@ export class RealmKernel {
   private readonly activeSessionRuns = new Set<string>();
   private readonly activeWorkers = new Set<Worker>();
   private readonly activeExecutions = new Map<string, Set<ActiveExecution>>();
+  private readonly startingExecutions = new Set<string>();
   private readonly activeWorkspaceSetups = new Map<string, Promise<void>>();
 
   constructor(store: JournalStore, opts: RealmKernelOptions = {}) {
@@ -529,6 +530,7 @@ export class RealmKernel {
     const runId = this.idgen();
     const profileSnapshot = this.captureEffectiveProfileSnapshot(at);
     const settingSnapshot = this.captureEffectiveSettingSnapshot(at);
+    using reservation = this.reserveExecutionStart(runId);
     this.store.transaction(() => {
       this.store.insertRun({
         runId,
@@ -596,6 +598,7 @@ export class RealmKernel {
     const runId = this.idgen();
     const profileSnapshot = this.captureEffectiveProfileSnapshot(at);
     const settingSnapshot = this.captureEffectiveSettingSnapshot(at);
+    using reservation = this.reserveExecutionStart(runId);
     this.store.transaction(() => {
       this.store.insertRun({
         runId,
@@ -664,6 +667,17 @@ export class RealmKernel {
     return this.startResume<O>(runId).done;
   }
 
+  assertCanResume(runId: string): void {
+    // A journal row may remain running after a crash. Fence local executions,
+    // including runs being started by synchronous event-producing operations.
+    if (
+      (this.activeExecutions.has(runId) || this.startingExecutions.has(runId)) &&
+      !TERMINAL.has(this.store.getRun(runId)?.status ?? "running")
+    ) {
+      throw new Error(`cannot resume run ${runId}: it is already executing in this kernel`);
+    }
+  }
+
   startResume<O>(runId: string): { runId: string; done: Promise<RunHandle<O>> } {
     const run = this.store.getRun(runId);
     if (!run) throw new Error(`run ${runId} not found`);
@@ -677,8 +691,10 @@ export class RealmKernel {
         }),
       };
     }
+    this.assertCanResume(runId);
     const executionPath = this.executionPathForRun(run);
     const input = run.inputRef ? JSON.parse(run.inputRef) : undefined;
+    using reservation = this.reserveExecutionStart(runId);
     this.store.transaction(() => {
       this.store.updateRun(runId, { status: "running", errorJson: null, finishedAtMs: null });
       this.store.appendEvent(runId, "run.resumed", {}, this.host.clock());
@@ -752,6 +768,7 @@ export class RealmKernel {
     const snapshotAt = this.host.clock();
     const profileSnapshot = this.captureEffectiveProfileSnapshot(snapshotAt);
     const settingSnapshot = this.captureEffectiveSettingSnapshot(snapshotAt);
+    using reservation = this.reserveExecutionStart(runId);
     this.store.transaction(() => {
       this.store.updateRun(runId, {
         status: "running",
@@ -791,6 +808,7 @@ export class RealmKernel {
     });
     this.assertRunSecretStoreAvailable(runSecrets, "RealmKernel.startRetry.runSecrets");
     const executionPath = this.executionPathForRun(run);
+    using reservation = this.reserveExecutionStart(runId);
     this.store.deleteFailedRows(runId);
     const at = this.host.clock();
     this.store.transaction(() => {
@@ -837,6 +855,7 @@ export class RealmKernel {
     });
     this.assertRunSecretStoreAvailable(runSecrets, "RealmKernel.startRewind.runSecrets");
     const executionPath = this.executionPathForRun(run);
+    using reservation = this.reserveExecutionStart(runId);
     // Trim journal + decrement refcounts + clear unresolved waits as one snapshot.
     this.store.deleteRunStateAfter(runId, toStableKey);
     this.store.updateRun(runId, {
@@ -2824,6 +2843,17 @@ export class RealmKernel {
     });
   }
 
+  private reserveExecutionStart(runId: string): Disposable {
+    // Journal listeners run synchronously, before execute() registers the worker.
+    const ownsReservation = !this.startingExecutions.has(runId);
+    if (ownsReservation) this.startingExecutions.add(runId);
+    return {
+      [Symbol.dispose]: () => {
+        if (ownsReservation) this.startingExecutions.delete(runId);
+      },
+    };
+  }
+
   private registerActiveExecution(runId: string, active: ActiveExecution): () => void {
     const set = this.activeExecutions.get(runId) ?? new Set<ActiveExecution>();
     set.add(active);
@@ -3851,6 +3881,7 @@ export class RealmKernel {
               const runTarget = run.runTarget;
               const nextId = this.idgen();
               const at = this.host.clock();
+              using reservation = this.reserveExecutionStart(nextId);
               // ATOMIC handoff: create the successor AND mark this run 'continued'
               // in one transaction. A crash between cannot leave a resumable
               // original next to an orphan successor (which would re-launch a

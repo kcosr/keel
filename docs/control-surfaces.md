@@ -228,15 +228,16 @@ acknowledgement behavior.
 | `retry` | yes | terminal/parked/interrupted by default; start acknowledgement with `--detach` | yes when attached | yes | text watch when attached; `<runId>\t<status>` when detached | attached run outcome, or retry success/failure when detached |
 | `rewind` | yes | terminal/parked/interrupted by default; start acknowledgement with `--detach` | yes when attached | yes | text watch when attached; `<runId>\t<status>` when detached | attached run outcome, or rewind success/failure when detached |
 | `watch` | no | terminal/parked/interrupted event or closed stream status after catch-up | yes | no | NDJSON | observed run status |
+| `wait` | no | current or next terminal/parked/interrupted status | no | no | JSON `runId` and `status` | observed run status |
 | `tui` | no by itself | user exits | live view | no | interactive terminal UI | user exit or startup failure |
 | `interrupt` | stops active work | interruption persistence | no | no | `<runId>\tinterrupted` | interruption success/failure |
-| `signal` | maybe starts wake | delivery and wake-start acknowledgement | no | no | status line | delivery success/failure |
+| `signal` | maybe starts wake | delivery acknowledgement, or terminal/parked/interrupted status with `--wait` | no | no | status line, or JSON `runId` and `status` with `--wait` | delivery success/failure, or observed run status with `--wait` |
 | `approve`/`deny` | maybe starts wake | delivery and wake-start acknowledgement | no | no | status line | delivery success/failure |
 
-`signal`, `approve`, and `deny` are delivery-acknowledgement commands. They
-return after the input is durable and any eligible wake has been accepted and
-started. They do not wait for resumed workflow work to finish, fail, or park
-again. Use `keel watch <runId> --output text` or the TUI to observe progress.
+`signal`, `approve`, and `deny` acknowledge delivery after the input is durable
+and any eligible wake has started. `signal --wait` also observes the run from
+the delivery cursor. Both `wait` and `signal --wait` use `run:events` to observe
+the outcome. Signal delivery requires `run:signal`.
 
 ## Implementation Convention
 

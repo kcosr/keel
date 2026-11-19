@@ -45,15 +45,18 @@
   `allowTools: ["Bash"]` so read-only reviewer sessions can inspect workspaces
   through shell commands while retaining their workflow-selected tool policy.
   ([#27](https://github.com/kcosr/keel/pull/27))
-- `bun run profiles:seed-defaults` now seeds a `claude-fable-5` Claude profile
-  matching the local conventional `xhigh` + Bash-enabled setup.
-  ([#30](https://github.com/kcosr/keel/pull/30))
-- `bun run profiles:seed-defaults` now seeds `pi-grok` through the Pi
-  provider with the native xAI `grok-4.6` model and `high` reasoning.
+- The default seed uses GPT-6 Astra, GPT-6.2 Sol, Claude Opus 5.5, and Claude
+  Fable 5.2. It adds `codex-fast` and `codex-ultrafast` and removes
+  `claude-fable-5` and `pi-grok` from the seed list. Oracle uses `claude-fable`
+  and requires an explicit launch target.
 - Default profile seeding no longer includes environment-specific `work-*` Pi
   model profiles.
 
 ### Fixed
+- Control scripts drain event backfill before stopping at a parked or terminal
+  run. Resume rejects duplicate live execution while allowing orphan recovery.
+- Codex honors the configured reasoning effort on fresh and resumed turns.
+  A Codex provider config can omit `transport` to use stdio.
 - Web schedule edits now preserve the pinned saved-workflow version and next
   fire time. Long directory listings remain scrollable inside their dialog,
   run-event watches stay connected across projection refreshes, and workflow
@@ -86,6 +89,10 @@
   ([#22](https://github.com/kcosr/keel/pull/22))
 
 ### Added
+- `keel wait` and `keel signal --wait` wait for a run outcome. Reports expose
+  the latest completed result for parked and interrupted runs.
+- The saved `codex-one-shot` workflow runs one write-enabled Codex prompt in
+  an explicit target using one of the seeded Codex profiles.
 - The new `oracle` saved workflow provides durable, artifact-free consultation
   with plain-text answers, configurable profile and reasoning, read-oriented
   target-worktree access, and validated signal-driven follow-up questions in the

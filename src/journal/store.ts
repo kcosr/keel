@@ -947,6 +947,20 @@ export class JournalStore {
       .map(mapEvent);
   }
 
+  *iterateEventsNewestFirst(runId: string, types: readonly string[]): IterableIterator<EventRow> {
+    const statement = this.db.prepare<RawEventRow, [string, string]>(
+      `SELECT * FROM events
+       WHERE run_id = ? AND type IN (SELECT value FROM json_each(?))
+       ORDER BY seq DESC`,
+    );
+    try {
+      for (const row of statement.iterate(runId, JSON.stringify(types))) yield mapEvent(row);
+    } finally {
+      // Callers can stop as soon as an event matches.
+      statement.finalize();
+    }
+  }
+
   eventHighWater(runId: string): number {
     return (
       this.db

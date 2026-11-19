@@ -690,6 +690,19 @@ describe("KeelOperationGateway", () => {
     }
   });
 
+  test("rejects event subscriptions for a missing run", async () => {
+    const harness = createHarness();
+    const session = new FakeGatewaySession("missing-run");
+    try {
+      await expect(
+        fail(harness, session, "subscribeEvents", { runId: "run_missing" }, ADMIN_TOKEN),
+      ).resolves.toBe("run run_missing not found");
+      expect(session.cleanups.size).toBe(0);
+    } finally {
+      harness.close();
+    }
+  });
+
   test("subscribes with backfill, live delivery, credential snapshot, revocation stop, cleanup, and payload redaction", async () => {
     const harness = createHarness();
     const session = new FakeGatewaySession("events");

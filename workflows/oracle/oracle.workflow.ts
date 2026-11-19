@@ -16,7 +16,7 @@ type OracleExchange = {
   response: string;
 };
 
-const DEFAULT_PROFILE = "claude-fable-5";
+const DEFAULT_PROFILE = "claude-fable";
 const DEFAULT_REASONING = "xhigh";
 const DEFAULT_MAX_TURNS = 10;
 const HARD_MAX_TURNS = 10;

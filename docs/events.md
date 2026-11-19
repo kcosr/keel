@@ -53,6 +53,10 @@ Closed status lets `keel watch --from now`, `--tail 0`, and execute event
 iteration terminate deterministically when the requested cursor skips an existing
 terminal, parked, or interrupted event.
 
+Execute event iteration yields the complete requested backfill before deciding
+whether to end. A historical park or failure is yielded even when the run has
+since resumed. Live park, terminal, and interruption events end iteration.
+
 ## Accepted Work
 
 Operations that accept work return an `attachCursor` when the caller can attach
@@ -69,6 +73,8 @@ to the accepted operation's stream:
 
 Attached lifecycle commands use `attachCursor`. Plain `keel watch <runId>` still
 defaults to `{ kind: "beginning" }`.
+`keel signal --wait` observes the status from the delivery cursor. `keel wait`
+starts at `{ kind: "now" }`. Both print a JSON status summary after waiting.
 
 ## Authorization
 

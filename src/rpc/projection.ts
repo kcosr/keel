@@ -5,7 +5,8 @@
 // it here prevents per-surface drift.
 
 import type { JournalStore } from "../journal/store.ts";
-import type { RunRow, ScheduleRow } from "../journal/types.ts";
+import type { JournalRow, RunRow, ScheduleRow } from "../journal/types.ts";
+import { completionCheckStableKey } from "../kernel/completion-check.ts";
 import { isRunOwnerStale, ownerStaleWindowMs } from "../kernel/liveness.ts";
 import { RUN_FINISHED_INLINE_OUTPUT_BYTES } from "../kernel/output.ts";
 import { workflowDefinitionSourceSelection } from "../workflow-definitions/source-view.ts";
@@ -13,6 +14,7 @@ import type {
   Blockage,
   InterruptionBlockageDetails,
   NodeView,
+  ReportLatestResult,
   ReportNodeView,
   RunProjection,
   RunReport,
@@ -32,6 +34,7 @@ export type {
   InterruptionBlockageDetails,
   JournalStatus,
   NodeView,
+  ReportLatestResult,
   ReportNodeView,
   RunProjection,
   RunReport,
@@ -187,7 +190,7 @@ function scheduleErrorProjection(errorJson: string | null): ScheduleErrorProject
   }
 }
 
-/** Build a post-run digest from journaled node results, not raw event transcripts. */
+/** Build a run digest from journaled node results. */
 export function buildRunReport(
   store: JournalStore,
   runId: string,
@@ -206,8 +209,8 @@ export function buildRunReport(
 
   const nodes: ReportNodeView[] = [...latest.values()]
     .sort((a, b) => a.stableKey.localeCompare(b.stableKey))
-    .map((r) => {
-      const node: ReportNodeView = {
+    .map(
+      (r): ReportNodeView => ({
         stableKey: r.stableKey,
         effectType: r.effectType,
         status: r.status,
@@ -215,17 +218,15 @@ export function buildRunReport(
         startedAtMs: r.startedAtMs,
         dependsOn: (r.inputDeps ?? []).map((d) => d.stepKey).sort(),
         artifactBacked: r.resultArtifact !== null,
-      };
-      const result = resultJsonForReport(store, r.resultInline, r.resultArtifact);
-      if (result.kind === "inline") node.result = JSON.parse(result.json);
-      if (result.kind === "omitted") {
-        node.resultOmitted = true;
-        node.resultByteLength = result.byteLength;
-      }
-      return node;
-    });
+        ...reportResultFields(store, r),
+      }),
+    );
 
   const output = outputJsonForReport(run.outputRef);
+  const latestResult =
+    run.status.startsWith("waiting-") || run.status === "interrupted"
+      ? latestCompletedResult(store, runId, rows)
+      : undefined;
   const blockage = getBlockage(
     store,
     runId,
@@ -242,6 +243,7 @@ export function buildRunReport(
     ...(output.kind === "omitted"
       ? { outputOmitted: true as const, outputByteLength: output.byteLength }
       : {}),
+    ...(latestResult ? { latestResult } : {}),
     error: run.errorJson ? (JSON.parse(run.errorJson) as { name: string; message: string }) : null,
     ...(isVisibleBlockage(blockage) ? { blockage } : {}),
     nodes,
@@ -251,6 +253,81 @@ export function buildRunReport(
       artifacts: nodes.filter((n) => n.artifactBacked).length,
     },
   };
+}
+
+function latestCompletedResult(
+  store: JournalStore,
+  runId: string,
+  rows: JournalRow[],
+): ReportLatestResult | undefined {
+  let finishedAtMs = Number.NEGATIVE_INFINITY;
+  const candidates = new Map<string, JournalRow>();
+  for (const row of rows) {
+    if (
+      row.status !== "completed" ||
+      row.finishedAtMs === null ||
+      row.finishedAtMs < finishedAtMs ||
+      (row.resultInline === null && row.resultArtifact === null) ||
+      (row.stableKey.startsWith("__") && !row.stableKey.startsWith("__session."))
+    ) {
+      continue;
+    }
+    if (row.finishedAtMs > finishedAtMs) {
+      finishedAtMs = row.finishedAtMs;
+      candidates.clear();
+    }
+    const previous = candidates.get(row.stableKey);
+    if (!previous || previous.attempt < row.attempt) candidates.set(row.stableKey, row);
+  }
+
+  let row = candidates.values().next().value;
+  if (!row) return undefined;
+
+  // Multiple steps can finish in one clock tick. Use durable completion order
+  // for the tie when the run has the corresponding events.
+  if (candidates.size > 1) {
+    for (const event of store.iterateEventsNewestFirst(runId, [
+      "step.completed",
+      "command.completed",
+      "completion_check.completed",
+    ])) {
+      const payload = JSON.parse(event.payloadJson) as {
+        stableKey?: string;
+        attempt?: number;
+        key?: string;
+      };
+      const key =
+        event.type === "completion_check.completed" &&
+        typeof payload.attempt === "number" &&
+        typeof payload.key === "string"
+          ? completionCheckStableKey(payload.attempt, payload.key)
+          : payload.stableKey;
+      const candidate = key === undefined ? undefined : candidates.get(key);
+      if (candidate) {
+        row = candidate;
+        break;
+      }
+    }
+  }
+
+  return {
+    stableKey: row.stableKey,
+    attempt: row.attempt,
+    finishedAtMs,
+    ...reportResultFields(store, row),
+  };
+}
+
+function reportResultFields(
+  store: JournalStore,
+  row: JournalRow,
+): Pick<ReportNodeView, "result" | "resultOmitted" | "resultByteLength"> {
+  const result = resultJsonForReport(store, row.resultInline, row.resultArtifact);
+  if (result.kind === "inline") return { result: JSON.parse(result.json) };
+  if (result.kind === "omitted") {
+    return { resultOmitted: true, resultByteLength: result.byteLength };
+  }
+  return {};
 }
 
 function outputJsonForReport(
@@ -269,7 +346,7 @@ function resultJsonForReport(
   inline: string | null,
   artifact: string | null,
 ): { kind: "none" } | { kind: "inline"; json: string } | { kind: "omitted"; byteLength: number } {
-  if (inline !== null) return { kind: "inline", json: inline };
+  if (inline !== null) return outputJsonForReport(inline);
   if (artifact === null) return { kind: "none" };
   const row = store.getArtifact(artifact);
   if (!row) throw new Error(`journal result artifact ${artifact} is missing`);

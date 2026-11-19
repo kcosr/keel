@@ -1182,6 +1182,53 @@ describe("capability auth", () => {
 });
 
 describe("CAS ownership fence", () => {
+  test("a live run refuses resume without claiming or appending a resume event", async () => {
+    const socketPath = join(dir, "active-resume.sock");
+    const dbPath = join(dir, "active-resume.db");
+    const providerRelease = Promise.withResolvers<void>();
+    let now = 1000;
+    let calls = 0;
+    const daemon = new KeelDaemon({
+      socketPath,
+      dbPath,
+      clock: () => now,
+      heartbeatMs: 100_000,
+      agents: new AgentProviderRegistry().register({
+        name: "mock",
+        async generate() {
+          calls += 1;
+          await providerRelease.promise;
+          return { text: '{"value":1}', transcript: [] };
+        },
+      }),
+    });
+    await daemon.start();
+    const client = await DaemonClient.connect(socketPath);
+    const probe = JournalStore.open(dbPath);
+    try {
+      const { runId, capability } = await client.launchRun({ ...onceUrl, input: null });
+      await client.authenticate(capability as string);
+      await until(() => Promise.resolve(calls > 0), 2000);
+      const beforeResume = probe.getRun(runId);
+      const eventSeq = probe.eventHighWater(runId);
+      expect(beforeResume?.status).toBe("running");
+
+      now += 10;
+      await expect(client.resumeRun(runId)).rejects.toThrow(/already executing/);
+      expect(probe.getRun(runId)).toEqual(beforeResume);
+      expect(probe.eventHighWater(runId)).toBe(eventSeq);
+
+      providerRelease.resolve();
+      await expect(client.waitForRun(runId)).resolves.toMatchObject({ status: "finished" });
+      expect(calls).toBe(1);
+    } finally {
+      providerRelease.resolve();
+      probe.close();
+      client.close();
+      daemon.stop();
+    }
+  });
+
   test("retrying a missing run reports not found instead of ownership fence", async () => {
     const socketPath = join(dir, "missing.sock");
     const daemon = new KeelDaemon({

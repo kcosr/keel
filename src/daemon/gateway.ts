@@ -292,9 +292,11 @@ export class KeelOperationGateway {
     resumeRun: {
       kind: "core",
       handle: (_session, p, credential) => {
-        this.authorizeRunCredential(credential, p.runId as string, "run:resume");
-        this.opts.claimOrReject(p.runId as string);
-        return this.opts.api.resumeRun(p.runId as string);
+        const runId = p.runId as string;
+        this.authorizeRunCredential(credential, runId, "run:resume");
+        this.opts.api.assertCanResume(runId);
+        this.opts.claimOrReject(runId);
+        return this.opts.api.resumeRun(runId);
       },
     },
     interruptRun: {
@@ -772,6 +774,7 @@ export class KeelOperationGateway {
     credential: string | null,
   ): SubscribeEventsResult {
     const runId = p.runId as string;
+    if (!this.opts.store.getRun(runId)) throw new Error(`run ${runId} not found`);
     if ("afterSeq" in p) {
       throw new Error("subscribeEvents uses cursor; numeric afterSeq is not supported");
     }

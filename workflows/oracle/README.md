@@ -53,13 +53,12 @@ returns immediately after its first answer.
 |---|---:|---|
 | `question` | yes | Initial question for the Oracle. |
 | `context` | no | Background that is useful for the initial answer. No repository or artifact is implied. |
-| `profile` | no | Agent profile name. Defaults to `claude-fable-5`. |
+| `profile` | no | Agent profile name. Defaults to `claude-fable`. |
 | `reasoning` | no | Reasoning effort override. The default profile uses `xhigh`; another selected profile keeps its configured reasoning when this is omitted. |
 | `maxTurns` | no | Total answers including the initial answer. Defaults to `10`, capped at `10`. Use `1` for one-shot use. |
 | `signalName` | no | Follow-up signal name. Defaults to `oracle-question`. |
 
-The saved workflow's default target is the worktree from which the local seed
-was run. Pass `--target` to use a different worktree for a consultation.
+Use `--target` to select the directory for the consultation.
 
 The signal payload accepts `question` and optional `context`, or `done: true`.
 Malformed payloads are logged and the workflow parks for a replacement signal

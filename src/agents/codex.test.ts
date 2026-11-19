@@ -14,8 +14,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { captureWorkflowFile } from "../workflow-definitions/capture.ts";
 import {
-  CODEX_FAST_SERVICE_TIER_WIRE_VALUE,
-  CODEX_NORMAL_SERVICE_TIER_WIRE_VALUE,
   CodexProvider,
   type CodexTransport,
   type CodexTransportConfig,
@@ -33,6 +31,7 @@ import type {
 } from "./types.ts";
 
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+const SERVICE_TIERS = ["priority", "ultrafast", null] as const;
 
 const tempDirs: string[] = [];
 afterEach(() => {
@@ -219,32 +218,19 @@ describe("Codex provider config", () => {
     });
   });
 
-  test("accepts serviceTier and maps Keel values to Codex app-server wire values", () => {
-    // Codex app-server accepts the user-facing "fast" service tier value and
-    // normalizes it to the core/model request value it supports.
-    expect(CODEX_FAST_SERVICE_TIER_WIRE_VALUE).toBe("fast");
-    // openai/codex model_switching.rs proves null suppresses catalog fast defaults.
-    expect(CODEX_NORMAL_SERVICE_TIER_WIRE_VALUE).toBeNull();
-    expect(
-      normalizeCodexProviderConfig({
-        transport: { type: "stdio" },
-        serviceTier: "fast",
-      }),
-    ).toEqual({
-      transport: { type: "stdio" },
-      serviceTier: "fast",
-      codexServiceTierParam: "fast",
-    });
-    expect(
-      normalizeCodexProviderConfig({
-        transport: { type: "stdio" },
-        serviceTier: "normal",
-      }),
-    ).toEqual({
-      transport: { type: "stdio" },
-      serviceTier: "normal",
-      codexServiceTierParam: null,
-    });
+  test("accepts priority, ultrafast, and explicit standard service tiers", () => {
+    for (const serviceTier of SERVICE_TIERS) {
+      const config = { transport: { type: "stdio" }, serviceTier } as const;
+      expect(normalizeCodexProviderConfig(config)).toEqual(config);
+    }
+  });
+
+  test("rejects unsupported service tiers with the config path", () => {
+    for (const serviceTier of ["fast", "normal", "default", false]) {
+      expect(() =>
+        normalizeCodexProviderConfig({ transport: { type: "stdio" }, serviceTier }),
+      ).toThrow(/providerConfig\.codex\.serviceTier/);
+    }
   });
 
   test("rejects malformed transport config with paths", () => {
@@ -264,9 +250,6 @@ describe("Codex provider config", () => {
     expect(() =>
       normalizeCodexProviderConfig({ transport: { type: "uds", path: "rel.sock" } }),
     ).toThrow(/providerConfig\.codex\.transport\.path/);
-    expect(() =>
-      normalizeCodexProviderConfig({ transport: { type: "stdio" }, serviceTier: "priority" }),
-    ).toThrow(/providerConfig\.codex\.serviceTier/);
   });
 });
 
@@ -330,39 +313,20 @@ describe("Codex JSON-RPC flow", () => {
   });
 
   for (const [name, transportConfig] of transportConfigs) {
-    test(`serviceTier fast is sent on ${name} thread/start and turn/start`, async () => {
-      const transport = new ScriptedTransport(basicScript);
-      const { factory } = await runWithTransport(transport, {
-        providerConfig: { transport: transportConfig, serviceTier: "fast" },
+    for (const serviceTier of SERVICE_TIERS) {
+      test(`serviceTier ${serviceTier} is sent on ${name} thread/start and turn/start`, async () => {
+        const transport = new ScriptedTransport(basicScript);
+        const { factory } = await runWithTransport(transport, {
+          providerConfig: { transport: transportConfig, serviceTier },
+        });
+
+        const threadStart = transport.sent.find((message) => message.method === "thread/start");
+        expect(threadStart?.params).toMatchObject({ serviceTier });
+        const turnStart = transport.sent.find((message) => message.method === "turn/start");
+        expect(turnStart?.params).toMatchObject({ serviceTier });
+        expect(factory.config).toEqual(transportConfig);
       });
-
-      const threadStart = transport.sent.find((message) => message.method === "thread/start");
-      const threadParams = threadStart?.params as Record<string, unknown>;
-      expect(threadParams.serviceTier).toBe(CODEX_FAST_SERVICE_TIER_WIRE_VALUE);
-      const turnStart = transport.sent.find((message) => message.method === "turn/start");
-      const params = turnStart?.params as Record<string, unknown>;
-      expect(params.serviceTier).toBe(CODEX_FAST_SERVICE_TIER_WIRE_VALUE);
-      expect(factory.config).toEqual(
-        name === "ws" ? { type: "ws", url: "ws://127.0.0.1:9/rpc" } : transportConfig,
-      );
-      expect(factory.config).not.toHaveProperty("serviceTier");
-    });
-
-    test(`serviceTier normal is sent as present null on ${name} thread/start and turn/start`, async () => {
-      const transport = new ScriptedTransport(basicScript);
-      await runWithTransport(transport, {
-        providerConfig: { transport: transportConfig, serviceTier: "normal" },
-      });
-
-      const threadStart = transport.sent.find((message) => message.method === "thread/start");
-      const threadParams = threadStart?.params as Record<string, unknown>;
-      expect(Object.hasOwn(threadParams, "serviceTier")).toBe(true);
-      expect(threadParams.serviceTier).toBe(CODEX_NORMAL_SERVICE_TIER_WIRE_VALUE);
-      const turnStart = transport.sent.find((message) => message.method === "turn/start");
-      const params = turnStart?.params as Record<string, unknown>;
-      expect(Object.hasOwn(params, "serviceTier")).toBe(true);
-      expect(params.serviceTier).toBe(CODEX_NORMAL_SERVICE_TIER_WIRE_VALUE);
-    });
+    }
   }
 
   test("omitted serviceTier does not send thread/start or turn/start serviceTier keys", async () => {
@@ -647,6 +611,7 @@ describe("Codex JSON-RPC flow", () => {
       approvalPolicy: "never",
       sandbox: "read-only",
     });
+    expect(transport.sent[3]?.params).not.toHaveProperty("serviceTier");
     expect(result.sessionToken).toBe("thread-1");
     expect(result.text).toBe("again");
   });
@@ -694,48 +659,30 @@ describe("Codex JSON-RPC flow", () => {
     ]);
   });
 
-  test("resumed turns keep the configured serviceTier", async () => {
-    const transport = new ScriptedTransport((message, t) => {
-      switch (message.method) {
-        case "initialize":
-          t.respond(message.id, {});
-          break;
-        case "initialized":
-          break;
-        case "thread/resume":
+  for (const serviceTier of SERVICE_TIERS) {
+    test(`serviceTier ${serviceTier} is sent on thread/resume and its next turn`, async () => {
+      const transport = new ScriptedTransport((message, t) => {
+        if (message.method === "thread/resume") {
           t.respond(message.id, {
             thread: { id: "thread-1", cwd: process.cwd(), status: { type: "idle" } },
           });
-          break;
-        case "turn/start":
-          expect((message.params as Record<string, unknown>).serviceTier).toBe(
-            CODEX_FAST_SERVICE_TIER_WIRE_VALUE,
-          );
-          t.respond(message.id, { turn: { id: "turn-2" } });
-          t.notify("turn/started", { threadId: "thread-1", turn: { id: "turn-2" } });
-          t.notify("item/agentMessage/delta", {
-            threadId: "thread-1",
-            turnId: "turn-2",
-            delta: "again",
-          });
-          t.notify("turn/completed", {
-            threadId: "thread-1",
-            turn: { id: "turn-2", status: "completed" },
-          });
-          break;
-        default:
-          throw new Error(`unexpected ${String(message.method)}`);
-      }
-    });
+        } else {
+          basicScript(message, t);
+        }
+      });
 
-    const { result } = await runWithTransport(transport, {
-      resumeToken: "thread-1",
-      providerConfig: { transport: { type: "stdio" }, serviceTier: "fast" },
-    });
+      const { result } = await runWithTransport(transport, {
+        resumeToken: "thread-1",
+        providerConfig: { transport: { type: "stdio" }, serviceTier },
+      });
 
-    expect(result.sessionToken).toBe("thread-1");
-    expect(result.text).toBe("again");
-  });
+      const threadResume = transport.sent.find((message) => message.method === "thread/resume");
+      expect(threadResume?.params).toMatchObject({ serviceTier });
+      const turnStart = transport.sent.find((message) => message.method === "turn/start");
+      expect(turnStart?.params).toMatchObject({ serviceTier });
+      expect(result.sessionToken).toBe("thread-1");
+    });
+  }
 
   test("schema retry resumes the Codex thread and preserves configured serviceTier", async () => {
     const transports: ScriptedTransport[] = [];
@@ -754,24 +701,18 @@ describe("Codex JSON-RPC flow", () => {
               break;
             case "thread/start":
               expect(attempt).toBe(1);
-              expect((message.params as Record<string, unknown>).serviceTier).toBe(
-                CODEX_NORMAL_SERVICE_TIER_WIRE_VALUE,
-              );
+              expect(message.params).toMatchObject({ serviceTier: null });
               t.respond(message.id, { thread: { id: "thread-1" } });
               break;
             case "thread/resume":
               expect(attempt).toBe(2);
-              expect((message.params as Record<string, unknown>).serviceTier).toBe(
-                CODEX_NORMAL_SERVICE_TIER_WIRE_VALUE,
-              );
+              expect(message.params).toMatchObject({ serviceTier: null });
               t.respond(message.id, {
                 thread: { id: "thread-1", cwd: context.cwd, status: { type: "idle" } },
               });
               break;
             case "turn/start": {
-              const params = message.params as Record<string, unknown>;
-              expect(Object.hasOwn(params, "serviceTier")).toBe(true);
-              expect(params.serviceTier).toBe(CODEX_NORMAL_SERVICE_TIER_WIRE_VALUE);
+              expect(message.params).toMatchObject({ serviceTier: null });
               const turnId = attempt === 1 ? "turn-1" : "turn-2";
               t.respond(message.id, { turn: { id: turnId } });
               t.notify("turn/started", { threadId: "thread-1", turn: { id: turnId } });
@@ -812,7 +753,7 @@ describe("Codex JSON-RPC flow", () => {
         prompt: "return severity",
         toolPolicy: "unrestricted",
         cwd: process.cwd(),
-        providerConfig: { transport: { type: "stdio" }, serviceTier: "normal" },
+        providerConfig: { transport: { type: "stdio" }, serviceTier: null },
       },
       {},
       {

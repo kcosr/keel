@@ -310,22 +310,23 @@ describe("agent profile RPC", () => {
         createOnly: true,
       }),
     ).toThrow(/pi provider tool "run" is not canonical; use "bash"/);
-    const codexSaved = api.putAgentProfile({
-      name: "codex-reviewer",
-      config: {
+    for (const serviceTier of ["priority", "ultrafast", null]) {
+      const name = `codex-${serviceTier ?? "standard"}`;
+      const config = {
         provider: "codex",
         toolPolicy: "read-only",
-        providerConfig: { codex: { transport: { type: "stdio" }, serviceTier: "fast" } },
-      },
-      createOnly: true,
-    });
-    expect(codexSaved).toMatchObject({ name: "codex-reviewer", source: "catalog" });
-    expect(api.checkAgentProfile({ name: "codex-reviewer" }).ok).toBe(true);
+        providerConfig: { codex: { transport: { type: "stdio" }, serviceTier } },
+      };
+      const saved = api.putAgentProfile({ name, config, createOnly: true });
+      expect(saved).toMatchObject({ name, source: "catalog", config });
+      expect(api.getAgentProfile(name)).toMatchObject({ config });
+      expect(api.checkAgentProfile({ name }).ok).toBe(true);
+    }
     expect(
       api.checkAgentProfile({
         config: {
           provider: "codex",
-          providerConfig: { codex: { transport: { type: "stdio" }, serviceTier: "priority" } },
+          providerConfig: { codex: { transport: { type: "stdio" }, serviceTier: "fast" } },
         },
       }),
     ).toMatchObject({

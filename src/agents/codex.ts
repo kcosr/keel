@@ -24,8 +24,6 @@ export const CODEX_TURN_COMPLETION_TIMEOUT_MS = DEFAULT_AGENT_TIMEOUT_MS;
 export const CODEX_CLOSE_GRACE_MS = 1_000;
 export const CODEX_INTERRUPT_CONFIRM_MS = 2_000;
 export const CODEX_DEFAULT_TRANSPORT = Object.freeze({ type: "stdio" as const });
-export const CODEX_FAST_SERVICE_TIER_WIRE_VALUE = "fast";
-export const CODEX_NORMAL_SERVICE_TIER_WIRE_VALUE: null = null;
 
 const CODEX_CLIENT_INFO = Object.freeze({ name: "keel", title: "Keel", version: "0.0.0" });
 const CODEX_OPT_OUT_NOTIFICATION_METHODS = Object.freeze(["thread/started"]);
@@ -37,15 +35,11 @@ export type CodexTransportConfig =
   | { type: "ws"; url: string }
   | { type: "uds"; path: string };
 
-export type CodexServiceTier = "fast" | "normal";
-type CodexServiceTierWireValue =
-  | typeof CODEX_FAST_SERVICE_TIER_WIRE_VALUE
-  | typeof CODEX_NORMAL_SERVICE_TIER_WIRE_VALUE;
+export type CodexServiceTier = "priority" | "ultrafast" | null;
 
 export interface NormalizedCodexProviderConfig {
   transport: CodexTransportConfig;
   serviceTier?: CodexServiceTier;
-  codexServiceTierParam?: CodexServiceTierWireValue;
 }
 
 export interface CodexProviderOptions {
@@ -102,8 +96,10 @@ export class CodexProvider implements AgentProvider {
   }
 
   async generate(invocation: AgentInvocation, hooks: AgentHooks): Promise<AgentResult> {
-    const config = normalizeCodexProviderConfig(invocation.providerConfig);
-    const transportConfig = config.transport;
+    const { transport: transportConfig, serviceTier } = normalizeCodexProviderConfig(
+      invocation.providerConfig,
+    );
+    const serviceTierParams = serviceTier === undefined ? {} : { serviceTier };
     const cwd = requireInvocationCwd(invocation, this.name);
     const resolved = resolveInvocationToolPolicy(
       {
@@ -276,9 +272,7 @@ export class CodexProvider implements AgentProvider {
             client,
             invocation,
             {
-              ...(config.codexServiceTierParam !== undefined
-                ? { serviceTier: config.codexServiceTierParam }
-                : {}),
+              ...serviceTierParams,
               ...codexCaps.thread,
             },
             state,
@@ -292,9 +286,7 @@ export class CodexProvider implements AgentProvider {
             cwd,
             ...(invocation.model ? { model: invocation.model } : {}),
             ...(invocation.reasoning ? { reasoning: invocation.reasoning } : {}),
-            ...(config.codexServiceTierParam !== undefined
-              ? { serviceTier: config.codexServiceTierParam }
-              : {}),
+            ...serviceTierParams,
             ...codexCaps.thread,
           }),
         );
@@ -308,9 +300,7 @@ export class CodexProvider implements AgentProvider {
         client.request("turn/start", {
           threadId: state.threadId,
           input: [{ type: "text", text: invocation.prompt }],
-          ...(config.codexServiceTierParam !== undefined
-            ? { serviceTier: config.codexServiceTierParam }
-            : {}),
+          ...serviceTierParams,
           ...codexCaps.turn,
         }),
       );
@@ -385,19 +375,9 @@ export function normalizeCodexProviderConfig(
   if (!hasOwn(value, "transport")) {
     throw invalidConfig("providerConfig.codex.transport is required");
   }
-  const serviceTier = hasOwn(value, "serviceTier")
-    ? normalizeCodexServiceTier(value.serviceTier)
-    : undefined;
-  const serviceTierConfig =
-    serviceTier === undefined
-      ? {}
-      : ({
-          serviceTier,
-          codexServiceTierParam:
-            serviceTier === "fast"
-              ? CODEX_FAST_SERVICE_TIER_WIRE_VALUE
-              : CODEX_NORMAL_SERVICE_TIER_WIRE_VALUE,
-        } satisfies Pick<NormalizedCodexProviderConfig, "serviceTier" | "codexServiceTierParam">);
+  const serviceTierConfig = hasOwn(value, "serviceTier")
+    ? { serviceTier: normalizeCodexServiceTier(value.serviceTier) }
+    : {};
   const transport = value.transport;
   if (!isPlainObject(transport)) {
     throw invalidConfig("providerConfig.codex.transport must be a plain JSON object");
@@ -447,8 +427,8 @@ export function normalizeCodexProviderConfig(
 }
 
 function normalizeCodexServiceTier(value: unknown): CodexServiceTier {
-  if (value === "fast" || value === "normal") return value;
-  throw invalidConfig('providerConfig.codex.serviceTier must be exactly "fast" or "normal"');
+  if (value === "priority" || value === "ultrafast" || value === null) return value;
+  throw invalidConfig('providerConfig.codex.serviceTier must be "priority", "ultrafast", or null');
 }
 
 class DefaultCodexTransportFactory implements CodexTransportFactory {

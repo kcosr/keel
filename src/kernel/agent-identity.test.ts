@@ -110,21 +110,27 @@ describe("agent identity includes capabilities, environment, and workspace", () 
     expect(agentVersion(base)).not.toBe(agentVersion({ ...base, providerConfig: {} }));
   });
 
-  test("codex serviceTier omitted, normal, and fast are distinct identities", () => {
+  test("codex omitted, standard, priority, and ultrafast tiers are distinct identities", () => {
     const base = { prompt: "p", provider: "codex" };
-    const omitted = agentVersion(base);
+    const noProviderConfig = agentVersion(base);
     const explicitTransportOnly = agentVersion({
       ...base,
       providerConfig: { transport: { type: "stdio" } },
     });
-    const normal = agentVersion({
+    const standard = agentVersion({
       ...base,
-      providerConfig: { transport: { type: "stdio" }, serviceTier: "normal" },
+      providerConfig: { transport: { type: "stdio" }, serviceTier: null },
     });
-    const fast = agentVersion({
+    const priority = agentVersion({
       ...base,
-      providerConfig: { transport: { type: "stdio" }, serviceTier: "fast" },
+      providerConfig: { transport: { type: "stdio" }, serviceTier: "priority" },
     });
-    expect(new Set([omitted, explicitTransportOnly, normal, fast]).size).toBe(4);
+    const ultrafast = agentVersion({
+      ...base,
+      providerConfig: { transport: { type: "stdio" }, serviceTier: "ultrafast" },
+    });
+    expect(
+      new Set([noProviderConfig, explicitTransportOnly, standard, priority, ultrafast]).size,
+    ).toBe(5);
   });
 });

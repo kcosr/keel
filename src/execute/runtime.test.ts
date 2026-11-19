@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import type { DaemonClient } from "../daemon/client.ts";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { Socket } from "bun";
+import { DaemonClient } from "../daemon/client.ts";
+import type { EventEnvelope, EventStreamFrame } from "../rpc/contract.ts";
 import { createExecuteKeel } from "./runtime.ts";
 
 describe("execute runtime schedule reads", () => {
@@ -76,108 +81,142 @@ describe("execute runtime schedule reads", () => {
   });
 });
 
+const runId = "run_events";
+const cursor = { kind: "after-seq", runId, seq: 1 } as const;
+const caughtUp = { kind: "control", type: "caught-up", cursor } as const;
+
+function durable(seq: number, type: string): EventEnvelope {
+  return { kind: "durable", seq, type, payload: {}, atMs: seq };
+}
+
+function eventFixture(...frames: Array<EventStreamFrame | Error>) {
+  const calls: string[] = [];
+  const client = {
+    async authenticate(token: string) {
+      calls.push(`authenticate:${token}`);
+      return { ok: true };
+    },
+    subscribeEvents(
+      ...[req, onEvent, onError, , onControl]: Parameters<DaemonClient["subscribeEvents"]>
+    ) {
+      calls.push(`subscribe:${JSON.stringify(req)}`);
+      queueMicrotask(() => {
+        for (const frame of frames) {
+          if (frame instanceof Error) onError?.(frame);
+          else if (frame.kind === "control") onControl?.(frame);
+          else onEvent(frame);
+        }
+      });
+      return () => calls.push("unsubscribe");
+    },
+  } as Partial<DaemonClient> as DaemonClient;
+  return { keel: executeWithClient(client, "kc_admin_execute_events_test"), calls };
+}
+
+function executeWithClient(client: DaemonClient, credential?: string) {
+  return createExecuteKeel({ client, credential, cwd: "/repo", args: [], state: null, env: {} });
+}
+
 describe("execute runtime events", () => {
   test("uses request-object cursors and ends when a live run parks", async () => {
-    const calls: string[] = [];
-    const client = {
-      async authenticate(token: string) {
-        calls.push(`authenticate:${token}`);
-        return { ok: true };
-      },
-      subscribeEvents(
-        req: Parameters<DaemonClient["subscribeEvents"]>[0],
-        onEvent: Parameters<DaemonClient["subscribeEvents"]>[1],
-        _onError?: Parameters<DaemonClient["subscribeEvents"]>[2],
-        onCaughtUp?: Parameters<DaemonClient["subscribeEvents"]>[3],
-      ) {
-        calls.push(`subscribe:${JSON.stringify(req)}`);
-        queueMicrotask(() => {
-          onCaughtUp?.({
-            subId: "sub_parked",
-            cursor: { kind: "after-seq", runId: "run_events", seq: 0 },
-            closedStatus: null,
-          });
-          onEvent({
-            kind: "durable",
-            seq: 1,
-            type: "run.parked",
-            payload: { kind: "human" },
-            atMs: 1,
-          });
-        });
-        return () => calls.push("unsubscribe");
-      },
-    } as Partial<DaemonClient> as DaemonClient;
+    const { keel, calls } = eventFixture(caughtUp, durable(2, "run.parked"));
 
-    const keel = createExecuteKeel({
-      client,
-      credential: "kc_admin_execute_events_test",
-      cwd: "/repo",
-      args: [],
-      state: null,
-      env: {},
-    });
-
-    const events = [];
-    for await (const event of keel.events({
-      runId: "run_events",
-      cursor: { kind: "tail", count: 0 },
-    })) {
-      events.push(event.type);
-    }
-
-    expect(events).toEqual(["run.parked"]);
+    expect(
+      await Array.fromAsync(keel.events({ runId, cursor: { kind: "tail", count: 0 } })),
+    ).toEqual([durable(2, "run.parked")]);
     expect(calls).toEqual([
       "authenticate:kc_admin_execute_events_test",
-      'subscribe:{"runId":"run_events","cursor":{"kind":"tail","count":0}}',
+      'subscribe:{"runId":"run_events","cursor":{"kind":"tail","count":0},"includeControlFrames":true}',
       "unsubscribe",
     ]);
   });
 
-  test("ends after catch-up when the cursor skips an already closed run", async () => {
-    const calls: string[] = [];
-    const client = {
-      async authenticate(token: string) {
-        calls.push(`authenticate:${token}`);
-        return { ok: true };
-      },
-      subscribeEvents(
-        req: Parameters<DaemonClient["subscribeEvents"]>[0],
-        _onEvent: Parameters<DaemonClient["subscribeEvents"]>[1],
-        _onError?: Parameters<DaemonClient["subscribeEvents"]>[2],
-        onCaughtUp?: Parameters<DaemonClient["subscribeEvents"]>[3],
-      ) {
-        calls.push(`subscribe:${JSON.stringify(req)}`);
-        queueMicrotask(() => {
-          onCaughtUp?.({
-            subId: "sub_closed",
-            cursor: { kind: "after-seq", runId: "run_closed", seq: 3 },
-            closedStatus: "finished",
-          });
-        });
-        return () => calls.push("unsubscribe");
-      },
-    } as Partial<DaemonClient> as DaemonClient;
+  test("yields historical parks and resumes before stopping at the live boundary", async () => {
+    const park = durable(1, "run.parked");
+    const resume = durable(2, "run.resumed");
+    const finish = durable(3, "run.finished");
+    const { keel, calls } = eventFixture(
+      park,
+      resume,
+      { ...caughtUp, cursor: { ...cursor, seq: 2 } },
+      finish,
+    );
 
-    const keel = createExecuteKeel({
-      client,
-      credential: "kc_admin_execute_events_test",
-      cwd: "/repo",
-      args: [],
-      state: null,
-      env: {},
+    expect(await Array.fromAsync(keel.events({ runId }))).toEqual([park, resume, finish]);
+    expect(calls.at(-1)).toBe("unsubscribe");
+  });
+
+  test("ends after catch-up when the cursor skips an already closed run", async () => {
+    const { keel, calls } = eventFixture(caughtUp, {
+      kind: "control",
+      type: "closed",
+      cursor,
+      status: "finished",
     });
 
-    const events = [];
-    for await (const event of keel.events({ runId: "run_closed", cursor: { kind: "now" } })) {
-      events.push(event.type);
-    }
+    expect(await Array.fromAsync(keel.events({ runId, cursor: { kind: "now" } }))).toEqual([]);
+    expect(calls.at(-1)).toBe("unsubscribe");
+  });
 
-    expect(events).toEqual([]);
-    expect(calls).toEqual([
-      "authenticate:kc_admin_execute_events_test",
-      'subscribe:{"runId":"run_closed","cursor":{"kind":"now"}}',
-      "unsubscribe",
-    ]);
+  test("surfaces subscription rejection and authorization revocation", async () => {
+    const rejected = eventFixture(new Error("subscription rejected"));
+    await expect(Array.fromAsync(rejected.keel.events({ runId }))).rejects.toThrow(
+      "subscription rejected",
+    );
+    expect(rejected.calls.at(-1)).toBe("unsubscribe");
+
+    const revoked = eventFixture(caughtUp, {
+      kind: "control",
+      type: "authorization.failed",
+      cursor,
+      payload: { message: "run capability revoked" },
+    });
+    await expect(Array.fromAsync(revoked.keel.events({ runId }))).rejects.toThrow(
+      "run capability revoked",
+    );
+    expect(revoked.calls.at(-1)).toBe("unsubscribe");
+  });
+
+  test("rejects a live iterator when its daemon socket closes", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "keel-events-"));
+    const socketPath = join(dir, "events.sock");
+    const connected = Promise.withResolvers<Socket<undefined>>();
+    const subId = "sub_events";
+    const started = durable(1, "run.started");
+    let buffer = "";
+    const server = Bun.listen<undefined>({
+      unix: socketPath,
+      socket: {
+        open: (socket) => connected.resolve(socket),
+        data(socket, data) {
+          buffer += data.toString();
+          const newline = buffer.indexOf("\n");
+          if (newline < 0) return;
+          const request = JSON.parse(buffer.slice(0, newline));
+          socket.write(
+            [
+              { event: { subId, ...started } },
+              { event: { subId, ...caughtUp } },
+              { id: request.id, result: { subId, cursor, closedStatus: null } },
+            ]
+              .map((frame) => `${JSON.stringify(frame)}\n`)
+              .join(""),
+          );
+        },
+      },
+    });
+    let client: DaemonClient | undefined;
+    try {
+      client = await DaemonClient.connect(socketPath);
+      const events = executeWithClient(client).events({ runId })[Symbol.asyncIterator]();
+      expect(await events.next()).toEqual({ value: started, done: false });
+      const next = events.next();
+      (await connected.promise).terminate();
+      await expect(next).rejects.toThrow("daemon connection closed");
+    } finally {
+      client?.close();
+      server.stop(true);
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

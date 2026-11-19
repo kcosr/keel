@@ -44,6 +44,12 @@ import type { RunProjection, RunReport, RunSummary, RunSummaryPage } from "../rp
 import { clientRunTargetOrCwd } from "../target.ts";
 import type { WorkflowSourceInput } from "../workflow-definitions/source.ts";
 
+interface EventSubscription {
+  onEvent: (event: EventEnvelope) => void;
+  onControl?: (frame: StreamControlFrame) => void;
+  onError?: (err: unknown) => void;
+}
+
 /** Async-shaped client over the socket (the in-process KeelApi is sync; the wire
  * is async). Same method names, Promise-returning. */
 export class DaemonClient {
@@ -54,8 +60,7 @@ export class DaemonClient {
     number,
     { resolve: (v: unknown) => void; reject: (e: unknown) => void }
   >();
-  private readonly subs = new Map<string, (event: EventEnvelope) => void>();
-  private readonly controlSubs = new Map<string, (frame: StreamControlFrame) => void>();
+  private readonly subs = new Map<string, EventSubscription>();
   private readonly pendingSubEvents = new Map<string, EventStreamFrame[]>();
   private readonly closedSubIds = new Set<string>();
 
@@ -65,7 +70,10 @@ export class DaemonClient {
       unix: socketPath,
       socket: {
         data: (_s, data) => c.onData(data),
-        close: () => c.failAll(new Error("daemon connection closed")),
+        close: () => {
+          c.socket = null;
+          c.failAll(new Error("daemon connection closed"));
+        },
       },
     });
     return c;
@@ -104,15 +112,11 @@ export class DaemonClient {
     if (msg.event) {
       const { subId, ...frame } = msg.event;
       const event = frame as EventStreamFrame;
-      const eventSub = this.subs.get(subId);
-      const controlSub = this.controlSubs.get(subId);
-      if (event.kind === "control" && controlSub) {
-        controlSub(event);
-      } else if (event.kind !== "control" && eventSub) {
-        eventSub(event);
-      } else if (this.closedSubIds.has(subId)) {
-        return;
-      } else {
+      const subscription = this.subs.get(subId);
+      if (subscription) {
+        if (event.kind === "control") subscription.onControl?.(event);
+        else subscription.onEvent(event);
+      } else if (!this.closedSubIds.has(subId)) {
         const buffered = this.pendingSubEvents.get(subId) ?? [];
         buffered.push(event);
         this.pendingSubEvents.set(subId, buffered);
@@ -131,17 +135,26 @@ export class DaemonClient {
   private failAll(err: unknown): void {
     for (const p of this.pending.values()) p.reject(err);
     this.pending.clear();
+    const subscriptions = [...this.subs.values()];
     this.subs.clear();
-    this.controlSubs.clear();
     this.pendingSubEvents.clear();
     this.closedSubIds.clear();
+    for (const { onError } of subscriptions) {
+      try {
+        onError?.(err);
+      } catch {
+        // A subscriber cannot prevent other subscriptions from receiving the disconnect.
+      }
+    }
   }
 
   private rpc<T>(method: string, params: unknown): Promise<T> {
+    const socket = this.socket;
+    if (!socket) return Promise.reject(new Error("daemon connection closed"));
     return new Promise<T>((resolve, reject) => {
       const id = this.nextId++;
       this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
-      this.socket?.write(`${JSON.stringify({ id, method, params })}\n`);
+      socket.write(`${JSON.stringify({ id, method, params })}\n`);
     });
   }
 
@@ -408,27 +421,30 @@ export class DaemonClient {
           this.pendingSubEvents.delete(r.subId);
           return;
         }
+        if (!this.socket) {
+          onError?.(new Error("daemon connection closed"));
+          return;
+        }
         this.closedSubIds.delete(r.subId);
-        this.subs.set(r.subId, onEvent);
-        if (onControl) this.controlSubs.set(r.subId, onControl);
+        this.subs.set(r.subId, { onEvent, onControl, onError });
         const buffered = this.pendingSubEvents.get(r.subId) ?? [];
         this.pendingSubEvents.delete(r.subId);
         for (const event of buffered) {
+          if (!active || !this.socket) return;
           if (event.kind === "control") onControl?.(event);
           else onEvent(event);
         }
         // The daemon backfills before the subscribe RPC returns; after this flush, events are live.
-        onCaughtUp?.(r);
+        if (active && this.socket) onCaughtUp?.(r);
       },
       (err) => {
-        onError?.(err);
+        if (active) onError?.(err);
       },
     );
     return () => {
       active = false;
       if (subId) {
         this.subs.delete(subId);
-        this.controlSubs.delete(subId);
         this.pendingSubEvents.delete(subId);
         this.closedSubIds.add(subId);
       }

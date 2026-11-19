@@ -53,6 +53,8 @@
   model profiles.
 
 ### Fixed
+- Control scripts drain event backfill before stopping at a parked or terminal
+  run. Resume rejects duplicate live execution while allowing orphan recovery.
 - Codex honors the configured reasoning effort on fresh and resumed turns.
   A Codex provider config can omit `transport` to use stdio.
 - Web schedule edits now preserve the pinned saved-workflow version and next
@@ -87,6 +89,8 @@
   ([#22](https://github.com/kcosr/keel/pull/22))
 
 ### Added
+- `keel wait` and `keel signal --wait` wait for a run outcome. Reports expose
+  the latest completed result for parked and interrupted runs.
 - The saved `codex-one-shot` workflow runs one write-enabled Codex prompt in
   an explicit target using one of the seeded Codex profiles.
 - The new `oracle` saved workflow provides durable, artifact-free consultation

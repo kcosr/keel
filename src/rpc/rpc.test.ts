@@ -2297,6 +2297,144 @@ class ControlledStreamingProvider implements AgentProvider {
 }
 
 describe("run report result policy", () => {
+  test("a parked run reports its latest durable agent-session answer", async () => {
+    const store = JournalStore.memory();
+    try {
+      const api = keel(
+        store,
+        new MockProvider({
+          responses: {
+            "__session.oracle.first": { outputs: ["First answer"], sessionToken: "oracle" },
+            "__session.oracle.second": { outputs: ["Second answer"], sessionToken: "oracle" },
+          },
+        }),
+      );
+      const { runId } = await api.launchRun({
+        name: "parked-report",
+        input: {},
+        source: `
+          import type { Ctx } from "@kcosr/keel";
+          export default async function workflow(ctx: Ctx) {
+            const oracle = ctx.agentSession({ key: "oracle", provider: "mock" });
+            await oracle.turn({ key: "first", prompt: "First question" });
+            await oracle.turn({ key: "second", prompt: "Second question" });
+            await ctx.signal("next");
+          }
+        `,
+      });
+      expect((await api.waitForRun(runId)).status).toBe("waiting-signal");
+      const report = api.getRunReport(runId);
+      // The deterministic test clock is fixed, so completion order resolves the tie.
+      const latestResult = {
+        stableKey: "__session.oracle.second",
+        attempt: 1,
+        finishedAtMs: 1,
+        result: "Second answer",
+      };
+      expect(report?.latestResult).toEqual(latestResult);
+      expect(api.getRunReport(runId)?.latestResult).toEqual(latestResult);
+      expect(report?.output).toBeUndefined();
+    } finally {
+      store.close();
+    }
+  });
+
+  test("a parked report selects the latest completion rather than the latest start or key", () => {
+    const store = JournalStore.memory();
+    try {
+      const runId = "run_parked_order";
+      seedReportRun(store, runId);
+      store.updateRun(runId, { status: "waiting-signal", finishedAtMs: null });
+      const baseRow = {
+        runId,
+        effectType: "pure",
+        status: "completed",
+        version: "v1",
+        inputHash: "h1",
+      } as const;
+      store.putJournalRow({
+        ...baseRow,
+        stableKey: "z",
+        resultInline: JSON.stringify("First completed"),
+        startedAtMs: 3,
+        finishedAtMs: 4,
+      });
+      store.putJournalRow({
+        ...baseRow,
+        stableKey: "a",
+        attempt: 2,
+        resultInline: JSON.stringify(null),
+        startedAtMs: 2,
+        finishedAtMs: 5,
+      });
+      store.putJournalRow({
+        ...baseRow,
+        stableKey: "__ambient.now",
+        effectType: "ambient",
+        resultInline: "6",
+        finishedAtMs: 6,
+      });
+
+      expect(keel(store).getRunReport(runId)?.latestResult).toEqual({
+        stableKey: "a",
+        attempt: 2,
+        finishedAtMs: 5,
+        result: null,
+      });
+
+      store.appendEvent(runId, "step.completed", { stableKey: "a" }, 5);
+      store.putJournalRow({
+        ...baseRow,
+        stableKey: "completion-check.2.tests",
+        effectType: "completion_check",
+        resultInline: JSON.stringify("Tests passed"),
+        finishedAtMs: 5,
+      });
+      store.appendEvent(runId, "completion_check.completed", { attempt: 2, key: "tests" }, 5);
+      expect(keel(store).getRunReport(runId)?.latestResult).toEqual({
+        stableKey: "completion-check.2.tests",
+        attempt: 1,
+        finishedAtMs: 5,
+        result: "Tests passed",
+      });
+    } finally {
+      store.close();
+    }
+  });
+
+  test("a parked report includes omission metadata for an oversized latest result", () => {
+    const store = JournalStore.memory();
+    try {
+      const runId = "run_parked_large";
+      seedReportRun(store, runId);
+      store.updateRun(runId, { status: "waiting-signal", finishedAtMs: null });
+      const bytes = new TextEncoder().encode(
+        JSON.stringify("x".repeat(RUN_FINISHED_INLINE_OUTPUT_BYTES)),
+      );
+      store.putArtifact("latest_result", bytes, 1);
+      store.putJournalRow({
+        runId,
+        stableKey: "__session.oracle.answer",
+        effectType: "effectful",
+        status: "completed",
+        version: "v1",
+        inputHash: "h1",
+        resultArtifact: "latest_result",
+        finishedAtMs: 1,
+      });
+
+      expect(keel(store).getRunReport(runId)?.latestResult).toEqual({
+        stableKey: "__session.oracle.answer",
+        attempt: 1,
+        finishedAtMs: 1,
+        resultOmitted: true,
+        resultByteLength: bytes.byteLength,
+      });
+    } finally {
+      store.close();
+    }
+  });
+
   test("includes small artifacts and omits large outputs/results", () => {
     const store = JournalStore.memory();
     seedReportRun(store, "run_report", {

@@ -153,6 +153,7 @@ export type {
   InterruptRunResult,
   JournalStatus,
   NodeView,
+  ReportLatestResult,
   ReportNodeView,
   RunLaunchResult,
   RunOutcome,

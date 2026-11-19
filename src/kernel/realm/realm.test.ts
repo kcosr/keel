@@ -183,6 +183,47 @@ describe("realm — memoization and resume", () => {
     }
     for (const sequence of sequences.slice(1)) expect(sequence).toEqual(sequences[0] as string[]);
   });
+
+  test("resume refuses reentrant starts and can recover after a local execution aborts", async () => {
+    const store = JournalStore.memory();
+    let shouldCrash = true;
+    const kernel = fixed(store, {
+      fault: (point: string, key: string) => {
+        if (shouldCrash && point === "before-commit" && key === "s1") {
+          shouldCrash = false;
+          throw new Error("INJECTED CRASH");
+        }
+      },
+    });
+    const attempted = new Map<string, Promise<unknown>>();
+    const unsubscribe = store.onEventAppended((event) => {
+      if (event.type !== "run.started" && event.type !== "run.resumed") return;
+      if (attempted.has(event.type)) return;
+      // Defer setting the promise until after resume() returns but mark the
+      // event first to prevent recursion if an execution starts unexpectedly.
+      attempted.set(event.type, Promise.resolve());
+      const resume = kernel.resume(event.runId);
+      void resume.catch(() => {});
+      attempted.set(event.type, resume);
+    });
+    try {
+      const run = kernel.launch(chainUrl, { n: 3 }, { target: TARGET });
+      await expect(attempted.get("run.started")).rejects.toThrow(/already executing/);
+      await expect(run.done).rejects.toThrow(/INJECTED CRASH/);
+      expect(store.getRun(run.runId)?.status).toBe("running");
+
+      const resumed = kernel.resume(run.runId);
+      await expect(attempted.get("run.resumed")).rejects.toThrow(/already executing/);
+      await expect(resumed).resolves.toMatchObject({ status: "finished", output: 3 });
+      expect(
+        store.listEvents(run.runId).filter((event) => event.type === "run.resumed"),
+      ).toHaveLength(1);
+    } finally {
+      unsubscribe();
+      kernel.shutdown();
+      store.close();
+    }
+  });
 });
 
 describe("realm — crash consistency (write-ahead through the realm)", () => {

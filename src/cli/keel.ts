@@ -136,6 +136,7 @@ const COMMANDS: [string, string, string][] = [
     "<runId> [--output ndjson|text] [--from beginning|now | --after-seq n | --tail n] [--tools]",
     "stream a run's events until it finishes",
   ],
+  ["wait", "<runId>", "wait for a run to finish, park, or be interrupted"],
   ["get", "<runId>", "print a run's projection as JSON"],
   ["output", "<runId> [--output json|text]", "print a run's terminal output"],
   ["report", "<runId> [--output json|text]", "print a run's per-node result digest"],
@@ -184,7 +185,7 @@ const COMMANDS: [string, string, string][] = [
   ],
   ["approve", "<runId> <key> [note]", "approve a ctx.human gate"],
   ["deny", "<runId> <key> [note]", "deny a ctx.human gate"],
-  ["signal", "<runId> <name> [json]", "deliver a ctx.signal payload"],
+  ["signal", "<runId> <name> [json] [--wait]", "deliver a ctx.signal payload"],
   ["help", "[command]", "show this help, or help for one command"],
 ];
 const cmdNames = new Set(COMMANDS.map((c) => c[0]));
@@ -363,6 +364,12 @@ async function dispatch(argv: string[]): Promise<number> {
         cursor: parsed.cursor,
       });
       return statusExitCode(terminal);
+    }
+    case "wait": {
+      const [runId, extra] = rest;
+      if (!runId || runId.startsWith("--") || extra !== undefined)
+        return usage("wait needs a runId");
+      return printWaitOutcome(await openClient(), runId, { kind: "now" });
     }
     case "get": {
       const [runId] = rest;
@@ -556,14 +563,11 @@ async function dispatch(argv: string[]): Promise<number> {
       return 0;
     }
     case "signal": {
-      const [runId, name, payloadJson] = rest;
+      const { runId, name, payload, wait } = parseSignalArgs(rest);
       if (!runId || !name) return usage("signal needs <runId> <name> [json]");
       const client = await openClient();
-      const out = await client.sendSignal(
-        runId,
-        name,
-        payloadJson ? JSON.parse(payloadJson) : null,
-      );
+      const out = await client.sendSignal(runId, name, payload);
+      if (wait) return printWaitOutcome(client, out.runId, out.attachCursor);
       process.stdout.write(`${out.status}\n`);
       return 0;
     }
@@ -1181,6 +1185,24 @@ export function parseRunIdOutputArgs(
   return { runId: positional[0], output };
 }
 
+function parseSignalArgs(args: string[]): {
+  runId?: string;
+  name?: string;
+  payload: unknown;
+  wait: boolean;
+} {
+  const positional: string[] = [];
+  let wait = false;
+  for (const arg of args) {
+    if (arg === "--wait") wait = true;
+    else if (arg.startsWith("--")) throw new Error(`unknown signal flag ${arg}`);
+    else positional.push(arg);
+  }
+  const [runId, name, payloadJson, extra] = positional;
+  if (extra !== undefined) throw new Error(`unexpected argument ${extra} for signal`);
+  return { runId, name, payload: payloadJson ? JSON.parse(payloadJson) : null, wait };
+}
+
 function assertToolsAllowed(
   command: string,
   tools: boolean,
@@ -1319,6 +1341,16 @@ function statusExitCode(status: string): number {
   return status === "finished" || status === "continued" ? 0 : 3;
 }
 
+async function printWaitOutcome(
+  client: DaemonClient,
+  runId: string,
+  cursor: EventCursorInput,
+): Promise<number> {
+  const status = await watchRun(client, runId, { cursor, quiet: true });
+  process.stdout.write(`${JSON.stringify({ runId, status })}\n`);
+  return statusExitCode(status);
+}
+
 function parkedStatus(payload: unknown): WatchStatus {
   const kind = prop(payload, "kind");
   if (kind === "timer") return "waiting-timer";
@@ -1398,6 +1430,15 @@ export function formatRunReportText(report: RunReport): string {
     lines.push(`output omitted ${report.outputByteLength ?? 0} bytes`);
   } else if ("output" in report) {
     lines.push(`output ${compact(report.output)}`);
+  }
+  if (report.latestResult) {
+    const latest = report.latestResult;
+    const label = `latestResult ${compact(latest.stableKey)} attempt=${latest.attempt}`;
+    lines.push(
+      latest.resultOmitted
+        ? `${label} omitted ${latest.resultByteLength ?? 0} bytes`
+        : `${label} ${compact(latest.result)}`,
+    );
   }
   if (report.error)
     lines.push(`error ${compact(report.error.name)}: ${compact(report.error.message)}`);
@@ -2695,9 +2736,9 @@ async function workspaceCommand(args: string[]): Promise<number> {
 export async function watchRun(
   client: DaemonClient,
   runId: string,
-  opts: WatchFormatOptions & { cursor?: EventCursorInput },
+  opts: WatchFormatOptions & { cursor?: EventCursorInput; quiet?: boolean },
 ): Promise<WatchStatus> {
-  return new Promise<WatchStatus>((resolve) => {
+  return new Promise<WatchStatus>((resolve, reject) => {
     let caughtUp = false;
     let settled = false;
     let pendingStatus: WatchStatus | null = null;
@@ -2706,17 +2747,18 @@ export async function watchRun(
     if (output !== "text" && output !== "ndjson") {
       throw new Error(`watchRun only supports text or ndjson output, got ${output}`);
     }
-    const textFormatter = output === "text" ? createTextWatchFormatter(opts) : null;
+    const textFormatter = !opts.quiet && output === "text" ? createTextWatchFormatter(opts) : null;
     const flushTextFormatter = (): void => {
       if (!textFormatter) return;
       for (const chunk of textFormatter.flush()) process.stdout.write(chunk);
     };
-    const finish = (status: WatchStatus): void => {
+    const finish = (status: WatchStatus | Error): void => {
       if (settled) return;
       settled = true;
       flushTextFormatter();
       unsubscribe();
-      resolve(status);
+      if (status instanceof Error) reject(status);
+      else resolve(status);
     };
     const noteStatus = (status: WatchStatus | null): void => {
       pendingStatus = status;
@@ -2727,7 +2769,7 @@ export async function watchRun(
       (e) => {
         if (textFormatter) {
           for (const chunk of textFormatter.push(e)) process.stdout.write(chunk);
-        } else {
+        } else if (!opts.quiet) {
           process.stdout.write(formatNdjsonWatchEvent(e));
         }
         if (e.type === "run.finished") noteStatus("finished");
@@ -2735,8 +2777,12 @@ export async function watchRun(
         else if (e.type === "run.continued") noteStatus("continued");
         else if (e.type === "run.parked") noteStatus(parkedStatus(e.payload));
         else if (e.type === "run.interrupted") noteStatus("interrupted");
-        else if (e.type === "authorization.failed") noteStatus("failed");
-        else if (
+        else if (e.type === "authorization.failed") {
+          if (opts.quiet) {
+            const message = prop(e.payload, "message");
+            finish(new Error(typeof message === "string" ? message : "event authorization failed"));
+          } else noteStatus("failed");
+        } else if (
           e.type === "run.resumed" ||
           e.type === "run.retry" ||
           e.type === "run.rewind" ||
@@ -2747,9 +2793,13 @@ export async function watchRun(
         }
       },
       (err) => {
-        flushTextFormatter();
-        process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
-        finish("failed");
+        const error = err instanceof Error ? err : new Error(String(err));
+        if (opts.quiet) finish(error);
+        else {
+          flushTextFormatter();
+          process.stderr.write(`${error.message}\n`);
+          finish("failed");
+        }
       },
       (result) => {
         caughtUp = true;

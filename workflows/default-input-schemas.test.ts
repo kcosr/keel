@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { assertValidWorkflowInputSchema, validateWorkflowInput } from "../src/workflow-input.ts";
 
 const cases = [
+  ["codex-one-shot", { prompt: "Update the README", profile: "codex-fast" }],
   ["oracle", { question: "Compare the available designs" }],
   ["iterative-review", { task: "Review the change" }],
   ["implement-review-loop", { spec: ".specs/change.md" }],

@@ -1,0 +1,15 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["prompt"],
+  "properties": {
+    "prompt": { "type": "string", "title": "Task prompt", "pattern": "\\S" },
+    "profile": {
+      "type": "string",
+      "title": "Codex profile",
+      "enum": ["codex-default", "codex-fast", "codex-ultrafast"],
+      "default": "codex-default"
+    }
+  }
+}

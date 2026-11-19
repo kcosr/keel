@@ -198,8 +198,9 @@ function basicScript(message: Record<string, unknown>, transport: ScriptedTransp
 }
 
 describe("Codex provider config", () => {
-  test("defaults to stdio when selected config is absent", () => {
+  test("defaults to stdio when selected config or transport is absent", () => {
     expect(normalizeCodexProviderConfig(undefined)).toEqual({ transport: { type: "stdio" } });
+    expect(normalizeCodexProviderConfig({})).toEqual({ transport: { type: "stdio" } });
   });
 
   test("accepts and normalizes explicit transports", () => {
@@ -220,8 +221,10 @@ describe("Codex provider config", () => {
 
   test("accepts priority, ultrafast, and explicit standard service tiers", () => {
     for (const serviceTier of SERVICE_TIERS) {
-      const config = { transport: { type: "stdio" }, serviceTier } as const;
-      expect(normalizeCodexProviderConfig(config)).toEqual(config);
+      expect(normalizeCodexProviderConfig({ serviceTier })).toEqual({
+        transport: { type: "stdio" },
+        serviceTier,
+      });
     }
   });
 
@@ -234,7 +237,9 @@ describe("Codex provider config", () => {
   });
 
   test("rejects malformed transport config with paths", () => {
-    expect(() => normalizeCodexProviderConfig({})).toThrow(/providerConfig\.codex\.transport/);
+    expect(() => normalizeCodexProviderConfig({ transport: null })).toThrow(
+      /providerConfig\.codex\.transport must be a plain JSON object/,
+    );
     expect(() =>
       normalizeCodexProviderConfig({ extra: true, transport: { type: "stdio" } }),
     ).toThrow(/providerConfig\.codex\.extra/);
@@ -329,7 +334,22 @@ describe("Codex JSON-RPC flow", () => {
     }
   }
 
-  test("omitted serviceTier does not send thread/start or turn/start serviceTier keys", async () => {
+  test("configured reasoning is sent as turn effort with a tier-only config", async () => {
+    const transport = new ScriptedTransport(basicScript);
+    const { factory } = await runWithTransport(transport, {
+      reasoning: "high",
+      providerConfig: { serviceTier: "priority" },
+    });
+
+    expect(factory.config).toEqual({ type: "stdio" });
+    const threadStart = transport.sent.find((message) => message.method === "thread/start");
+    expect(threadStart?.params).toMatchObject({ serviceTier: "priority" });
+    expect(threadStart?.params).not.toHaveProperty("reasoning");
+    const turnStart = transport.sent.find((message) => message.method === "turn/start");
+    expect(turnStart?.params).toMatchObject({ serviceTier: "priority", effort: "high" });
+  });
+
+  test("omits service tier and effort when unconfigured", async () => {
     const transport = new ScriptedTransport(basicScript);
 
     await runWithTransport(transport, {
@@ -342,6 +362,7 @@ describe("Codex JSON-RPC flow", () => {
     const turnStart = transport.sent.find((message) => message.method === "turn/start");
     const params = turnStart?.params as Record<string, unknown>;
     expect(Object.hasOwn(params, "serviceTier")).toBe(false);
+    expect(Object.hasOwn(params, "effort")).toBe(false);
   });
 
   test("read-only policy sends Codex read-only thread and turn sandbox params", async () => {
@@ -684,7 +705,7 @@ describe("Codex JSON-RPC flow", () => {
     });
   }
 
-  test("schema retry resumes the Codex thread and preserves configured serviceTier", async () => {
+  test("schema retry resumes the Codex thread and preserves configured tier and effort", async () => {
     const transports: ScriptedTransport[] = [];
     const configs: CodexTransportConfig[] = [];
     let openCount = 0;
@@ -702,17 +723,19 @@ describe("Codex JSON-RPC flow", () => {
             case "thread/start":
               expect(attempt).toBe(1);
               expect(message.params).toMatchObject({ serviceTier: null });
+              expect(message.params).not.toHaveProperty("reasoning");
               t.respond(message.id, { thread: { id: "thread-1" } });
               break;
             case "thread/resume":
               expect(attempt).toBe(2);
               expect(message.params).toMatchObject({ serviceTier: null });
+              expect(message.params).not.toHaveProperty("reasoning");
               t.respond(message.id, {
                 thread: { id: "thread-1", cwd: context.cwd, status: { type: "idle" } },
               });
               break;
             case "turn/start": {
-              expect(message.params).toMatchObject({ serviceTier: null });
+              expect(message.params).toMatchObject({ serviceTier: null, effort: "xhigh" });
               const turnId = attempt === 1 ? "turn-1" : "turn-2";
               t.respond(message.id, { turn: { id: turnId } });
               t.notify("turn/started", { threadId: "thread-1", turn: { id: turnId } });
@@ -751,6 +774,7 @@ describe("Codex JSON-RPC flow", () => {
         key: "schema-tier",
         provider: "codex",
         prompt: "return severity",
+        reasoning: "xhigh",
         toolPolicy: "unrestricted",
         cwd: process.cwd(),
         providerConfig: { transport: { type: "stdio" }, serviceTier: null },

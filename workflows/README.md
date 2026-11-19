@@ -16,6 +16,7 @@ development-only database surgery.
 |---|---|
 | [`fixtures/`](./fixtures/) | Small runnable examples, tests, and synthetic workloads that should not be treated as stable operational workflows. |
 | [`oracle/`](./oracle/) | A caller wants durable, artifact-free advice or design feedback with follow-up questions in the same agent conversation. |
+| [`codex-one-shot/`](./codex-one-shot/) | A caller wants one Codex agent to act on a prompt with workspace-write access to an explicit target. |
 | [`iterative-review/`](./iterative-review/) | An implementer or human owns fixes, while a durable reviewer session waits for follow-up signals. |
 | [`implement-review-loop/`](./implement-review-loop/) | Keel should autonomously loop a write-capable implementer with a read-only code reviewer. |
 | [`branch-worktree-implement-review/`](./branch-worktree-implement-review/) | Keel should create a generated-branch worktree, then autonomously loop a write-capable implementer with a read-only code reviewer in that shared worktree. |
@@ -26,7 +27,7 @@ development-only database surgery.
 | [`spec-review-loop/`](./spec-review-loop/) | A user-facing creator agent owns the spec, while a durable reviewer session appends timestamped correspondence and waits for updates. |
 | [`spec-author-review-loop/`](./spec-author-review-loop/) | Keel should autonomously loop a write-capable spec creator with a write-capable correspondence reviewer. |
 
-All workflows are bounded by launch input such as `maxRounds` or `maxReviews`.
+Iterative workflows are bounded by launch input such as `maxRounds` or `maxReviews`.
 Keep those limits small for write-capable workflows.
 
 Reusable workflows that use `ctx.agentSession` preserve backend session
@@ -47,14 +48,14 @@ captured into the immutable saved bundle; editing a guidance file affects only
 newly launched path-based runs or newly saved versions, not existing saved
 versions.
 
-Seed the local default reusable review workflows with:
+Seed the local default reusable workflows with:
 
 ```bash
 bun run workflows:seed-defaults
 ```
 
-This saves or refreshes `oracle`, `iterative-review`, `implement-review-loop`,
-`branch-worktree-implement-review`, `spec-review-loop`, and
+This saves or refreshes `oracle`, `codex-one-shot`, `iterative-review`,
+`implement-review-loop`, `branch-worktree-implement-review`, `spec-review-loop`, and
 `spec-author-review-loop` as saved workflow versions. Use `bun run
 defaults:seed` to seed both these workflows and the conventional local agent
 profiles.

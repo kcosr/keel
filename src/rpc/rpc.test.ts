@@ -315,7 +315,7 @@ describe("agent profile RPC", () => {
       const config = {
         provider: "codex",
         toolPolicy: "read-only",
-        providerConfig: { codex: { transport: { type: "stdio" }, serviceTier } },
+        providerConfig: { codex: { serviceTier } },
       };
       const saved = api.putAgentProfile({ name, config, createOnly: true });
       expect(saved).toMatchObject({ name, source: "catalog", config });

@@ -1237,18 +1237,20 @@ bun run workflows:seed-defaults
 
 The profile seed upserts:
 
-| Name | Provider | Model | Reasoning | Tool additions |
-|---|---|---|---|---|
-| `codex-default` | `codex` | `gpt-5.5` | `xhigh` | none |
-| `claude-default` | `claude` | `claude-opus-4-8` | `xhigh` | `allowTools: ["Bash"]` |
-| `claude-fable-5` | `claude` | `claude-fable-5` | `xhigh` | `allowTools: ["Bash"]` |
-| `pi-grok` | `pi` | `xai/grok-4.6` | `high` | none |
+| Name | Provider | Model | Reasoning | Service tier | Tool additions |
+|---|---|---|---|---|---|
+| `codex-default` | `codex` | `gpt-6-astra` | `xhigh` | Codex default | none |
+| `codex-fast` | `codex` | `gpt-6.2-sol` | `xhigh` | `priority` | none |
+| `codex-ultrafast` | `codex` | `gpt-6.2-sol` | `xhigh` | `ultrafast` | none |
+| `claude-default` | `claude` | `claude-opus-5-5` | `xhigh` | — | `allowTools: ["Bash"]` |
+| `claude-fable` | `claude` | `claude-fable-5-2` | `xhigh` | — | `allowTools: ["Bash"]` |
 
 The workflow seed saves or refreshes these reusable saved workflows together
 with their adjacent Draft 7 input schemas:
 
 | Name | Source | Input schema |
 |---|---|---|
+| `codex-one-shot` | `workflows/codex-one-shot/codex-one-shot.workflow.ts` | `workflows/codex-one-shot/input-schema.json` |
 | `oracle` | `workflows/oracle/oracle.workflow.ts` | `workflows/oracle/input-schema.json` |
 | `iterative-review` | `workflows/iterative-review/iterative-review.workflow.ts` | `workflows/iterative-review/input-schema.json` |
 | `implement-review-loop` | `workflows/implement-review-loop/implement-review-loop.workflow.ts` | `workflows/implement-review-loop/input-schema.json` |
@@ -1391,22 +1393,24 @@ that supplies it):
 
 ```ts
 { codex: { transport: { type: "stdio" } } }
-{ codex: { transport: { type: "stdio" }, serviceTier: null } }
+{ codex: { serviceTier: null } }
 { codex: { transport: { type: "ws", url: "ws://127.0.0.1:1455/rpc" }, serviceTier: "priority" } }
 { codex: { transport: { type: "uds", path: "/tmp/codex.sock" }, serviceTier: "ultrafast" } }
 ```
 
-If `providerConfig.codex` is omitted, the runtime default is stdio and Keel
-spawns `${KEEL_CODEX_BIN:-codex} app-server` in the resolved workspace cwd.
-Omitted config and explicit `{ codex: { transport: { type: "stdio" } } }` are
-distinct replay identities. An explicit `providerConfig.codex` block requires
-`transport`, including when it selects stdio.
+Omitting `transport` selects stdio. Keel spawns
+`${KEEL_CODEX_BIN:-codex} app-server` in the resolved workspace cwd. Omitted
+config, an explicit config block, and an explicit transport all participate in
+replay identity as supplied.
 
 `serviceTier` is optional. Use `"priority"` to request Fast, `"ultrafast"` to
 request Ultrafast, or explicit `null` to select Standard. Omitting the field
 leaves the tier to Codex configuration or the resumed thread's selection.
 Codex determines whether the model catalog, account, and policy allow the
 requested speed. All four choices are distinct replay identities.
+
+Keel sends the resolved `reasoning` effort on every turn when configured.
+Omitting `reasoning` leaves the effort to Codex.
 
 Replace `"fast"` with `"priority"` and `"normal"` with `null` in workflow
 source and saved profiles. Inspect `config.providerConfig.codex.serviceTier`

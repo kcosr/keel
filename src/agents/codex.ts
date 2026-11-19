@@ -285,7 +285,6 @@ export class CodexProvider implements AgentProvider {
           client.request("thread/start", {
             cwd,
             ...(invocation.model ? { model: invocation.model } : {}),
-            ...(invocation.reasoning ? { reasoning: invocation.reasoning } : {}),
             ...serviceTierParams,
             ...codexCaps.thread,
           }),
@@ -300,6 +299,7 @@ export class CodexProvider implements AgentProvider {
         client.request("turn/start", {
           threadId: state.threadId,
           input: [{ type: "text", text: invocation.prompt }],
+          ...(invocation.reasoning ? { effort: invocation.reasoning } : {}),
           ...serviceTierParams,
           ...codexCaps.turn,
         }),
@@ -372,12 +372,12 @@ export function normalizeCodexProviderConfig(
     throw invalidConfig("providerConfig.codex must be a plain JSON object");
   }
   rejectUnknownKeys(value, ["transport", "serviceTier"], "providerConfig.codex");
-  if (!hasOwn(value, "transport")) {
-    throw invalidConfig("providerConfig.codex.transport is required");
-  }
   const serviceTierConfig = hasOwn(value, "serviceTier")
     ? { serviceTier: normalizeCodexServiceTier(value.serviceTier) }
     : {};
+  if (!hasOwn(value, "transport")) {
+    return { transport: { ...CODEX_DEFAULT_TRANSPORT }, ...serviceTierConfig };
+  }
   const transport = value.transport;
   if (!isPlainObject(transport)) {
     throw invalidConfig("providerConfig.codex.transport must be a plain JSON object");
@@ -1093,7 +1093,6 @@ async function resumeThread(
     threadId: token,
     cwd: invocation.cwd,
     ...(invocation.model ? { model: invocation.model } : {}),
-    ...(invocation.reasoning ? { reasoning: invocation.reasoning } : {}),
     ...threadParams,
   });
   const resumedThreadId = requiredThreadIdFromResult(resumeResult);
